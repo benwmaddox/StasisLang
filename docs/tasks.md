@@ -3,10 +3,9 @@
 ## Completed
 - Phases 0-6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
 - Phase 7: lowering & codegen — control-flow lowering (`if`/`for`/`foreach`), operator-method comparisons/unary/boolean coercion, layout-driven SoA globals and field access via `LayoutPlan`, diagnostics for bad operator arity/unsupported targets/invalid field access, with IR coverage tests.
+- Phase 8: testing harness integration — IR emits `run_tests`; lowering options allow omitting tests/harness for production; `stasisc` CLI defaults to production and `--with-tests` enables harness emission.
 
 ## Phase 8: Testing Harness Integration
-- Discover `test` declarations, emit host runner to call compiled test functions, exclude from production roots.
-  - Progress: IR emits `run_tests` harness when tests are included; lowering options allow skipping tests/harness for production builds.
 - Verify: `dotnet test` executes compiled Stasis tests; production build omits test roots.
 
 ## Phase 9: CLI & UX
