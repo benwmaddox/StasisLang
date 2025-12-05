@@ -95,6 +95,10 @@ public sealed class Lexer
                     Advance();
                     AddToken(TokenKind.Percent, "%", 1);
                     break;
+                case '!':
+                    Advance();
+                    AddToken(TokenKind.Bang, "!", 1);
+                    break;
                 case '<':
                     Advance();
                     AddToken(TokenKind.Less, "<", 1);
@@ -102,6 +106,10 @@ public sealed class Lexer
                 case '>':
                     Advance();
                     AddToken(TokenKind.Greater, ">", 1);
+                    break;
+                case ':':
+                    Advance();
+                    AddToken(TokenKind.Colon, ":", 1);
                     break;
                 case '=':
                     LexEquals(start);

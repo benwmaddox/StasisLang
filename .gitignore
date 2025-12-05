@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.ncrunchsolution*
+*.ncrunchproject*
+_ReSharper.Caches/
+.DS_Store
+.vscode/
+.config/dotnet-tools.json.lock

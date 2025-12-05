@@ -40,6 +40,8 @@ public enum TokenKind
     Greater,
     Equal,
     EqualEqual,
+    Colon,
+    Bang,
 
     LParen,
     RParen,
