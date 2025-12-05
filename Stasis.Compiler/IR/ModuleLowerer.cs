@@ -352,11 +352,10 @@ public sealed class ModuleLowerer
                     return LowerExpression(builder, paren.Expression, locals);
                 case UnaryExpressionSyntax unary:
                     return LowerUnary(builder, unary, locals);
+                case CallExpressionSyntax call:
+                    return LowerCall(builder, call, locals);
                 case OperatorCallExpressionSyntax op:
                     return LowerOperatorCall(builder, op, locals);
-                case CallExpressionSyntax call:
-                    AddDiagnostic("Function calls are not lowered yet.", call.Span);
-                    return ConstI32(0);
                 default:
                     AddDiagnostic("Expression not supported during lowering.", expr.Span);
                     return ConstI32(0);
@@ -389,6 +388,44 @@ public sealed class ModuleLowerer
                 TokenKind.Bang => LowerLogicalNot(builder, operand),
                 _ => operand
             };
+        }
+
+        private LLVMValueRef LowerCall(LLVMBuilderRef builder, CallExpressionSyntax call, Dictionary<string, LocalBinding> locals)
+        {
+            if (call.Callee is not IdentifierExpressionSyntax id)
+            {
+                AddDiagnostic("Only simple function calls are supported.", call.Span);
+                return ConstI32(0);
+            }
+
+            if (!_symbols.TryGetValue(id.Identifier.Text, out var sym) || sym.Kind is not (SymbolKind.Function or SymbolKind.Test))
+            {
+                AddDiagnostic($"Unknown function '{id.Identifier.Text}'.", call.Span);
+                return ConstI32(0);
+            }
+
+            var fn = _moduleBuilder.Module.GetNamedFunction(id.Identifier.Text);
+            if (fn.Handle == IntPtr.Zero)
+            {
+                AddDiagnostic($"Function '{id.Identifier.Text}' missing from module.", call.Span);
+                return ConstI32(0);
+            }
+
+            var argValues = call.Arguments.Select(a => LowerExpression(builder, a, locals)).ToArray();
+            var fnType = fn.TypeOf;
+            if (fnType.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+            {
+                fnType = fnType.ElementType;
+            }
+
+            var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
+            var retType = fnType.ReturnType;
+            if (retType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
+            {
+                return ConstI32(0);
+            }
+
+            return callValue;
         }
 
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
