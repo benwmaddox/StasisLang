@@ -39,10 +39,39 @@ public class LoweringTests
     {
         var ir = Lower("""
             function add(a: i32, b: i32): i32 {
-                a.+(b);
+                return a.+(b);
             }
             """);
 
-        Assert.Matches("(declare|define) i32 @add\\([^)]*i32[^)]*i32", ir);
+        Assert.Contains("define i32 @add(", ir);
+        Assert.Contains("addtmp", ir);
+        Assert.Contains("ret i32", ir);
+    }
+
+    [Fact]
+    public void Emits_ret_void_when_missing()
+    {
+        var ir = Lower("""
+            function tick(): void {
+            }
+            """);
+
+        Assert.Contains("define void @tick()", ir);
+        Assert.Contains("ret void", ir);
+    }
+
+    [Fact]
+    public void Lowers_assignment_into_local()
+    {
+        var ir = Lower("""
+            function one(): i32 {
+                let x: i32;
+                x.=(1);
+                return x;
+            }
+            """);
+
+        Assert.Contains("store i32 1", ir);
+        Assert.Contains("ret i32", ir);
     }
 }
