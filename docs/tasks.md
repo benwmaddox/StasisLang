@@ -16,6 +16,7 @@
 - Implement end-to-end IR emission runnable via `lli` for sample programs (function calls, arithmetic, control flow, globals).
 - Add minimal runtime stubs if needed; ensure production defaults link/execute without tests.
 - Verify: sample Stasis programs run under `lli` with expected stdout/return codes; golden IR snapshots for samples.
+- Add integration test that compiles Stasis `test` declarations, emits `run_tests`, and executes via `lli` to verify harness exit code.
 
 ## Phase 10: CI/CD Hardening
 - GitHub Actions: run format/build/test across OSes; cache NuGet/LLVM; publish IR/WASM artifacts for samples.

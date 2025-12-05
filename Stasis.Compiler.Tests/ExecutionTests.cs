@@ -90,4 +90,51 @@ public class ExecutionTests
         path = string.Empty;
         return false;
     }
+
+    [Fact]
+    public void Runs_stasis_tests_via_run_tests_harness()
+    {
+        if (!TryFindLli(out var lliPath))
+        {
+            return;
+        }
+
+        var source = """
+            function add(a: i32, b: i32): i32 {
+                return a.+(b);
+            }
+
+            test check_math(): bool {
+                return add(2, 3).==(5);
+            }
+
+            test always_true(): bool {
+                return true;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(sema.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "testmodule", LowerOptions.Default);
+        Assert.Empty(lower.Diagnostics);
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, lower.Ir);
+
+        var (exitCode, stderr) = RunProcess(lliPath, $"-entry-function=run_tests \"{temp}\"");
+        try
+        {
+            Assert.Equal(0, exitCode);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
 }
