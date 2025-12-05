@@ -6,12 +6,10 @@ function seed_rng(seed: i32): void {
 
 function next_rand(max: i32): i32 {
     rng_state.=(rng_state.*(1103515245).+(12345));
-    let val: i32;
-    val.=(rng_state./(65536));
-    if (val.<(0)) {
-        val.=(0.-(val));
+    if (rng_state.<(0)) {
+        rng_state.=(0.-(rng_state));
     }
-    return val.%((max)).+(1);
+    return rng_state.%((max)).+(1);
 }
 
 function print_text_guess(): void {
@@ -42,6 +40,8 @@ function main(): i32 {
     seed_rng(12345);
     let target: i32;
     target.=(next_rand(99));
+    if (target.<(1)) { target.=(1); }
+    if (target.>(99)) { target.=(target.%((99)).+(1)); }
 
     let tries: i32;
     for tries.=(0); tries.<(20); tries.=(tries.+(1)) {
