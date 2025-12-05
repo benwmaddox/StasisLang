@@ -6,6 +6,7 @@
 
 ## Phase 8: Testing Harness Integration
 - Discover `test` declarations, emit host runner to call compiled test functions, exclude from production roots.
+  - Progress: IR emits `run_tests` harness when tests are included; lowering options allow skipping tests/harness for production builds.
 - Verify: `dotnet test` executes compiled Stasis tests; production build omits test roots.
 
 ## Phase 9: CLI & UX

@@ -14,15 +14,22 @@ namespace Stasis.Compiler.IR;
 /// </summary>
 public sealed class ModuleLowerer
 {
-    public LowerResult LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module")
+    public LowerResult LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module", LowerOptions? options = null)
     {
+        var opts = options ?? LowerOptions.Default;
         using var builder = new LlvmModuleBuilder(moduleName);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
-        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder);
+        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests);
 
         var diagnostics = new List<Diagnostic>();
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics);
-        lowerer.Lower(compilationUnit);
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests);
+        lowerer.Lower(compilationUnit, opts.IncludeTests);
+
+        if (opts.IncludeTests && opts.EmitTestHarness)
+        {
+            EmitTestHarness(compilationUnit, builder, semantic.Symbols, diagnostics);
+        }
+
         return new LowerResult(builder.EmitToString(), diagnostics);
     }
 
@@ -96,6 +103,81 @@ public sealed class ModuleLowerer
             _ => 4
         };
 
+    private void EmitTestHarness(CompilationUnitSyntax compilationUnit, LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, List<Diagnostic> diagnostics)
+    {
+        var tests = compilationUnit.Declarations.OfType<TestDeclarationSyntax>().ToList();
+        var int32 = LLVMTypeRef.Int32;
+        var harness = builder.DefineFunction("run_tests", int32);
+        using var llvmBuilder = builder.Context.CreateBuilder();
+        var entry = harness.AppendBasicBlock("entry");
+        llvmBuilder.PositionAtEnd(entry);
+        var failures = llvmBuilder.BuildAlloca(int32, "failures");
+        llvmBuilder.BuildStore(ConstInt(int32, 0), failures);
+
+        foreach (var testDecl in tests)
+        {
+            if (testDecl.Parameters.Count > 0)
+            {
+                diagnostics.Add(new Diagnostic("Test harness supports parameterless tests only.", testDecl.Name.Span));
+                continue;
+            }
+
+            var testFn = builder.Module.GetNamedFunction(testDecl.Name.Text);
+            if (testFn.Handle == IntPtr.Zero)
+            {
+                continue;
+            }
+
+            var retSymbol = testDecl.ReturnType is null
+                ? new PrimitiveTypeSymbol("i32")
+                : ResolveType(testDecl.ReturnType, symbols);
+            var retLlvm = builder.TypeMapper.Map(retSymbol);
+            var fnType = LLVMTypeRef.CreateFunction(retLlvm, Array.Empty<LLVMTypeRef>(), false);
+
+            var call = llvmBuilder.BuildCall2(fnType, testFn, Array.Empty<LLVMValueRef>(), $"{testDecl.Name.Text}.call");
+            if (retLlvm.Kind == LLVMTypeKind.LLVMVoidTypeKind)
+            {
+                continue;
+            }
+
+            var ok = AsBoolean(llvmBuilder, call);
+            var fail = llvmBuilder.BuildNot(ok, $"{testDecl.Name.Text}.fail");
+            var failI32 = llvmBuilder.BuildZExt(fail, int32, $"{testDecl.Name.Text}.faili32");
+            var cur = llvmBuilder.BuildLoad2(int32, failures, "failcur");
+            var next = llvmBuilder.BuildAdd(cur, failI32, "failnext");
+            llvmBuilder.BuildStore(next, failures);
+        }
+
+        var result = llvmBuilder.BuildLoad2(int32, failures, "failures.result");
+        llvmBuilder.BuildRet(result);
+    }
+
+    private static LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)
+    {
+        var type = value.TypeOf;
+        if (type.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
+        {
+            if (type.IntWidth == 1)
+            {
+                return value;
+            }
+
+            var zero = LLVMValueRef.CreateConstInt(type, 0, false);
+            return builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, value, zero, "to_bool");
+        }
+
+        if (type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind)
+        {
+            var zero = LLVMValueRef.CreateConstReal(type, 0);
+            return builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, value, zero, "to_bool");
+        }
+
+        return value;
+    }
+
+    private static LLVMValueRef ConstInt(LLVMTypeRef type, int value) =>
+        LLVMValueRef.CreateConstInt(type, (ulong)value, true);
+
     private sealed class FunctionLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
@@ -104,7 +186,7 @@ public sealed class ModuleLowerer
         private readonly List<Diagnostic> _diagnostics;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
         private int _blockId;
-        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics)
+        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
@@ -112,7 +194,7 @@ public sealed class ModuleLowerer
             _diagnostics = diagnostics;
         }
 
-        public void Lower(CompilationUnitSyntax compilationUnit)
+        public void Lower(CompilationUnitSyntax compilationUnit, bool includeTests)
         {
             _structs = compilationUnit.Declarations
                 .OfType<StructDeclarationSyntax>()
@@ -123,9 +205,12 @@ public sealed class ModuleLowerer
                 LowerFunction(fn);
             }
 
-            foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
+            if (includeTests)
             {
-                LowerFunction(test);
+                foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
+                {
+                    LowerFunction(test);
+                }
             }
         }
 
@@ -694,11 +779,16 @@ public sealed class ModuleLowerer
             _diagnostics.Add(new Diagnostic(message, span));
     }
 
-    private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)
+    private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder, bool includeTests)
     {
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             EmitFunction(builder, symbols, fn.Name.Text, fn.ReturnType, fn.Parameters);
+        }
+
+        if (!includeTests)
+        {
+            return;
         }
 
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())

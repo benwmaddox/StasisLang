@@ -17,7 +17,7 @@ public class LoweringTests
         return result.Ir;
     }
 
-    private static LowerResult LowerWithDiagnostics(string source, bool allowSemanticDiagnostics = true)
+    private static LowerResult LowerWithDiagnostics(string source, bool allowSemanticDiagnostics = true, LowerOptions? options = null)
     {
         var parse = Parser.Parse(source);
         Assert.Empty(parse.Diagnostics);
@@ -29,7 +29,7 @@ public class LoweringTests
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        return new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "testmodule");
+        return new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "testmodule", options);
     }
 
     [Fact]
@@ -270,5 +270,31 @@ public class LoweringTests
 
         Assert.NotEmpty(result.Diagnostics);
         Assert.Contains(result.Diagnostics, d => d.Message.Contains("not a struct array"));
+    }
+
+    [Fact]
+    public void Emits_run_tests_harness()
+    {
+        var ir = Lower("""
+            test check(): bool {
+                return true;
+            }
+            """);
+
+        Assert.Contains("define i32 @run_tests()", ir);
+        Assert.Contains("call i32 @check", ir);
+    }
+
+    [Fact]
+    public void Skips_tests_and_harness_when_disabled()
+    {
+        var result = LowerWithDiagnostics("""
+            test check(): bool {
+                return true;
+            }
+            """, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false));
+
+        Assert.DoesNotContain("run_tests", result.Ir);
+        Assert.DoesNotContain("check", result.Ir);
     }
 }
