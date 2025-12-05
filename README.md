@@ -46,6 +46,7 @@ Options:
 ## Samples
 - `samples/basic.stasis` basic function plus `main` returning 5.
 - `samples/tests.stasis` includes Stasis `test` declarations; the emitted `run_tests` function prints a summary and returns the failure count.
+- `samples/sudoku.stasis` playable Sudoku: `stasis run samples/sudoku.stasis` then enter `row col value` (1-9) or `0 0 0` to quit. Clue cells are colored differently; invalid moves are rejected.
 
 ## Git hooks
 - Shared pre-push hook lives at `tools/git-hooks/pre-push` and runs `dotnet format --verify-no-changes` then `dotnet test -c Release --no-build`.

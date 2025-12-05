@@ -184,7 +184,8 @@ public sealed class ModuleLowerer
         var passed = llvmBuilder.BuildSub(ConstInt(int32, totalTests), result, "tests.passed");
         var hasFailures = llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntNE, result, ConstInt(int32, 0), "has_failures");
         var summaryFmt = llvmBuilder.BuildSelect(hasFailures, fmtFail, fmtPass, "tests_fmt");
-        llvmBuilder.BuildCall2(printfType, printf, new[] { summaryFmt, passed, result, elapsedMs }, "printf.tests");
+        var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { summaryFmt.TypeOf, passed.TypeOf, result.TypeOf, elapsedMs.TypeOf }, false);
+        llvmBuilder.BuildCall2(callType, printf, new[] { summaryFmt, passed, result, elapsedMs }, "printf.tests");
 
         llvmBuilder.BuildRet(result);
     }
@@ -229,7 +230,7 @@ public sealed class ModuleLowerer
         }
 
         var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-        printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new LLVMTypeRef[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
+        printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, true);
         printf = builder.Module.AddFunction("printf", printfType);
         return (printf, printfType);
     }
@@ -246,6 +247,22 @@ public sealed class ModuleLowerer
         var putsType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
         puts = builder.Module.AddFunction("puts", putsType);
         return (puts, putsType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareScanf(LlvmModuleBuilder builder)
+    {
+        var scanf = builder.Module.GetNamedFunction("scanf");
+        LLVMTypeRef scanfType;
+        if (scanf.Handle != IntPtr.Zero)
+        {
+            scanfType = GetFunctionType(scanf);
+            return (scanf, scanfType);
+        }
+
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        scanfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, true);
+        scanf = builder.Module.AddFunction("scanf", scanfType);
+        return (scanf, scanfType);
     }
 
     private static (LLVMValueRef Fn, LLVMTypeRef Type, LLVMTypeRef PtrType) GetOrDeclareTime(LlvmModuleBuilder builder)
@@ -291,6 +308,17 @@ public sealed class ModuleLowerer
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
         private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
+        {
+            "print_int",
+            "print_char",
+            "print_cell",
+            "print_prompt",
+            "print_invalid",
+            "print_clue_error",
+            "print_solved",
+            "read_int"
+        };
         private int _blockId;
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests)
         {
@@ -510,6 +538,11 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
+            if (_builtIns.Contains(id.Identifier.Text))
+            {
+                return LowerBuiltInCall(builder, id.Identifier.Text, call.Arguments, locals, call.Span);
+            }
+
             if (!_symbols.TryGetValue(id.Identifier.Text, out var sym) || sym.Kind is not (SymbolKind.Function or SymbolKind.Test))
             {
                 AddDiagnostic($"Unknown function '{id.Identifier.Text}'.", call.Span);
@@ -536,6 +569,90 @@ public sealed class ModuleLowerer
 
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
+        }
+
+        private LLVMValueRef LowerBuiltInCall(LLVMBuilderRef builder, string name, IReadOnlyList<ExpressionSyntax> args, Dictionary<string, LocalBinding> locals, SourceSpan span)
+        {
+            switch (name)
+            {
+                case "print_int":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("print_int expects 1 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        var value = LowerExpression(builder, args[0], locals);
+                        EmitPrintf(builder, " %d", value);
+                        return ConstI32(0);
+                    }
+                case "print_char":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("print_char expects 1 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        var value = LowerExpression(builder, args[0], locals);
+                        EmitPrintf(builder, "%c", value);
+                        return ConstI32(0);
+                    }
+                case "print_prompt":
+                    EmitPrintf(builder, "Enter row col val (1-9), or 0 0 0 to quit:\n");
+                    return ConstI32(0);
+                case "print_invalid":
+                    EmitPrintf(builder, "\u001b[31mInvalid move.\u001b[0m\n");
+                    return ConstI32(0);
+                case "print_clue_error":
+                    EmitPrintf(builder, "\u001b[31mCannot change a clue.\u001b[0m\n");
+                    return ConstI32(0);
+                case "print_solved":
+                    EmitPrintf(builder, "\u001b[32mSolved!\u001b[0m\n");
+                    return ConstI32(0);
+                case "print_cell":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("print_cell expects 2 arguments (value, is_clue).", span);
+                            return ConstI32(0);
+                        }
+
+                        var val = LowerExpression(builder, args[0], locals);
+                        var isClue = AsBoolean(builder, LowerExpression(builder, args[1], locals));
+                        var zero = ConstI32(0);
+                        var isEmpty = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, val, zero, "cell.empty");
+
+                        var emptyBlock = AppendBlock(builder.InsertBlock.Parent, "cell.empty");
+                        var printBlock = AppendBlock(builder.InsertBlock.Parent, "cell.print");
+                        var contBlock = AppendBlock(builder.InsertBlock.Parent, "cell.cont");
+
+                        builder.BuildCondBr(isEmpty, emptyBlock, printBlock);
+
+                        builder.PositionAtEnd(emptyBlock);
+                        EmitPrintf(builder, ". ");
+                        builder.BuildBr(contBlock);
+
+                        builder.PositionAtEnd(printBlock);
+                        var cluePrefix = builder.BuildGlobalStringPtr("\u001b[36m", $"cell_clue_prefix_{_blockId++}");
+                        var userPrefix = builder.BuildGlobalStringPtr("\u001b[32m", $"cell_user_prefix_{_blockId++}");
+                        var reset = builder.BuildGlobalStringPtr("\u001b[0m ", $"cell_reset_{_blockId++}");
+                        var prefix = builder.BuildSelect(isClue, cluePrefix, userPrefix, "cell_prefix");
+                        EmitPrintf(builder, "%s", prefix);
+                        EmitPrintf(builder, "%d", val);
+                        EmitPrintf(builder, "%s", reset);
+                        builder.BuildBr(contBlock);
+
+                        builder.PositionAtEnd(contBlock);
+                        return ConstI32(0);
+                    }
+                case "read_int":
+                    return EmitReadInt(builder);
+                default:
+                    AddDiagnostic($"Unknown built-in '{name}'.", span);
+                    return ConstI32(0);
+            }
         }
 
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
@@ -846,6 +963,34 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef ConstBool(bool value) =>
             LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, value ? 1u : 0u, false);
+
+        private LLVMBasicBlockRef AppendBlock(LLVMValueRef function, string name) =>
+            function.AppendBasicBlock(name);
+
+        private LLVMValueRef EmitPrintf(LLVMBuilderRef builder, string format, params LLVMValueRef[] values)
+        {
+            var (printf, printfType) = GetOrDeclarePrintf(_moduleBuilder);
+            var fmt = builder.BuildGlobalStringPtr(format, $"fmt_{_blockId++}");
+            var args = new LLVMValueRef[values.Length + 1];
+            args[0] = fmt;
+            for (int i = 0; i < values.Length; i++)
+            {
+                args[i + 1] = values[i];
+            }
+
+            var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, args.Select(a => a.TypeOf).ToArray(), false);
+            return builder.BuildCall2(callType, printf, args, "printf.call");
+        }
+
+        private LLVMValueRef EmitReadInt(LLVMBuilderRef builder)
+        {
+            var alloca = builder.BuildAlloca(LLVMTypeRef.Int32, "read_int.tmp");
+            var (scanf, scanfType) = GetOrDeclareScanf(_moduleBuilder);
+            var fmt = builder.BuildGlobalStringPtr("%d", $"fmt_read_{_blockId++}");
+            var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { fmt.TypeOf, alloca.TypeOf }, false);
+            builder.BuildCall2(callType, scanf, new[] { fmt, alloca }, "scanf.call");
+            return builder.BuildLoad2(LLVMTypeRef.Int32, alloca, "read_int.val");
+        }
 
         private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)
         {

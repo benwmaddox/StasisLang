@@ -4,6 +4,7 @@ function idx(r: i32, c: i32): i32 {
 
 global puzzle: i32[81];
 global grid: i32[81];
+global clues: i32[81];
 
 function seed_puzzle(): void {
     let i: i32;
@@ -28,6 +29,11 @@ function reset_grid(): void {
     let i: i32;
     for i.=(0); i.<(81); i.=(i.+(1)) {
         grid[i].=(puzzle[i]);
+        if (puzzle[i].==(0)) {
+            clues[i].=(0);
+        } else {
+            clues[i].=(1);
+        }
     }
 }
 
@@ -131,10 +137,96 @@ test `sudoku solves seed`() : bool {
     return true;
 }
 
-function main(): i32 {
-    if (solve()) {
-        return 0;
+function print_board(): void {
+    let r: i32;
+    let c: i32;
+    for r.=(0); r.<(9); r.=(r.+(1)) {
+        for c.=(0); c.<(9); c.=(c.+(1)) {
+            let p: i32;
+            p.=(idx(r, c));
+            print_cell(grid[p], clues[p]);
+        }
+        print_char(10);
+    }
+    print_char(10);
+}
+
+function is_complete(): bool {
+    let i: i32;
+    for i.=(0); i.<(81); i.=(i.+(1)) {
+        if (grid[i].==(0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function play(): i32 {
+    seed_puzzle();
+    reset_grid();
+
+    let loop: i32;
+    for loop.=(0); loop.<(1000000); loop.=(loop.+(1)) {
+        print_board();
+        if (is_complete()) {
+            print_solved();
+            return 0;
+        }
+
+        print_prompt();
+        let r: i32;
+        let c: i32;
+        let v: i32;
+        r.=(read_int());
+        c.=(read_int());
+        v.=(read_int());
+
+        if (r.==(0)) {
+            if (c.==(0)) {
+                if (v.==(0)) {
+                    return 1;
+                }
+            }
+        }
+
+        let bad: bool;
+        bad.=(false);
+        if (r.<(1)) { bad.=(true); }
+        if (r.>(9)) { bad.=(true); }
+        if (c.<(1)) { bad.=(true); }
+        if (c.>(9)) { bad.=(true); }
+        if (v.<(0)) { bad.=(true); }
+        if (v.>(9)) { bad.=(true); }
+
+        if (bad) {
+            print_invalid();
+        } else {
+            let rr: i32;
+            let cc: i32;
+            rr.=(r.-(1));
+            cc.=(c.-(1));
+            let pos: i32;
+            pos.=(idx(rr, cc));
+            if (clues[pos].==(1)) {
+                print_clue_error();
+            } else {
+                if (v.==(0)) {
+                    grid[pos].=(0);
+                } else {
+                    if (!can_place(rr, cc, v)) {
+                        print_invalid();
+                    } else {
+                        grid[pos].=(v);
+                    }
+                }
+            }
+        }
     }
 
     return 1;
+}
+
+function main(): i32 {
+    return play();
 }

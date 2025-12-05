@@ -50,6 +50,15 @@ public sealed class SemanticAnalyzer
         {
             _symbols[name] = new Symbol(name, SymbolKind.Struct, type);
         }
+
+        AddSymbol("print_int", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_char", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_cell", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_prompt", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_invalid", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_clue_error", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print_solved", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
     }
 
     private void DeclareTypes(CompilationUnitSyntax compilationUnit)
