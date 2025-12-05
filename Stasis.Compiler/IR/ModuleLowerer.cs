@@ -116,6 +116,8 @@ public sealed class ModuleLowerer
 
         var totalTests = tests.Count;
         var (putsFn, putsType) = GetOrDeclarePuts(builder);
+        var (clockFn, clockType) = GetOrDeclareClock(builder);
+        var startClock = llvmBuilder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "clock.start");
 
         foreach (var testDecl in tests)
         {
@@ -157,15 +159,21 @@ public sealed class ModuleLowerer
         }
 
         var result = llvmBuilder.BuildLoad2(int32, failures, "failures.result");
+        var endClock = llvmBuilder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "clock.end");
+        var elapsedTicks = llvmBuilder.BuildSub(endClock, startClock, "clock.ticks");
+        var ticksTimesMs = llvmBuilder.BuildMul(elapsedTicks, ConstInt64(1000), "clock.ticks_ms");
+        var clocksPerSec = ConstInt64(1000000);
+        var elapsedMs64 = llvmBuilder.BuildUDiv(ticksTimesMs, clocksPerSec, "clock.ms64");
+        var elapsedMs = llvmBuilder.BuildTrunc(elapsedMs64, int32, "clock.ms");
 
         // Print a simple summary: Tests: passed=X failed=Y
         var (printf, printfType) = GetOrDeclarePrintf(builder);
-        var fmtPass = llvmBuilder.BuildGlobalStringPtr("Tests: \u001b[32mpassed=%d\u001b[0m failed=%d\n", "tests_fmt_pass");
-        var fmtFail = llvmBuilder.BuildGlobalStringPtr("Tests: passed=%d \u001b[31mfailed=%d\u001b[0m\n", "tests_fmt_fail");
+        var fmtPass = llvmBuilder.BuildGlobalStringPtr("Tests: \u001b[32mpassed=%d\u001b[0m failed=%d time=%ums\n", "tests_fmt_pass");
+        var fmtFail = llvmBuilder.BuildGlobalStringPtr("Tests: passed=%d \u001b[31mfailed=%d\u001b[0m time=%ums\n", "tests_fmt_fail");
         var passed = llvmBuilder.BuildSub(ConstInt(int32, totalTests), result, "tests.passed");
         var hasFailures = llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntNE, result, ConstInt(int32, 0), "has_failures");
         var summaryFmt = llvmBuilder.BuildSelect(hasFailures, fmtFail, fmtPass, "tests_fmt");
-        llvmBuilder.BuildCall2(printfType, printf, new[] { summaryFmt, passed, result }, "printf.tests");
+        llvmBuilder.BuildCall2(printfType, printf, new[] { summaryFmt, passed, result, elapsedMs }, "printf.tests");
 
         llvmBuilder.BuildRet(result);
     }
@@ -196,6 +204,9 @@ public sealed class ModuleLowerer
     private static LLVMValueRef ConstInt(LLVMTypeRef type, int value) =>
         LLVMValueRef.CreateConstInt(type, (ulong)value, true);
 
+    private static LLVMValueRef ConstInt64(long value) =>
+        LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)value, false);
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclarePrintf(LlvmModuleBuilder builder)
     {
         var printf = builder.Module.GetNamedFunction("printf");
@@ -207,7 +218,7 @@ public sealed class ModuleLowerer
         }
 
         var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-        printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new LLVMTypeRef[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
+        printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new LLVMTypeRef[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
         printf = builder.Module.AddFunction("printf", printfType);
         return (printf, printfType);
     }
@@ -224,6 +235,19 @@ public sealed class ModuleLowerer
         var putsType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
         puts = builder.Module.AddFunction("puts", putsType);
         return (puts, putsType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareClock(LlvmModuleBuilder builder)
+    {
+        var clock = builder.Module.GetNamedFunction("clock");
+        var clockType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, Array.Empty<LLVMTypeRef>(), false);
+        if (clock.Handle != IntPtr.Zero)
+        {
+            return (clock, clockType);
+        }
+
+        clock = builder.Module.AddFunction("clock", clockType);
+        return (clock, clockType);
     }
 
     private static LLVMTypeRef GetFunctionType(LLVMValueRef fn)
