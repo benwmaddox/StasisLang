@@ -18,12 +18,16 @@ string? path = null;
 var includeTests = false;
 var moduleName = "module";
 var emitIrOnly = false;
+string? outputPath = null;
 
 while (cliArgs.Count > 0)
 {
     var arg = cliArgs.Dequeue();
     switch (arg)
     {
+        case "build":
+            mode = arg;
+            break;
         case "format":
             mode = arg;
             break;
@@ -37,6 +41,9 @@ while (cliArgs.Count > 0)
             break;
         case "--module" when cliArgs.Count > 0:
             moduleName = cliArgs.Dequeue();
+            break;
+        case "--out" when cliArgs.Count > 0:
+            outputPath = cliArgs.Dequeue();
             break;
         case "--emit-ir":
             emitIrOnly = true;
@@ -121,8 +128,17 @@ File.WriteAllText(tempLl, lower.Ir);
 
 try
 {
-    var exitCode = Execute(mode, tempLl);
-    Environment.Exit(exitCode);
+    if (mode == "build")
+    {
+        var outPath = outputPath ?? BuildDefaultOutputPath(path);
+        var exitCode = BuildExecutable(tempLl, outPath, includeTests);
+        Environment.Exit(exitCode);
+    }
+    else
+    {
+        var exitCode = Execute(mode, tempLl);
+        Environment.Exit(exitCode);
+    }
 }
 finally
 {
@@ -253,6 +269,33 @@ static int RunProcess(string fileName, string arguments)
     using var proc = Process.Start(psi)!;
     proc.WaitForExit();
     return proc.ExitCode;
+}
+
+static int BuildExecutable(string llPath, string outputPath, bool isTest)
+{
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: build requires clang in PATH.");
+        return 1;
+    }
+
+    var args = BuildClangArgs(llPath, outputPath, isTest);
+    var exit = RunProcess(clang, args);
+    if (exit != 0)
+    {
+        return exit;
+    }
+
+    Console.WriteLine($"built: {outputPath}");
+    return 0;
+}
+
+static string BuildDefaultOutputPath(string sourcePath)
+{
+    var dir = Path.GetDirectoryName(sourcePath);
+    var name = Path.GetFileNameWithoutExtension(sourcePath);
+    var ext = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty;
+    return Path.Combine(string.IsNullOrEmpty(dir) ? Directory.GetCurrentDirectory() : dir, name + ext);
 }
 
 static void PrintUsage()
