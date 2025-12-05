@@ -27,3 +27,6 @@ public sealed record CallExpressionSyntax(ExpressionSyntax Callee, Token LParen,
 
 public sealed record OperatorCallExpressionSyntax(ExpressionSyntax Receiver, Token DotToken, Token OperatorToken, Token LParen, IReadOnlyList<ExpressionSyntax> Arguments, Token RParen)
     : ExpressionSyntax(new SourceSpan(Receiver.Span.Start, RParen.Span.End - Receiver.Span.Start));
+
+public sealed record BinaryExpressionSyntax(ExpressionSyntax Left, Token OperatorToken, ExpressionSyntax Right)
+    : ExpressionSyntax(new SourceSpan(Left.Span.Start, Right.Span.End - Left.Span.Start));

@@ -95,6 +95,32 @@ public sealed class Lexer
                     Advance();
                     AddToken(TokenKind.Percent, "%", 1);
                     break;
+                case '&':
+                    Advance();
+                    if (!IsAtEnd() && Current == '&')
+                    {
+                        Advance();
+                        AddToken(TokenKind.AmpAmp, "&&", 2);
+                    }
+                    else
+                    {
+                        AddUnknown(start);
+                    }
+
+                    break;
+                case '|':
+                    Advance();
+                    if (!IsAtEnd() && Current == '|')
+                    {
+                        Advance();
+                        AddToken(TokenKind.PipePipe, "||", 2);
+                    }
+                    else
+                    {
+                        AddUnknown(start);
+                    }
+
+                    break;
                 case '!':
                     Advance();
                     AddToken(TokenKind.Bang, "!", 1);

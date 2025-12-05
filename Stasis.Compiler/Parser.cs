@@ -317,7 +317,33 @@ public sealed class Parser
         return new ExpressionStatementSyntax(expr, semicolon);
     }
 
-    private ExpressionSyntax ParseExpression() => ParseUnary();
+    private ExpressionSyntax ParseExpression() => ParseLogicalOr();
+
+    private ExpressionSyntax ParseLogicalOr()
+    {
+        var expr = ParseLogicalAnd();
+        while (Match(TokenKind.PipePipe))
+        {
+            var op = Previous;
+            var right = ParseLogicalAnd();
+            expr = new BinaryExpressionSyntax(expr, op, right);
+        }
+
+        return expr;
+    }
+
+    private ExpressionSyntax ParseLogicalAnd()
+    {
+        var expr = ParseUnary();
+        while (Match(TokenKind.AmpAmp))
+        {
+            var op = Previous;
+            var right = ParseUnary();
+            expr = new BinaryExpressionSyntax(expr, op, right);
+        }
+
+        return expr;
+    }
 
     private ExpressionSyntax ParseUnary()
     {

@@ -255,6 +255,11 @@ public sealed class SemanticAnalyzer
 
                 ValidateOperatorCall(op);
                 break;
+            case BinaryExpressionSyntax bin:
+                AnalyzeExpression(bin.Left, scope);
+                AnalyzeExpression(bin.Right, scope);
+                ValidateBinary(bin);
+                break;
         }
     }
 
@@ -286,6 +291,17 @@ public sealed class SemanticAnalyzer
         receiver is IdentifierExpressionSyntax
         or MemberAccessExpressionSyntax
         or ArrayAccessExpressionSyntax;
+
+    private void ValidateBinary(BinaryExpressionSyntax bin)
+    {
+        var kind = bin.OperatorToken.Kind;
+        if (kind is TokenKind.AmpAmp or TokenKind.PipePipe)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic($"Unsupported binary operator '{bin.OperatorToken.Text}'. Use operator-methods for other operators.", bin.OperatorToken.Span));
+    }
 
     private TypeSymbol? ResolveType(TypeSyntax typeSyntax)
     {

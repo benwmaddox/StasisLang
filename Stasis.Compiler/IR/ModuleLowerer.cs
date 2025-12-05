@@ -493,6 +493,8 @@ public sealed class ModuleLowerer
                     return LowerExpression(builder, paren.Expression, locals);
                 case UnaryExpressionSyntax unary:
                     return LowerUnary(builder, unary, locals);
+                case BinaryExpressionSyntax bin:
+                    return LowerBinary(builder, bin, locals);
                 case CallExpressionSyntax call:
                     return LowerCall(builder, call, locals);
                 case OperatorCallExpressionSyntax op:
@@ -529,6 +531,65 @@ public sealed class ModuleLowerer
                 TokenKind.Bang => LowerLogicalNot(builder, operand),
                 _ => operand
             };
+        }
+
+        private LLVMValueRef LowerBinary(LLVMBuilderRef builder, BinaryExpressionSyntax bin, Dictionary<string, LocalBinding> locals)
+        {
+            var function = builder.InsertBlock.Parent;
+            switch (bin.OperatorToken.Kind)
+            {
+                case TokenKind.PipePipe:
+                    {
+                        var lhsBool = AsBoolean(builder, LowerExpression(builder, bin.Left, locals));
+                        var trueBlock = AppendBlock(function, NextBlockName("or.true"));
+                        var falseBlock = AppendBlock(function, NextBlockName("or.false"));
+                        var mergeBlock = AppendBlock(function, NextBlockName("or.merge"));
+
+                        builder.BuildCondBr(lhsBool, trueBlock, falseBlock);
+
+                        builder.PositionAtEnd(trueBlock);
+                        var trueVal = ConstI32(1);
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(falseBlock);
+                        var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
+                        var rhsVal = BuildBoolResult(builder, rhsBool);
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(mergeBlock);
+                        var phi = builder.BuildPhi(LLVMTypeRef.Int32, "or.result");
+                        phi.AddIncoming(new[] { trueVal }, new[] { trueBlock }, 1u);
+                        phi.AddIncoming(new[] { rhsVal }, new[] { falseBlock }, 1u);
+                        return phi;
+                    }
+                case TokenKind.AmpAmp:
+                    {
+                        var lhsBool = AsBoolean(builder, LowerExpression(builder, bin.Left, locals));
+                        var trueBlock = AppendBlock(function, NextBlockName("and.true"));
+                        var falseBlock = AppendBlock(function, NextBlockName("and.false"));
+                        var mergeBlock = AppendBlock(function, NextBlockName("and.merge"));
+
+                        builder.BuildCondBr(lhsBool, trueBlock, falseBlock);
+
+                        builder.PositionAtEnd(trueBlock);
+                        var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
+                        var rhsVal = BuildBoolResult(builder, rhsBool);
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(falseBlock);
+                        var falseVal = ConstI32(0);
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(mergeBlock);
+                        var phi = builder.BuildPhi(LLVMTypeRef.Int32, "and.result");
+                        phi.AddIncoming(new[] { rhsVal }, new[] { trueBlock }, 1u);
+                        phi.AddIncoming(new[] { falseVal }, new[] { falseBlock }, 1u);
+                        return phi;
+                    }
+                default:
+                    AddDiagnostic($"Unsupported binary operator '{bin.OperatorToken.Text}'.", bin.OperatorToken.Span);
+                    return ConstI32(0);
+            }
         }
 
         private LLVMValueRef LowerCall(LLVMBuilderRef builder, CallExpressionSyntax call, Dictionary<string, LocalBinding> locals)

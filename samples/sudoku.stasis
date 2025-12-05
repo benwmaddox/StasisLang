@@ -204,7 +204,7 @@ function play(): i32 {
         let r: i32;
         let c: i32;
         let v: i32;
-        if (cmd.>=(48) && cmd.<=(57)) {
+        if (cmd.>(47) && cmd.<(58)) {
             r.=(cmd.-(48));
         } else {
             r.=(0);

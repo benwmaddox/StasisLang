@@ -36,6 +36,8 @@ public enum TokenKind
     Star,
     Slash,
     Percent,
+    AmpAmp,
+    PipePipe,
     Less,
     Greater,
     Equal,
