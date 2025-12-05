@@ -72,6 +72,7 @@ public sealed class ModuleLowerer
         private readonly LlvmModuleBuilder _moduleBuilder;
         private readonly IReadOnlyDictionary<string, Symbol> _symbols;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+        private int _blockId;
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout)
         {
             _moduleBuilder = moduleBuilder;
@@ -118,6 +119,7 @@ public sealed class ModuleLowerer
             using var builder = _moduleBuilder.Context.CreateBuilder();
             var entry = function.AppendBasicBlock("entry");
             builder.PositionAtEnd(entry);
+            _blockId = 0;
 
             var locals = new Dictionary<string, LocalBinding>(StringComparer.Ordinal);
 
@@ -129,37 +131,60 @@ public sealed class ModuleLowerer
                 locals[param.Name.Text] = new LocalBinding(paramVal, _moduleBuilder.TypeMapper.Map(paramType), false);
             }
 
-            foreach (var stmt in body.Statements)
+            var terminated = LowerBlock(builder, function, body, locals);
+            var isVoid = returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
+            if (!terminated && isVoid)
             {
-                switch (stmt)
-                {
-                    case VariableDeclarationSyntax decl:
-                        LowerVariableDeclaration(builder, decl, locals);
-                        break;
-                    case ExpressionStatementSyntax exprStmt:
-                        LowerExpression(builder, exprStmt.Expression, locals);
-                        break;
-                    case ReturnStatementSyntax ret:
-                        if (ret.Expression is null)
-                        {
-                            builder.BuildRetVoid();
-                        }
-                        else
-                        {
-                            var value = LowerExpression(builder, ret.Expression, locals);
-                            builder.BuildRet(value);
-                        }
+                builder.BuildRetVoid();
+            }
+        }
 
-                        return;
-                    default:
-                        break;
+        private bool LowerBlock(LLVMBuilderRef builder, LLVMValueRef function, BlockStatementSyntax block, Dictionary<string, LocalBinding> locals)
+        {
+            var scope = new Dictionary<string, LocalBinding>(locals, StringComparer.Ordinal);
+            foreach (var stmt in block.Statements)
+            {
+                if (LowerStatement(builder, function, stmt, scope))
+                {
+                    return true;
                 }
             }
 
-            var isVoid = returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
-            if (isVoid)
+            return false;
+        }
+
+        private bool LowerStatement(LLVMBuilderRef builder, LLVMValueRef function, StatementSyntax stmt, Dictionary<string, LocalBinding> locals)
+        {
+            switch (stmt)
             {
-                builder.BuildRetVoid();
+                case BlockStatementSyntax block:
+                    return LowerBlock(builder, function, block, locals);
+                case VariableDeclarationSyntax decl:
+                    LowerVariableDeclaration(builder, decl, locals);
+                    return false;
+                case ExpressionStatementSyntax exprStmt:
+                    LowerExpression(builder, exprStmt.Expression, locals);
+                    return false;
+                case ReturnStatementSyntax ret:
+                    if (ret.Expression is null)
+                    {
+                        builder.BuildRetVoid();
+                    }
+                    else
+                    {
+                        var value = LowerExpression(builder, ret.Expression, locals);
+                        builder.BuildRet(value);
+                    }
+
+                    return true;
+                case IfStatementSyntax ifs:
+                    return LowerIf(builder, function, ifs, locals);
+                case ForStatementSyntax @for:
+                    return LowerFor(builder, function, @for, locals);
+                case ForeachStatementSyntax foreachStmt:
+                    return LowerForeach(builder, function, foreachStmt, locals);
+                default:
+                    return false;
             }
         }
 
@@ -291,6 +316,131 @@ public sealed class ModuleLowerer
             };
         }
 
+        private bool LowerIf(LLVMBuilderRef builder, LLVMValueRef function, IfStatementSyntax ifs, Dictionary<string, LocalBinding> locals)
+        {
+            var thenBlock = function.AppendBasicBlock(NextBlockName("if.then"));
+            var mergeBlock = function.AppendBasicBlock(NextBlockName("if.end"));
+            var elseBlock = ifs.ElseBlock is not null ? function.AppendBasicBlock(NextBlockName("if.else")) : default;
+
+            var cond = AsBoolean(builder, LowerExpression(builder, ifs.Condition, locals));
+            if (ifs.ElseBlock is null)
+            {
+                builder.BuildCondBr(cond, thenBlock, mergeBlock);
+            }
+            else
+            {
+                builder.BuildCondBr(cond, thenBlock, elseBlock);
+            }
+
+            builder.PositionAtEnd(thenBlock);
+            var thenTerminated = LowerBlock(builder, function, ifs.ThenBlock, locals);
+            if (!thenTerminated)
+            {
+                builder.BuildBr(mergeBlock);
+            }
+
+            var elseTerminated = false;
+            if (ifs.ElseBlock is not null)
+            {
+                builder.PositionAtEnd(elseBlock);
+                elseTerminated = LowerBlock(builder, function, ifs.ElseBlock, locals);
+                if (!elseTerminated)
+                {
+                    builder.BuildBr(mergeBlock);
+                }
+            }
+
+            if (!thenTerminated || ifs.ElseBlock is null || !elseTerminated)
+            {
+                builder.PositionAtEnd(mergeBlock);
+                return false;
+            }
+
+            builder.PositionAtEnd(mergeBlock);
+            builder.BuildUnreachable();
+            return true;
+        }
+
+        private bool LowerFor(LLVMBuilderRef builder, LLVMValueRef function, ForStatementSyntax @for, Dictionary<string, LocalBinding> locals)
+        {
+            var condBlock = function.AppendBasicBlock(NextBlockName("for.cond"));
+            var bodyBlock = function.AppendBasicBlock(NextBlockName("for.body"));
+            var latchBlock = function.AppendBasicBlock(NextBlockName("for.latch"));
+            var exitBlock = function.AppendBasicBlock(NextBlockName("for.end"));
+
+            if (@for.Initializer is not null)
+            {
+                LowerExpression(builder, @for.Initializer, locals);
+            }
+
+            builder.BuildBr(condBlock);
+
+            builder.PositionAtEnd(condBlock);
+            var condValue = @for.Condition is null
+                ? ConstBool(true)
+                : AsBoolean(builder, LowerExpression(builder, @for.Condition, locals));
+            builder.BuildCondBr(condValue, bodyBlock, exitBlock);
+
+            builder.PositionAtEnd(bodyBlock);
+            var bodyTerminated = LowerBlock(builder, function, @for.Body, locals);
+            if (!bodyTerminated)
+            {
+                builder.BuildBr(latchBlock);
+            }
+
+            builder.PositionAtEnd(latchBlock);
+            if (@for.Step is not null)
+            {
+                LowerExpression(builder, @for.Step, locals);
+            }
+
+            builder.BuildBr(condBlock);
+            builder.PositionAtEnd(exitBlock);
+            return false;
+        }
+
+        private bool LowerForeach(LLVMBuilderRef builder, LLVMValueRef function, ForeachStatementSyntax foreachStmt, Dictionary<string, LocalBinding> locals)
+        {
+            var condBlock = function.AppendBasicBlock(NextBlockName("foreach.cond"));
+            var bodyBlock = function.AppendBasicBlock(NextBlockName("foreach.body"));
+            var latchBlock = function.AppendBasicBlock(NextBlockName("foreach.latch"));
+            var exitBlock = function.AppendBasicBlock(NextBlockName("foreach.end"));
+
+            var i32 = _moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32"));
+            var iterator = builder.BuildAlloca(i32, foreachStmt.Iterator.Text);
+            var loopLocals = new Dictionary<string, LocalBinding>(locals, StringComparer.Ordinal)
+            {
+                [foreachStmt.Iterator.Text] = new LocalBinding(iterator, i32, true)
+            };
+
+            builder.BuildStore(ConstI32(0), iterator);
+
+            var length = ResolveIterableLength(foreachStmt.Iterable);
+            var lengthValue = LLVMValueRef.CreateConstInt(i32, (ulong)length, true);
+
+            builder.BuildBr(condBlock);
+
+            builder.PositionAtEnd(condBlock);
+            var currentIndex = builder.BuildLoad2(i32, iterator, $"{foreachStmt.Iterator.Text}.idx");
+            var cond = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, currentIndex, lengthValue, "foreach.cmp");
+            builder.BuildCondBr(cond, bodyBlock, exitBlock);
+
+            builder.PositionAtEnd(bodyBlock);
+            var bodyTerminated = LowerBlock(builder, function, foreachStmt.Body, loopLocals);
+            if (!bodyTerminated)
+            {
+                builder.BuildBr(latchBlock);
+            }
+
+            builder.PositionAtEnd(latchBlock);
+            var next = builder.BuildAdd(currentIndex, ConstI32(1), "foreach.next");
+            builder.BuildStore(next, iterator);
+            builder.BuildBr(condBlock);
+
+            builder.PositionAtEnd(exitBlock);
+            return false;
+        }
+
         private LLVMValueRef LowerArrayAccess(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals)
         {
             if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var ptr, out var elemType))
@@ -363,6 +513,46 @@ public sealed class ModuleLowerer
             }
 
             return false;
+        }
+
+        private LLVMValueRef ConstBool(bool value) =>
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, value ? 1u : 0u, false);
+
+        private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)
+        {
+            var type = value.TypeOf;
+            if (type.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
+            {
+                if (type.IntWidth == 1)
+                {
+                    return value;
+                }
+
+                var zero = LLVMValueRef.CreateConstInt(type, 0, false);
+                return builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, value, zero, "to_bool");
+            }
+
+            if (type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind)
+            {
+                var zero = LLVMValueRef.CreateConstReal(type, 0);
+                return builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, value, zero, "to_bool");
+            }
+
+            return value;
+        }
+
+        private string NextBlockName(string prefix) => $"{prefix}.{_blockId++}";
+
+        private int ResolveIterableLength(ExpressionSyntax iterable)
+        {
+            if (iterable is IdentifierExpressionSyntax id
+                && _symbols.TryGetValue(id.Identifier.Text, out var sym)
+                && sym.Type is ArrayTypeSymbol array)
+            {
+                return array.Size;
+            }
+
+            return 0;
         }
 
         private LLVMValueRef ConstI32(int value) =>

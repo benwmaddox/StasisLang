@@ -168,14 +168,18 @@ public sealed class SemanticAnalyzer
                 }
                 if (fs.Step is not null)
                 {
-                    AnalyzeExpression(fs.Step, scope);
+                AnalyzeExpression(fs.Step, scope);
                 }
 
                 AnalyzeBlock(fs.Body, new Dictionary<string, Symbol>(scope, StringComparer.Ordinal));
                 break;
             case ForeachStatementSyntax fes:
                 AnalyzeExpression(fes.Iterable, scope);
-                AnalyzeBlock(fes.Body, new Dictionary<string, Symbol>(scope, StringComparer.Ordinal));
+                var foreachScope = new Dictionary<string, Symbol>(scope, StringComparer.Ordinal);
+                var iteratorType = BuiltInTypes["i32"];
+                AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
+                EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
+                AnalyzeBlock(fes.Body, foreachScope);
                 break;
             case ReturnStatementSyntax rs:
                 if (rs.Expression is not null)

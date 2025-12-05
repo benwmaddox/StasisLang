@@ -89,4 +89,62 @@ public class LoweringTests
         Assert.Contains("getelementptr", ir);
         Assert.Contains("store float", ir);
     }
+
+    [Fact]
+    public void Lowers_if_with_conditional_branches()
+    {
+        var ir = Lower("""
+            function choose(flag: bool): i32 {
+                if (flag) {
+                    return 1;
+                } else {
+                    return 0;
+                }
+            }
+            """);
+
+        Assert.Contains("if.then", ir);
+        Assert.Contains("if.else", ir);
+        Assert.Contains("if.end", ir);
+        Assert.Contains("br i1", ir);
+    }
+
+    [Fact]
+    public void Lowers_for_loop_with_header_and_latch()
+    {
+        var ir = Lower("""
+            function loop(n: i32): void {
+                let i: i32;
+                i.=(0);
+                for i.=(0); true; i.=(i.+(1)) {
+                    i.=(i);
+                }
+            }
+            """);
+
+        Assert.Contains("for.cond", ir);
+        Assert.Contains("for.body", ir);
+        Assert.Contains("for.latch", ir);
+        Assert.Contains("for.end", ir);
+        Assert.Contains("br label %for.cond", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_into_index_iteration()
+    {
+        var ir = Lower("""
+            global values: i32[4];
+            function sum(): void {
+                foreach (i in values) {
+                    values[i].=(values[i]);
+                }
+            }
+            """);
+
+        Assert.Contains("foreach.cond", ir);
+        Assert.Contains("foreach.latch", ir);
+        Assert.Contains("foreach.end", ir);
+        Assert.Contains("foreach.cmp", ir);
+        Assert.Contains("store i32", ir);
+    }
 }
