@@ -34,6 +34,37 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_local_struct_type()
+    {
+        var source = """
+            struct Player { hp: u8; }
+            function f(): void {
+                let p: Player;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+    }
+
+    [Fact]
+    public void Flags_parameter_struct_type()
+    {
+        var source = """
+            struct Player { hp: u8; }
+            function f(p: Player): void {
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+    }
+
+    [Fact]
     public void Flags_assignment_to_literal()
     {
         var source = """

@@ -102,6 +102,7 @@ public sealed class SemanticAnalyzer
         {
             var type = ResolveType(param.Type);
             AddLocal(scope, param.Name.Text, SymbolKind.Parameter, type, param.Name.Span);
+            EnsurePrimitiveLocal(type, param.Name.Span);
         }
 
         AnalyzeBlock(fn.Body, scope);
@@ -114,6 +115,7 @@ public sealed class SemanticAnalyzer
         {
             var type = ResolveType(param.Type);
             AddLocal(scope, param.Name.Text, SymbolKind.Parameter, type, param.Name.Span);
+            EnsurePrimitiveLocal(type, param.Name.Span);
         }
 
         AnalyzeBlock(test.Body, scope);
@@ -192,6 +194,7 @@ public sealed class SemanticAnalyzer
         {
             var type = ResolveType(v.Type);
             AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
+            EnsurePrimitiveLocal(type, v.Name.Span);
         }
     }
 
@@ -304,6 +307,21 @@ public sealed class SemanticAnalyzer
         }
 
         _diagnostics.Add(new Diagnostic($"Undefined identifier '{name}'.", span));
+    }
+
+    private void EnsurePrimitiveLocal(TypeSymbol? type, SourceSpan span)
+    {
+        if (type is null)
+        {
+            return;
+        }
+
+        if (type is PrimitiveTypeSymbol)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types; structs/arrays live in static memory.", span));
     }
 
     private void AddSymbol(string name, SymbolKind kind, TypeSymbol? type, SourceSpan span)
