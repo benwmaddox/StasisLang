@@ -10,7 +10,7 @@ public class ExecutionTests
 {
     static ExecutionTests()
     {
-        LlvmNativeLoader.EnsureLoaded();
+        Stasis.Compiler.LlvmNativeLoader.EnsureLoaded();
     }
 
     [Fact]

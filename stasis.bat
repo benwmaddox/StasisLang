@@ -9,30 +9,50 @@ set FILE=%~1
 shift
 set EXTRA=%*
 set PROJ=Stasis.Cli\Stasis.Cli.csproj
-
-where lli >nul 2>&1
-if errorlevel 1 (
-  echo error: lli not found on PATH>&2
-  exit /b 1
+if "%LLVM_NATIVE_PATH%"=="" (
+  set "LLVM_NATIVE_PATH=%USERPROFILE%\.nuget\packages\libllvm.runtime.win-x64\20.1.2\runtimes\win-x64\native"
 )
 
-set TMP=%TEMP%\stasis_%RANDOM%%RANDOM%.ll
+set LLI=
+for %%I in (lli.exe) do @for %%J in ("%ProgramFiles%\\LLVM\\bin\\%%I" "%%~$PATH:I") do @if exist %%~J set LLI=%%~fJ
+
+set CLANG=
+for %%I in (clang.exe) do @for %%J in ("%ProgramFiles%\\LLVM\\bin\\%%I" "%%~$PATH:I") do @if exist %%~J set CLANG=%%~fJ
+
+if "%LLI%"=="" if "%CLANG%"=="" (
+  echo error: neither lli nor clang found. Install LLVM or add to PATH.&goto :fail
+)
+
+set OUTLL=%TEMP%\stasis_%RANDOM%%RANDOM%.ll
+set TMPEXE=%TEMP%\stasis_%RANDOM%%RANDOM%.exe
 
 if /I "%CMD%"=="run" (
   dotnet run --project "%PROJ%" -- "%FILE%" %EXTRA% > "%TMP%"
   if errorlevel 1 goto :fail
-  lli "%TMP%"
+  if not "%LLI%"=="" (
+    "%LLI%" "%OUTLL%"
+  ) else (
+    "%CLANG%" "%OUTLL%" -o "%TMPEXE%"
+    "%TMPEXE%"
+  )
   set EXITCODE=!errorlevel!
-  del "%TMP%"
+  del "%OUTLL%"
+  if exist "%TMPEXE%" del "%TMPEXE%"
   exit /b !EXITCODE!
 )
 
 if /I "%CMD%"=="test" (
-  dotnet run --project "%PROJ%" -- "%FILE%" --with-tests %EXTRA% > "%TMP%"
+  dotnet run --project "%PROJ%" -- "%FILE%" --with-tests %EXTRA% > "%OUTLL%"
   if errorlevel 1 goto :fail
-  lli -entry-function=run_tests "%TMP%"
+  if not "%LLI%"=="" (
+    "%LLI%" -entry-function=run_tests "%OUTLL%"
+  ) else (
+    "%CLANG%" "%OUTLL%" -o "%TMPEXE%" -Wl,/entry:run_tests -Wl,/subsystem:console
+    "%TMPEXE%"
+  )
   set EXITCODE=!errorlevel!
-  del "%TMP%"
+  del "%OUTLL%"
+  if exist "%TMPEXE%" del "%TMPEXE%"
   exit /b !EXITCODE!
 )
 
@@ -43,5 +63,6 @@ exit /b 1
 
 :fail
 set EXITCODE=%ERRORLEVEL%
-if exist "%TMP%" del "%TMP%"
+if exist "%OUTLL%" del "%OUTLL%"
+if exist "%TMPEXE%" del "%TMPEXE%"
 exit /b %EXITCODE%

@@ -7,7 +7,7 @@ public class LoweringTests
 {
     static LoweringTests()
     {
-        LlvmNativeLoader.EnsureLoaded();
+        Stasis.Compiler.LlvmNativeLoader.EnsureLoaded();
     }
 
     private static string Lower(string source)

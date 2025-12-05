@@ -185,6 +185,8 @@ public sealed class ModuleLowerer
         private readonly Dictionary<string, GlobalLayout> _globalLayouts;
         private readonly List<Diagnostic> _diagnostics;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+        private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
+        private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
         private int _blockId;
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests)
         {
@@ -199,6 +201,12 @@ public sealed class ModuleLowerer
             _structs = compilationUnit.Declarations
                 .OfType<StructDeclarationSyntax>()
                 .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+            _functions = compilationUnit.Declarations
+                .OfType<FunctionDeclarationSyntax>()
+                .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
+            _tests = compilationUnit.Declarations
+                .OfType<TestDeclarationSyntax>()
+                .ToDictionary(t => t.Name.Text, t => t, StringComparer.Ordinal);
 
             foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
             {
@@ -412,15 +420,12 @@ public sealed class ModuleLowerer
             }
 
             var argValues = call.Arguments.Select(a => LowerExpression(builder, a, locals)).ToArray();
-            var fnType = fn.TypeOf;
-            if (fnType.Kind == LLVMTypeKind.LLVMPointerTypeKind)
-            {
-                fnType = fnType.ElementType;
-            }
+            var signature = ResolveFunctionSignature(id.Identifier.Text);
+            var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
 
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
-            var retType = fnType.ReturnType;
-            if (retType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
+            var callRetType = fnType.ReturnType;
+            if (callRetType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
             {
                 return ConstI32(0);
             }
@@ -801,6 +806,29 @@ public sealed class ModuleLowerer
             }
 
             return $"{structName}_{fieldName}";
+        }
+
+        private (LLVMTypeRef ReturnType, LLVMTypeRef[] Parameters) ResolveFunctionSignature(string name)
+        {
+            if (_functions.TryGetValue(name, out var fn))
+            {
+                var retType = fn.ReturnType is null
+                    ? LLVMTypeRef.Void
+                    : _moduleBuilder.TypeMapper.Map(ResolveType(fn.ReturnType, _symbols));
+                var paramTypes = fn.Parameters.Select(p => _moduleBuilder.TypeMapper.Map(ResolveType(p.Type, _symbols))).ToArray();
+                return (retType, paramTypes);
+            }
+
+            if (_tests.TryGetValue(name, out var test))
+            {
+                var retType = test.ReturnType is null
+                    ? _moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32"))
+                    : _moduleBuilder.TypeMapper.Map(ResolveType(test.ReturnType, _symbols));
+                var paramTypes = test.Parameters.Select(p => _moduleBuilder.TypeMapper.Map(ResolveType(p.Type, _symbols))).ToArray();
+                return (retType, paramTypes);
+            }
+
+            return (LLVMTypeRef.Void, Array.Empty<LLVMTypeRef>());
         }
 
         private LLVMValueRef ConstI32(int value) =>

@@ -2,30 +2,30 @@ using Stasis.Compiler;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
 
-var args = Environment.GetCommandLineArgs().Skip(1).ToList();
-if (args.Count == 0 || args.Contains("--help"))
+var argv = Environment.GetCommandLineArgs().Skip(1).ToList();
+if (argv.Count == 0 || argv.Contains("--help"))
 {
     PrintUsage();
     return;
 }
 
-var includeTests = args.Remove("--with-tests");
-var moduleNameIndex = args.IndexOf("--module");
+var includeTests = argv.Remove("--with-tests");
+var moduleNameIndex = argv.IndexOf("--module");
 string moduleName = "module";
-if (moduleNameIndex >= 0 && moduleNameIndex + 1 < args.Count)
+if (moduleNameIndex >= 0 && moduleNameIndex + 1 < argv.Count)
 {
-    moduleName = args[moduleNameIndex + 1];
-    args.RemoveAt(moduleNameIndex + 1);
-    args.RemoveAt(moduleNameIndex);
+    moduleName = argv[moduleNameIndex + 1];
+    argv.RemoveAt(moduleNameIndex + 1);
+    argv.RemoveAt(moduleNameIndex);
 }
 
-if (args.Count == 0)
+if (argv.Count == 0)
 {
     PrintUsage();
     return;
 }
 
-var path = args[0];
+var path = argv[0];
 if (!File.Exists(path))
 {
     Console.Error.WriteLine($"error: file not found: {path}");
@@ -39,6 +39,8 @@ if (parse.Diagnostics.Count > 0)
     PrintDiagnostics(parse.Diagnostics);
     Environment.Exit(1);
 }
+
+LlvmNativeLoader.EnsureLoaded();
 
 var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 if (sema.Diagnostics.Count > 0)

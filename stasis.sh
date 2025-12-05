@@ -13,9 +13,10 @@ shift 2
 EXTRA=("$@")
 PROJ="Stasis.Cli/Stasis.Cli.csproj"
 LLI="$(command -v lli || true)"
+CLANG="$(command -v clang || true)"
 
-if [ -z "$LLI" ]; then
-  echo "error: lli not found on PATH" >&2
+if [ -z "$LLI" ] && [ -z "$CLANG" ]; then
+  echo "error: neither lli nor clang found on PATH" >&2
   exit 1
 fi
 
@@ -25,10 +26,24 @@ trap cleanup EXIT
 
 if [ "$CMD" = "run" ]; then
   dotnet run --project "$PROJ" -- "$FILE" "${EXTRA[@]}" > "$TMP"
-  "$LLI" "$TMP"
+  if [ -n "$LLI" ]; then
+    "$LLI" "$TMP"
+  else
+    TMPEXE="$(mktemp --suffix .out)"
+    clang "$TMP" -o "$TMPEXE"
+    "$TMPEXE"
+    rm -f "$TMPEXE"
+  fi
 elif [ "$CMD" = "test" ]; then
   dotnet run --project "$PROJ" -- "$FILE" --with-tests "${EXTRA[@]}" > "$TMP"
-  "$LLI" -entry-function=run_tests "$TMP"
+  if [ -n "$LLI" ]; then
+    "$LLI" -entry-function=run_tests "$TMP"
+  else
+    TMPEXE="$(mktemp --suffix .out)"
+    clang "$TMP" -o "$TMPEXE" -Wl,-e,run_tests
+    "$TMPEXE"
+    rm -f "$TMPEXE"
+  fi
 else
   echo "Unknown command: $CMD" >&2
   exit 1
