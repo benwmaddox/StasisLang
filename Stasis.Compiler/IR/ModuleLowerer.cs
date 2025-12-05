@@ -71,12 +71,16 @@ public sealed class ModuleLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
         private readonly IReadOnlyDictionary<string, Symbol> _symbols;
+        private readonly LayoutPlan _layout;
+        private readonly Dictionary<string, GlobalLayout> _globalLayouts;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
         private int _blockId;
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
+            _layout = layout;
+            _globalLayouts = layout.Globals.ToDictionary(g => g.Name, g => g, StringComparer.Ordinal);
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit)
@@ -230,8 +234,15 @@ public sealed class ModuleLowerer
                     return LowerMemberAccess(builder, member, locals);
                 case ArrayAccessExpressionSyntax arr:
                     return LowerArrayAccess(builder, arr, null, locals);
+                case ParenthesizedExpressionSyntax paren:
+                    return LowerExpression(builder, paren.Expression, locals);
+                case UnaryExpressionSyntax unary:
+                    return LowerUnary(builder, unary, locals);
                 case OperatorCallExpressionSyntax op:
                     return LowerOperatorCall(builder, op, locals);
+                case CallExpressionSyntax:
+                    // Function calls are not lowered yet; return zero to keep IR valid.
+                    return ConstI32(0);
                 default:
                     return ConstI32(0);
             }
@@ -252,6 +263,17 @@ public sealed class ModuleLowerer
                 default:
                     return ConstI32(0);
             }
+        }
+
+        private LLVMValueRef LowerUnary(LLVMBuilderRef builder, UnaryExpressionSyntax unary, Dictionary<string, LocalBinding> locals)
+        {
+            var operand = LowerExpression(builder, unary.Operand, locals);
+            return unary.OperatorToken.Kind switch
+            {
+                TokenKind.Minus => LowerNeg(builder, operand),
+                TokenKind.Bang => LowerLogicalNot(builder, operand),
+                _ => operand
+            };
         }
 
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
@@ -305,16 +327,37 @@ public sealed class ModuleLowerer
 
             var lhs = LowerExpression(builder, op.Receiver, locals);
             var rhs = LowerExpression(builder, op.Arguments[0], locals);
-            return opText switch
+            return LowerBinary(builder, opText, lhs, rhs);
+        }
+
+        private LLVMValueRef LowerBinary(LLVMBuilderRef builder, string op, LLVMValueRef lhs, LLVMValueRef rhs)
+        {
+            var type = lhs.TypeOf;
+            var isFloat = type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            return op switch
             {
+                "+" when isFloat => builder.BuildFAdd(lhs, rhs, "faddtmp"),
                 "+" => builder.BuildAdd(lhs, rhs, "addtmp"),
+                "-" when isFloat => builder.BuildFSub(lhs, rhs, "fsubtmp"),
                 "-" => builder.BuildSub(lhs, rhs, "subtmp"),
+                "*" when isFloat => builder.BuildFMul(lhs, rhs, "fmultmp"),
                 "*" => builder.BuildMul(lhs, rhs, "multmp"),
+                "/" when isFloat => builder.BuildFDiv(lhs, rhs, "fdivtmp"),
                 "/" => builder.BuildSDiv(lhs, rhs, "divtmp"),
+                "%" when isFloat => lhs,
                 "%" => builder.BuildSRem(lhs, rhs, "remtmp"),
+                "<" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, lhs, rhs, "flt")),
+                "<" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, lhs, rhs, "ilt")),
+                ">" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGT, lhs, rhs, "fgt")),
+                ">" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, lhs, rhs, "igt")),
+                "==" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, lhs, rhs, "feq")),
+                "==" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, lhs, rhs, "ieq")),
                 _ => lhs
             };
         }
+
+        private LLVMValueRef BuildBoolResult(LLVMBuilderRef builder, LLVMValueRef value) =>
+            builder.BuildZExt(value, LLVMTypeRef.Int32, "booltmp");
 
         private bool LowerIf(LLVMBuilderRef builder, LLVMValueRef function, IfStatementSyntax ifs, Dictionary<string, LocalBinding> locals)
         {
@@ -493,7 +536,7 @@ public sealed class ModuleLowerer
                         {
                             var fieldType = ResolveType(field.Type, _symbols);
                             elemType = _moduleBuilder.TypeMapper.Map(fieldType);
-                            var fieldGlobalName = $"{namedElem.TypeName}_{fieldName}";
+                            var fieldGlobalName = TryResolveFieldGlobalName(id.Identifier.Text, namedElem.TypeName, fieldName);
                             var fieldGlobal = _moduleBuilder.Module.GetNamedGlobal(fieldGlobalName);
                             if (fieldGlobal.Handle != IntPtr.Zero)
                             {
@@ -504,7 +547,8 @@ public sealed class ModuleLowerer
                     }
                     else
                     {
-                        var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                        var globalName = TryResolveGlobalName(id.Identifier.Text);
+                        var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
                         elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
                         ptr = builder.BuildGEP2(elemType, global, new[] { zero, index }, "elemaddr");
                         return true;
@@ -541,6 +585,21 @@ public sealed class ModuleLowerer
             return value;
         }
 
+        private LLVMValueRef LowerNeg(LLVMBuilderRef builder, LLVMValueRef operand)
+        {
+            var type = operand.TypeOf;
+            return type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind
+                ? builder.BuildFNeg(operand, "fnegtmp")
+                : builder.BuildNeg(operand, "negtmp");
+        }
+
+        private LLVMValueRef LowerLogicalNot(LLVMBuilderRef builder, LLVMValueRef operand)
+        {
+            var boolVal = AsBoolean(builder, operand);
+            var inverted = builder.BuildNot(boolVal, "nottmp");
+            return builder.BuildZExt(inverted, LLVMTypeRef.Int32, "noti32");
+        }
+
         private string NextBlockName(string prefix) => $"{prefix}.{_blockId++}";
 
         private int ResolveIterableLength(ExpressionSyntax iterable)
@@ -553,6 +612,24 @@ public sealed class ModuleLowerer
             }
 
             return 0;
+        }
+
+        private string TryResolveGlobalName(string name) =>
+            _globalLayouts.TryGetValue(name, out var layout) ? layout.Name : name;
+
+        private string TryResolveFieldGlobalName(string parentGlobal, string structName, string fieldName)
+        {
+            if (_globalLayouts.TryGetValue(parentGlobal, out var layout))
+            {
+                var candidate = $"{structName}_{fieldName}";
+                var match = layout.Fields.FirstOrDefault(f => string.Equals(f.Name, candidate, StringComparison.Ordinal));
+                if (match is not null)
+                {
+                    return match.Name;
+                }
+            }
+
+            return $"{structName}_{fieldName}";
         }
 
         private LLVMValueRef ConstI32(int value) =>

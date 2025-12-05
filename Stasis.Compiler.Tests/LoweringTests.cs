@@ -147,4 +147,46 @@ public class LoweringTests
         Assert.Contains("foreach.cmp", ir);
         Assert.Contains("store i32", ir);
     }
+
+    [Fact]
+    public void Lowers_integer_comparisons_to_icmp()
+    {
+        var ir = Lower("""
+            function smaller(a: i32, b: i32): i32 {
+                return a.<(b);
+            }
+            """);
+
+        Assert.Contains("icmp slt", ir);
+        Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
+    public void Lowers_float_comparisons_to_fcmp()
+    {
+        var ir = Lower("""
+            function equals(a: f32, b: f32): i32 {
+                return a.==(b);
+            }
+            """);
+
+        Assert.Contains("fcmp oeq", ir);
+        Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
+    public void Lowers_unary_negation_and_not()
+    {
+        var ir = Lower("""
+            function tweak(x: f32, flag: bool): i32 {
+                let y: f32;
+                y.=(-(x));
+                return !(flag);
+            }
+            """);
+
+        Assert.Contains("fneg", ir);
+        Assert.Contains("icmp", ir); // from bool coercion
+        Assert.Contains("zext i1", ir);
+    }
 }
