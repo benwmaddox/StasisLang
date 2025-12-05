@@ -527,13 +527,14 @@ public sealed class ModuleLowerer
             var signature = ResolveFunctionSignature(id.Identifier.Text);
             var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
 
-            var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             var callRetType = fnType.ReturnType;
             if (callRetType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
             {
+                builder.BuildCall2(fnType, fn, argValues, string.Empty);
                 return ConstI32(0);
             }
 
+            var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
         }
 
@@ -811,7 +812,9 @@ public sealed class ModuleLowerer
                             var fieldGlobal = _moduleBuilder.Module.GetNamedGlobal(fieldGlobalName);
                             if (fieldGlobal.Handle != IntPtr.Zero)
                             {
-                                ptr = builder.BuildGEP2(elemType, fieldGlobal, new[] { zero, index }, "fieldaddr");
+                                var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                                var casted = builder.BuildBitCast(fieldGlobal, elemPtrType, "fieldbase");
+                                ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
                                 return true;
                             }
                             AddDiagnostic($"Layout for global '{id.Identifier.Text}' missing field '{fieldName}'.", arr.Span);
@@ -830,7 +833,9 @@ public sealed class ModuleLowerer
                         var globalName = TryResolveGlobalName(id.Identifier.Text);
                         var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
                         elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
-                        ptr = builder.BuildGEP2(elemType, global, new[] { zero, index }, "elemaddr");
+                        var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                        var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
+                        ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");
                         return true;
                     }
                 }

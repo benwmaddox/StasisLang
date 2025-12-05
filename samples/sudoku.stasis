@@ -1,0 +1,140 @@
+function idx(r: i32, c: i32): i32 {
+    return r.*(9).+(c);
+}
+
+global puzzle: i32[81];
+global grid: i32[81];
+
+function seed_puzzle(): void {
+    let i: i32;
+    for i.=(0); i.<(81); i.=(i.+(1)) {
+        puzzle[i].=(0);
+    }
+
+    puzzle[idx(0, 0)].=(5); puzzle[idx(0, 1)].=(3); puzzle[idx(0, 4)].=(7);
+    puzzle[idx(1, 0)].=(6); puzzle[idx(1, 3)].=(1); puzzle[idx(1, 4)].=(9); puzzle[idx(1, 5)].=(5);
+    puzzle[idx(2, 1)].=(9); puzzle[idx(2, 2)].=(8); puzzle[idx(2, 7)].=(6);
+
+    puzzle[idx(3, 0)].=(8); puzzle[idx(3, 4)].=(6); puzzle[idx(3, 8)].=(3);
+    puzzle[idx(4, 0)].=(4); puzzle[idx(4, 3)].=(8); puzzle[idx(4, 5)].=(3); puzzle[idx(4, 8)].=(1);
+    puzzle[idx(5, 0)].=(7); puzzle[idx(5, 4)].=(2); puzzle[idx(5, 8)].=(6);
+
+    puzzle[idx(6, 1)].=(6); puzzle[idx(6, 6)].=(2); puzzle[idx(6, 7)].=(8);
+    puzzle[idx(7, 3)].=(4); puzzle[idx(7, 4)].=(1); puzzle[idx(7, 5)].=(9); puzzle[idx(7, 8)].=(5);
+    puzzle[idx(8, 4)].=(8); puzzle[idx(8, 7)].=(7); puzzle[idx(8, 8)].=(9);
+}
+
+function reset_grid(): void {
+    let i: i32;
+    for i.=(0); i.<(81); i.=(i.+(1)) {
+        grid[i].=(puzzle[i]);
+    }
+}
+
+function row_ok(r: i32, val: i32): bool {
+    let c: i32;
+    for c.=(0); c.<(9); c.=(c.+(1)) {
+        if (grid[idx(r, c)].==(val)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function col_ok(c: i32, val: i32): bool {
+    let r: i32;
+    for r.=(0); r.<(9); r.=(r.+(1)) {
+        if (grid[idx(r, c)].==(val)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function box_ok(r: i32, c: i32, val: i32): bool {
+    let br: i32;
+    let bc: i32;
+    let rr: i32;
+    let cc: i32;
+    br.=(r./(3).*(3));
+    bc.=(c./(3).*(3));
+    for rr.=(0); rr.<(3); rr.=(rr.+(1)) {
+        for cc.=(0); cc.<(3); cc.=(cc.+(1)) {
+            if (grid[idx(br.+(rr), bc.+(cc))].==(val)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+function can_place(r: i32, c: i32, val: i32): bool {
+    if (!row_ok(r, val)) {
+        return false;
+    }
+    if (!col_ok(c, val)) {
+        return false;
+    }
+    if (!box_ok(r, c, val)) {
+        return false;
+    }
+    return true;
+}
+
+function solve_at(pos: i32): bool {
+    if (pos.==(81)) {
+        return true;
+    }
+
+    let r: i32;
+    let c: i32;
+    r.=(pos./(9));
+    c.=(pos.-(r.*(9)));
+
+    if (!grid[idx(r, c)].==(0)) {
+        return solve_at(pos.+(1));
+    }
+
+    let val: i32;
+    for val.=(1); val.<(10); val.=(val.+(1)) {
+        if (can_place(r, c, val)) {
+            grid[idx(r, c)].=(val);
+            if (solve_at(pos.+(1))) {
+                return true;
+            }
+            grid[idx(r, c)].=(0);
+        }
+    }
+
+    return false;
+}
+
+function solve(): bool {
+    seed_puzzle();
+    reset_grid();
+    return solve_at(0);
+}
+
+test `sudoku solves seed`() : bool {
+    if (!solve()) {
+        return false;
+    }
+    if (!grid[idx(0, 2)].==(4)) {
+        return false;
+    }
+    if (!grid[idx(8, 8)].==(9)) {
+        return false;
+    }
+    return true;
+}
+
+function main(): i32 {
+    if (solve()) {
+        return 0;
+    }
+
+    return 1;
+}

@@ -20,3 +20,18 @@
 - Verify: sample Stasis programs run under `lli` with expected stdout/return codes; golden IR snapshots for samples.
 - Add integration test that compiles Stasis `test` declarations, emits `run_tests`, and executes via `lli` to verify harness exit code.
 
+## Sudoku CLI Mini-Game (Stasis)
+- Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.
+- Language/runtime gaps to close:
+  - Add string literal lowering to immutable `i8*` buffers and expose `puts/printf` for user-facing text.
+  - Add basic stdin support (e.g., host shim for numeric input or readline) and a minimal formatting helper for board rendering.
+  - CLI flag `stasis play-sudoku` that wires console I/O to the Stasis program (bridge host I/O to LLVM intrinsics).
+- Game logic:
+  - Stasis sample defines board storage (global arrays), helpers (indexing, validity checks), backtracking solver, and commands to place numbers.
+  - Main loop: render board, prompt for row/col/value, validate move, allow quit/reset; exit code 0 on solved, nonzero on abort/error.
+  - Tests: host-side CLI test drives scripted input; Stasis-side tests validate solver correctness on the seed puzzle.
+- Deliverables:
+  - `samples/sudoku.stasis` playable program + solver.
+  - CLI documentation in README for Sudoku mode and controls.
+  - Integration test ensuring Sudoku sample builds/solves via CLI.
+
