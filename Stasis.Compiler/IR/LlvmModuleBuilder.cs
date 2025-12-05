@@ -1,5 +1,5 @@
-using LLVMSharp.Interop;
 using System.Runtime.InteropServices;
+using LLVMSharp.Interop;
 using Stasis.Compiler.Semantic;
 
 namespace Stasis.Compiler.IR;

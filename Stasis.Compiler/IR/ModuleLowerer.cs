@@ -1,10 +1,10 @@
+using System;
+using System.Globalization;
 using LLVMSharp.Interop;
 using Stasis.Compiler;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
-using System.Globalization;
-using System;
 
 namespace Stasis.Compiler.IR;
 

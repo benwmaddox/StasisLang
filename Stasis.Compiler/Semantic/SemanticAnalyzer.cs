@@ -168,7 +168,7 @@ public sealed class SemanticAnalyzer
                 }
                 if (fs.Step is not null)
                 {
-                AnalyzeExpression(fs.Step, scope);
+                    AnalyzeExpression(fs.Step, scope);
                 }
 
                 AnalyzeBlock(fs.Body, new Dictionary<string, Symbol>(scope, StringComparer.Ordinal));
