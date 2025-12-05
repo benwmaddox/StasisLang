@@ -33,7 +33,7 @@ public class CLITests
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --configuration {Configuration} --project \"{CliProj}\" -- {args}",
+            Arguments = $"run --no-restore --configuration {Configuration} --project \"{CliProj}\" -- {args}",
             WorkingDirectory = RepoRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
