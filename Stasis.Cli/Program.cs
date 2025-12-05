@@ -23,6 +23,9 @@ while (cliArgs.Count > 0)
     var arg = cliArgs.Dequeue();
     switch (arg)
     {
+        case "format":
+            mode = arg;
+            break;
         case "run":
         case "test":
             mode = arg;
@@ -64,6 +67,18 @@ if (!File.Exists(path))
 {
     Console.Error.WriteLine($"error: file not found: {path}");
     Environment.Exit(1);
+}
+
+if (mode == "format")
+{
+    var input = File.ReadAllText(path);
+    var formatted = Stasis.Cli.StasisFormatter.Format(input);
+    if (!string.Equals(input, formatted, StringComparison.Ordinal))
+    {
+        File.WriteAllText(path, formatted);
+    }
+
+    return;
 }
 
 var source = File.ReadAllText(path);
@@ -244,6 +259,7 @@ static void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
     Console.WriteLine("  stasisc test <file> [--module <name>] [--emit-ir]");
+    Console.WriteLine("  stasisc format <file>");
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout.");
 }
 
