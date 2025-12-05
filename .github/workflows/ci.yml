@@ -8,9 +8,21 @@ on:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_NOLOGO: true
+      NUGET_PACKAGES: ${{ runner.temp }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -31,3 +43,17 @@ jobs:
 
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
+
+      - name: Emit sample IR artifacts
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p artifacts
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- run samples/basic.stasis --emit-ir > artifacts/basic.ll
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- test samples/tests.stasis --emit-ir > artifacts/tests.ll
+
+      - name: Upload IR artifacts
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-ir
+          path: artifacts/*.ll
