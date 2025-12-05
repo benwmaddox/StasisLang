@@ -1,0 +1,67 @@
+global rng_state: i32;
+
+function seed_rng(seed: i32): void {
+    rng_state.=(seed);
+}
+
+function next_rand(max: i32): i32 {
+    rng_state.=(rng_state.*(1103515245).+(12345));
+    let val: i32;
+    val.=(rng_state./(65536));
+    if (val.<(0)) {
+        val.=(0.-(val));
+    }
+    return val.%((max).+(1)).+(1);
+}
+
+function print_text_guess(): void {
+    print_char(71); print_char(117); print_char(101); print_char(115); print_char(115); print_char(32); // "Guess "
+    print_char(40); print_char(49); print_char(45); print_char(57); print_char(57); print_char(44); print_char(32); print_char(48); print_char(32); print_char(113); print_char(32); print_char(116); print_char(111); print_char(32); print_char(113); print_char(117); print_char(105); print_char(116); print_char(41); print_char(58); print_char(32);
+}
+
+function print_win(): void {
+    print_char(89); print_char(111); print_char(117); print_char(32); print_char(119); print_char(111); print_char(110); print_char(33); print_char(10);
+}
+
+function print_higher(): void {
+    print_char(72); print_char(105); print_char(103); print_char(104); print_char(101); print_char(114); print_char(10);
+}
+
+function print_lower(): void {
+    print_char(76); print_char(111); print_char(119); print_char(101); print_char(114); print_char(10);
+}
+
+function print_out_of_tries(target: i32): void {
+    print_char(79); print_char(117); print_char(116); print_char(32); print_char(111); print_char(102); print_char(32); print_char(116); print_char(114); print_char(105); print_char(101); print_char(115); print_char(46); print_char(32);
+    print_char(84); print_char(97); print_char(114); print_char(103); print_char(101); print_char(116); print_char(32); print_char(119); print_char(97); print_char(115); print_char(32);
+    print_int(target);
+    print_char(10);
+}
+
+function main(): i32 {
+    seed_rng(12345);
+    let target: i32;
+    target.=(next_rand(99));
+
+    let tries: i32;
+    for tries.=(0); tries.<(20); tries.=(tries.+(1)) {
+        print_text_guess();
+        let guess: i32;
+        guess.=(read_int());
+        if (guess.==(0)) {
+            return 0;
+        }
+        if (guess.==(target)) {
+            print_win();
+            return 0;
+        }
+        if (guess.<(target)) {
+            print_higher();
+        } else {
+            print_lower();
+        }
+    }
+
+    print_out_of_tries(target);
+    return 1;
+}
