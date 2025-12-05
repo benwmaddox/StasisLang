@@ -1,38 +1,65 @@
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
 using Stasis.Compiler;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
 
-var argv = Environment.GetCommandLineArgs().Skip(1).ToList();
-if (argv.Count == 0 || argv.Contains("--help"))
+var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
+if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
 {
     PrintUsage();
     return;
 }
 
 var mode = "run";
-if (argv[0].Equals("run", StringComparison.OrdinalIgnoreCase) || argv[0].Equals("test", StringComparison.OrdinalIgnoreCase))
+string? path = null;
+var includeTests = false;
+var moduleName = "module";
+var emitIrOnly = false;
+
+while (cliArgs.Count > 0)
 {
-    mode = argv[0].ToLowerInvariant();
-    argv.RemoveAt(0);
+    var arg = cliArgs.Dequeue();
+    switch (arg)
+    {
+        case "run":
+        case "test":
+            mode = arg;
+            includeTests = includeTests || arg == "test";
+            break;
+        case "--with-tests":
+            includeTests = true;
+            break;
+        case "--module" when cliArgs.Count > 0:
+            moduleName = cliArgs.Dequeue();
+            break;
+        case "--emit-ir":
+            emitIrOnly = true;
+            break;
+        case "--help":
+            PrintUsage();
+            return;
+        default:
+            if (path is null)
+            {
+                path = arg;
+            }
+            else
+            {
+                Console.Error.WriteLine($"error: unexpected argument '{arg}'");
+                Environment.Exit(1);
+            }
+            break;
+    }
 }
 
-var includeTests = argv.Remove("--with-tests") || mode == "test";
-var moduleNameIndex = argv.IndexOf("--module");
-string moduleName = "module";
-if (moduleNameIndex >= 0 && moduleNameIndex + 1 < argv.Count)
-{
-    moduleName = argv[moduleNameIndex + 1];
-    argv.RemoveAt(moduleNameIndex + 1);
-    argv.RemoveAt(moduleNameIndex);
-}
-
-if (argv.Count == 0)
+if (path is null)
 {
     PrintUsage();
     return;
 }
 
-var path = argv[0];
 if (!File.Exists(path))
 {
     Console.Error.WriteLine($"error: file not found: {path}");
@@ -63,20 +90,159 @@ var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, l
 if (lower.Diagnostics.Count > 0)
 {
     PrintDiagnostics(lower.Diagnostics);
+    Console.WriteLine(lower.Ir);
+    Environment.Exit(1);
 }
 
-Console.WriteLine(lower.Ir);
-if (lower.Diagnostics.Count > 0)
+if (emitIrOnly)
 {
-    Environment.Exit(1);
+    Console.WriteLine(lower.Ir);
+    Environment.Exit(lower.Diagnostics.Count > 0 ? 1 : 0);
+}
+
+var tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+File.WriteAllText(tempLl, lower.Ir);
+
+try
+{
+    var exitCode = Execute(mode, tempLl);
+    Environment.Exit(exitCode);
+}
+finally
+{
+    if (File.Exists(tempLl))
+    {
+        File.Delete(tempLl);
+    }
+}
+
+static int Execute(string mode, string llPath)
+{
+    if (TryFindTool("lli", out var lli))
+    {
+        return RunProcess(lli, mode == "test" ? $"-entry-function=run_tests \"{llPath}\"" : $"\"{llPath}\"");
+    }
+
+    if (TryFindTool("clang", out var clang))
+    {
+        var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+        try
+        {
+            var args = BuildClangArgs(llPath, exePath, mode == "test");
+            var exit = RunProcess(clang, args);
+            if (exit != 0)
+            {
+                return exit;
+            }
+
+            return RunProcess(exePath, string.Empty);
+        }
+        finally
+        {
+            if (File.Exists(exePath))
+            {
+                File.Delete(exePath);
+            }
+        }
+    }
+
+    Console.Error.WriteLine("error: neither lli nor clang found. Install LLVM or add to PATH.");
+    return 1;
+}
+
+static string BuildClangArgs(string llPath, string exePath, bool isTest)
+{
+    var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        if (isTest)
+        {
+            args.Add("-Wl,/entry:run_tests");
+        }
+
+        args.Add("-Wl,/subsystem:console");
+
+        var sdkRoot = GetLatestWindowsSdkLib();
+        if (sdkRoot is not null)
+        {
+            var ucrt = Path.Combine(sdkRoot, "ucrt", "x64");
+            var um = Path.Combine(sdkRoot, "um", "x64");
+            args.Add($"-L\"{ucrt}\"");
+            args.Add($"-L\"{um}\"");
+            args.Add("-lucrt");
+            args.Add("-lkernel32");
+            args.Add("-llegacy_stdio_definitions");
+        }
+    }
+    else if (isTest)
+    {
+        args.Add("-Wl,-e,run_tests");
+    }
+
+    return string.Join(" ", args);
+}
+
+static string? GetLatestWindowsSdkLib()
+{
+    var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10", "Lib");
+    if (!Directory.Exists(root))
+    {
+        return null;
+    }
+
+    return Directory.GetDirectories(root)
+        .OrderByDescending(Path.GetFileName)
+        .FirstOrDefault();
+}
+
+static bool TryFindTool(string name, out string path)
+{
+    var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+        .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+        .ToList();
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        search.Add(Path.Combine(programFiles, "LLVM", "bin"));
+        search.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+    }
+
+    foreach (var dir in search)
+    {
+        var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? $"{name}.exe" : name);
+        if (File.Exists(candidate))
+        {
+            path = candidate;
+            return true;
+        }
+    }
+
+    path = string.Empty;
+    return false;
+}
+
+static int RunProcess(string fileName, string arguments)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = fileName,
+        Arguments = arguments,
+        UseShellExecute = false
+    };
+
+    using var proc = Process.Start(psi)!;
+    proc.WaitForExit();
+    return proc.ExitCode;
 }
 
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests]");
-    Console.WriteLine("  stasisc test <file> [--module <name>]");
-    Console.WriteLine("Emits LLVM IR to stdout. Defaults to production lowering (tests omitted) unless using 'test' or --with-tests.");
+    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
+    Console.WriteLine("  stasisc test <file> [--module <name>] [--emit-ir]");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics)

@@ -114,6 +114,8 @@ public sealed class ModuleLowerer
         var failures = llvmBuilder.BuildAlloca(int32, "failures");
         llvmBuilder.BuildStore(ConstInt(int32, 0), failures);
 
+        var totalTests = tests.Count;
+
         foreach (var testDecl in tests)
         {
             if (testDecl.Parameters.Count > 0)
@@ -149,6 +151,13 @@ public sealed class ModuleLowerer
         }
 
         var result = llvmBuilder.BuildLoad2(int32, failures, "failures.result");
+
+        // Print a simple summary: Tests: passed=X failed=Y
+        var (printf, printfType) = GetOrDeclarePrintf(builder);
+        var fmt = llvmBuilder.BuildGlobalStringPtr("Tests: passed=%d failed=%d\n", "tests_fmt");
+        var passed = llvmBuilder.BuildSub(ConstInt(int32, totalTests), result, "tests.passed");
+        llvmBuilder.BuildCall2(printfType, printf, new[] { fmt, passed, result }, "printf.tests");
+
         llvmBuilder.BuildRet(result);
     }
 
@@ -177,6 +186,28 @@ public sealed class ModuleLowerer
 
     private static LLVMValueRef ConstInt(LLVMTypeRef type, int value) =>
         LLVMValueRef.CreateConstInt(type, (ulong)value, true);
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclarePrintf(LlvmModuleBuilder builder)
+    {
+        var printf = builder.Module.GetNamedFunction("printf");
+        LLVMTypeRef printfType;
+        if (printf.Handle != IntPtr.Zero)
+        {
+            printfType = GetFunctionType(printf);
+            return (printf, printfType);
+        }
+
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new LLVMTypeRef[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
+        printf = builder.Module.AddFunction("printf", printfType);
+        return (printf, printfType);
+    }
+
+    private static LLVMTypeRef GetFunctionType(LLVMValueRef fn)
+    {
+        var type = fn.TypeOf;
+        return type.Kind == LLVMTypeKind.LLVMPointerTypeKind ? type.ElementType : type;
+    }
 
     private sealed class FunctionLowerer
     {
