@@ -2,6 +2,7 @@ using LLVMSharp.Interop;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using System.Globalization;
 
 namespace Stasis.Compiler.IR;
 
@@ -14,7 +15,7 @@ public sealed class ModuleLowerer
     public string LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module")
     {
         using var builder = new LlvmModuleBuilder(moduleName);
-        EmitGlobals(layout, builder);
+        EmitGlobals(compilationUnit, semantic.Symbols, builder);
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder);
 
         var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout);
@@ -22,37 +23,58 @@ public sealed class ModuleLowerer
         return builder.EmitToString();
     }
 
-    private static void EmitGlobals(LayoutPlan layout, LlvmModuleBuilder builder)
+    private static void EmitGlobals(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)
     {
-        foreach (var global in layout.Globals)
+        var structs = compilationUnit.Declarations
+            .OfType<StructDeclarationSyntax>()
+            .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+
+        foreach (var global in compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>())
         {
-            if (global.Fields.Count > 0)
+            switch (global.Type)
             {
-                foreach (var field in global.Fields)
-                {
-                    var length = (uint)Math.Max(field.Size, 1);
-                    builder.DefineGlobalArray(field.Name, LLVMTypeRef.Int8, length);
-                }
-            }
-            else
-            {
-                var length = (uint)Math.Max(global.Size, 1);
-                builder.DefineGlobalArray(global.Name, LLVMTypeRef.Int8, length);
+                case ArrayTypeSyntax array when array.ElementType is NamedTypeSyntax named && structs.TryGetValue(named.Name, out var structDecl):
+                    {
+                        var length = ParseArrayLength(array.SizeToken.Text);
+                        foreach (var field in structDecl.Fields)
+                        {
+                            var fieldType = ResolveType(field.Type, symbols);
+                            var llvmElem = builder.TypeMapper.Map(fieldType);
+                            builder.DefineGlobalArray($"{structDecl.Name.Text}_{field.Identifier.Text}", llvmElem, length);
+                        }
+
+                        break;
+                    }
+                case ArrayTypeSyntax array:
+                    {
+                        var elementType = ResolveType(array.ElementType, symbols);
+                        var llvmElem = builder.TypeMapper.Map(elementType);
+                        var length = ParseArrayLength(array.SizeToken.Text);
+                        builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
+                        break;
+                    }
+                case NamedTypeSyntax named:
+                    {
+                        var type = ResolveType(named, symbols);
+                        var llvmType = builder.TypeMapper.Map(type);
+                        builder.DefineGlobalScalar(global.Name.Text, llvmType);
+                        break;
+                    }
             }
         }
     }
+
+    private static uint ParseArrayLength(string text) =>
+        uint.TryParse(text, out var n) ? n : 0;
 
     private sealed class FunctionLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
         private readonly IReadOnlyDictionary<string, Symbol> _symbols;
-        private readonly LayoutPlan _layout;
-
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
-            _layout = layout;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit)
@@ -166,22 +188,38 @@ public sealed class ModuleLowerer
                         return value.Value;
                     }
 
-                    return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
+                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
+                    {
+                        var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                        var type = _moduleBuilder.TypeMapper.Map(sym.Type);
+                        return builder.BuildLoad2(type, global, id.Identifier.Text);
+                    }
+
+                    return ConstI32(0);
+                case ArrayAccessExpressionSyntax arr:
+                    return LowerArrayAccess(builder, arr, locals);
                 case OperatorCallExpressionSyntax op:
                     return LowerOperatorCall(builder, op, locals);
                 default:
-                    return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
+                    return ConstI32(0);
             }
         }
 
         private LLVMValueRef LowerLiteral(LiteralExpressionSyntax lit)
         {
-            if (int.TryParse(lit.Literal.Text, out var value))
+            switch (lit.Literal.Kind)
             {
-                return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
+                case TokenKind.IntegerLiteral when int.TryParse(lit.Literal.Text, out var ival):
+                    return ConstI32(ival);
+                case TokenKind.FloatLiteral when float.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var fval):
+                    return LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("f32")), fval);
+                case TokenKind.TrueKeyword:
+                    return ConstI32(1);
+                case TokenKind.FalseKeyword:
+                    return ConstI32(0);
+                default:
+                    return ConstI32(0);
             }
-
-            return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
         }
 
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
@@ -201,6 +239,25 @@ public sealed class ModuleLowerer
                     return value;
                 }
 
+                if (receiver is not null && _symbols.TryGetValue(receiver.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
+                {
+                    var value = LowerExpression(builder, op.Arguments[0], locals);
+                    var global = _moduleBuilder.Module.GetNamedGlobal(receiver.Identifier.Text);
+                    var type = _moduleBuilder.TypeMapper.Map(sym.Type);
+                    builder.BuildStore(value, global);
+                    return value;
+                }
+
+                if (op.Receiver is ArrayAccessExpressionSyntax arr)
+                {
+                    if (TryLowerArrayElementPointer(builder, arr, locals, out var ptr, out var elemType))
+                    {
+                        var value = LowerExpression(builder, op.Arguments[0], locals);
+                        builder.BuildStore(value, ptr);
+                        return value;
+                    }
+                }
+
                 return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
             }
 
@@ -216,6 +273,40 @@ public sealed class ModuleLowerer
                 _ => lhs
             };
         }
+
+        private LLVMValueRef LowerArrayAccess(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals)
+        {
+            if (TryLowerArrayElementPointer(builder, arr, locals, out var ptr, out var elemType))
+            {
+                return builder.BuildLoad2(elemType, ptr, "elemload");
+            }
+
+            return ConstI32(0);
+        }
+
+        private bool TryLowerArrayElementPointer(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef elemType)
+        {
+            ptr = default;
+            elemType = default;
+
+            if (arr.Receiver is IdentifierExpressionSyntax id)
+            {
+                if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is ArrayTypeSymbol arrayType)
+                {
+                    var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                    elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                    var zero = ConstI32(0);
+                    var index = LowerExpression(builder, arr.Index, locals);
+                    ptr = builder.BuildGEP2(elemType, global, new[] { zero, index }, "elemaddr");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private LLVMValueRef ConstI32(int value) =>
+            LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
     }
 
     private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)

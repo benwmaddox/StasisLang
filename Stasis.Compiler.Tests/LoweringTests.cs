@@ -31,7 +31,7 @@ public class LoweringTests
             """);
 
         Assert.Contains("@Player_hp = internal global [2 x i8] zeroinitializer", ir);
-        Assert.Contains("@Player_score = internal global [8 x i8] zeroinitializer", ir);
+        Assert.Contains("@Player_score = internal global [2 x i32] zeroinitializer", ir);
     }
 
     [Fact]
@@ -73,5 +73,20 @@ public class LoweringTests
 
         Assert.Contains("store i32 1", ir);
         Assert.Contains("ret i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_store_into_global_array()
+    {
+        var ir = Lower("""
+            global temps: f32[3];
+            function set(i: i32, v: f32): void {
+                temps[i].=(v);
+            }
+            """);
+
+        Assert.Contains("@temps = internal global [3 x float] zeroinitializer", ir);
+        Assert.Contains("getelementptr", ir);
+        Assert.Contains("store float", ir);
     }
 }
