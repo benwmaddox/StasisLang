@@ -107,6 +107,7 @@ public sealed class ModuleLowerer
     {
         var tests = compilationUnit.Declarations.OfType<TestDeclarationSyntax>().ToList();
         var int32 = LLVMTypeRef.Int32;
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
         var harness = builder.DefineFunction("run_tests", int32);
         using var llvmBuilder = builder.Context.CreateBuilder();
         var entry = harness.AppendBasicBlock("entry");
@@ -115,6 +116,7 @@ public sealed class ModuleLowerer
         llvmBuilder.BuildStore(ConstInt(int32, 0), failures);
 
         var totalTests = tests.Count;
+        var (putsFn, putsType) = GetOrDeclarePuts(builder);
 
         foreach (var testDecl in tests)
         {
@@ -143,6 +145,11 @@ public sealed class ModuleLowerer
             }
 
             var ok = AsBoolean(llvmBuilder, call);
+            var passMsg = llvmBuilder.BuildGlobalStringPtr($"PASS: {testDecl.Name.Text}\n", $"{testDecl.Name.Text}.passmsg");
+            var failMsg = llvmBuilder.BuildGlobalStringPtr($"FAIL: {testDecl.Name.Text}\n", $"{testDecl.Name.Text}.failmsg");
+            var msg = llvmBuilder.BuildSelect(ok, passMsg, failMsg, $"{testDecl.Name.Text}.msg");
+            llvmBuilder.BuildCall2(putsType, putsFn, new[] { msg }, $"{testDecl.Name.Text}.print");
+
             var fail = llvmBuilder.BuildNot(ok, $"{testDecl.Name.Text}.fail");
             var failI32 = llvmBuilder.BuildZExt(fail, int32, $"{testDecl.Name.Text}.faili32");
             var cur = llvmBuilder.BuildLoad2(int32, failures, "failcur");
@@ -201,6 +208,20 @@ public sealed class ModuleLowerer
         printfType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new LLVMTypeRef[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
         printf = builder.Module.AddFunction("printf", printfType);
         return (printf, printfType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclarePuts(LlvmModuleBuilder builder)
+    {
+        var puts = builder.Module.GetNamedFunction("puts");
+        if (puts.Handle != IntPtr.Zero)
+        {
+            var type = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+            return (puts, type);
+        }
+
+        var putsType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+        puts = builder.Module.AddFunction("puts", putsType);
+        return (puts, putsType);
     }
 
     private static LLVMTypeRef GetFunctionType(LLVMValueRef fn)

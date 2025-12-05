@@ -153,6 +153,7 @@ static int Execute(string mode, string llPath)
 static string BuildClangArgs(string llPath, string exePath, bool isTest)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
+    args.Add("-Wno-override-module");
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         if (isTest)
@@ -161,6 +162,7 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest)
         }
 
         args.Add("-Wl,/subsystem:console");
+        args.Add("-Wl,/ignore:4210");
 
         var sdkRoot = GetLatestWindowsSdkLib();
         if (sdkRoot is not null)

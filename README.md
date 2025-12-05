@@ -20,7 +20,7 @@ Run Stasis tests end-to-end (executes `run_tests` harness; prints pass/fail coun
 ```sh
 stasis test samples/tests.stasis
 ```
-`run` returns your program's exit code; `test` returns the failure count.
+`run` returns your program's exit code; `test` returns the failure count and prints each test result plus a summary.
 
 Emit LLVM IR without executing:
 ```sh

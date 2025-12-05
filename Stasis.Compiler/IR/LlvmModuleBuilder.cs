@@ -1,4 +1,5 @@
 using LLVMSharp.Interop;
+using System.Runtime.InteropServices;
 using Stasis.Compiler.Semantic;
 
 namespace Stasis.Compiler.IR;
@@ -13,6 +14,9 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         Context = LLVMContextRef.Create();
         Module = Context.CreateModuleWithName(moduleName);
+        var module = Module;
+        module.Target = GetHostTriple();
+        Module = module;
         TypeMapper = new LlvmTypeMapper(Context);
     }
 
@@ -45,5 +49,20 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         Module.Dispose();
         Context.Dispose();
+    }
+
+    private static string GetHostTriple()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return "x86_64-pc-windows-msvc";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return "x86_64-apple-darwin";
+        }
+
+        return "x86_64-pc-linux-gnu";
     }
 }
