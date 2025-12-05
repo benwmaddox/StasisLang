@@ -214,6 +214,9 @@ function play(): i32 {
         print_prompt();
         let cmd: i32;
         cmd.=(read_char());
+        if (cmd.==(0)) {
+            return 0;
+        }
         if (cmd.==(113) || cmd.==(81)) { // q or Q
             return 0;
         }
@@ -254,17 +257,18 @@ function play(): i32 {
                 print_clue_error();
             } else {
                 if (v.==(0)) {
-                    grid[pos].=(0);
-                } else {
-                    if (!can_place(rr, cc, v)) {
-                        print_invalid();
+                        grid[pos].=(0);
                     } else {
-                        grid[pos].=(v);
+                        if (!can_place(rr, cc, v)) {
+                            print_invalid();
+                        } else {
+                            grid[pos].=(v);
+                            print_board();
+                        }
                     }
                 }
             }
         }
-    }
 
     return 1;
 }
