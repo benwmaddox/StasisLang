@@ -11,7 +11,7 @@
 
 ## Phase 9: CLI & UX
 - Build `stasisc` CLI to lex/parse/typecheck/lower; flags for output (LLVM IR/WASM), debug dumps, layout inspection; deterministic defaults.
-- Verify: snapshot tests for CLI stdout/stderr and exit codes on fixtures.
+- Verify: snapshot tests for CLI stdout/stderr and exit codes on fixtures (basic/test samples covered).
 - CLI runs `run`/`test` end-to-end via `lli` (preferred) or `clang` fallback; `stasis.{bat,sh}` are thin shims that delegate to the CLI.
 
 ## Phase 11: LLVM Execution Path
