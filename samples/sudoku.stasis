@@ -299,7 +299,10 @@ function read_cmd(): i32 {
         }
         if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
             // skip whitespace
+        } else {
+            return ch;
         }
-        return ch;
     }
+
+    return 0;
 }
