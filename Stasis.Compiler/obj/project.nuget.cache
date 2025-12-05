@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "dgSpecHash": "4v8z+0UtwAk=",
+  "success": true,
+  "projectFilePath": "C:\\code\\StasisLang\\Stasis.Compiler\\Stasis.Compiler.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\benwm\\.nuget\\packages\\libllvm\\20.1.2\\libllvm.20.1.2.nupkg.sha512",
+    "C:\\Users\\benwm\\.nuget\\packages\\llvmsharp\\20.1.2\\llvmsharp.20.1.2.nupkg.sha512",
+    "C:\\Users\\benwm\\.nuget\\packages\\llvmsharp.interop\\20.1.2\\llvmsharp.interop.20.1.2.nupkg.sha512"
+  ],
+  "logs": []
+}

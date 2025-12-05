@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Format check
+        run: dotnet format --verify-no-changes
+
+      - name: Restore
+        run: dotnet restore Stasis.sln
+
+      - name: Build
+        run: dotnet build Stasis.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test Stasis.sln -c Release --no-build

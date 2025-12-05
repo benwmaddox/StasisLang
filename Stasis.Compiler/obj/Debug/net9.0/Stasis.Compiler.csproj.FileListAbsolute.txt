@@ -1,0 +1,13 @@
+C:\code\StasisLang\Stasis.Compiler\bin\Debug\net9.0\Stasis.Compiler.deps.json
+C:\code\StasisLang\Stasis.Compiler\bin\Debug\net9.0\Stasis.Compiler.dll
+C:\code\StasisLang\Stasis.Compiler\bin\Debug\net9.0\Stasis.Compiler.pdb
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.GeneratedMSBuildEditorConfig.editorconfig
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.AssemblyInfoInputs.cache
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.AssemblyInfo.cs
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.csproj.CoreCompileInputs.cache
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.sourcelink.json
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.dll
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\refint\Stasis.Compiler.dll
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.pdb
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\ref\Stasis.Compiler.dll
+C:\code\StasisLang\Stasis.Compiler\obj\Debug\net9.0\Stasis.Compiler.csproj.AssemblyReference.cache

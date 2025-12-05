@@ -1,0 +1,149 @@
+{
+  "version": 3,
+  "targets": {
+    "net9.0": {
+      "libLLVM/20.1.2": {
+        "type": "package"
+      },
+      "LLVMSharp/20.1.2": {
+        "type": "package",
+        "dependencies": {
+          "LLVMSharp.Interop": "20.1.2"
+        },
+        "compile": {
+          "lib/net8.0/LLVMSharp.dll": {}
+        },
+        "runtime": {
+          "lib/net8.0/LLVMSharp.dll": {}
+        }
+      },
+      "LLVMSharp.Interop/20.1.2": {
+        "type": "package",
+        "dependencies": {
+          "libLLVM": "20.1.2"
+        },
+        "compile": {
+          "lib/net8.0/LLVMSharp.Interop.dll": {}
+        },
+        "runtime": {
+          "lib/net8.0/LLVMSharp.Interop.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "libLLVM/20.1.2": {
+      "sha512": "fKGHH+a/z2amRo7WislrWZxAIJ+25QGDOEwIcEzacNYgu27nBFNv5gudQzPZjGKBD0EwEYmTuiFb7hz4KgiqVQ==",
+      "type": "package",
+      "path": "libllvm/20.1.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "LICENSE.TXT",
+        "libllvm.20.1.2.nupkg.sha512",
+        "libllvm.nuspec",
+        "runtime.json"
+      ]
+    },
+    "LLVMSharp/20.1.2": {
+      "sha512": "Y335JTJAcIJNFBtsP2n3q2KDXISVGoDSL0wW60FFZhPJVrsfsGlo8Hy1W30hXbVnOXN2orPQpMPEBrNTXtxbWQ==",
+      "type": "package",
+      "path": "llvmsharp/20.1.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "lib/net8.0/LLVMSharp.dll",
+        "llvmsharp.20.1.2.nupkg.sha512",
+        "llvmsharp.nuspec"
+      ]
+    },
+    "LLVMSharp.Interop/20.1.2": {
+      "sha512": "cHMef03EWJYxrKskQahCYUs4o9GPdChKb/mleQ/XoNkp9t31Ub9e0H/NdwsLvNluSF/9FgoRlvU/q4iOityIlA==",
+      "type": "package",
+      "path": "llvmsharp.interop/20.1.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "lib/net8.0/LLVMSharp.Interop.dll",
+        "llvmsharp.interop.20.1.2.nupkg.sha512",
+        "llvmsharp.interop.nuspec"
+      ]
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net9.0": [
+      "LLVMSharp >= 20.1.2"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\benwm\\.nuget\\packages\\": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "C:\\code\\StasisLang\\Stasis.Compiler\\Stasis.Compiler.csproj",
+      "projectName": "Stasis.Compiler",
+      "projectPath": "C:\\code\\StasisLang\\Stasis.Compiler\\Stasis.Compiler.csproj",
+      "packagesPath": "C:\\Users\\benwm\\.nuget\\packages\\",
+      "outputPath": "C:\\code\\StasisLang\\Stasis.Compiler\\obj\\",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "C:\\Users\\benwm\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+      ],
+      "originalTargetFrameworks": [
+        "net9.0"
+      ],
+      "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+        "C:\\Program Files\\dotnet\\library-packs": {},
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net9.0": {
+          "targetAlias": "net9.0",
+          "projectReferences": {}
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      },
+      "SdkAnalysisLevel": "9.0.200"
+    },
+    "frameworks": {
+      "net9.0": {
+        "targetAlias": "net9.0",
+        "dependencies": {
+          "LLVMSharp": {
+            "target": "Package",
+            "version": "[20.1.2, )"
+          }
+        },
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.203/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}
