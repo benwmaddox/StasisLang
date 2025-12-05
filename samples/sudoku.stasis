@@ -298,7 +298,7 @@ function read_cmd(): i32 {
             return 0;
         }
         if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
-            continue;
+            // skip whitespace
         }
         return ch;
     }
