@@ -224,9 +224,8 @@ function play(): i32 {
         invalid_first.=(false);
         if (!(cmd.>(47) && cmd.<(58))) {
             invalid_first.=(true);
-            r.=(0);
-            c.=(0);
-            v.=(0);
+            discard_line();
+            r.=(0); c.=(0); v.=(0);
         } else {
             r.=(cmd.-(48));
             c.=(read_int());
@@ -272,4 +271,13 @@ function play(): i32 {
 
 function main(): i32 {
     return play();
+}
+
+function discard_line(): void {
+    let ch: i32;
+    for ch.=(read_char()); true; ch.=(read_char()) {
+        if (ch.==(10) || ch.==(13) || ch.==(0)) {
+            return;
+        }
+    }
 }
