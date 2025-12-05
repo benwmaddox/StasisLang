@@ -1,57 +1,26 @@
-# Compiler Implementation Plan (C# + LLVMSharp)
+# Remaining Compiler Tasks (C# + LLVMSharp)
 
-## Phase 0: Repository Bootstrap
-- Tasks: create `Stasis.sln` and `Stasis.Compiler` project; add `LLVMSharp` and testing packages; configure `dotnet format` and EditorConfig; add GitHub Actions for `dotnet format`, `dotnet build`, `dotnet test`.
-- Verification: `dotnet build`; `dotnet format --verify-no-changes`; `dotnet test` (empty scaffold initially).
+## Completed
+- Phases 0–6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
 
-## Phase 1: Lexing (per docs/spec.md §2 and docs/compilation.md §9)
-- Tasks: implement tokenizer with exact keywords, identifiers, numeric/string/backtick literals, operator-method tokens (`.+`, `.-`, `.*`, `./`, `.%`, `.<`, `.>`, `.==`, `.=`), parentheses/brackets/braces, and comments if allowed; produce source spans for diagnostics.
-- Verification: unit tests covering all token categories, backtick test names, and error cases (unterminated string/backtick).
-
-## Phase 2: Parsing (LL(1) per docs/compilation.md)
-- Tasks: build recursive-descent parser for the grammar; produce AST nodes for structs/enums/globals/functions/tests; parse postfix operator-method chains and assignment `.=( )`; ensure left-factored rules to keep LL(1); emit friendly diagnostics with span info.
-- Verification: golden parse trees for valid samples; negative tests for ambiguity (e.g., missing `)`/`;`, invalid operator token).
-
-## Phase 3: AST + Symbol Tables
-- Tasks: define AST types for modules, declarations, statements, expressions; implement symbol table with scopes for types, globals, and functions; enforce uniqueness; collect signatures in a first pass (per spec §13 Phase 1).
-- Verification: tests for duplicate symbol detection, unknown references, and multi-file module indexing (if added).
-
-## Phase 4: Semantic Analysis & Type Checking
-- Tasks: enforce static memory rules (structs/arrays only in global memory, locals restricted to primitives/references); type-check operator-methods by receiver type; validate assignment receivers; check return types; flag disallowed dynamic allocation.
-- Verification: unit tests for valid/invalid programs, especially operator-method typing and assignment l-values; ensure diagnostics cite spans.
-
-## Phase 5: Memory Layout (AoS syntax → SoA storage)
-- Tasks: compute deterministic SoA layouts for structs and globals; generate per-field arrays with offsets; expose `memoryOffset()` constants; decide alignment/padding rules and document in `docs/spec.md` if refined.
-- Verification: golden layout tests (input struct → emitted field arrays and offsets); compare offsets to spec expectations.
-
-## Phase 6: IR Construction Layer (LLVMSharp)
-- Tasks: wrap LLVMSharp in a thin builder to isolate interop; map Stasis types to LLVM types; implement helpers for globals, functions, blocks, and operator-method intrinsics; support both LLVM IR and WASM-compatible targets.
-- Verification: unit tests on the builder (creates expected IR snippets); round-trip `llc`/`lli` on tiny programs (e.g., arithmetic, assignment) to confirm correctness. _Status: LLVMSharp builder + type mapper + native loader + smoke tests for globals/functions are in place._
-
-## Phase 7: Lowering & Codegen
-- Tasks: lower typed AST to LLVM IR using the builder; implement operator-method lowering tables (spec §6); generate control flow for if/for/foreach; emit explicit stores/loads for SoA fields and arrays; ensure no hidden allocations.
-- Verification: compile sample programs and run with `lli` or wasm runtime; assertions on emitted IR text for key constructs; negative tests for disallowed patterns.
-
-### Phase 7 incremental steps
-- Build a block-aware IR emitter (basic blocks, phi-less SSA) that creates an entry block per function/test and emits `ret` for `void`/value returns.  
-  - Verify: IR text contains a `define` with an entry block and a `ret` of the right type for simple `return`/`return expr`.
-- Implement expression lowering for literals, identifiers (primitives only), and operator-method arithmetic (`.+ .- .* ./ .%`) to register-level operations.  
-  - Verify: `function add(a:i32,b:i32):i32 { return a.+(b); }` round-trips to IR containing `add` and passes `lli` with a small harness.
-- Add address calculation helpers for SoA globals (use `LayoutPlan` to compute offsets) and lower `.=( )` to `store` into arrays/fields.  
-  - Verify: a function writing to `global temps: f32[3];` emits a `store` into the correct global symbol and index.
-- Lower control flow: `if` (conditional branch + merge block) and `for` (loop header, body, and latch). Desugar `foreach` to index-based `for`.  
-  - Verify: IR contains appropriate `br`/`phi` (if introduced) and behaves with `lli` on small loops.
-- Negative coverage: emit diagnostics when encountering unsupported aggregate locals or invalid operator arity during lowering.  
-  - Verify: unit tests assert diagnostics for these cases without crashing the lowering pass.
+## Phase 7: Lowering & Codegen (in progress)
+- Control flow lowering: `if` (cond br + merge) and `for`/`foreach` (loop header/body/latch; desugar foreach).  
+  - Verify: IR contains the expected `br` structure; small samples run via `lli`.
+- Memory-aware lowering: integrate `LayoutPlan` offsets where needed; ensure field/member access stays consistent with SoA layout (currently name-based).  
+  - Verify: struct array field load/store points at correct field array; add golden IR assertions.
+- Operator-method coverage: finish comparison ops (`.< .> .==`), unary ops, and boolean logic as needed.  
+  - Verify: IR uses correct LLVM integer/float predicates; unit tests for truthy/falsy results.
+- Diagnostics during lowering: reject unsupported aggregates/locals, bad arity, or unsupported operator-methods.  
+  - Verify: unit tests assert diagnostics without crashes.
 
 ## Phase 8: Testing Harness Integration
-- Tasks: implement discovery of `test` declarations; generate host-side runners (C#) that invoke compiled test functions; mark tests as non-rooted for production builds (tree shaking).
-- Verification: `dotnet test` running compiled Stasis tests; ensure production build excludes test roots.
+- Discover `test` declarations, emit host runner to call compiled test functions, exclude from production roots.  
+- Verify: `dotnet test` executes compiled Stasis tests; production build omits test roots.
 
 ## Phase 9: CLI & UX
-- Tasks: build a `stasisc` CLI (`dotnet`) to lex/parse/typecheck/emit IR/WASM; add flags for output type, debug dumps, and layout inspection; default to deterministic builds.
-- Verification: manual and automated CLI invocations on fixtures; snapshot tests for CLI stdout/stderr and exit codes.
+- Build `stasisc` CLI to lex/parse/typecheck/lower; flags for output (LLVM IR/WASM), debug dumps, layout inspection; deterministic defaults.  
+- Verify: snapshot tests for CLI stdout/stderr and exit codes on fixtures.
 
 ## Phase 10: CI/CD Hardening
-- Tasks: ensure GitHub Actions run format/build/test across supported OSes; add caching for NuGet and LLVM toolchain; publish IR/WASM artifacts for sample programs as checks.
-- Verification: green CI with artifact uploads; documented badges in README.
+- GitHub Actions: run format/build/test across OSes; cache NuGet/LLVM; publish IR/WASM artifacts for samples.  
+- Verify: green CI and uploaded artifacts; badges documented in README.
