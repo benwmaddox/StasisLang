@@ -202,8 +202,7 @@ function play(): i32 {
     seed_puzzle();
     reset_grid();
 
-    let loop: i32;
-    for loop.=(0); loop.<(1000000); loop.=(loop.+(1)) {
+    for ;; {
         print_col_header();
         print_board();
         if (is_complete()) {
@@ -282,21 +281,29 @@ function main(): i32 {
 
 function discard_line(): void {
     let ch: i32;
-    ch.=(read_char());
-    if (ch.==(10) || ch.==(13) || ch.==(0)) {
-        return;
+    for ;; {
+        ch.=(read_char());
+        if (ch.==(10) || ch.==(13) || ch.==(0)) {
+            return;
+        }
     }
-    discard_line();
 }
 
 function read_cmd(): i32 {
     let ch: i32;
-    ch.=(read_char());
-    if (ch.==(0)) {
-        return 0;
+    for ;; {
+        ch.=(read_char());
+        if (ch.==(0)) {
+            return 0;
+        }
+        if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
+            // skip whitespace
+        } else {
+            return ch;
+        }
     }
-    if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
-        return read_cmd();
-    }
-    return ch;
 }
+
+
+
+
