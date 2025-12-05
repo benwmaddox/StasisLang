@@ -174,11 +174,11 @@ function is_complete(): bool {
 function print_sep_line(): void {
     let i: i32;
     print_char(43); // +
-    for i.=(0); i.<(9); i.=(i.+(1)) { print_char(45); }
+    for i.=(0); i.<(8); i.=(i.+(1)) { print_char(45); }
     print_char(43);
-    for i.=(0); i.<(9); i.=(i.+(1)) { print_char(45); }
+    for i.=(0); i.<(8); i.=(i.+(1)) { print_char(45); }
     print_char(43);
-    for i.=(0); i.<(9); i.=(i.+(1)) { print_char(45); }
+    for i.=(0); i.<(8); i.=(i.+(1)) { print_char(45); }
     print_char(43);
     print_char(10);
 }
