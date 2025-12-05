@@ -1,0 +1,37 @@
+using LLVMSharp.Interop;
+using Stasis.Compiler.Semantic;
+
+namespace Stasis.Compiler.IR;
+
+public sealed class LlvmTypeMapper
+{
+    private readonly LLVMContextRef _context;
+
+    public LlvmTypeMapper(LLVMContextRef context)
+    {
+        _context = context;
+    }
+
+    public LLVMTypeRef Map(TypeSymbol type) =>
+        type switch
+        {
+            PrimitiveTypeSymbol p => MapPrimitive(p.PrimitiveName),
+            ArrayTypeSymbol a => LLVMTypeRef.CreateArray(Map(a.ElementType), (uint)a.Size),
+            NamedTypeSymbol => LLVMTypeRef.Int32, // treat struct/enums as indices into SoA storage
+            _ => LLVMTypeRef.Int32
+        };
+
+    private LLVMTypeRef MapPrimitive(string name) =>
+        name switch
+        {
+            "bool" => LLVMTypeRef.Int32,
+            "u8" => LLVMTypeRef.Int8,
+            "u16" => LLVMTypeRef.Int16,
+            "u32" => LLVMTypeRef.Int32,
+            "i32" => LLVMTypeRef.Int32,
+            "f32" => LLVMTypeRef.Float,
+            "f64" => LLVMTypeRef.Double,
+            "string" => LLVMTypeRef.Int8, // string[N] should be mapped as array by caller
+            _ => LLVMTypeRef.Int32
+        };
+}
