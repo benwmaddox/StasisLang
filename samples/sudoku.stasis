@@ -12,17 +12,17 @@ function seed_puzzle(): void {
         puzzle[i].=(0);
     }
 
-    puzzle[idx(0, 0)].=(5); puzzle[idx(0, 1)].=(3); puzzle[idx(0, 4)].=(7);
-    puzzle[idx(1, 0)].=(6); puzzle[idx(1, 3)].=(1); puzzle[idx(1, 4)].=(9); puzzle[idx(1, 5)].=(5);
-    puzzle[idx(2, 1)].=(9); puzzle[idx(2, 2)].=(8); puzzle[idx(2, 7)].=(6);
+    puzzle[idx(0, 0)].=(5); puzzle[idx(0, 1)].=(3); puzzle[idx(0, 2)].=(4); puzzle[idx(0, 3)].=(6); puzzle[idx(0, 4)].=(7); puzzle[idx(0, 7)].=(1);
+    puzzle[idx(1, 0)].=(6); puzzle[idx(1, 1)].=(7); puzzle[idx(1, 2)].=(2); puzzle[idx(1, 3)].=(1); puzzle[idx(1, 4)].=(9); puzzle[idx(1, 5)].=(5); puzzle[idx(1, 6)].=(3);
+    puzzle[idx(2, 0)].=(1); puzzle[idx(2, 1)].=(9); puzzle[idx(2, 2)].=(8); puzzle[idx(2, 3)].=(3); puzzle[idx(2, 5)].=(2); puzzle[idx(2, 7)].=(6);
 
-    puzzle[idx(3, 0)].=(8); puzzle[idx(3, 4)].=(6); puzzle[idx(3, 8)].=(3);
-    puzzle[idx(4, 0)].=(4); puzzle[idx(4, 3)].=(8); puzzle[idx(4, 5)].=(3); puzzle[idx(4, 8)].=(1);
-    puzzle[idx(5, 0)].=(7); puzzle[idx(5, 4)].=(2); puzzle[idx(5, 8)].=(6);
+    puzzle[idx(3, 0)].=(8); puzzle[idx(3, 1)].=(5); puzzle[idx(3, 4)].=(6); puzzle[idx(3, 8)].=(3);
+    puzzle[idx(4, 0)].=(4); puzzle[idx(4, 1)].=(2); puzzle[idx(4, 2)].=(6); puzzle[idx(4, 3)].=(8); puzzle[idx(4, 5)].=(3); puzzle[idx(4, 6)].=(7); puzzle[idx(4, 8)].=(1);
+    puzzle[idx(5, 0)].=(7); puzzle[idx(5, 1)].=(1); puzzle[idx(5, 2)].=(3); puzzle[idx(5, 4)].=(2); puzzle[idx(5, 5)].=(4); puzzle[idx(5, 8)].=(6);
 
-    puzzle[idx(6, 1)].=(6); puzzle[idx(6, 6)].=(2); puzzle[idx(6, 7)].=(8);
-    puzzle[idx(7, 3)].=(4); puzzle[idx(7, 4)].=(1); puzzle[idx(7, 5)].=(9); puzzle[idx(7, 8)].=(5);
-    puzzle[idx(8, 4)].=(8); puzzle[idx(8, 7)].=(7); puzzle[idx(8, 8)].=(9);
+    puzzle[idx(6, 0)].=(9); puzzle[idx(6, 1)].=(6); puzzle[idx(6, 3)].=(5); puzzle[idx(6, 5)].=(7); puzzle[idx(6, 6)].=(2); puzzle[idx(6, 7)].=(8);
+    puzzle[idx(7, 1)].=(8); puzzle[idx(7, 3)].=(4); puzzle[idx(7, 4)].=(1); puzzle[idx(7, 5)].=(9); puzzle[idx(7, 6)].=(6); puzzle[idx(7, 7)].=(3); puzzle[idx(7, 8)].=(5);
+    puzzle[idx(8, 0)].=(3); puzzle[idx(8, 2)].=(5); puzzle[idx(8, 4)].=(8); puzzle[idx(8, 7)].=(7); puzzle[idx(8, 8)].=(9);
 }
 
 function reset_grid(): void {
