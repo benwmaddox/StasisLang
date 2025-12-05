@@ -70,7 +70,7 @@ var source = File.ReadAllText(path);
 var parse = Parser.Parse(source);
 if (parse.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(parse.Diagnostics);
+    PrintDiagnostics(parse.Diagnostics, source, path);
     Environment.Exit(1);
 }
 
@@ -79,7 +79,7 @@ LlvmNativeLoader.EnsureLoaded();
 var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 if (sema.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(sema.Diagnostics);
+    PrintDiagnostics(sema.Diagnostics, source, path);
     Environment.Exit(1);
 }
 
@@ -89,7 +89,7 @@ var lowerOptions = includeTests ? LowerOptions.Default : LowerOptions.Production
 var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
 if (lower.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(lower.Diagnostics);
+    PrintDiagnostics(lower.Diagnostics, source, path);
     Console.WriteLine(lower.Ir);
     Environment.Exit(1);
 }
@@ -247,10 +247,42 @@ static void PrintUsage()
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout.");
 }
 
-static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics)
+static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)
 {
     foreach (var d in diagnostics)
     {
-        Console.Error.WriteLine($"error: {d.Message} @ {d.Span.Start}");
+        var (line, column, lineText) = GetLineInfo(source, d.Span.Start);
+        var length = Math.Max(1, d.Span.Length);
+        var markerLen = Math.Min(length, Math.Max(1, Math.Max(0, lineText.Length - (column - 1))));
+        var marker = new string(' ', Math.Max(0, column - 1)) + new string('^', markerLen);
+        var location = filePath is null ? $"line {line}, column {column}" : $"{filePath}:{line}:{column}";
+        Console.Error.WriteLine($"error: {d.Message} ({location})");
+        Console.Error.WriteLine(lineText);
+        Console.Error.WriteLine(marker);
     }
+}
+
+static (int line, int column, string lineText) GetLineInfo(string source, int offset)
+{
+    var clamped = Math.Max(0, Math.Min(source.Length, offset));
+    var line = 1;
+    var lineStart = 0;
+    for (int i = 0; i < clamped; i++)
+    {
+        if (source[i] == '\n')
+        {
+            line++;
+            lineStart = i + 1;
+        }
+    }
+
+    var lineEnd = source.IndexOf('\n', lineStart);
+    if (lineEnd < 0)
+    {
+        lineEnd = source.Length;
+    }
+
+    var column = clamped - lineStart + 1;
+    var lineText = source.Substring(lineStart, Math.Max(0, lineEnd - lineStart));
+    return (line, column, lineText);
 }
