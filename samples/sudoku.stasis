@@ -138,17 +138,26 @@ test `sudoku solves seed`() : bool {
 }
 
 function print_board(): void {
+    print_sep_line();
     let r: i32;
     let c: i32;
     for r.=(0); r.<(9); r.=(r.+(1)) {
+        print_char(124); // |
         for c.=(0); c.<(9); c.=(c.+(1)) {
             let p: i32;
             p.=(idx(r, c));
             print_cell(grid[p], clues[p]);
+            if (c.==(2) || c.==(5) || c.==(8)) {
+                print_char(124);
+            } else {
+                print_char(32);
+            }
         }
         print_char(10);
+        if (r.==(2) || r.==(5) || r.==(8)) {
+            print_sep_line();
+        }
     }
-    print_char(10);
 }
 
 function is_complete(): bool {
@@ -160,6 +169,18 @@ function is_complete(): bool {
     }
 
     return true;
+}
+
+function print_sep_line(): void {
+    let i: i32;
+    print_char(43); // +
+    for i.=(0); i.<(7); i.=(i.+(1)) { print_char(45); }
+    print_char(43);
+    for i.=(0); i.<(7); i.=(i.+(1)) { print_char(45); }
+    print_char(43);
+    for i.=(0); i.<(7); i.=(i.+(1)) { print_char(45); }
+    print_char(43);
+    print_char(10);
 }
 
 function play(): i32 {
