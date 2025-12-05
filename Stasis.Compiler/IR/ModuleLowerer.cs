@@ -1,8 +1,10 @@
 using LLVMSharp.Interop;
+using Stasis.Compiler;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
 using System.Globalization;
+using System;
 
 namespace Stasis.Compiler.IR;
 
@@ -12,34 +14,40 @@ namespace Stasis.Compiler.IR;
 /// </summary>
 public sealed class ModuleLowerer
 {
-    public string LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module")
+    public LowerResult LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module")
     {
         using var builder = new LlvmModuleBuilder(moduleName);
-        EmitGlobals(compilationUnit, semantic.Symbols, builder);
+        EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder);
 
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout);
+        var diagnostics = new List<Diagnostic>();
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics);
         lowerer.Lower(compilationUnit);
-        return builder.EmitToString();
+        return new LowerResult(builder.EmitToString(), diagnostics);
     }
 
-    private static void EmitGlobals(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)
+    private static void EmitGlobals(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, LlvmModuleBuilder builder)
     {
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
             .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+        var layoutMap = layout.Globals.ToDictionary(g => g.Name, g => g, StringComparer.Ordinal);
 
         foreach (var global in compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>())
         {
+            layoutMap.TryGetValue(global.Name.Text, out var globalLayout);
             switch (global.Type)
             {
                 case ArrayTypeSyntax array when array.ElementType is NamedTypeSyntax named && structs.TryGetValue(named.Name, out var structDecl):
                     {
-                        var length = ParseArrayLength(array.SizeToken.Text);
                         foreach (var field in structDecl.Fields)
                         {
                             var fieldType = ResolveType(field.Type, symbols);
                             var llvmElem = builder.TypeMapper.Map(fieldType);
+                            var fieldLayout = globalLayout?.Fields.FirstOrDefault(f => string.Equals(f.Name, $"{structDecl.Name.Text}_{field.Identifier.Text}", StringComparison.Ordinal));
+                            var length = fieldLayout is null
+                                ? ParseArrayLength(array.SizeToken.Text)
+                                : (uint)Math.Max(1, fieldLayout.Size / SizeOf(fieldType));
                             builder.DefineGlobalArray($"{structDecl.Name.Text}_{field.Identifier.Text}", llvmElem, length);
                         }
 
@@ -49,7 +57,9 @@ public sealed class ModuleLowerer
                     {
                         var elementType = ResolveType(array.ElementType, symbols);
                         var llvmElem = builder.TypeMapper.Map(elementType);
-                        var length = ParseArrayLength(array.SizeToken.Text);
+                        var length = globalLayout is null
+                            ? ParseArrayLength(array.SizeToken.Text)
+                            : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
                         builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
                         break;
                     }
@@ -67,20 +77,39 @@ public sealed class ModuleLowerer
     private static uint ParseArrayLength(string text) =>
         uint.TryParse(text, out var n) ? n : 0;
 
+    private static int SizeOf(TypeSymbol type) =>
+        type switch
+        {
+            PrimitiveTypeSymbol p => SizeOfPrimitive(p.PrimitiveName),
+            NamedTypeSymbol => 4, // indices or placeholders
+            ArrayTypeSymbol a => SizeOf(a.ElementType) * a.Size,
+            _ => 4
+        };
+
+    private static int SizeOfPrimitive(string name) =>
+        name switch
+        {
+            "bool" or "u8" => 1,
+            "u16" => 2,
+            "u32" or "i32" or "f32" => 4,
+            "f64" => 8,
+            _ => 4
+        };
+
     private sealed class FunctionLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
         private readonly IReadOnlyDictionary<string, Symbol> _symbols;
-        private readonly LayoutPlan _layout;
         private readonly Dictionary<string, GlobalLayout> _globalLayouts;
+        private readonly List<Diagnostic> _diagnostics;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
         private int _blockId;
-        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout)
+        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
-            _layout = layout;
             _globalLayouts = layout.Globals.ToDictionary(g => g.Name, g => g, StringComparer.Ordinal);
+            _diagnostics = diagnostics;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit)
@@ -240,10 +269,11 @@ public sealed class ModuleLowerer
                     return LowerUnary(builder, unary, locals);
                 case OperatorCallExpressionSyntax op:
                     return LowerOperatorCall(builder, op, locals);
-                case CallExpressionSyntax:
-                    // Function calls are not lowered yet; return zero to keep IR valid.
+                case CallExpressionSyntax call:
+                    AddDiagnostic("Function calls are not lowered yet.", call.Span);
                     return ConstI32(0);
                 default:
+                    AddDiagnostic("Expression not supported during lowering.", expr.Span);
                     return ConstI32(0);
             }
         }
@@ -279,6 +309,12 @@ public sealed class ModuleLowerer
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
         {
             var opText = op.OperatorToken.Text;
+            if (op.Arguments.Count != 1)
+            {
+                AddDiagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span);
+                return ConstI32(0);
+            }
+
             if (opText == "=")
             {
                 var receiver = op.Receiver as IdentifierExpressionSyntax;
@@ -322,15 +358,16 @@ public sealed class ModuleLowerer
                     }
                 }
 
+                AddDiagnostic("Left side of .=( ) must be an assignable location (identifier, field, or array element).", op.Receiver.Span);
                 return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
             }
 
             var lhs = LowerExpression(builder, op.Receiver, locals);
             var rhs = LowerExpression(builder, op.Arguments[0], locals);
-            return LowerBinary(builder, opText, lhs, rhs);
+            return LowerBinary(builder, opText, lhs, rhs, op.Span);
         }
 
-        private LLVMValueRef LowerBinary(LLVMBuilderRef builder, string op, LLVMValueRef lhs, LLVMValueRef rhs)
+        private LLVMValueRef LowerBinary(LLVMBuilderRef builder, string op, LLVMValueRef lhs, LLVMValueRef rhs, SourceSpan span)
         {
             var type = lhs.TypeOf;
             var isFloat = type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
@@ -352,7 +389,7 @@ public sealed class ModuleLowerer
                 ">" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, lhs, rhs, "igt")),
                 "==" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, lhs, rhs, "feq")),
                 "==" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, lhs, rhs, "ieq")),
-                _ => lhs
+                _ => UnsupportedOperator(span, lhs)
             };
         }
 
@@ -491,6 +528,7 @@ public sealed class ModuleLowerer
                 return builder.BuildLoad2(elemType, ptr, "elemload");
             }
 
+            AddDiagnostic("Unable to lower array access.", arr.Span);
             return ConstI32(0);
         }
 
@@ -504,6 +542,7 @@ public sealed class ModuleLowerer
                 }
             }
 
+            AddDiagnostic("Unable to lower member access.", member.Span);
             return ConstI32(0);
         }
 
@@ -514,6 +553,7 @@ public sealed class ModuleLowerer
                 return builder.BuildLoad2(elemType, ptr, "elemload");
             }
 
+            AddDiagnostic("Unable to lower array access.", arr.Span);
             return ConstI32(0);
         }
 
@@ -543,7 +583,16 @@ public sealed class ModuleLowerer
                                 ptr = builder.BuildGEP2(elemType, fieldGlobal, new[] { zero, index }, "fieldaddr");
                                 return true;
                             }
+                            AddDiagnostic($"Layout for global '{id.Identifier.Text}' missing field '{fieldName}'.", arr.Span);
                         }
+                        else
+                        {
+                            AddDiagnostic($"Unknown field '{fieldName}' on struct '{namedElem.TypeName}'.", arr.Span);
+                        }
+                    }
+                    else if (fieldName is not null)
+                    {
+                        AddDiagnostic($"Field access requires struct array; '{id.Identifier.Text}' is not a struct array.", arr.Span);
                     }
                     else
                     {
@@ -634,6 +683,15 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef ConstI32(int value) =>
             LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
+
+        private LLVMValueRef UnsupportedOperator(SourceSpan span, LLVMValueRef fallback)
+        {
+            AddDiagnostic("Unsupported operator-method during lowering.", span);
+            return fallback;
+        }
+
+        private void AddDiagnostic(string message, SourceSpan span) =>
+            _diagnostics.Add(new Diagnostic(message, span));
     }
 
     private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)

@@ -12,11 +12,21 @@ public class LoweringTests
 
     private static string Lower(string source)
     {
+        var result = LowerWithDiagnostics(source, allowSemanticDiagnostics: false);
+        Assert.Empty(result.Diagnostics);
+        return result.Ir;
+    }
+
+    private static LowerResult LowerWithDiagnostics(string source, bool allowSemanticDiagnostics = true)
+    {
         var parse = Parser.Parse(source);
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        if (!allowSemanticDiagnostics)
+        {
+            Assert.Empty(sema.Diagnostics);
+        }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         return new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "testmodule");
@@ -88,6 +98,22 @@ public class LoweringTests
         Assert.Contains("@temps = internal global [3 x float] zeroinitializer", ir);
         Assert.Contains("getelementptr", ir);
         Assert.Contains("store float", ir);
+    }
+
+    [Fact]
+    public void Lowers_struct_field_access_with_layout_names()
+    {
+        var ir = Lower("""
+            struct Player { hp: u8; score: i32; }
+            global players: Player[2];
+            function set(i: i32): void {
+                players[i].hp.=(1);
+            }
+            """);
+
+        Assert.Contains("@Player_hp", ir);
+        Assert.Contains("getelementptr", ir);
+        Assert.Contains("store", ir);
     }
 
     [Fact]
@@ -188,5 +214,61 @@ public class LoweringTests
         Assert.Contains("fneg", ir);
         Assert.Contains("icmp", ir); // from bool coercion
         Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
+    public void Emits_diagnostic_for_bad_operator_arity()
+    {
+        var result = LowerWithDiagnostics("""
+            function bad(): void {
+                let x: i32;
+                x.=(1, 2);
+            }
+            """);
+
+        Assert.NotEmpty(result.Diagnostics);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("requires exactly one argument"));
+    }
+
+    [Fact]
+    public void Emits_diagnostic_for_non_assignable_target()
+    {
+        var result = LowerWithDiagnostics("""
+            function bad(): void {
+                1.=(2);
+            }
+            """);
+
+        Assert.NotEmpty(result.Diagnostics);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("assignable"));
+    }
+
+    [Fact]
+    public void Emits_diagnostic_for_missing_struct_field()
+    {
+        var result = LowerWithDiagnostics("""
+            struct Player { hp: u8; }
+            global players: Player[2];
+            function bad(i: i32): void {
+                players[i].mp.=(1);
+            }
+            """);
+
+        Assert.NotEmpty(result.Diagnostics);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("Unknown field 'mp'"));
+    }
+
+    [Fact]
+    public void Emits_diagnostic_for_field_access_on_non_struct_array()
+    {
+        var result = LowerWithDiagnostics("""
+            global temps: i32[2];
+            function bad(i: i32): void {
+                temps[i].hp.=(1);
+            }
+            """);
+
+        Assert.NotEmpty(result.Diagnostics);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("not a struct array"));
     }
 }

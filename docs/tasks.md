@@ -2,13 +2,11 @@
 
 ## Completed
 - Phases 0-6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
-- Phase 7 (partial): control-flow lowering for `if`/`for`/`foreach` and operator-method comparisons/unary/boolean coercion, all covered by IR tests.
+- Phase 7 (partial): control-flow lowering for `if`/`for`/`foreach`; operator-method comparisons/unary/boolean coercion; layout-aware SoA globals and field access driven by `LayoutPlan`; lowering diagnostics for bad operator arity/unsupported targets — all covered by IR tests.
 
 ## Phase 7: Lowering & Codegen (in progress)
-- Memory-aware lowering: integrate `LayoutPlan` offsets where needed; ensure field/member access stays consistent with SoA layout (currently name-based).
-  - Verify: struct array field load/store points at correct field array; add golden IR assertions.
-- Diagnostics during lowering: reject unsupported aggregates/locals, bad arity, or unsupported operator-methods.
-  - Verify: unit tests assert diagnostics without crashes.
+- Memory-aware lowering: extend use of `LayoutPlan` offsets for any remaining address calculations (monolithic buffer/offset-based addressing if needed).
+  - Verify: struct array field load/store points at correct field array; add golden IR assertions if addressing model expands.
 
 ## Phase 8: Testing Harness Integration
 - Discover `test` declarations, emit host runner to call compiled test functions, exclude from production roots.
