@@ -8,8 +8,8 @@ internal static class StasisFormatter
 
     public static string Format(string source)
     {
-        // Enforce a space before '.' and a space between '=' and '(' for .=( ) calls.
-        // Example: x.=(y) => x . = (y)
-        return AssignSpacing.Replace(source, "$1 . = (");
+        // Enforce a space before '.' and a space after '=' for .=( ) calls.
+        // Example: x.=(y) => x .= (y)
+        return AssignSpacing.Replace(source, "$1 .= (");
     }
 }
