@@ -39,6 +39,3 @@ test `fib 35`() : bool {
 test `fib 1000`() : bool {
     return fib(1000).==(1556111435);
 }
-test `fib 1000000000 failing test`() : bool {
-    return fib(1000000000).==(1556111435);
-}

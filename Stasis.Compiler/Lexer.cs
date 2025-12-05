@@ -268,9 +268,45 @@ public sealed class Lexer
 
     private void SkipWhitespace()
     {
-        while (!IsAtEnd() && char.IsWhiteSpace(Current))
+        while (!IsAtEnd())
         {
-            Advance();
+            if (char.IsWhiteSpace(Current))
+            {
+                Advance();
+                continue;
+            }
+
+            if (Current == '/' && Peek == '/')
+            {
+                // Line comment
+                while (!IsAtEnd() && Current is not '\n' and not '\r')
+                {
+                    Advance();
+                }
+
+                continue;
+            }
+
+            if (Current == '/' && Peek == '*')
+            {
+                // Block comment
+                Advance(); // /
+                Advance(); // *
+                while (!IsAtEnd() && !(Current == '*' && Peek == '/'))
+                {
+                    Advance();
+                }
+
+                if (!IsAtEnd())
+                {
+                    Advance(); // *
+                    Advance(); // /
+                }
+
+                continue;
+            }
+
+            break;
         }
     }
 
@@ -279,6 +315,8 @@ public sealed class Lexer
     private bool IsAtEnd() => _position >= _text.Length;
 
     private char Current => _text[_position];
+
+    private char Peek => _position + 1 < _text.Length ? _text[_position + 1] : '\0';
 
     private bool PeekIsDigit()
     {
