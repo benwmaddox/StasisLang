@@ -317,6 +317,7 @@ public sealed class ModuleLowerer
             "print_invalid",
             "print_clue_error",
             "print_solved",
+            "read_char",
             "read_int"
         };
         private int _blockId;
@@ -600,7 +601,7 @@ public sealed class ModuleLowerer
                         return ConstI32(0);
                     }
                 case "print_prompt":
-                    EmitPrintf(builder, "Enter row col val (1-9), or 0 0 0 to quit:\n");
+                    EmitPrintf(builder, "Enter row col val (1-9, 0 clears), or q to quit:\n");
                     return ConstI32(0);
                 case "print_invalid":
                     EmitPrintf(builder, "\u001b[31mInvalid move.\u001b[0m\n");
@@ -647,6 +648,8 @@ public sealed class ModuleLowerer
                         builder.PositionAtEnd(contBlock);
                         return ConstI32(0);
                     }
+                case "read_char":
+                    return EmitReadChar(builder);
                 case "read_int":
                     return EmitReadInt(builder);
                 default:
@@ -990,6 +993,16 @@ public sealed class ModuleLowerer
             var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { fmt.TypeOf, alloca.TypeOf }, false);
             builder.BuildCall2(callType, scanf, new[] { fmt, alloca }, "scanf.call");
             return builder.BuildLoad2(LLVMTypeRef.Int32, alloca, "read_int.val");
+        }
+
+        private LLVMValueRef EmitReadChar(LLVMBuilderRef builder)
+        {
+            var alloca = builder.BuildAlloca(LLVMTypeRef.Int32, "read_char.tmp");
+            var (scanf, scanfType) = GetOrDeclareScanf(_moduleBuilder);
+            var fmt = builder.BuildGlobalStringPtr(" %c", $"fmt_readc_{_blockId++}");
+            var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { fmt.TypeOf, alloca.TypeOf }, false);
+            builder.BuildCall2(callType, scanf, new[] { fmt, alloca }, "scanf.char.call");
+            return builder.BuildLoad2(LLVMTypeRef.Int32, alloca, "read_char.val");
         }
 
         private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)

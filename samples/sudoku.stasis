@@ -196,20 +196,21 @@ function play(): i32 {
         }
 
         print_prompt();
+        let cmd: i32;
+        cmd.=(read_char());
+        if (cmd.==(113) || cmd.==(81)) { // q or Q
+            return 1;
+        }
         let r: i32;
         let c: i32;
         let v: i32;
-        r.=(read_int());
+        if (cmd.>=(48) && cmd.<=(57)) {
+            r.=(cmd.-(48));
+        } else {
+            r.=(0);
+        }
         c.=(read_int());
         v.=(read_int());
-
-        if (r.==(0)) {
-            if (c.==(0)) {
-                if (v.==(0)) {
-                    return 1;
-                }
-            }
-        }
 
         let bad: bool;
         bad.=(false);

@@ -58,6 +58,7 @@ public sealed class SemanticAnalyzer
         AddSymbol("print_invalid", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_clue_error", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_solved", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("read_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
     }
 
