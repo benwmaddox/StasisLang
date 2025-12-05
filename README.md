@@ -46,3 +46,11 @@ Options:
 ## Samples
 - `samples/basic.stasis` basic function plus `main` returning 5.
 - `samples/tests.stasis` includes Stasis `test` declarations; the emitted `run_tests` function prints a summary and returns the failure count.
+
+## Git hooks
+- Shared pre-push hook lives at `tools/git-hooks/pre-push` and runs `dotnet format --verify-no-changes` then `dotnet test -c Release --no-build`.
+- Enable locally:
+  ```sh
+  git config core.hooksPath tools/git-hooks
+  chmod +x tools/git-hooks/pre-push
+  ```

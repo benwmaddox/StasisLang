@@ -25,4 +25,8 @@
     <ProjectReference Include="..\Stasis.Compiler\Stasis.Compiler.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\tools\git-hooks\pre-push" Link="hooks\pre-push" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
