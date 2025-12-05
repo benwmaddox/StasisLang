@@ -42,3 +42,7 @@ Notes:
 - Function calls and control flow are lowered; SoA globals follow the layout in `docs/spec.md`.
 - Locals/params are primitives only; structs/arrays live in static globals per spec.
 - If `lli` is not available, you can still produce IR; executing tests requires LLVM tools installed.
+
+Samples:
+- `samples/basic.stasis` basic function + main returning 5.
+- `samples/tests.stasis` includes Stasis `test` declarations (use `--with-tests` and `lli -entry-function=run_tests`).
