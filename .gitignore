@@ -1,5 +1,9 @@
 bin/
 obj/
+**/bin/
+**/obj/
+TestResults/
+*.csproj.user
 .vs/
 .idea/
 *.user

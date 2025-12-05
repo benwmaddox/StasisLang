@@ -65,6 +65,21 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Allows_global_struct()
+    {
+        var source = """
+            struct Player { hp: u8; }
+            global players: Player[10];
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+        Assert.Contains("players", sema.Symbols.Keys);
+    }
+
+    [Fact]
     public void Flags_assignment_to_literal()
     {
         var source = """
