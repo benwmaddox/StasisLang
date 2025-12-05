@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Stasis.Compiler;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
+using Stasis.Cli;
 
 var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
 if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
@@ -259,8 +260,9 @@ static void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
     Console.WriteLine("  stasisc test <file> [--module <name>] [--emit-ir]");
+    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>]");
     Console.WriteLine("  stasisc format <file>");
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. Build requires clang in PATH.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)
