@@ -14,7 +14,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       DOTNET_NOLOGO: true
-      NUGET_PACKAGES: ${{ runner.temp }}/.nuget/packages
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
 
