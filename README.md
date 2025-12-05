@@ -33,6 +33,11 @@ Options:
 - `--module <name>` set the LLVM module identifier (default `module`).
 - `--help` prints usage.
 
+Suggested convenience scripts (from repo root):
+- `stasis run path/to/file.stasis` -> emits IR (production) and runs `lli` with default entry (main); add `--with-tests` to include tests.
+- `stasis test path/to/file.stasis` -> emits IR with tests, runs `lli -entry-function=run_tests`, returns failure count as exit code.
+You can implement these as small shell/batch wrappers calling `dotnet run -p Stasis.Cli -- ...` and `lli ...`.
+
 Notes:
 - Function calls and control flow are lowered; SoA globals follow the layout in `docs/spec.md`.
 - Locals/params are primitives only; structs/arrays live in static globals per spec.
