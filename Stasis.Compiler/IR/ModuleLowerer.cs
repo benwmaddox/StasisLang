@@ -71,6 +71,7 @@ public sealed class ModuleLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
         private readonly IReadOnlyDictionary<string, Symbol> _symbols;
+        private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout)
         {
             _moduleBuilder = moduleBuilder;
@@ -79,6 +80,10 @@ public sealed class ModuleLowerer
 
         public void Lower(CompilationUnitSyntax compilationUnit)
         {
+            _structs = compilationUnit.Declarations
+                .OfType<StructDeclarationSyntax>()
+                .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+
             foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
             {
                 LowerFunction(fn);
@@ -196,8 +201,10 @@ public sealed class ModuleLowerer
                     }
 
                     return ConstI32(0);
+                case MemberAccessExpressionSyntax member:
+                    return LowerMemberAccess(builder, member, locals);
                 case ArrayAccessExpressionSyntax arr:
-                    return LowerArrayAccess(builder, arr, locals);
+                    return LowerArrayAccess(builder, arr, null, locals);
                 case OperatorCallExpressionSyntax op:
                     return LowerOperatorCall(builder, op, locals);
                 default:
@@ -250,7 +257,17 @@ public sealed class ModuleLowerer
 
                 if (op.Receiver is ArrayAccessExpressionSyntax arr)
                 {
-                    if (TryLowerArrayElementPointer(builder, arr, locals, out var ptr, out var elemType))
+                    if (TryLowerArrayElementPointer(builder, arr, null, locals, out var ptr, out var elemType))
+                    {
+                        var value = LowerExpression(builder, op.Arguments[0], locals);
+                        builder.BuildStore(value, ptr);
+                        return value;
+                    }
+                }
+
+                if (op.Receiver is MemberAccessExpressionSyntax member && member.Receiver is ArrayAccessExpressionSyntax arrRecv)
+                {
+                    if (TryLowerArrayElementPointer(builder, arrRecv, member.Member.Text, locals, out var ptr, out _))
                     {
                         var value = LowerExpression(builder, op.Arguments[0], locals);
                         builder.BuildStore(value, ptr);
@@ -276,7 +293,7 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerArrayAccess(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals)
         {
-            if (TryLowerArrayElementPointer(builder, arr, locals, out var ptr, out var elemType))
+            if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var ptr, out var elemType))
             {
                 return builder.BuildLoad2(elemType, ptr, "elemload");
             }
@@ -284,7 +301,30 @@ public sealed class ModuleLowerer
             return ConstI32(0);
         }
 
-        private bool TryLowerArrayElementPointer(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef elemType)
+        private LLVMValueRef LowerMemberAccess(LLVMBuilderRef builder, MemberAccessExpressionSyntax member, Dictionary<string, LocalBinding> locals)
+        {
+            if (member.Receiver is ArrayAccessExpressionSyntax arr)
+            {
+                if (TryLowerArrayElementPointer(builder, arr, member.Member.Text, locals, out var ptr, out var elemType))
+                {
+                    return builder.BuildLoad2(elemType, ptr, "fieldload");
+                }
+            }
+
+            return ConstI32(0);
+        }
+
+        private LLVMValueRef LowerArrayAccess(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, string? fieldName, Dictionary<string, LocalBinding> locals)
+        {
+            if (TryLowerArrayElementPointer(builder, arr, fieldName, locals, out var ptr, out var elemType))
+            {
+                return builder.BuildLoad2(elemType, ptr, "elemload");
+            }
+
+            return ConstI32(0);
+        }
+
+        private bool TryLowerArrayElementPointer(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, string? fieldName, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef elemType)
         {
             ptr = default;
             elemType = default;
@@ -293,12 +333,32 @@ public sealed class ModuleLowerer
             {
                 if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is ArrayTypeSymbol arrayType)
                 {
-                    var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
-                    elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
                     var zero = ConstI32(0);
                     var index = LowerExpression(builder, arr.Index, locals);
-                    ptr = builder.BuildGEP2(elemType, global, new[] { zero, index }, "elemaddr");
-                    return true;
+
+                    if (arrayType.ElementType is NamedTypeSymbol namedElem && fieldName is not null && _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+                    {
+                        var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, fieldName, StringComparison.Ordinal));
+                        if (field is not null)
+                        {
+                            var fieldType = ResolveType(field.Type, _symbols);
+                            elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                            var fieldGlobalName = $"{namedElem.TypeName}_{fieldName}";
+                            var fieldGlobal = _moduleBuilder.Module.GetNamedGlobal(fieldGlobalName);
+                            if (fieldGlobal.Handle != IntPtr.Zero)
+                            {
+                                ptr = builder.BuildGEP2(elemType, fieldGlobal, new[] { zero, index }, "fieldaddr");
+                                return true;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                        elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                        ptr = builder.BuildGEP2(elemType, global, new[] { zero, index }, "elemaddr");
+                        return true;
+                    }
                 }
             }
 
