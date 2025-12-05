@@ -11,7 +11,7 @@ function next_rand(max: i32): i32 {
     if (val.<(0)) {
         val.=(0.-(val));
     }
-    return val.%((max).+(1)).+(1);
+    return val.%((max)).+(1);
 }
 
 function print_text_guess(): void {
@@ -50,6 +50,10 @@ function main(): i32 {
         guess.=(read_int());
         if (guess.==(0)) {
             return 0;
+        }
+        if (guess.<(1) || guess.>(99)) {
+            print_invalid();
+            continue;
         }
         if (guess.==(target)) {
             print_win();
