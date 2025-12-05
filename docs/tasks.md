@@ -26,11 +26,23 @@
 
 ## Phase 6: IR Construction Layer (LLVMSharp)
 - Tasks: wrap LLVMSharp in a thin builder to isolate interop; map Stasis types to LLVM types; implement helpers for globals, functions, blocks, and operator-method intrinsics; support both LLVM IR and WASM-compatible targets.
-- Verification: unit tests on the builder (creates expected IR snippets); round-trip `llc`/`lli` on tiny programs (e.g., arithmetic, assignment) to confirm correctness.
+- Verification: unit tests on the builder (creates expected IR snippets); round-trip `llc`/`lli` on tiny programs (e.g., arithmetic, assignment) to confirm correctness. _Status: LLVMSharp builder + type mapper + native loader + smoke tests for globals/functions are in place._
 
 ## Phase 7: Lowering & Codegen
 - Tasks: lower typed AST to LLVM IR using the builder; implement operator-method lowering tables (spec §6); generate control flow for if/for/foreach; emit explicit stores/loads for SoA fields and arrays; ensure no hidden allocations.
 - Verification: compile sample programs and run with `lli` or wasm runtime; assertions on emitted IR text for key constructs; negative tests for disallowed patterns.
+
+### Phase 7 incremental steps
+- Build a block-aware IR emitter (basic blocks, phi-less SSA) that creates an entry block per function/test and emits `ret` for `void`/value returns.  
+  - Verify: IR text contains a `define` with an entry block and a `ret` of the right type for simple `return`/`return expr`.
+- Implement expression lowering for literals, identifiers (primitives only), and operator-method arithmetic (`.+ .- .* ./ .%`) to register-level operations.  
+  - Verify: `function add(a:i32,b:i32):i32 { return a.+(b); }` round-trips to IR containing `add` and passes `lli` with a small harness.
+- Add address calculation helpers for SoA globals (use `LayoutPlan` to compute offsets) and lower `.=( )` to `store` into arrays/fields.  
+  - Verify: a function writing to `global temps: f32[3];` emits a `store` into the correct global symbol and index.
+- Lower control flow: `if` (conditional branch + merge block) and `for` (loop header, body, and latch). Desugar `foreach` to index-based `for`.  
+  - Verify: IR contains appropriate `br`/`phi` (if introduced) and behaves with `lli` on small loops.
+- Negative coverage: emit diagnostics when encountering unsupported aggregate locals or invalid operator arity during lowering.  
+  - Verify: unit tests assert diagnostics for these cases without crashing the lowering pass.
 
 ## Phase 8: Testing Harness Integration
 - Tasks: implement discovery of `test` declarations; generate host-side runners (C#) that invoke compiled test functions; mark tests as non-rooted for production builds (tree shaking).

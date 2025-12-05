@@ -65,6 +65,22 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_typed_let_without_initializer()
+    {
+        var source = """
+            function f(): void {
+                let hp: i32;
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body.Statements));
+    }
+
+    [Fact]
     public void Reports_bare_assignment_operator()
     {
         var source = """

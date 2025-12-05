@@ -65,6 +65,36 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_void_local()
+    {
+        var source = """
+            function f(): void {
+                let x: void;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+    }
+
+    [Fact]
+    public void Allows_void_return_type()
+    {
+        var source = """
+            function f(): void {
+                return;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
     public void Allows_global_struct()
     {
         var source = """

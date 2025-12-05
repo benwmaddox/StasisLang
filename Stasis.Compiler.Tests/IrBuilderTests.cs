@@ -22,6 +22,7 @@ public class IrBuilderTests
         Assert.Equal(LLVMTypeRef.Float, builder.TypeMapper.Map(new PrimitiveTypeSymbol("f32")));
         Assert.Equal(LLVMTypeRef.Double, builder.TypeMapper.Map(new PrimitiveTypeSymbol("f64")));
         Assert.Equal(LLVMTypeRef.Int32, builder.TypeMapper.Map(new PrimitiveTypeSymbol("bool")));
+        Assert.Equal(LLVMTypeRef.Void, builder.TypeMapper.Map(new VoidTypeSymbol()));
     }
 
     [Fact]
