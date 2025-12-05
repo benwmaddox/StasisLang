@@ -186,7 +186,7 @@ function print_sep_line(): void {
 }
 
 function print_col_header(): void {
-    print_char(32); print_char(32); print_char(32);
+    print_char(32); print_char(32);
     let c: i32;
     for c.=(0); c.<(9); c.=(c.+(1)) {
         print_int(c.+(1));
@@ -257,19 +257,17 @@ function play(): i32 {
                 print_clue_error();
             } else {
                 if (v.==(0)) {
-                        grid[pos].=(0);
-                    } else {
+                    grid[pos].=(0);
+                } else {
                     if (!can_place(rr, cc, v)) {
                         print_invalid();
                     } else {
                         grid[pos].=(v);
-                        print_col_header();
-                        print_board();
                     }
-                    if (is_complete()) {
-                        print_solved();
-                        return 0;
-                    }
+                }
+                if (is_complete()) {
+                    print_solved();
+                    return 0;
                 }
             }
         }
@@ -284,25 +282,21 @@ function main(): i32 {
 
 function discard_line(): void {
     let ch: i32;
-    for ch.=(read_char()); true; ch.=(read_char()) {
-        if (ch.==(10) || ch.==(13) || ch.==(0)) {
-            return;
-        }
+    ch.=(read_char());
+    if (ch.==(10) || ch.==(13) || ch.==(0)) {
+        return;
     }
+    discard_line();
 }
 
 function read_cmd(): i32 {
     let ch: i32;
-    for ch.=(read_char()); true; ch.=(read_char()) {
-        if (ch.==(0)) {
-            return 0;
-        }
-        if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
-            // skip whitespace
-        } else {
-            return ch;
-        }
+    ch.=(read_char());
+    if (ch.==(0)) {
+        return 0;
     }
-
-    return 0;
+    if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
+        return read_cmd();
+    }
+    return ch;
 }
