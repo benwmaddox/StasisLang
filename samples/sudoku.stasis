@@ -213,7 +213,7 @@ function play(): i32 {
 
         print_prompt();
         let cmd: i32;
-        cmd.=(read_char());
+        cmd.=(read_cmd());
         if (cmd.==(0)) {
             return 0;
         }
@@ -265,15 +265,15 @@ function play(): i32 {
                         grid[pos].=(v);
                         print_col_header();
                         print_board();
-                        if (is_complete()) {
-                            print_solved();
-                            return 0;
-                        }
+                    }
+                    if (is_complete()) {
+                        print_solved();
+                        return 0;
                     }
                 }
             }
         }
-        }
+    }
 
     return 1;
 }
@@ -288,5 +288,18 @@ function discard_line(): void {
         if (ch.==(10) || ch.==(13) || ch.==(0)) {
             return;
         }
+    }
+}
+
+function read_cmd(): i32 {
+    let ch: i32;
+    for ch.=(read_char()); true; ch.=(read_char()) {
+        if (ch.==(0)) {
+            return 0;
+        }
+        if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
+            continue;
+        }
+        return ch;
     }
 }
