@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using LLVMSharp.Interop;
 using Stasis.Compiler;
 using Stasis.Compiler.Layout;
@@ -116,7 +117,10 @@ public sealed class ModuleLowerer
 
         var totalTests = tests.Count;
         var (putsFn, putsType) = GetOrDeclarePuts(builder);
+        var (timeFn, timeType, timePtrType) = GetOrDeclareTime(builder);
         var (clockFn, clockType) = GetOrDeclareClock(builder);
+        var nullTimePtr = LLVMValueRef.CreateConstPointerNull(timePtrType);
+        var startTime = llvmBuilder.BuildCall2(timeType, timeFn, new[] { nullTimePtr }, "time.start");
         var startClock = llvmBuilder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "clock.start");
 
         foreach (var testDecl in tests)
@@ -159,12 +163,19 @@ public sealed class ModuleLowerer
         }
 
         var result = llvmBuilder.BuildLoad2(int32, failures, "failures.result");
+        var endTime = llvmBuilder.BuildCall2(timeType, timeFn, new[] { nullTimePtr }, "time.end");
+        var elapsedSeconds = llvmBuilder.BuildSub(endTime, startTime, "time.elapsed_sec");
+        var timeMs64 = llvmBuilder.BuildMul(elapsedSeconds, ConstInt64(1000), "time.elapsed_ms64");
+
         var endClock = llvmBuilder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "clock.end");
         var elapsedTicks = llvmBuilder.BuildSub(endClock, startClock, "clock.ticks");
         var ticksTimesMs = llvmBuilder.BuildMul(elapsedTicks, ConstInt64(1000), "clock.ticks_ms");
-        var clocksPerSec = ConstInt64(1000000);
-        var elapsedMs64 = llvmBuilder.BuildUDiv(ticksTimesMs, clocksPerSec, "clock.ms64");
-        var elapsedMs = llvmBuilder.BuildTrunc(elapsedMs64, int32, "clock.ms");
+        var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
+        var clockMs64 = llvmBuilder.BuildUDiv(ticksTimesMs, clocksPerSec, "clock.ms64");
+
+        var useTime = llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntNE, timeMs64, ConstInt64(0), "time.nonzero");
+        var elapsedMs64 = llvmBuilder.BuildSelect(useTime, timeMs64, clockMs64, "elapsed.ms64");
+        var elapsedMs = llvmBuilder.BuildTrunc(elapsedMs64, int32, "elapsed.ms");
 
         // Print a simple summary: Tests: passed=X failed=Y
         var (printf, printfType) = GetOrDeclarePrintf(builder);
@@ -235,6 +246,21 @@ public sealed class ModuleLowerer
         var putsType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
         puts = builder.Module.AddFunction("puts", putsType);
         return (puts, putsType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type, LLVMTypeRef PtrType) GetOrDeclareTime(LlvmModuleBuilder builder)
+    {
+        var time = builder.Module.GetNamedFunction("time");
+        var timeType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int64, 0) }, false);
+        if (time.Handle != IntPtr.Zero)
+        {
+            var ptrType = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int64, 0);
+            return (time, timeType, ptrType);
+        }
+
+        time = builder.Module.AddFunction("time", timeType);
+        var timePtr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int64, 0);
+        return (time, timeType, timePtr);
     }
 
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareClock(LlvmModuleBuilder builder)
