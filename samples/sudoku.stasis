@@ -215,18 +215,23 @@ function play(): i32 {
         let cmd: i32;
         cmd.=(read_char());
         if (cmd.==(113) || cmd.==(81)) { // q or Q
-            return 1;
+            return 0;
         }
         let r: i32;
         let c: i32;
         let v: i32;
-        if (cmd.>(47) && cmd.<(58)) {
-            r.=(cmd.-(48));
-        } else {
+        let invalid_first: bool;
+        invalid_first.=(false);
+        if (!(cmd.>(47) && cmd.<(58))) {
+            invalid_first.=(true);
             r.=(0);
+            c.=(0);
+            v.=(0);
+        } else {
+            r.=(cmd.-(48));
+            c.=(read_int());
+            v.=(read_int());
         }
-        c.=(read_int());
-        v.=(read_int());
 
         let bad: bool;
         bad.=(false);
@@ -237,7 +242,7 @@ function play(): i32 {
         if (v.<(0)) { bad.=(true); }
         if (v.>(9)) { bad.=(true); }
 
-        if (bad) {
+        if (invalid_first || bad) {
             print_invalid();
         } else {
             let rr: i32;
