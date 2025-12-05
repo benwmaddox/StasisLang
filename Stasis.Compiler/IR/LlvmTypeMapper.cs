@@ -15,6 +15,7 @@ public sealed class LlvmTypeMapper
     public LLVMTypeRef Map(TypeSymbol type) =>
         type switch
         {
+            VoidTypeSymbol => LLVMTypeRef.Void,
             PrimitiveTypeSymbol p => MapPrimitive(p.PrimitiveName),
             ArrayTypeSymbol a => LLVMTypeRef.CreateArray(Map(a.ElementType), (uint)a.Size),
             NamedTypeSymbol => LLVMTypeRef.Int32, // treat struct/enums as indices into SoA storage
@@ -32,6 +33,7 @@ public sealed class LlvmTypeMapper
             "f32" => LLVMTypeRef.Float,
             "f64" => LLVMTypeRef.Double,
             "string" => LLVMTypeRef.Int8, // string[N] should be mapped as array by caller
+            "void" => LLVMTypeRef.Void,
             _ => LLVMTypeRef.Int32
         };
 }

@@ -5,13 +5,17 @@ namespace Stasis.Compiler;
 
 public sealed class SemanticAnalyzer
 {
-    private static readonly HashSet<string> BuiltInTypes = new(StringComparer.Ordinal)
+    private static readonly Dictionary<string, TypeSymbol> BuiltInTypes = new(StringComparer.Ordinal)
     {
-        "u8", "u16", "u32",
-        "i32",
-        "f32", "f64",
-        "bool",
-        "string"
+        { "u8", new PrimitiveTypeSymbol("u8") },
+        { "u16", new PrimitiveTypeSymbol("u16") },
+        { "u32", new PrimitiveTypeSymbol("u32") },
+        { "i32", new PrimitiveTypeSymbol("i32") },
+        { "f32", new PrimitiveTypeSymbol("f32") },
+        { "f64", new PrimitiveTypeSymbol("f64") },
+        { "bool", new PrimitiveTypeSymbol("bool") },
+        { "string", new PrimitiveTypeSymbol("string") },
+        { "void", new VoidTypeSymbol() }
     };
 
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
@@ -42,9 +46,9 @@ public sealed class SemanticAnalyzer
 
     private void DeclareBuiltIns()
     {
-        foreach (var type in BuiltInTypes)
+        foreach (var (name, type) in BuiltInTypes)
         {
-            _symbols[type] = new Symbol(type, SymbolKind.Struct, new PrimitiveTypeSymbol(type));
+            _symbols[name] = new Symbol(name, SymbolKind.Struct, type);
         }
     }
 
@@ -317,7 +321,7 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        if (type is PrimitiveTypeSymbol)
+        if (type is PrimitiveTypeSymbol primitive && primitive.PrimitiveName != "void")
         {
             return;
         }

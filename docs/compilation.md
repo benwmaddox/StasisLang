@@ -190,7 +190,7 @@ Statement        -> Block
 ## 4.1 Variable Declaration
 
 ```
-VarDeclStatement -> "let" Identifier "=" Expression ";"
+VarDeclStatement -> "let" Identifier ":" Type ";"
 ```
 
 ---
@@ -212,10 +212,13 @@ ElseOpt          -> "else" Block
 
 ```
 ForStatement     -> "for"
-                    Identifier "=" Expression ";"
-                    Expression ";"
-                    Expression
+                    ExpressionOpt ";"
+                    ExpressionOpt ";"
+                    ExpressionOpt
                     Block
+
+ExpressionOpt    -> Expression
+                  | Îµ
 ```
 
 ---

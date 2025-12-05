@@ -7,3 +7,5 @@ public sealed record PrimitiveTypeSymbol(string PrimitiveName) : TypeSymbol(Prim
 public sealed record NamedTypeSymbol(string TypeName) : TypeSymbol(TypeName);
 
 public sealed record ArrayTypeSymbol(TypeSymbol ElementType, int Size) : TypeSymbol($"{ElementType.Name}[{Size}]");
+
+public sealed record VoidTypeSymbol() : TypeSymbol("void");

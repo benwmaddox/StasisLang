@@ -277,10 +277,10 @@ Lowering:
 ### 7.1 Variable Declaration
 
 ```
-let x = Expression;
+let x: Type;
 ```
 
-Locals may only be primitive types.
+Locals may only be primitive types. Initialization uses the assignment operator-method on a subsequent line, e.g. `x.=(0);`.
 
 ### 7.2 Assignment
 
@@ -300,7 +300,7 @@ else { ... }
 ### 7.4 For
 
 ```
-for i = 0; i.<(10); i.=( i.+(1) ) {
+for i.=(0); i.<(10); i.=( i.+(1) ) {
     ...
 }
 ```
@@ -362,10 +362,10 @@ Global arrays of struct references become SoA automatically.
 
 ```
 test `enemy takes damage`(): bool {
-    let e = Enemy(0);
-    e.hp.=(50);
-    damage(e, 10);
-    return e.hp.==(40);
+    let hp: i32;
+    hp.=(50);
+    hp.=(hp.-(10));
+    return hp.==(40);
 }
 ```
 
@@ -472,12 +472,13 @@ Compiles to:
 
 ```stasis
 function updateEnemy(i: u32, dt: f32): void {
-    let e = Enemy(i);
+    let e: Enemy;
+    e.=(Enemy(i));
 
     e.posX.=( e.posX.+( e.vx.*(dt) ) );
     e.posY.=( e.posY.+( e.vy.*(dt) ) );
 
-    if (e.hp.<=(0)) {
+    if (e.hp.<(1)) {
         e.hp.=(0);
     }
 }
