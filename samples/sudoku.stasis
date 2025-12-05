@@ -175,7 +175,7 @@ function is_complete(): bool {
 
 function print_sep_line(): void {
     let i: i32;
-    print_char(32); print_char(32); print_char(43); // indent + +
+    print_char(32); print_char(43); // indent + +
     for i.=(0); i.<(8); i.=(i.+(1)) { print_char(45); }
     print_char(43);
     for i.=(0); i.<(8); i.=(i.+(1)) { print_char(45); }
@@ -186,7 +186,7 @@ function print_sep_line(): void {
 }
 
 function print_col_header(): void {
-    print_char(32); print_char(32); print_char(32);
+    print_char(32); print_char(32);
     let c: i32;
     for c.=(0); c.<(9); c.=(c.+(1)) {
         print_int(c.+(1));
