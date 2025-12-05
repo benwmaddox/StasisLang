@@ -37,7 +37,7 @@ public sealed class SemanticAnalyzer
             }
         }
 
-        return new SemanticResult(_diagnostics);
+        return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
     }
 
     private void DeclareBuiltIns()
@@ -70,6 +70,7 @@ public sealed class SemanticAnalyzer
         {
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Global, type, decl.Name.Span);
+            EnsureGlobalType(type, decl.Type.Span);
         }
     }
 
@@ -322,6 +323,21 @@ public sealed class SemanticAnalyzer
         }
 
         _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types; structs/arrays live in static memory.", span));
+    }
+
+    private void EnsureGlobalType(TypeSymbol? type, SourceSpan span)
+    {
+        if (type is null)
+        {
+            return;
+        }
+
+        if (type is PrimitiveTypeSymbol or NamedTypeSymbol or ArrayTypeSymbol)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic("Globals must be primitive, struct, or array types.", span));
     }
 
     private void AddSymbol(string name, SymbolKind kind, TypeSymbol? type, SourceSpan span)
