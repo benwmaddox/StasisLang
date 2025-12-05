@@ -107,7 +107,6 @@ public sealed class ModuleLowerer
     {
         var tests = compilationUnit.Declarations.OfType<TestDeclarationSyntax>().ToList();
         var int32 = LLVMTypeRef.Int32;
-        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
         var harness = builder.DefineFunction("run_tests", int32);
         using var llvmBuilder = builder.Context.CreateBuilder();
         var entry = harness.AppendBasicBlock("entry");
@@ -145,8 +144,8 @@ public sealed class ModuleLowerer
             }
 
             var ok = AsBoolean(llvmBuilder, call);
-            var passMsg = llvmBuilder.BuildGlobalStringPtr($"PASS: {testDecl.Name.Text}\n", $"{testDecl.Name.Text}.passmsg");
-            var failMsg = llvmBuilder.BuildGlobalStringPtr($"FAIL: {testDecl.Name.Text}\n", $"{testDecl.Name.Text}.failmsg");
+            var passMsg = llvmBuilder.BuildGlobalStringPtr($"\u001b[32mPASS\u001b[0m: {testDecl.Name.Text}", $"{testDecl.Name.Text}.passmsg");
+            var failMsg = llvmBuilder.BuildGlobalStringPtr($"\u001b[31mFAIL\u001b[0m: {testDecl.Name.Text}", $"{testDecl.Name.Text}.failmsg");
             var msg = llvmBuilder.BuildSelect(ok, passMsg, failMsg, $"{testDecl.Name.Text}.msg");
             llvmBuilder.BuildCall2(putsType, putsFn, new[] { msg }, $"{testDecl.Name.Text}.print");
 
