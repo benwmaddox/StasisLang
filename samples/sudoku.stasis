@@ -259,15 +259,20 @@ function play(): i32 {
                 if (v.==(0)) {
                         grid[pos].=(0);
                     } else {
-                        if (!can_place(rr, cc, v)) {
-                            print_invalid();
-                        } else {
-                            grid[pos].=(v);
-                            print_board();
+                    if (!can_place(rr, cc, v)) {
+                        print_invalid();
+                    } else {
+                        grid[pos].=(v);
+                        print_col_header();
+                        print_board();
+                        if (is_complete()) {
+                            print_solved();
+                            return 0;
                         }
                     }
                 }
             }
+        }
         }
 
     return 1;
