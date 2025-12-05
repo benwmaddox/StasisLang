@@ -66,18 +66,24 @@ function main(): i32 {
         if (guess.==(0)) {
             return 0;
         }
+        let bad: bool;
+        bad.=(false);
         if (guess.<(1) || guess.>(99)) {
+            bad.=(true);
+        }
+
+        if (bad) {
             print_invalid();
-            continue;
-        }
-        if (guess.==(target)) {
-            print_win();
-            return 0;
-        }
-        if (guess.<(target)) {
-            print_higher();
         } else {
-            print_lower();
+            if (guess.==(target)) {
+                print_win();
+                return 0;
+            }
+            if (guess.<(target)) {
+                print_higher();
+            } else {
+                print_lower();
+            }
         }
     }
 
