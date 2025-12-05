@@ -160,9 +160,12 @@ public sealed class ModuleLowerer
 
         // Print a simple summary: Tests: passed=X failed=Y
         var (printf, printfType) = GetOrDeclarePrintf(builder);
-        var fmt = llvmBuilder.BuildGlobalStringPtr("Tests: passed=%d failed=%d\n", "tests_fmt");
+        var fmtPass = llvmBuilder.BuildGlobalStringPtr("Tests: \u001b[32mpassed=%d\u001b[0m failed=%d\n", "tests_fmt_pass");
+        var fmtFail = llvmBuilder.BuildGlobalStringPtr("Tests: passed=%d \u001b[31mfailed=%d\u001b[0m\n", "tests_fmt_fail");
         var passed = llvmBuilder.BuildSub(ConstInt(int32, totalTests), result, "tests.passed");
-        llvmBuilder.BuildCall2(printfType, printf, new[] { fmt, passed, result }, "printf.tests");
+        var hasFailures = llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntNE, result, ConstInt(int32, 0), "has_failures");
+        var summaryFmt = llvmBuilder.BuildSelect(hasFailures, fmtFail, fmtPass, "tests_fmt");
+        llvmBuilder.BuildCall2(printfType, printf, new[] { summaryFmt, passed, result }, "printf.tests");
 
         llvmBuilder.BuildRet(result);
     }
