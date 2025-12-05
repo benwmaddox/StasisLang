@@ -34,9 +34,9 @@ Options:
 - `--help` prints usage.
 
 Suggested convenience scripts (from repo root):
-- `stasis run path/to/file.stasis` -> emits IR (production) and runs `lli` with default entry (main); add `--with-tests` to include tests.
+- `stasis run path/to/file.stasis` -> emits IR (production) and runs `lli` with default entry (main); pass extra CLI args (e.g., `--module foo`) after the file.
 - `stasis test path/to/file.stasis` -> emits IR with tests, runs `lli -entry-function=run_tests`, returns failure count as exit code.
-You can implement these as small shell/batch wrappers calling `dotnet run -p Stasis.Cli -- ...` and `lli ...`.
+Scripts are provided (`stasis.bat` on Windows, `stasis.sh` on Unix). Add the repo root to `PATH` to call `stasis` without `./`.
 
 Notes:
 - Function calls and control flow are lowered; SoA globals follow the layout in `docs/spec.md`.
