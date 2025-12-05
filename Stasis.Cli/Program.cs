@@ -9,7 +9,14 @@ if (argv.Count == 0 || argv.Contains("--help"))
     return;
 }
 
-var includeTests = argv.Remove("--with-tests");
+var mode = "run";
+if (argv[0].Equals("run", StringComparison.OrdinalIgnoreCase) || argv[0].Equals("test", StringComparison.OrdinalIgnoreCase))
+{
+    mode = argv[0].ToLowerInvariant();
+    argv.RemoveAt(0);
+}
+
+var includeTests = argv.Remove("--with-tests") || mode == "test";
 var moduleNameIndex = argv.IndexOf("--module");
 string moduleName = "module";
 if (moduleNameIndex >= 0 && moduleNameIndex + 1 < argv.Count)
@@ -66,8 +73,10 @@ if (lower.Diagnostics.Count > 0)
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: stasisc <file> [--with-tests] [--module <name>] [--help]");
-    Console.WriteLine("  Emits LLVM IR to stdout. Defaults to production lowering (tests omitted).");
+    Console.WriteLine("Usage:");
+    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests]");
+    Console.WriteLine("  stasisc test <file> [--module <name>]");
+    Console.WriteLine("Emits LLVM IR to stdout. Defaults to production lowering (tests omitted) unless using 'test' or --with-tests.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics)

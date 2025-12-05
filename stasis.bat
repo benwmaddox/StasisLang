@@ -13,6 +13,11 @@ if "%LLVM_NATIVE_PATH%"=="" (
   set "LLVM_NATIVE_PATH=%USERPROFILE%\.nuget\packages\libllvm.runtime.win-x64\20.1.2\runtimes\win-x64\native"
 )
 
+dotnet build "%PROJ%" -v minimal >nul
+if errorlevel 1 goto :fail
+set CLI_DLL=Stasis.Cli\bin\Debug\net9.0\Stasis.Cli.dll
+if not exist "%CLI_DLL%" set CLI_DLL=Stasis.Cli\bin\Release\net9.0\Stasis.Cli.dll
+
 set LLI=
 for %%I in (lli.exe) do @for %%J in ("%ProgramFiles%\\LLVM\\bin\\%%I" "%%~$PATH:I") do @if exist %%~J set LLI=%%~fJ
 
@@ -27,7 +32,7 @@ set OUTLL=%TEMP%\stasis_%RANDOM%%RANDOM%.ll
 set TMPEXE=%TEMP%\stasis_%RANDOM%%RANDOM%.exe
 
 if /I "%CMD%"=="run" (
-  dotnet run --project "%PROJ%" -- "%FILE%" %EXTRA% > "%TMP%"
+  dotnet "%CLI_DLL%" run "%FILE%" %EXTRA% > "%OUTLL%"
   if errorlevel 1 goto :fail
   if not "%LLI%"=="" (
     "%LLI%" "%OUTLL%"
@@ -42,7 +47,7 @@ if /I "%CMD%"=="run" (
 )
 
 if /I "%CMD%"=="test" (
-  dotnet run --project "%PROJ%" -- "%FILE%" --with-tests %EXTRA% > "%OUTLL%"
+  dotnet "%CLI_DLL%" test "%FILE%" %EXTRA% > "%OUTLL%"
   if errorlevel 1 goto :fail
   if not "%LLI%"=="" (
     "%LLI%" -entry-function=run_tests "%OUTLL%"
@@ -51,6 +56,11 @@ if /I "%CMD%"=="test" (
     "%TMPEXE%"
   )
   set EXITCODE=!errorlevel!
+  if "!EXITCODE!"=="0" (
+    echo Tests passed
+  ) else (
+    echo Tests failed: !EXITCODE!
+  )
   del "%OUTLL%"
   if exist "%TMPEXE%" del "%TMPEXE%"
   exit /b !EXITCODE!

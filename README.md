@@ -38,6 +38,8 @@ Suggested convenience scripts (from repo root):
 - `stasis test path/to/file.stasis` -> emits IR with tests, runs `lli -entry-function=run_tests`, returns failure count as exit code.
 Scripts are provided (`stasis.bat` on Windows, `stasis.sh` on Unix). Add the repo root to `PATH` to call `stasis` without `./`.
 The scripts prefer `lli` if found; otherwise they fall back to compiling the emitted IR with `clang` (tests use `-entry run_tests`).
+Windows note: `.` is not on `PATH` by default—use `.\stasis.bat ...` or add the repo root to your `PATH`.
+Test script output: prints “Tests passed” on exit code 0, otherwise “Tests failed: <code>” and returns the same exit code.
 
 Notes:
 - Function calls and control flow are lowered; SoA globals follow the layout in `docs/spec.md`.

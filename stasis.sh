@@ -44,6 +44,12 @@ elif [ "$CMD" = "test" ]; then
     "$TMPEXE"
     rm -f "$TMPEXE"
   fi
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "Tests passed"
+  else
+    echo "Tests failed: $status"
+  fi
 else
   echo "Unknown command: $CMD" >&2
   exit 1
