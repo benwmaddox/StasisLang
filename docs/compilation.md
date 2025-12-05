@@ -6,7 +6,7 @@
 - **AoS → SoA semantics represented cleanly**
 - **All productions structured for predictable recursive-descent parsing**
 
-This is the version you'd put in a language manual or compiler reference.
+This is the version you'd put in a language manual or compiler reference. The reference compiler targets C# with LLVMSharp bindings for IR generation and emission.
 
 ---
 

@@ -25,7 +25,7 @@ _A statically-allocated, AoS-syntax / SoA-storage, operator-method-based languag
 
 # **1. Overview**
 
-Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly and LLVM IR**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required.
+Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly and LLVM IR**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** for IR construction and emission.
 
 The core design pillars are:
 
