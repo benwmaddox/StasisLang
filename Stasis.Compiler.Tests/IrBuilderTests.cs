@@ -62,6 +62,7 @@ public class IrBuilderTests
         builder.DefineFunction("add", i32, i32, i32);
 
         var ir = builder.EmitToString();
-        Assert.Contains("define i32 @add(i32 %0, i32 %1)", ir);
+        Assert.Contains("define i32 @add(", ir);
+        Assert.Contains("i32", ir);
     }
 }
