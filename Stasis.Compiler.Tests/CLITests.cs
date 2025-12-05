@@ -6,6 +6,7 @@ public class CLITests
 {
     private static readonly string RepoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
     private static readonly string CliProj = Path.Combine(RepoRoot, "Stasis.Cli", "Stasis.Cli.csproj");
+    private static readonly string Configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Parent?.Name ?? "Debug";
 
     [Fact]
     public void Emits_ir_for_basic_sample()
@@ -32,7 +33,7 @@ public class CLITests
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --no-build --project \"{CliProj}\" -- {args}",
+            Arguments = $"run --configuration {Configuration} --project \"{CliProj}\" -- {args}",
             WorkingDirectory = RepoRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
