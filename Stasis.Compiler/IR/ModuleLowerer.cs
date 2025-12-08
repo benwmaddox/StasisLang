@@ -1125,10 +1125,23 @@ public sealed class ModuleLowerer
         private LLVMValueRef EmitReadChar(LLVMBuilderRef builder)
         {
             var alloca = builder.BuildAlloca(LLVMTypeRef.Int32, "read_char.tmp");
+            builder.BuildStore(ConstI32(0), alloca);
             var (scanf, scanfType) = GetOrDeclareScanf(_moduleBuilder);
-            var fmt = builder.BuildGlobalStringPtr(" %c", $"fmt_readc_{_blockId++}");
+            var fmt = builder.BuildGlobalStringPtr("%c", $"fmt_readc_{_blockId++}");
             var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { fmt.TypeOf, alloca.TypeOf }, false);
-            builder.BuildCall2(callType, scanf, new[] { fmt, alloca }, "scanf.char.call");
+            var result = builder.BuildCall2(callType, scanf, new[] { fmt, alloca }, "scanf.char.call");
+
+            var parent = builder.InsertBlock.Parent;
+            var cont = AppendBlock(parent, "read_char.cont");
+            var eof = AppendBlock(parent, "read_char.eof");
+            var ok = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, result, ConstI32(1), "read_char.ok");
+            builder.BuildCondBr(ok, cont, eof);
+
+            builder.PositionAtEnd(eof);
+            builder.BuildStore(ConstI32(0), alloca);
+            builder.BuildBr(cont);
+
+            builder.PositionAtEnd(cont);
             return builder.BuildLoad2(LLVMTypeRef.Int32, alloca, "read_char.val");
         }
 

@@ -218,17 +218,24 @@ function play(): i32 {
         let line_len: i32;
         line_len = read_line();
         if (line_len == 0) {
-            skip = true;
+            return 0;
+        }
+        if (line_is_quit(line_len)) {
+            return 0;
         }
 
-        let first: i32;
+        let first_idx: i32;
+        first_idx = first_non_space_index(line_len);
         if (!skip) {
-            first = first_non_space(line_len);
-            if (first == -1) {
+            if (first_idx == -1) {
+                sudoku_print_parse_error();
                 skip = true;
             } else {
-                if (first == 113 || first == 81) { // q or Q
-                    return 0;
+                let ch: i32;
+                ch = input_buf[first_idx];
+                if (ch < 48 || ch > 57) {
+                    sudoku_print_parse_error();
+                    skip = true;
                 }
             }
         }
@@ -238,8 +245,8 @@ function play(): i32 {
         if (!skip) {
             parsed = parse_move(line_len);
             if (!parsed) {
-            sudoku_print_parse_error();
-            skip = true;
+                sudoku_print_parse_error();
+                skip = true;
             }
         }
 
@@ -341,22 +348,46 @@ function read_line(): i32 {
     return i;
 }
 
-function first_non_space(len: i32): i32 {
+function is_space_or_bom(ch: i32): bool {
+    if (ch == 32 || ch == 9 || ch == 13) {
+        return true;
+    }
+    if (ch == 239 || ch == 187 || ch == 191) {
+        return true;
+    }
+    return false;
+}
+
+function first_non_space_index(len: i32): i32 {
     let i: i32;
     for i = 0; i < len; i = i + 1 {
         let ch: i32;
         ch = input_buf[i];
-        if (!(ch == 32 || ch == 9)) {
-            return ch;
+        if (!is_space_or_bom(ch)) {
+            return i;
         }
     }
     return -1;
 }
 
+function line_is_quit(len: i32): bool {
+    let i: i32;
+    for i = 0; i < len; i = i + 1 {
+        let ch: i32;
+        ch = input_buf[i];
+        if (is_space_or_bom(ch)) {
+        } else {
+            if (ch == 113 || ch == 81) { return true; }
+            return false;
+        }
+    }
+    return false;
+}
+
 function skip_ws(len: i32, start: i32): void {
     let k: i32;
     for k = start; k < len; k = k + 1 {
-        if (!(input_buf[k] == 32 || input_buf[k] == 9)) {
+        if (!is_space_or_bom(input_buf[k])) {
             parse_next = k;
             return;
         }

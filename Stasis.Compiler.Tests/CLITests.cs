@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Xunit;
 
 namespace Stasis.Compiler.Tests;
@@ -41,7 +42,7 @@ public class CLITests
         Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
     }
 
-    private static (int ExitCode, string Stdout, string Stderr) RunCli(string args, string? workingDirectory = null)
+    private static (int ExitCode, string Stdout, string Stderr) RunCli(string args, string? workingDirectory = null, string? stdin = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -50,10 +51,21 @@ public class CLITests
             WorkingDirectory = workingDirectory ?? RepoRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = stdin is not null,
             UseShellExecute = false
         };
+        if (stdin is not null)
+        {
+            psi.StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        }
 
         using var proc = Process.Start(psi)!;
+        if (stdin is not null)
+        {
+            proc.StandardInput.Write(stdin);
+            proc.StandardInput.Flush();
+            proc.StandardInput.Close();
+        }
         var stdout = proc.StandardOutput.ReadToEnd();
         var stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit();
@@ -84,6 +96,16 @@ public class CLITests
         {
             Directory.Delete(tempDir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void Sudoku_quit_exits()
+    {
+        var samplePath = Path.Combine(RepoRoot, "samples", "sudoku.stasis");
+        var (exit, stdout, stderr) = RunCli($"run \"{samplePath}\"", stdin: "q\n");
+        Assert.Equal(0, exit);
+        Assert.Contains("Enter row col value", stdout);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
     }
 
     [Fact]
