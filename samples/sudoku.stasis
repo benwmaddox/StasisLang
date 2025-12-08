@@ -1,5 +1,5 @@
 function idx(r: i32, c: i32): i32 {
-    return r.*(9).+(c);
+    return r * 9 + c;
 }
 
 global puzzle: i32[81];
@@ -8,7 +8,7 @@ global clues: i32[81];
 
 function seed_puzzle(): void {
     let i: i32;
-    for i = 0; i.<(81); i = i.+(1) {
+    for i = 0; i < 81; i = i + 1 {
         puzzle[i] = 0;
     }
 
@@ -27,9 +27,9 @@ function seed_puzzle(): void {
 
 function reset_grid(): void {
     let i: i32;
-    for i = 0; i.<(81); i = i.+(1) {
+    for i = 0; i < 81; i = i + 1 {
         grid[i] = puzzle[i];
-        if (puzzle[i].==(0)) {
+        if (puzzle[i] == 0) {
             clues[i] = 0;
         } else {
             clues[i] = 1;
@@ -39,8 +39,8 @@ function reset_grid(): void {
 
 function row_ok(r: i32, val: i32): bool {
     let c: i32;
-    for c = 0; c.<(9); c = c.+(1) {
-        if (grid[idx(r, c)].==(val)) {
+    for c = 0; c < 9; c = c + 1 {
+        if (grid[idx(r, c)] == val) {
             return false;
         }
     }
@@ -50,8 +50,8 @@ function row_ok(r: i32, val: i32): bool {
 
 function col_ok(c: i32, val: i32): bool {
     let r: i32;
-    for r = 0; r.<(9); r = r.+(1) {
-        if (grid[idx(r, c)].==(val)) {
+    for r = 0; r < 9; r = r + 1 {
+        if (grid[idx(r, c)] == val) {
             return false;
         }
     }
@@ -64,11 +64,11 @@ function box_ok(r: i32, c: i32, val: i32): bool {
     let bc: i32;
     let rr: i32;
     let cc: i32;
-    br = r./(3).*(3);
-    bc = c./(3).*(3);
-    for rr = 0; rr.<(3); rr = rr.+(1) {
-        for cc = 0; cc.<(3); cc = cc.+(1) {
-            if (grid[idx(br.+(rr), bc.+(cc))].==(val)) {
+    br = r / 3 * 3;
+    bc = c / 3 * 3;
+    for rr = 0; rr < 3; rr = rr + 1 {
+        for cc = 0; cc < 3; cc = cc + 1 {
+            if (grid[idx(br + rr, bc + cc)] == val) {
                 return false;
             }
         }
@@ -91,24 +91,24 @@ function can_place(r: i32, c: i32, val: i32): bool {
 }
 
 function solve_at(pos: i32): bool {
-    if (pos.==(81)) {
+    if (pos == 81) {
         return true;
     }
 
     let r: i32;
     let c: i32;
-    r = pos./(9);
-    c = pos.-(r.*(9));
+    r = pos / 9;
+    c = pos - r * 9;
 
-    if (!grid[idx(r, c)].==(0)) {
-        return solve_at(pos.+(1));
+    if (!grid[idx(r, c)] == 0) {
+        return solve_at(pos + 1);
     }
 
     let val: i32;
-    for val = 1; val.<(10); val = val.+(1) {
+    for val = 1; val < 10; val = val + 1 {
         if (can_place(r, c, val)) {
             grid[idx(r, c)] = val;
-            if (solve_at(pos.+(1))) {
+            if (solve_at(pos + 1)) {
                 return true;
             }
             grid[idx(r, c)] = 0;
@@ -128,10 +128,10 @@ test `sudoku solves seed`() : bool {
     if (!solve()) {
         return false;
     }
-    if (!grid[idx(0, 2)].==(4)) {
+    if (!grid[idx(0, 2)] == 4) {
         return false;
     }
-    if (!grid[idx(8, 8)].==(9)) {
+    if (!grid[idx(8, 8)] == 9) {
         return false;
     }
     return true;
@@ -141,22 +141,22 @@ function print_board(): void {
     print_sep_line();
     let r: i32;
     let c: i32;
-    for r = 0; r.<(9); r = r.+(1) {
-        print_int(r.+(1));
+    for r = 0; r < 9; r = r + 1 {
+        print_int(r + 1);
         print_char(32);
         print_char(124); // |
-        for c = 0; c.<(9); c = c.+(1) {
+        for c = 0; c < 9; c = c + 1 {
             let p: i32;
             p = idx(r, c);
             print_cell(grid[p], clues[p]);
-            if (c.==(2) || c.==(5) || c.==(8)) {
+            if (c == 2 || c == 5 || c == 8) {
                 print_char(124);
             } else {
                 print_char(32);
             }
         }
         print_char(10);
-        if (r.==(2) || r.==(5) || r.==(8)) {
+        if (r == 2 || r == 5 || r == 8) {
             print_sep_line();
         }
     }
@@ -164,8 +164,8 @@ function print_board(): void {
 
 function is_complete(): bool {
     let i: i32;
-    for i = 0; i.<(81); i = i.+(1) {
-        if (grid[i].==(0)) {
+    for i = 0; i < 81; i = i + 1 {
+        if (grid[i] == 0) {
             return false;
         }
     }
@@ -176,11 +176,11 @@ function is_complete(): bool {
 function print_sep_line(): void {
     let i: i32;
     print_char(32); print_char(32); print_char(43); // indent + +
-    for i = 0; i.<(8); i = i.+(1) { print_char(45); }
+    for i = 0; i < 8; i = i + 1 { print_char(45); }
     print_char(43);
-    for i = 0; i.<(8); i = i.+(1) { print_char(45); }
+    for i = 0; i < 8; i = i + 1 { print_char(45); }
     print_char(43);
-    for i = 0; i.<(8); i = i.+(1) { print_char(45); }
+    for i = 0; i < 8; i = i + 1 { print_char(45); }
     print_char(43);
     print_char(10);
 }
@@ -188,10 +188,10 @@ function print_sep_line(): void {
 function print_col_header(): void {
     print_char(32); print_char(32);
     let c: i32;
-    for c = 0; c.<(9); c = c.+(1) {
-        print_int(c.+(1));
+    for c = 0; c < 9; c = c + 1 {
+        print_int(c + 1);
         print_char(32);
-        if (c.==(2) || c.==(5)) {
+        if (c == 2 || c == 5) {
             print_char(32);
         }
     }
@@ -213,10 +213,10 @@ function play(): i32 {
         print_prompt();
         let cmd: i32;
         cmd = read_cmd();
-        if (cmd.==(0)) {
+        if (cmd == 0) {
             return 0;
         }
-        if (cmd.==(113) || cmd.==(81)) { // q or Q
+        if (cmd == 113 || cmd == 81) { // q or Q
             return 0;
         }
         let r: i32;
@@ -224,38 +224,38 @@ function play(): i32 {
         let v: i32;
         let invalid_first: bool;
         invalid_first = false;
-        if (!(cmd.>(47) && cmd.<(58))) {
+        if (!(cmd > 47 && cmd < 58)) {
             invalid_first = true;
             discard_line();
             r = 0; c = 0; v = 0;
         } else {
-            r = cmd.-(48);
+            r = cmd - 48;
             c = read_int();
             v = read_int();
         }
 
         let bad: bool;
         bad = false;
-        if (r.<(1)) { bad = true; }
-        if (r.>(9)) { bad = true; }
-        if (c.<(1)) { bad = true; }
-        if (c.>(9)) { bad = true; }
-        if (v.<(0)) { bad = true; }
-        if (v.>(9)) { bad = true; }
+        if (r < 1) { bad = true; }
+        if (r > 9) { bad = true; }
+        if (c < 1) { bad = true; }
+        if (c > 9) { bad = true; }
+        if (v < 0) { bad = true; }
+        if (v > 9) { bad = true; }
 
         if (invalid_first || bad) {
             print_invalid();
         } else {
             let rr: i32;
             let cc: i32;
-            rr = r.-(1);
-            cc = c.-(1);
+            rr = r - 1;
+            cc = c - 1;
             let pos: i32;
             pos = idx(rr, cc);
-            if (clues[pos].==(1)) {
+            if (clues[pos] == 1) {
                 print_clue_error();
             } else {
-                if (v.==(0)) {
+                if (v == 0) {
                     grid[pos] = 0;
                 } else {
                     if (!can_place(rr, cc, v)) {
@@ -283,7 +283,7 @@ function discard_line(): void {
     let ch: i32;
     for ;; {
         ch = read_char();
-        if (ch.==(10) || ch.==(13) || ch.==(0)) {
+        if (ch == 10 || ch == 13 || ch == 0) {
             return;
         }
     }
@@ -294,10 +294,10 @@ function read_cmd(): i32 {
     let ch: i32;
     for ;; {
         ch = read_char();
-        if (ch.==(0)) {
+        if (ch == 0) {
             return 0;
         }
-        if (ch.==(32) || ch.==(9) || ch.==(10) || ch.==(13)) {
+        if (ch == 32 || ch == 9 || ch == 10 || ch == 13) {
             // skip whitespace
         } else {
             return ch;

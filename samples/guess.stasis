@@ -5,11 +5,11 @@ function seed_rng(seed: i32): void {
 }
 
 function next_rand(max: i32): i32 {
-    rng_state = rng_state.*(1103515245).+(12345);
-    if (rng_state.<(0)) {
-        rng_state = 0.-(rng_state);
+    rng_state = rng_state * 1103515245 + 12345;
+    if (rng_state < 0) {
+        rng_state = 0 - rng_state;
     }
-    return rng_state.%((max)).+(1);
+    return rng_state % (max) + 1;
 }
 
 function print_text_guess(): void {
@@ -48,38 +48,38 @@ function main(): i32 {
     print_intro();
     let seed: i32;
     seed = read_int();
-    if (seed.==(0)) {
+    if (seed == 0) {
         return 0;
     }
     seed_rng(seed);
 
     let target: i32;
     target = next_rand(99);
-    if (target.<(1)) { target = 1; }
-    if (target.>(99)) { target = target.%((99)).+(1); }
+    if (target < 1) { target = 1; }
+    if (target > 99) { target = target % 99 + 1; }
 
     let tries: i32;
-    for tries = 0; tries.<(20); tries = tries.+(1) {
+    for tries = 0; tries < 20; tries = tries + 1 {
         print_text_guess();
         let guess: i32;
         guess = read_int();
-        if (guess.==(0)) {
+        if (guess == 0) {
             return 0;
         }
         let bad: bool;
         bad = false;
-        if (guess.<(1) || guess.>(99)) {
+        if (guess < 1 || guess > 99) {
             bad = true;
         }
 
         if (bad) {
             print_invalid();
         } else {
-            if (guess.==(target)) {
+            if (guess == target) {
                 print_win();
                 return 0;
             }
-            if (guess.<(target)) {
+            if (guess < target) {
                 print_higher();
             } else {
                 print_lower();

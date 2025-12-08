@@ -7,12 +7,12 @@ function fib(n: i32): i32 {
     a = 0;
     b = 1;
 
-    if (n.==(0)) {
+    if (n == 0) {
         return 0;
     }
 
-    for i = 1; i.<(n); i = i.+(1) {
-        next = a.+(b);
+    for i = 1; i < n; i = i + 1 {
+        next = a + b;
         a = b;
         b = next;
     }
@@ -21,25 +21,25 @@ function fib(n: i32): i32 {
 }
 
 test `fib 10`() : bool {
-    return fib(10).==(55);
+    return fib(10) == 55;
 }
 
 test `fib 20`() : bool {
-    return fib(20).==(6765);
+    return fib(20) == 6765;
 }
 
 test `fib 30`() : bool {
-    return fib(30).==(832040);
+    return fib(30) == 832040;
 }
 
 test `fib 35`() : bool {
-    return fib(35).==(9227465);
+    return fib(35) == 9227465;
 }
 
 test `fib 1000`() : bool {
-    return fib(1000).==(1556111435);
+    return fib(1000) == 1556111435;
 }
 
 test `fib 1000000`() : bool {
-    return fib(1000000).==(1884755131);
+    return fib(1000000) == 1884755131;
 }
