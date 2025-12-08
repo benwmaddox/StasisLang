@@ -29,6 +29,17 @@ jobs:
         with:
           dotnet-version: "9.0.x"
 
+      - name: Install LLVM (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm clang
+
+      - name: Install LLVM (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install -y llvm
+
       - name: Restore tools
         run: dotnet tool restore
 
