@@ -28,6 +28,7 @@
 
 ## CLI Quality-of-Life
 - `stasis test` with no path (or `--all`) should discover and run all `.stasis` files under the working directory.
+- `stasis release` builds optimized binaries via clang (defaults `-O3` + LTO); `build` remains unoptimized unless `--opt-level`/`--lto` are provided.
 
 ## Sudoku CLI Mini-Game (Stasis)
 - Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.

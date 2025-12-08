@@ -20,6 +20,8 @@ var moduleName = "module";
 var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
+string? optLevel = null;
+var enableLto = false;
 
 while (cliArgs.Count > 0)
 {
@@ -28,6 +30,11 @@ while (cliArgs.Count > 0)
     {
         case "build":
             mode = arg;
+            break;
+        case "release":
+            mode = arg;
+            optLevel ??= "3";
+            enableLto = true;
             break;
         case "format":
             mode = arg;
@@ -51,6 +58,15 @@ while (cliArgs.Count > 0)
             break;
         case "--all":
             runAllInDirectory = true;
+            break;
+        case "--opt-level" when cliArgs.Count > 0:
+            optLevel = cliArgs.Dequeue();
+            break;
+        case "--lto":
+            enableLto = true;
+            break;
+        case "--no-lto":
+            enableLto = false;
             break;
         case "--help":
             PrintUsage();
@@ -81,6 +97,12 @@ if (path is null)
         PrintUsage();
         return;
     }
+}
+
+if (optLevel is not null && !IsValidOptLevel(optLevel))
+{
+    Console.Error.WriteLine($"error: invalid --opt-level '{optLevel}'. Use 0,1,2,3,s,z.");
+    Environment.Exit(1);
 }
 
 if (!File.Exists(path) && !Directory.Exists(path))
@@ -115,15 +137,15 @@ if (runAllInDirectory && mode == "test")
     foreach (var file in files)
     {
         Console.WriteLine($"=== {file} ===");
-        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath));
+        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto));
     }
     Environment.Exit(overallExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
@@ -167,14 +189,14 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
         File.WriteAllText(tempLl, lower.Ir);
 
-        if (mode == "build")
+        if (mode == "build" || mode == "release")
         {
             var outPath = outputPath ?? BuildDefaultOutputPath(path);
-            var exitCode = BuildExecutable(tempLl, outPath, includeTests);
+            var exitCode = BuildExecutable(tempLl, outPath, includeTests, optLevel, enableLto);
             return exitCode;
         }
 
-        var executeExit = Execute(mode, tempLl);
+        var executeExit = Execute(mode, tempLl, optLevel, enableLto);
         return executeExit;
     }
     finally
@@ -189,7 +211,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     }
 }
 
-static int Execute(string mode, string llPath)
+static int Execute(string mode, string llPath, string? optLevel, bool enableLto)
 {
     if (TryFindTool("lli", out var lli))
     {
@@ -201,7 +223,7 @@ static int Execute(string mode, string llPath)
         var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
         try
         {
-            var args = BuildClangArgs(llPath, exePath, mode == "test");
+            var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto);
             var exit = RunProcess(clang, args);
             if (exit != 0)
             {
@@ -223,10 +245,19 @@ static int Execute(string mode, string llPath)
     return 1;
 }
 
-static string BuildClangArgs(string llPath, string exePath, bool isTest)
+static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
     args.Add("-Wno-override-module");
+    if (!string.IsNullOrWhiteSpace(optLevel))
+    {
+        args.Add($"-O{optLevel}");
+    }
+
+    if (enableLto)
+    {
+        args.Add("-flto");
+    }
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         if (isTest)
@@ -312,7 +343,7 @@ static int RunProcess(string fileName, string arguments)
     return proc.ExitCode;
 }
 
-static int BuildExecutable(string llPath, string outputPath, bool isTest)
+static int BuildExecutable(string llPath, string outputPath, bool isTest, string? optLevel, bool enableLto)
 {
     if (!TryFindTool("clang", out var clang))
     {
@@ -320,7 +351,7 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest)
         return 1;
     }
 
-    var args = BuildClangArgs(llPath, outputPath, isTest);
+    var args = BuildClangArgs(llPath, outputPath, isTest, optLevel, enableLto);
     var exit = RunProcess(clang, args);
     if (exit != 0)
     {
@@ -330,6 +361,9 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest)
     Console.WriteLine($"built: {outputPath}");
     return 0;
 }
+
+static bool IsValidOptLevel(string level) =>
+    level is "0" or "1" or "2" or "3" or "s" or "z";
 
 static string BuildDefaultOutputPath(string sourcePath)
 {
@@ -344,9 +378,10 @@ static void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
     Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>]");
+    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto]");
+    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto]");
     Console.WriteLine("  stasisc format <file>");
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build requires clang in PATH.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)

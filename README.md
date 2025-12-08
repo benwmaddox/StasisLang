@@ -27,12 +27,20 @@ Emit LLVM IR without executing:
 stasis test samples/tests.stasis --emit-ir > out.ll
 ```
 
+Build an optimized executable (defaults to `-O3` and LTO unless overridden):
+```sh
+stasis release samples/basic.stasis --out dist/basic.exe --module basic --opt-level 3 --lto
+```
+
 Options:
 - `run` or `test` subcommands (default is `run` if omitted).
+- `build` produces a binary via `clang` (no optimizations by default); `release` produces an optimized binary (`-O3` + `-flto` by default).
 - `test` with no path (or `--all`) runs every `.stasis` file under the working directory.
 - `--with-tests` include test functions and harness during lowering even for `run`.
 - `--emit-ir` write IR to stdout and skip execution.
+- `--opt-level <0|1|2|3|s|z>` and `--lto|--no-lto` control clang optimization flags for `build`/`release`.
 - `--module <name>` set the LLVM module identifier (default `module`).
+- `--out <path>` write the built binary to a specific path (default is alongside the source).
 - `--help` usage.
 
 ## CLI wrapper

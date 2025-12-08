@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Xunit;
 
 namespace Stasis.Compiler.Tests;
 
@@ -82,5 +84,39 @@ public class CLITests
         {
             Directory.Delete(tempDir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void Builds_release_executable()
+    {
+        if (!HasClang())
+        {
+            return;
+        }
+        var samplePath = Path.Combine(RepoRoot, "samples", "basic.stasis");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"stasis_release_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+        try
+        {
+            var (exit, stdout, stderr) = RunCli($"release \"{samplePath}\" --out \"{outputPath}\"");
+            Assert.Equal(0, exit);
+            Assert.True(File.Exists(outputPath));
+            Assert.Contains("built:", stdout);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            if (File.Exists(outputPath))
+            {
+                File.Delete(outputPath);
+            }
+        }
+    }
+
+    private static bool HasClang()
+    {
+        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+        var name = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "clang.exe" : "clang";
+        return search.Any(dir => File.Exists(Path.Combine(dir, name)));
     }
 }
