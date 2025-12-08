@@ -516,6 +516,9 @@ function prompt_seed(): i32 {
     print_char(10);
     let seed: i32;
     seed = parse_seed_input(len);
+    if (seed == -1) {
+        seed = time();
+    }
     if (seed == 0) {
         seed = 1;
     }
@@ -545,7 +548,8 @@ function parse_seed_input(len: i32): i32 {
     if (has_digit) {
         return value;
     }
-    return 0;
+    // -1 signals that no digit was provided so the caller can choose a default seed.
+    return -1;
 }
 
 function generate_random_puzzle(seed: i32): void {

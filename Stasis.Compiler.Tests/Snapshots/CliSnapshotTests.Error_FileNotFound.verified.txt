@@ -1,0 +1,5 @@
+﻿{
+  ExitCode: 1,
+  Stdout: ,
+  Stderr: error: file not found: nonexistent.stasis
+}

@@ -1,0 +1,26 @@
+﻿{
+  ExitCode: 1,
+  Stdout: ,
+  Stderr:
+error: Expected '(' after function name. (<temp-file>:1:17)
+function broken {
+                ^
+error: Expected parameter name. (<temp-file>:1:18)
+function broken {
+                 ^
+error: Expected ':' after parameter name. (<temp-file>:1:18)
+function broken {
+                 ^
+error: Expected type name. (<temp-file>:1:18)
+function broken {
+                 ^
+error: Expected ')' after parameters. (<temp-file>:1:18)
+function broken {
+                 ^
+error: Expected '{'. (<temp-file>:1:18)
+function broken {
+                 ^
+error: Expected '}'. (<temp-file>:1:18)
+function broken {
+                 ^
+}

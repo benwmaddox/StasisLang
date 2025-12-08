@@ -321,7 +321,16 @@ public sealed class ModuleLowerer
             "print_clue_error",
             "print_solved",
             "read_char",
-            "read_int"
+            "read_int",
+            "time",
+            "init_window",
+            "begin_frame",
+            "end_frame",
+            "clear",
+            "draw_line",
+            "is_key_down",
+            "get_time_ms",
+            "sleep_ms"
         };
         private int _blockId;
         public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests)
@@ -848,6 +857,106 @@ public sealed class ModuleLowerer
                     return EmitReadChar(builder);
                 case "read_int":
                     return EmitReadInt(builder);
+                case "time":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("time expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+                        return EmitTime(builder);
+                    }
+                case "init_window":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("init_window expects width, height, and title.", span);
+                            return ConstI32(0);
+                        }
+
+                        _ = LowerExpression(builder, args[0], locals);
+                        _ = LowerExpression(builder, args[1], locals);
+                        _ = LowerExpression(builder, args[2], locals);
+                        return ConstI32(1);
+                    }
+                case "begin_frame":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("begin_frame expects no arguments.", span);
+                        }
+                        return ConstI32(0);
+                    }
+                case "end_frame":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("end_frame expects no arguments.", span);
+                        }
+                        return ConstI32(0);
+                    }
+                case "clear":
+                    {
+                        if (args.Count != 4)
+                        {
+                            AddDiagnostic("clear expects four components (r,g,b,a).", span);
+                            return ConstI32(0);
+                        }
+
+                        foreach (var arg in args)
+                        {
+                            _ = LowerExpression(builder, arg, locals);
+                        }
+
+                        return ConstI32(0);
+                    }
+                case "draw_line":
+                    {
+                        if (args.Count != 8)
+                        {
+                            AddDiagnostic("draw_line expects eight arguments (x1,y1,x2,y2,r,g,b,a).", span);
+                            return ConstI32(0);
+                        }
+
+                        foreach (var arg in args)
+                        {
+                            _ = LowerExpression(builder, arg, locals);
+                        }
+
+                        return ConstI32(0);
+                    }
+                case "is_key_down":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("is_key_down expects a key code.", span);
+                            return ConstI32(0);
+                        }
+
+                        _ = LowerExpression(builder, args[0], locals);
+                        return ConstI32(0);
+                    }
+                case "get_time_ms":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("get_time_ms expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        return EmitGetTimeMs(builder);
+                    }
+                case "sleep_ms":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sleep_ms expects the duration in milliseconds.", span);
+                            return ConstI32(0);
+                        }
+
+                        _ = LowerExpression(builder, args[0], locals);
+                        return ConstI32(0);
+                    }
                 default:
                     AddDiagnostic($"Unknown built-in '{name}'.", span);
                     return ConstI32(0);
@@ -1213,6 +1322,24 @@ public sealed class ModuleLowerer
 
             builder.PositionAtEnd(cont);
             return builder.BuildLoad2(LLVMTypeRef.Int32, alloca, "read_char.val");
+        }
+
+        private LLVMValueRef EmitTime(LLVMBuilderRef builder)
+        {
+            var (timeFn, timeType, timePtrType) = GetOrDeclareTime(_moduleBuilder);
+            var nullPtr = LLVMValueRef.CreateConstPointerNull(timePtrType);
+            var value = builder.BuildCall2(timeType, timeFn, new[] { nullPtr }, "time.call");
+            return builder.BuildTrunc(value, LLVMTypeRef.Int32, "time.i32");
+        }
+
+        private LLVMValueRef EmitGetTimeMs(LLVMBuilderRef builder)
+        {
+            var (clockFn, clockType) = GetOrDeclareClock(_moduleBuilder);
+            var ticks = builder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "gfx.clock");
+            var ticksMs = builder.BuildMul(ticks, ConstInt64(1000), "gfx.clock_ms");
+            var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
+            var ms64 = builder.BuildUDiv(ticksMs, clocksPerSec, "gfx.ms64");
+            return builder.BuildTrunc(ms64, LLVMTypeRef.Int32, "gfx.ms");
         }
 
         private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)
