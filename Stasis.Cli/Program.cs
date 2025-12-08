@@ -260,6 +260,7 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             args.Add("-fuse-ld=lld");
+            args.Add("-Wl,/nodefaultlib:libucrt");
         }
     }
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
