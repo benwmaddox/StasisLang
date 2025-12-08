@@ -32,7 +32,7 @@ public sealed class LlvmTypeMapper
             "i32" => LLVMTypeRef.Int32,
             "f32" => LLVMTypeRef.Float,
             "f64" => LLVMTypeRef.Double,
-            "string" => LLVMTypeRef.Int8, // string[N] should be mapped as array by caller
+            "string" => LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), // bare string is a pointer to bytes
             "void" => LLVMTypeRef.Void,
             _ => LLVMTypeRef.Int32
         };

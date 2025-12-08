@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Text;
 using System.Runtime.InteropServices;
 using LLVMSharp.Interop;
 using Stasis.Compiler;
@@ -310,6 +311,8 @@ public sealed class ModuleLowerer
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
         {
+            "print_string",
+            "print",
             "print_int",
             "print_char",
             "print_cell",
@@ -468,7 +471,7 @@ public sealed class ModuleLowerer
             switch (expr)
             {
                 case LiteralExpressionSyntax lit:
-                    return LowerLiteral(lit);
+                    return LowerLiteral(builder, lit);
                 case IdentifierExpressionSyntax id:
                     if (locals.TryGetValue(id.Identifier.Text, out var value))
                     {
@@ -510,7 +513,7 @@ public sealed class ModuleLowerer
             }
         }
 
-        private LLVMValueRef LowerLiteral(LiteralExpressionSyntax lit)
+        private LLVMValueRef LowerLiteral(LLVMBuilderRef builder, LiteralExpressionSyntax lit)
         {
             switch (lit.Literal.Kind)
             {
@@ -518,6 +521,11 @@ public sealed class ModuleLowerer
                     return ConstI32(ival);
                 case TokenKind.FloatLiteral when float.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var fval):
                     return LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("f32")), fval);
+                case TokenKind.StringLiteral:
+                    {
+                        var text = UnescapeString(lit.Literal.Text);
+                        return builder.BuildGlobalStringPtr(text, $"str_{_blockId++}");
+                    }
                 case TokenKind.TrueKeyword:
                     return ConstI32(1);
                 case TokenKind.FalseKeyword:
@@ -737,6 +745,33 @@ public sealed class ModuleLowerer
         {
             switch (name)
             {
+                case "print_string":
+                case "print":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("print_string expects 1 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        LLVMValueRef strPtr;
+                        if (args[0] is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+                        {
+                            var text = UnescapeString(lit.Literal.Text);
+                            strPtr = builder.BuildGlobalStringPtr(text, $"strlit_{_blockId++}");
+                        }
+                        else
+                        {
+                            var value = LowerExpression(builder, args[0], locals);
+                            var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                            strPtr = value.TypeOf.Kind == LLVMTypeKind.LLVMPointerTypeKind
+                                ? value
+                                : builder.BuildIntToPtr(value, i8Ptr, "str.ptr");
+                        }
+
+                        EmitPrintf(builder, "%s", strPtr);
+                        return ConstI32(0);
+                    }
                 case "print_int":
                     {
                         if (args.Count != 1)
@@ -1110,6 +1145,41 @@ public sealed class ModuleLowerer
 
             var callType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, args.Select(a => a.TypeOf).ToArray(), false);
             return builder.BuildCall2(callType, printf, args, "printf.call");
+        }
+
+        private static string UnescapeString(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+
+            var inner = text.Length >= 2 ? text.Substring(1, text.Length - 2) : text;
+            var sb = new StringBuilder(inner.Length);
+            for (int i = 0; i < inner.Length; i++)
+            {
+                var ch = inner[i];
+                if (ch == '\\' && i + 1 < inner.Length)
+                {
+                    i++;
+                    var esc = inner[i];
+                    sb.Append(esc switch
+                    {
+                        '\\' => '\\',
+                        '"' => '"',
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        _ => esc
+                    });
+                }
+                else
+                {
+                    sb.Append(ch);
+                }
+            }
+
+            return sb.ToString();
         }
 
         private LLVMValueRef EmitReadInt(LLVMBuilderRef builder)

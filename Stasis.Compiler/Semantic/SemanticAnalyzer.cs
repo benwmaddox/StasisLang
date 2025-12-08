@@ -51,6 +51,8 @@ public sealed class SemanticAnalyzer
             _symbols[name] = new Symbol(name, SymbolKind.Struct, type);
         }
 
+        AddSymbol("print_string", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("print", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_int", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_char", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_cell", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));

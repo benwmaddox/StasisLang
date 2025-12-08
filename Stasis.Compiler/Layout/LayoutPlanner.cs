@@ -1,3 +1,4 @@
+using System;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
 
@@ -97,7 +98,7 @@ public sealed class LayoutPlanner
             "i32" => 4,
             "f32" => 4,
             "f64" => 8,
-            "string" => 1, // string[N] is represented via array types; bare string treated as byte here.
+            "string" => IntPtr.Size, // bare string is a pointer; string[N] should be spelled as u8[N]
             _ => 4 // default alignment for unknown; structs handled separately above.
         };
     }

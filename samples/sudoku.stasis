@@ -218,27 +218,12 @@ function is_complete(): bool {
 }
 
 function print_sep_line(): void {
-    let i: i32;
-    print_char(32); print_char(32); print_char(43); // indent + +
-    for i = 0; i < 8; i = i + 1 { print_char(45); }
-    print_char(43);
-    for i = 0; i < 8; i = i + 1 { print_char(45); }
-    print_char(43);
-    for i = 0; i < 8; i = i + 1 { print_char(45); }
-    print_char(43);
+    print_string("  +--------+--------+--------+");
     print_char(10);
 }
 
 function print_col_header(): void {
-    print_char(32); print_char(32);
-    let c: i32;
-    for c = 0; c < 9; c = c + 1 {
-        print_int(c + 1);
-        print_char(32);
-        if (c == 2 || c == 5) {
-            print_char(32);
-        }
-    }
+    print_string("  1 2 3  4 5 6  7 8 9");
     print_char(10);
 }
 
@@ -507,32 +492,35 @@ function parse_move(len: i32): bool {
 }
 
 function sudoku_print_prompt(): void {
-    print_char(69); print_char(110); print_char(116); print_char(101); print_char(114); print_char(32);
-    print_char(114); print_char(111); print_char(119); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(40); print_char(48); print_char(32); print_char(99); print_char(108); print_char(101); print_char(97); print_char(114); print_char(115); print_char(44); print_char(32); print_char(113); print_char(32); print_char(113); print_char(117); print_char(105); print_char(116); print_char(115); print_char(41); print_char(58); print_char(32);
+    print_string("Enter row col value (0 clears, q quits): ");
 }
 
 function sudoku_print_parse_error(): void {
-    print_char(73); print_char(110); print_char(118); print_char(97); print_char(108); print_char(105); print_char(100); print_char(32); print_char(105); print_char(110); print_char(112); print_char(117); print_char(116); print_char(46); print_char(32);
-    print_char(85); print_char(115); print_char(101); print_char(32); print_char(114); print_char(111); print_char(119); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(108); print_char(105); print_char(107); print_char(101); print_char(32); print_char(34); print_char(50); print_char(32); print_char(49); print_char(32); print_char(51); print_char(34); print_char(46); print_char(10);
+    print_string("Invalid input. Use row col value like 2 1 3.");
+    print_char(10);
 }
 
 function sudoku_print_range_error(): void {
-    print_char(82); print_char(111); print_char(119); print_char(32); print_char(97); print_char(110); print_char(100); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(109); print_char(117); print_char(115); print_char(116); print_char(32); print_char(98); print_char(101); print_char(32); print_char(49); print_char(45); print_char(57); print_char(59); print_char(32);
-    print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(109); print_char(117); print_char(115); print_char(116); print_char(32); print_char(98); print_char(101); print_char(32); print_char(48); print_char(45); print_char(57); print_char(32); print_char(40); print_char(48); print_char(32); print_char(99); print_char(108); print_char(101); print_char(97); print_char(114); print_char(115); print_char(41); print_char(46); print_char(10);
+    print_string("Row and col must be 1-9; value must be 0-9 (0 clears).");
+    print_char(10);
 }
 
 function sudoku_print_conflict(): void {
-    print_char(67); print_char(111); print_char(110); print_char(102); print_char(108); print_char(105); print_char(99); print_char(116); print_char(115); print_char(32); print_char(119); print_char(105); print_char(116); print_char(104); print_char(32); print_char(114); print_char(111); print_char(119); print_char(47); print_char(99); print_char(111); print_char(108); print_char(47); print_char(98); print_char(111); print_char(120); print_char(46); print_char(10);
+    print_string("Conflicts with row/col/box.");
+    print_char(10);
 }
 
 function sudoku_print_clue_error(): void {
-    print_char(67); print_char(97); print_char(110); print_char(110); print_char(111); print_char(116); print_char(32); print_char(99); print_char(104); print_char(97); print_char(110); print_char(103); print_char(101); print_char(32); print_char(97); print_char(32); print_char(103); print_char(105); print_char(118); print_char(101); print_char(110); print_char(32); print_char(99); print_char(108); print_char(117); print_char(101); print_char(46); print_char(10);
+    print_string("Cannot change a given clue.");
+    print_char(10);
 }
 
 function sudoku_print_invalid(): void {
-    print_char(73); print_char(110); print_char(118); print_char(97); print_char(108); print_char(105); print_char(100); print_char(32); print_char(112); print_char(108); print_char(97); print_char(99); print_char(101); print_char(109); print_char(101); print_char(110); print_char(116); print_char(46); print_char(10);
+    print_string("Invalid placement.");
+    print_char(10);
 }
 
 function sudoku_print_solved(): void {
-    print_char(83); print_char(111); print_char(108); print_char(118); print_char(101); print_char(100); print_char(33); print_char(32); print_char(71); print_char(114); print_char(101); print_char(97); print_char(116); print_char(32); print_char(106); print_char(111); print_char(98); print_char(33); print_char(10);
+    print_string("Solved! Great job!");
+    print_char(10);
 }

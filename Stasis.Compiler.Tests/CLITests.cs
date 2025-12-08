@@ -42,6 +42,16 @@ public class CLITests
         Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
     }
 
+    [Fact]
+    public void Runs_string_sample()
+    {
+        var samplePath = Path.Combine(RepoRoot, "samples", "strings.stasis");
+        var (exit, stdout, stderr) = RunCli($"run \"{samplePath}\"");
+        Assert.Equal(0, exit);
+        Assert.Contains("hello, stasis!", stdout);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+    }
+
     private static (int ExitCode, string Stdout, string Stderr) RunCli(string args, string? workingDirectory = null, string? stdin = null)
     {
         var psi = new ProcessStartInfo

@@ -1,0 +1,11 @@
+function main(): i32 {
+    print_string("hello, stasis!");
+    print_char(10);
+    return 0;
+}
+
+test `prints greeting`() : bool {
+    print_string("hello, stasis!");
+    print_char(10);
+    return true;
+}
