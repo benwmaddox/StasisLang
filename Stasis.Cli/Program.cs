@@ -189,7 +189,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         fileStopwatch.Stop();
-        Console.WriteLine($"Compiled in {fileStopwatch.ElapsedMilliseconds} ms");
+        Console.WriteLine($"Total time={fileStopwatch.ElapsedMilliseconds}ms");
     }
 }
 
