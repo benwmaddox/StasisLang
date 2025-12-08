@@ -202,53 +202,69 @@ function play(): i32 {
     seed_puzzle();
     reset_grid();
 
-    for ;; {
+    let game_loop: i32;
+    for game_loop = 0; game_loop < 1; game_loop = game_loop {
+        let skip: bool;
+        skip = false;
+
         print_col_header();
         print_board();
         if (is_complete()) {
-            print_solved();
+            sudoku_print_solved();
             return 0;
         }
 
-        print_prompt();
+        sudoku_print_prompt();
         let line_len: i32;
         line_len = read_line();
         if (line_len == 0) {
-            continue;
+            skip = true;
         }
 
         let first: i32;
-        first = first_non_space(line_len);
-        if (first == -1) {
-            continue;
-        }
-        if (first == 113 || first == 81) { // q or Q
-            return 0;
+        if (!skip) {
+            first = first_non_space(line_len);
+            if (first == -1) {
+                skip = true;
+            } else {
+                if (first == 113 || first == 81) { // q or Q
+                    return 0;
+                }
+            }
         }
 
         let parsed: bool;
-        parsed = parse_move(line_len);
-        if (!parsed) {
-            print_parse_error();
-            continue;
+        parsed = false;
+        if (!skip) {
+            parsed = parse_move(line_len);
+            if (!parsed) {
+            sudoku_print_parse_error();
+            skip = true;
+            }
         }
 
         let r: i32;
         let c: i32;
         let v: i32;
-        r = parse_row;
-        c = parse_col;
-        v = parse_val;
+        if (!skip) {
+            r = parse_row;
+            c = parse_col;
+            v = parse_val;
+        } else {
+            r = 0; c = 0; v = 0;
+        }
 
         let bad: bool;
         bad = false;
-        if (r < 1 || r > 9) { bad = true; }
-        if (c < 1 || c > 9) { bad = true; }
-        if (v < 0 || v > 9) { bad = true; }
+        if (!skip) {
+            if (r < 1 || r > 9) { bad = true; }
+            if (c < 1 || c > 9) { bad = true; }
+            if (v < 0 || v > 9) { bad = true; }
 
-        if (bad) {
-            print_range_error();
-            continue;
+            if (bad) {
+                sudoku_print_range_error();
+                skip = true;
+            }
         }
 
         let rr: i32;
@@ -257,24 +273,30 @@ function play(): i32 {
         cc = c - 1;
         let pos: i32;
         pos = idx(rr, cc);
-        if (clues[pos] == 1) {
-            print_clue_error();
-            continue;
-        }
-
-        if (v == 0) {
-            grid[pos] = 0;
-        } else {
-            if (!can_place(rr, cc, v)) {
-                print_conflict();
-            } else {
-                grid[pos] = v;
+        if (!skip) {
+            if (clues[pos] == 1) {
+                sudoku_print_clue_error();
+                skip = true;
             }
         }
 
-        if (is_complete()) {
-            print_solved();
-            return 0;
+        if (!skip) {
+            if (v == 0) {
+                grid[pos] = 0;
+            } else {
+                if (!can_place(rr, cc, v)) {
+                    sudoku_print_conflict();
+                } else {
+                    grid[pos] = v;
+                }
+            }
+        }
+
+        if (!skip) {
+            if (is_complete()) {
+                sudoku_print_solved();
+                return 0;
+            }
         }
     }
 
@@ -289,12 +311,13 @@ global input_buf: i32[128];
 global parse_row: i32;
 global parse_col: i32;
 global parse_val: i32;
+global parse_next: i32;
+global parse_tmp: i32;
 
 function read_line(): i32 {
     let i: i32;
     let ch: i32;
-    i = 0;
-    for ;; {
+    for i = 0; i < 128; i = i {
         ch = read_char();
         if (ch == 0) {
             return i;
@@ -310,6 +333,8 @@ function read_line(): i32 {
         if (i < 128) {
             input_buf[i] = ch;
             i = i + 1;
+        } else {
+            return i;
         }
     }
 
@@ -328,122 +353,111 @@ function first_non_space(len: i32): i32 {
     return -1;
 }
 
-function parse_move(len: i32): bool {
-    let pos: i32;
-    pos = 0;
-
-    // row
-    for ;; {
-        if (pos < len && (input_buf[pos] == 32 || input_buf[pos] == 9)) {
-            pos = pos + 1;
-        } else {
-            break;
+function skip_ws(len: i32, start: i32): void {
+    let k: i32;
+    for k = start; k < len; k = k + 1 {
+        if (!(input_buf[k] == 32 || input_buf[k] == 9)) {
+            parse_next = k;
+            return;
         }
     }
-    if (pos >= len) { return false; }
-    let r: i32;
+    parse_next = len;
+    return;
+}
+
+function parse_int_token(len: i32, start: i32): bool {
+    let k: i32;
     let has: bool;
-    r = 0;
+    let value: i32;
     has = false;
-    for ;; {
-        if (!(pos < len)) { break; }
+    value = 0;
+    for k = start; k < len; k = k + 1 {
         let ch: i32;
-        ch = input_buf[pos];
-        if (ch < 48 || ch > 57) { break; }
-        has = true;
-        r = r * 10 + (ch - 48);
-        pos = pos + 1;
-    }
-    if (!has) { return false; }
-
-    // col
-    for ;; {
-        if (pos < len && (input_buf[pos] == 32 || input_buf[pos] == 9)) {
-            pos = pos + 1;
-        } else {
-            break;
+        ch = input_buf[k];
+        if (ch < 48 || ch > 57) {
+            parse_next = k;
+            if (has) {
+                parse_tmp = value;
+            }
+            return has;
         }
-    }
-    if (pos >= len) { return false; }
-    let c: i32;
-    c = 0;
-    has = false;
-    for ;; {
-        if (!(pos < len)) { break; }
-        let ch: i32;
-        ch = input_buf[pos];
-        if (ch < 48 || ch > 57) { break; }
         has = true;
-        c = c * 10 + (ch - 48);
-        pos = pos + 1;
+        value = value * 10 + (ch - 48);
     }
-    if (!has) { return false; }
 
-    // value
-    for ;; {
-        if (pos < len && (input_buf[pos] == 32 || input_buf[pos] == 9)) {
-            pos = pos + 1;
-        } else {
-            break;
-        }
+    parse_next = k;
+    if (has) {
+        parse_tmp = value;
     }
-    if (pos >= len) { return false; }
-    let v: i32;
-    v = 0;
-    has = false;
-    for ;; {
-        if (!(pos < len)) { break; }
-        let ch: i32;
-        ch = input_buf[pos];
-        if (ch < 48 || ch > 57) { break; }
-        has = true;
-        v = v * 10 + (ch - 48);
-        pos = pos + 1;
-    }
-    if (!has) { return false; }
+    return has;
+}
 
-    for ;; {
-        if (pos < len && (input_buf[pos] == 32 || input_buf[pos] == 9)) {
-            pos = pos + 1;
-        } else {
-            break;
-        }
-    }
-    if (pos < len) { return false; }
+function parse_move(len: i32): bool {
+    let i: i32;
+    i = 0;
 
-    parse_row = r;
-    parse_col = c;
-    parse_val = v;
+    skip_ws(len, i);
+    i = parse_next;
+    if (!(i < len)) { return false; }
+
+    let ok: bool;
+    ok = parse_int_token(len, i);
+    if (!ok) { return false; }
+    parse_row = parse_tmp;
+    i = parse_next;
+
+    skip_ws(len, i);
+    i = parse_next;
+    if (!(i < len)) { return false; }
+
+    ok = parse_int_token(len, i);
+    if (!ok) { return false; }
+    parse_col = parse_tmp;
+    i = parse_next;
+
+    skip_ws(len, i);
+    i = parse_next;
+    if (!(i < len)) { return false; }
+
+    ok = parse_int_token(len, i);
+    if (!ok) { return false; }
+    parse_val = parse_tmp;
+    i = parse_next;
+
+    skip_ws(len, i);
+    i = parse_next;
+    if (i < len) { return false; }
+
     return true;
 }
 
-function print_prompt(): void {
+function sudoku_print_prompt(): void {
     print_char(69); print_char(110); print_char(116); print_char(101); print_char(114); print_char(32);
     print_char(114); print_char(111); print_char(119); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(40); print_char(48); print_char(32); print_char(99); print_char(108); print_char(101); print_char(97); print_char(114); print_char(115); print_char(44); print_char(32); print_char(113); print_char(32); print_char(113); print_char(117); print_char(105); print_char(116); print_char(115); print_char(41); print_char(58); print_char(32);
 }
 
-function print_parse_error(): void {
+function sudoku_print_parse_error(): void {
     print_char(73); print_char(110); print_char(118); print_char(97); print_char(108); print_char(105); print_char(100); print_char(32); print_char(105); print_char(110); print_char(112); print_char(117); print_char(116); print_char(46); print_char(32);
     print_char(85); print_char(115); print_char(101); print_char(32); print_char(114); print_char(111); print_char(119); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(108); print_char(105); print_char(107); print_char(101); print_char(32); print_char(34); print_char(50); print_char(32); print_char(49); print_char(32); print_char(51); print_char(34); print_char(46); print_char(10);
 }
 
-function print_range_error(): void {
+function sudoku_print_range_error(): void {
     print_char(82); print_char(111); print_char(119); print_char(32); print_char(97); print_char(110); print_char(100); print_char(32); print_char(99); print_char(111); print_char(108); print_char(32); print_char(109); print_char(117); print_char(115); print_char(116); print_char(32); print_char(98); print_char(101); print_char(32); print_char(49); print_char(45); print_char(57); print_char(59); print_char(32);
     print_char(118); print_char(97); print_char(108); print_char(117); print_char(101); print_char(32); print_char(109); print_char(117); print_char(115); print_char(116); print_char(32); print_char(98); print_char(101); print_char(32); print_char(48); print_char(45); print_char(57); print_char(32); print_char(40); print_char(48); print_char(32); print_char(99); print_char(108); print_char(101); print_char(97); print_char(114); print_char(115); print_char(41); print_char(46); print_char(10);
 }
 
-function print_conflict(): void {
+function sudoku_print_conflict(): void {
     print_char(67); print_char(111); print_char(110); print_char(102); print_char(108); print_char(105); print_char(99); print_char(116); print_char(115); print_char(32); print_char(119); print_char(105); print_char(116); print_char(104); print_char(32); print_char(114); print_char(111); print_char(119); print_char(47); print_char(99); print_char(111); print_char(108); print_char(47); print_char(98); print_char(111); print_char(120); print_char(46); print_char(10);
 }
 
-function print_clue_error(): void {
+function sudoku_print_clue_error(): void {
     print_char(67); print_char(97); print_char(110); print_char(110); print_char(111); print_char(116); print_char(32); print_char(99); print_char(104); print_char(97); print_char(110); print_char(103); print_char(101); print_char(32); print_char(97); print_char(32); print_char(103); print_char(105); print_char(118); print_char(101); print_char(110); print_char(32); print_char(99); print_char(108); print_char(117); print_char(101); print_char(46); print_char(10);
 }
 
-function print_invalid(): void {
+function sudoku_print_invalid(): void {
     print_char(73); print_char(110); print_char(118); print_char(97); print_char(108); print_char(105); print_char(100); print_char(32); print_char(112); print_char(108); print_char(97); print_char(99); print_char(101); print_char(109); print_char(101); print_char(110); print_char(116); print_char(46); print_char(10);
 }
 
-function print_solved(): void {
+function sudoku_print_solved(): void {
     print_char(83); print_char(111); print_char(108); print_char(118); print_char(101); print_char(100); print_char(33); print_char(32); print_char(71); print_char(114); print_char(101); print_char(97); print_char(116); print_char(32); print_char(106); print_char(111); print_char(98); print_char(33); print_char(10);
 }

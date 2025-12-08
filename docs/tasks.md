@@ -30,6 +30,11 @@
 - `stasis test` with no path (or `--all`) should discover and run all `.stasis` files under the working directory.
 - `stasis release` builds optimized binaries via clang (defaults `-O3` + LTO); `build` remains unoptimized unless `--opt-level`/`--lto` are provided.
 
+## String literals and printing
+- Add first-class string literal support to the frontend (lex/parse), carry type info through symbols/sema, and lower string constants to immutable global buffers (null-terminated `i8` arrays).
+- Expose a `print(string)`/`puts`-style intrinsic in lowering: map a Stasis `string` to `i8*` in LLVM, emit globals for literals, and generate `printf("%s", ptr)`/`puts(ptr)` calls.
+- Update samples and tests to use string printing instead of manual `print_char` sequences; add negative tests for unterminated/invalid escapes.
+
 ## Sudoku CLI Mini-Game (Stasis)
 - Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.
 - Language/runtime gaps to close:
