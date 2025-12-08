@@ -13,7 +13,7 @@
 - Use `rg` for code/spec searches (faster than `grep`) and favor scriptable tasks over ad-hoc manual steps.
 
 ## Coding Style & Naming Conventions
-- Preserve operator-method style from the spec (`target.=(value)`, `. +()`, etc.); no infix operators in v1.
+- Preserve operator-method style for arithmetic/comparison (`.+()`, `.==()`, etc.); infix arithmetic/comparison is allowed with TypeScript-like precedence; assignment uses infix `=` (and compound forms).
 - Keep files ASCII; avoid introducing non-ASCII unless the surrounding file already uses it.
 - Name files and modules with short, lowercase, dash/underscore-separated tokens (`lexing.rs`, `parser.ts`, `memory_layout.md`).
 - Document memory layout and lowering decisions alongside code; add brief comments only where behavior is non-obvious.
@@ -30,7 +30,7 @@
 - PRs should summarize intent, list user-visible changes, and call out spec updates or new commands; link issues and include reproduction or screenshots when UI/UX is involved.
 
 ## Architecture & Design Notes
-- Core principles (per `docs/spec.md`): static global memory only; AoS syntax lowered to SoA storage; deterministic layouts; operator-methods replace infix syntax; compilation targets LLVM/WASM.
+- Core principles (per `docs/spec.md`): static global memory only; AoS syntax lowered to SoA storage; deterministic layouts; operator-method arithmetic/comparison (infix allowed) with infix assignment; compilation targets LLVM/WASM.
 - Implementation stack: C# front-end with recursive-descent parser (LL(1) per `docs/compilation.md`), lowering through LLVMSharp bindings to produce LLVM IR and WASM.
 - Keep the managed/native boundary explicit; encapsulate LLVMSharp interop in a thin layer to keep IR building testable.
 - Avoid hidden allocation or implicit copying; make side effects and memory writes explicit in both code and docs.

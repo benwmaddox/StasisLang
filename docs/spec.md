@@ -1,8 +1,9 @@
 Got you, Ben. Here is a **complete, consolidated, detailed Stasis Language Specification** with **all decisions incorporated**, including:
 
-- Assignment via **`.=( )`**
-- Operator-methods for arithmetic, comparison, and assignment
-- No infix operators in v1
+- Assignment via infix `=`
+- Operator-methods for arithmetic/comparison; assignment uses infix `=`
+- Infix arithmetic/comparison with TypeScript-style precedence; compound assignment supported
+- Only one assignment operator may appear in an expression (no chaining).
 - AoS → SoA translation model
 - LLVM as backend
 - Static memory rules
@@ -11,7 +12,7 @@ Got you, Ben. Here is a **complete, consolidated, detailed Stasis Language Speci
 - Built-in opcode-direct functions
 - All built-in operators, including their lowering
 - Updated examples
-- Fully aligned with the LL(1) grammar you approved
+- Aligned with the current Pratt-based expression grammar
 
 I am not omitting anything — this is the full working spec as of now.
 
@@ -32,11 +33,11 @@ The core design pillars are:
 - **Static memory only** — all data exists in a fixed global memory region
 - **No dynamic allocation** — no heap, no runtime resizing
 - **Explicit semantics** — no hidden copies, no implicit boxing
-- **Operator-methods** instead of infix operators
-- **Assignment operator is a method call**:
+- **Operator-methods** for arithmetic/comparison; assignment uses infix `=`
+- **Assignment uses infix syntax**:
 
   ```
-  target.=(value)
+  target = value
   ```
 
 - **AoS source structure → SoA target memory**
@@ -71,13 +72,11 @@ struct enum global function export test return let if else for foreach in
 
 (Reserved but potentially unused tokens may be added later.)
 
-### Operators (all method-based)
+### Operators
 
-```
-.+() .-() .*() ./() .%()
-.<() .>() .==()
-.=()
-```
+- Infix arithmetic/comparison: `+ - * / % < > ==` with TypeScript-style precedence.
+- Compound assignment: `= += -= *= /= %=`
+- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .>() .==()`
 
 ---
 
@@ -128,8 +127,8 @@ Enums are lowered to integers (`u32` by default).
 
 - All structs and arrays live in a single global memory region.
 - Functions may not allocate dynamic memory.
-- Local variables can only be primitive types (`i32`, `f32`, etc.) stored in WASM/LLVM locals.
-- Structs and arrays _cannot_ be local — only **references** to global memory.
+- Local variables are primitive scalars stored in WASM/LLVM locals; struct-typed locals hold references (indices) into global structs.
+- Arrays are never local — struct storage stays global-only even when referenced from the stack.
 
 ### 4.2 AoS Syntax → SoA Storage
 
@@ -163,7 +162,7 @@ p.hp    →  Player_hp[p.index]
 Assignment is explicit:
 
 ```
-p.hp.=(5)
+p.hp = 5
 ```
 
 Lowering:
@@ -186,8 +185,7 @@ Bounds checking rules may be:
 
 # **5. Expressions**
 
-Stasis v1 uses **only operator-methods**.
-There are **no infix operators** — everything is a postfix chain.
+Stasis expressions allow infix arithmetic/comparison with TypeScript-style precedence (`||`, `&&`, equality, relational, additive, multiplicative) plus infix `=`/`+=`/`-=`/`*=` `/=` `%=`, and `&&`/`||` for logical flow. Operator-methods for arithmetic/comparison remain valid. A Pratt parser enforces precedence (assignments are right-associative).
 
 ---
 
@@ -240,7 +238,7 @@ Returns `bool` (`i32`, 0 or 1).
 ## 6.3 Assignment Operator
 
 ```
-.=(rhs)
+ = rhs
 ```
 
 ### Semantics:
@@ -280,14 +278,14 @@ Lowering:
 let x: Type;
 ```
 
-Locals may only be primitive types. Initialization uses the assignment operator-method on a subsequent line, e.g. `x.=(0);`.
+Locals are primitive scalars or struct references (indices into globals). Arrays cannot be local. Initialize them with a subsequent assignment, e.g. `let x: i32; x = 0;`.
 
 ### 7.2 Assignment
 
 Just another expression:
 
 ```
-p.hp.=(10);
+p.hp = 10;
 ```
 
 ### 7.3 If
@@ -300,7 +298,7 @@ else { ... }
 ### 7.4 For
 
 ```
-for i.=(0); i.<(10); i.=( i.+(1) ) {
+for i = 0; i.<(10); i = i.+(1) {
     ...
 }
 ```
@@ -363,8 +361,8 @@ Global arrays of struct references become SoA automatically.
 ```
 test `enemy takes damage`(): bool {
     let hp: i32;
-    hp.=(50);
-    hp.=(hp.-(10));
+    hp = 50;
+    hp = hp.-(10);
     return hp.==(40);
 }
 ```
@@ -448,7 +446,7 @@ Generates LLVM globals:
 Example:
 
 ```
-p.hp.=( p.hp.-(10) )
+p.hp = p.hp.-(10)
 ```
 
 Compiles to:
@@ -473,13 +471,13 @@ Compiles to:
 ```stasis
 function updateEnemy(i: u32, dt: f32): void {
     let e: Enemy;
-    e.=(Enemy(i));
+    e = Enemy(i);
 
-    e.posX.=( e.posX.+( e.vx.*(dt) ) );
-    e.posY.=( e.posY.+( e.vy.*(dt) ) );
+    e.posX = e.posX.+( e.vx.*(dt) );
+    e.posY = e.posY.+( e.vy.*(dt) );
 
     if (e.hp.<(1)) {
-        e.hp.=(0);
+        e.hp = 0;
     }
 }
 ```
@@ -487,14 +485,14 @@ function updateEnemy(i: u32, dt: f32): void {
 ### Array update:
 
 ```stasis
-scores[i].=( scores[i].+(1) );
+scores[i] = scores[i].+(1);
 ```
 
 ### Health handling:
 
 ```stasis
 function damage(e: Enemy, amt: u8): void {
-    e.hp.=( e.hp.-(amt) );
+    e.hp = e.hp.-(amt);
 }
 ```
 
@@ -507,9 +505,9 @@ function damage(e: Enemy, amt: u8): void {
 | Static memory                  | ✔ required   |
 | AoS syntax → SoA memory        | ✔ automatic  |
 | No dynamic allocation          | ✔            |
-| Operator-methods               | ✔ required   |
-| Assignment via `.=( )`         | ✔            |
-| Infix ops                      | ✖ none in v1 |
+| Infix arith/compare + method calls | ✔ available |
+| Assignment via `=`, `+=`, `-=`, `*=`, `/=`, `%=` | ✔ |
+| Infix ops beyond these             | ✖ none in v1 |
 | Function signatures first pass | ✔            |
 | Tree shaking                   | ✔            |
 | LLVM backend                   | ✔            |

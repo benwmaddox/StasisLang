@@ -137,4 +137,47 @@ public class ExecutionTests
             File.Delete(temp);
         }
     }
+
+    [Fact]
+    public void Runs_compound_and_precedence()
+    {
+        if (!TryFindLli(out var lliPath))
+        {
+            return;
+        }
+
+        var source = """
+            function main(): i32 {
+                let x: i32;
+                x = 1;
+                x += 2 * 3;
+                x -= 4 / 2;
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(sema.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "execops", LowerOptions.Production);
+        Assert.Empty(lower.Diagnostics);
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, lower.Ir);
+
+        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        try
+        {
+            Assert.Equal(5, exitCode);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
 }

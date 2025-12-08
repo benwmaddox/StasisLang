@@ -28,13 +28,24 @@ public class CLITests
         Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
     }
 
-    private static (int ExitCode, string Stdout, string Stderr) RunCli(string args)
+    [Fact]
+    public void Runs_operator_sample_tests()
+    {
+        var samplePath = Path.Combine(RepoRoot, "samples", "operators.stasis");
+        var (exit, stdout, stderr) = RunCli($"test \"{samplePath}\"");
+        Assert.Equal(0, exit);
+        Assert.Contains("precedence", stdout);
+        Assert.Contains("compound", stdout);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+    }
+
+    private static (int ExitCode, string Stdout, string Stderr) RunCli(string args, string? workingDirectory = null)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
             Arguments = $"run --no-restore --configuration {Configuration} --project \"{CliProj}\" -- {args}",
-            WorkingDirectory = RepoRoot,
+            WorkingDirectory = workingDirectory ?? RepoRoot,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
@@ -45,5 +56,31 @@ public class CLITests
         var stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit();
         return (proc.ExitCode, stdout, stderr);
+    }
+
+    [Fact]
+    public void Runs_tests_in_directory_when_no_path_provided()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"stasis_cli_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "a.stasis"), """
+                test one(): bool { return true; }
+                """);
+            File.WriteAllText(Path.Combine(tempDir, "b.stasis"), """
+                test two(): bool { return true; }
+                """);
+
+            var (exit, stdout, stderr) = RunCli("test", tempDir);
+            Assert.Equal(0, exit);
+            Assert.Contains("=== " + Path.Combine(tempDir, "a.stasis"), stdout);
+            Assert.Contains("=== " + Path.Combine(tempDir, "b.stasis"), stdout);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
     }
 }

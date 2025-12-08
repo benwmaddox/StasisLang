@@ -11,7 +11,7 @@ public class ParserTests
             struct Player { hp: u8; }
             global players: Player[10];
             function update(p: Player): void {
-                p.hp.=(p.hp.-(1));
+                p.hp = p.hp.-(1);
             }
             """;
 
@@ -81,41 +81,83 @@ public class ParserTests
     }
 
     [Fact]
-    public void Reports_bare_assignment_operator()
+    public void Parses_infix_assignment()
     {
         var source = """
-            function bad(): void {
+            function ok(): void {
                 x = 5;
             }
             """;
 
         var result = Parser.Parse(source);
 
-        Assert.NotEmpty(result.Diagnostics);
-        Assert.Contains(result.Diagnostics, d => d.Message.Contains("Operator tokens must follow a '.'"));
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
+        Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
     }
 
     [Fact]
-    public void Reports_bare_comparison_operator()
+    public void Parses_infix_comparison()
     {
         var source = """
-            function bad(): void {
+            function ok(): void {
                 if (1 < 2) { }
             }
             """;
 
         var result = Parser.Parse(source);
 
-        Assert.NotEmpty(result.Diagnostics);
-        Assert.Contains(result.Diagnostics, d => d.Message.Contains("Operator tokens must follow a '.'"));
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        var ifStmt = Assert.IsType<IfStatementSyntax>(Assert.Single(func.Body.Statements));
+        Assert.IsType<BinaryExpressionSyntax>(ifStmt.Condition);
     }
 
     [Fact]
-    public void Parses_for_with_operator_assignment()
+    public void Parses_compound_assignment()
+    {
+        var source = """
+            function ok(): void {
+                x += 2;
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
+        var assignment = Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
+        Assert.Equal(TokenKind.PlusEqual, assignment.OperatorToken.Kind);
+    }
+
+    [Fact]
+    public void Respects_operator_precedence()
+    {
+        var source = """
+            function ok(): i32 {
+                return 1 + 2 * 3;
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body.Statements));
+        var add = Assert.IsType<BinaryExpressionSyntax>(ret.Expression);
+        Assert.Equal(TokenKind.Plus, add.OperatorToken.Kind);
+        var rhs = Assert.IsType<BinaryExpressionSyntax>(add.Right);
+        Assert.Equal(TokenKind.Star, rhs.OperatorToken.Kind);
+    }
+
+    [Fact]
+    public void Parses_for_with_assignment()
     {
         var source = """
             function loop(): void {
-                for i.=(0); i.<(10); i.=(i.+(1)) {
+                for i = 0; i.<(10); i = i.+(1) {
                 }
             }
             """;
@@ -129,11 +171,11 @@ public class ParserTests
     }
 
     [Fact]
-    public void Parses_spaced_operator_assignment()
+    public void Parses_spaced_assignment()
     {
         var source = """
             function demo(): void {
-                hp .= (5);
+                hp = (5);
             }
             """;
 
@@ -142,6 +184,6 @@ public class ParserTests
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
         var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
-        Assert.IsType<OperatorCallExpressionSyntax>(exprStmt.Expression);
+        Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
     }
 }

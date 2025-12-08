@@ -75,26 +75,6 @@ public sealed class Lexer
                     Advance();
                     AddToken(TokenKind.Dot, ".", 1);
                     break;
-                case '+':
-                    Advance();
-                    AddToken(TokenKind.Plus, "+", 1);
-                    break;
-                case '-':
-                    Advance();
-                    AddToken(TokenKind.Minus, "-", 1);
-                    break;
-                case '*':
-                    Advance();
-                    AddToken(TokenKind.Star, "*", 1);
-                    break;
-                case '/':
-                    Advance();
-                    AddToken(TokenKind.Slash, "/", 1);
-                    break;
-                case '%':
-                    Advance();
-                    AddToken(TokenKind.Percent, "%", 1);
-                    break;
                 case '&':
                     Advance();
                     if (!IsAtEnd() && Current == '&')
@@ -124,6 +104,21 @@ public sealed class Lexer
                 case '!':
                     Advance();
                     AddToken(TokenKind.Bang, "!", 1);
+                    break;
+                case '+':
+                    LexPlus(start);
+                    break;
+                case '-':
+                    LexMinus(start);
+                    break;
+                case '*':
+                    LexStar(start);
+                    break;
+                case '/':
+                    LexSlash(start);
+                    break;
+                case '%':
+                    LexPercent(start);
                     break;
                 case '<':
                     Advance();
@@ -261,6 +256,71 @@ public sealed class Lexer
 
         Advance(); // closing backtick
         AddToken(TokenKind.BacktickLiteral, _text[start.._position], _position - start);
+    }
+
+    private void LexPlus(int start)
+    {
+        Advance();
+        if (!IsAtEnd() && Current == '=')
+        {
+            Advance();
+            AddToken(TokenKind.PlusEqual, "+=", 2);
+            return;
+        }
+
+        AddToken(TokenKind.Plus, "+", 1);
+    }
+
+    private void LexMinus(int start)
+    {
+        Advance();
+        if (!IsAtEnd() && Current == '=')
+        {
+            Advance();
+            AddToken(TokenKind.MinusEqual, "-=", 2);
+            return;
+        }
+
+        AddToken(TokenKind.Minus, "-", 1);
+    }
+
+    private void LexStar(int start)
+    {
+        Advance();
+        if (!IsAtEnd() && Current == '=')
+        {
+            Advance();
+            AddToken(TokenKind.StarEqual, "*=", 2);
+            return;
+        }
+
+        AddToken(TokenKind.Star, "*", 1);
+    }
+
+    private void LexSlash(int start)
+    {
+        Advance();
+        if (!IsAtEnd() && Current == '=')
+        {
+            Advance();
+            AddToken(TokenKind.SlashEqual, "/=", 2);
+            return;
+        }
+
+        AddToken(TokenKind.Slash, "/", 1);
+    }
+
+    private void LexPercent(int start)
+    {
+        Advance();
+        if (!IsAtEnd() && Current == '=')
+        {
+            Advance();
+            AddToken(TokenKind.PercentEqual, "%=", 2);
+            return;
+        }
+
+        AddToken(TokenKind.Percent, "%", 1);
     }
 
     private void LexEquals(int start)

@@ -385,9 +385,12 @@ public sealed class ModuleLowerer
             for (int i = 0; i < parameters.Count; i++)
             {
                 var param = parameters[i];
-                var paramVal = function.GetParam((uint)i);
                 var paramType = ResolveType(param.Type, _symbols);
-                locals[param.Name.Text] = new LocalBinding(paramVal, _moduleBuilder.TypeMapper.Map(paramType), false);
+                var llvmType = _moduleBuilder.TypeMapper.Map(paramType);
+                var paramVal = function.GetParam((uint)i);
+                var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                builder.BuildStore(paramVal, alloca);
+                locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true);
             }
 
             var terminated = LowerBlock(builder, function, body, locals);
@@ -493,6 +496,8 @@ public sealed class ModuleLowerer
                     return LowerExpression(builder, paren.Expression, locals);
                 case UnaryExpressionSyntax unary:
                     return LowerUnary(builder, unary, locals);
+                case AssignmentExpressionSyntax assign:
+                    return LowerAssignment(builder, assign, locals);
                 case BinaryExpressionSyntax bin:
                     return LowerBinary(builder, bin, locals);
                 case CallExpressionSyntax call:
@@ -531,6 +536,100 @@ public sealed class ModuleLowerer
                 TokenKind.Bang => LowerLogicalNot(builder, operand),
                 _ => operand
             };
+        }
+
+        private LLVMValueRef LowerAssignment(LLVMBuilderRef builder, AssignmentExpressionSyntax assign, Dictionary<string, LocalBinding> locals)
+        {
+            if (!TryGetPointer(builder, assign.Left, locals, out var ptr, out var ptrType))
+            {
+                AddDiagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", assign.Left.Span);
+                return ConstI32(0);
+            }
+
+            var rhs = LowerExpression(builder, assign.Right, locals);
+            if (assign.OperatorToken.Kind == TokenKind.Equal)
+            {
+                builder.BuildStore(rhs, ptr);
+                return rhs;
+            }
+
+            var lhsValue = builder.BuildLoad2(ptrType, ptr, "assign.lhs");
+            var opText = assign.OperatorToken.Kind switch
+            {
+                TokenKind.PlusEqual => "+",
+                TokenKind.MinusEqual => "-",
+                TokenKind.StarEqual => "*",
+                TokenKind.SlashEqual => "/",
+                TokenKind.PercentEqual => "%",
+                _ => string.Empty
+            };
+
+            if (string.IsNullOrEmpty(opText))
+            {
+                AddDiagnostic($"Unsupported assignment operator '{assign.OperatorToken.Text}'.", assign.OperatorToken.Span);
+                return rhs;
+            }
+
+            var combined = LowerBinary(builder, opText, lhsValue, rhs, assign.OperatorToken.Span);
+            builder.BuildStore(combined, ptr);
+            return combined;
+        }
+
+        private bool TryGetPointer(LLVMBuilderRef builder, ExpressionSyntax target, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef type)
+        {
+            ptr = default;
+            type = default;
+
+            switch (target)
+            {
+                case IdentifierExpressionSyntax id:
+                    if (locals.TryGetValue(id.Identifier.Text, out var local))
+                    {
+                        if (!local.IsAddress)
+                        {
+                            var promoted = builder.BuildAlloca(local.Type, id.Identifier.Text);
+                            builder.BuildStore(local.Value, promoted);
+                            locals[id.Identifier.Text] = new LocalBinding(promoted, local.Type, true);
+                            local = locals[id.Identifier.Text];
+                        }
+
+                        ptr = local.Value;
+                        type = local.Type;
+                        return true;
+                    }
+
+                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
+                    {
+                        ptr = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                        type = _moduleBuilder.TypeMapper.Map(sym.Type);
+                        return true;
+                    }
+
+                    return false;
+
+                case ArrayAccessExpressionSyntax arr:
+                    if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var elemPtr, out var elemType))
+                    {
+                        ptr = elemPtr;
+                        type = elemType;
+                        return true;
+                    }
+
+                    return false;
+
+                case MemberAccessExpressionSyntax member when member.Receiver is ArrayAccessExpressionSyntax arrRecv:
+                    if (TryLowerArrayElementPointer(builder, arrRecv, member.Member.Text, locals, out var fieldPtr, out var fieldElemType))
+                    {
+                        ptr = fieldPtr;
+                        type = fieldElemType;
+                        return true;
+                    }
+
+                    return false;
+
+                default:
+                    return false;
+            }
         }
 
         private LLVMValueRef LowerBinary(LLVMBuilderRef builder, BinaryExpressionSyntax bin, Dictionary<string, LocalBinding> locals)
@@ -587,8 +686,9 @@ public sealed class ModuleLowerer
                         return phi;
                     }
                 default:
-                    AddDiagnostic($"Unsupported binary operator '{bin.OperatorToken.Text}'.", bin.OperatorToken.Span);
-                    return ConstI32(0);
+                    var lhs = LowerExpression(builder, bin.Left, locals);
+                    var rhs = LowerExpression(builder, bin.Right, locals);
+                    return LowerBinary(builder, bin.OperatorToken.Text, lhs, rhs, bin.OperatorToken.Span);
             }
         }
 
@@ -728,55 +828,21 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
+            var rhs = LowerExpression(builder, op.Arguments[0], locals);
             if (opText == "=")
             {
-                var receiver = op.Receiver as IdentifierExpressionSyntax;
-                if (receiver is not null && locals.TryGetValue(receiver.Identifier.Text, out var target))
+                AddDiagnostic("Use infix '=' for assignment.", op.Span);
+                if (TryGetPointer(builder, op.Receiver, locals, out var ptr, out _))
                 {
-                    var value = LowerExpression(builder, op.Arguments[0], locals);
-                    if (target.IsAddress)
-                    {
-                        builder.BuildStore(value, target.Value);
-                    }
-
-                    return value;
+                    builder.BuildStore(rhs, ptr);
+                    return rhs;
                 }
 
-                if (receiver is not null && _symbols.TryGetValue(receiver.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
-                {
-                    var value = LowerExpression(builder, op.Arguments[0], locals);
-                    var global = _moduleBuilder.Module.GetNamedGlobal(receiver.Identifier.Text);
-                    var type = _moduleBuilder.TypeMapper.Map(sym.Type);
-                    builder.BuildStore(value, global);
-                    return value;
-                }
-
-                if (op.Receiver is ArrayAccessExpressionSyntax arr)
-                {
-                    if (TryLowerArrayElementPointer(builder, arr, null, locals, out var ptr, out var elemType))
-                    {
-                        var value = LowerExpression(builder, op.Arguments[0], locals);
-                        builder.BuildStore(value, ptr);
-                        return value;
-                    }
-                }
-
-                if (op.Receiver is MemberAccessExpressionSyntax member && member.Receiver is ArrayAccessExpressionSyntax arrRecv)
-                {
-                    if (TryLowerArrayElementPointer(builder, arrRecv, member.Member.Text, locals, out var ptr, out _))
-                    {
-                        var value = LowerExpression(builder, op.Arguments[0], locals);
-                        builder.BuildStore(value, ptr);
-                        return value;
-                    }
-                }
-
-                AddDiagnostic("Left side of .=( ) must be an assignable location (identifier, field, or array element).", op.Receiver.Span);
-                return LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), 0, false);
+                AddDiagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", op.Receiver.Span);
+                return rhs;
             }
 
             var lhs = LowerExpression(builder, op.Receiver, locals);
-            var rhs = LowerExpression(builder, op.Arguments[0], locals);
             return LowerBinary(builder, opText, lhs, rhs, op.Span);
         }
 

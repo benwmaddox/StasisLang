@@ -34,7 +34,7 @@ public class SemanticTests
     }
 
     [Fact]
-    public void Flags_local_struct_type()
+    public void Allows_local_struct_reference()
     {
         var source = """
             struct Player { hp: u8; }
@@ -46,11 +46,11 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+        Assert.Empty(sema.Diagnostics);
     }
 
     [Fact]
-    public void Flags_parameter_struct_type()
+    public void Allows_parameter_struct_reference()
     {
         var source = """
             struct Player { hp: u8; }
@@ -61,7 +61,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+        Assert.Empty(sema.Diagnostics);
     }
 
     [Fact]
@@ -76,7 +76,24 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Locals and parameters must be primitive types"));
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("primitive types or struct references"));
+    }
+
+    [Fact]
+    public void Allows_compound_assignment()
+    {
+        var source = """
+            function f(): i32 {
+                let x: i32;
+                x += 2;
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
     }
 
     [Fact]
@@ -114,7 +131,7 @@ public class SemanticTests
     {
         var source = """
             function f(): void {
-                5.=(3);
+                5 = 3;
             }
             """;
 
@@ -129,7 +146,7 @@ public class SemanticTests
     {
         var source = """
             function f(): void {
-                x.=(1, 2);
+                x.+(1, 2);
             }
             """;
 
@@ -144,7 +161,7 @@ public class SemanticTests
     {
         var source = """
             function f(): void {
-                hp.=(1);
+                hp = 1;
             }
             """;
 
@@ -153,4 +170,5 @@ public class SemanticTests
 
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Undefined identifier 'hp'"));
     }
+
 }

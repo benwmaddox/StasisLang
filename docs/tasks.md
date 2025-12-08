@@ -20,6 +20,15 @@
 - Verify: sample Stasis programs run under `lli` with expected stdout/return codes; golden IR snapshots for samples.
 - Add integration test that compiles Stasis `test` declarations, emits `run_tests`, and executes via `lli` to verify harness exit code.
 
+## Phase 12: Expression & Locals Refresh
+- Switch assignment syntax to infix `=` and move expressions to a Pratt parser (assignment right-associative; logical ops stay infix).
+- Keep arithmetic/comparison as operator-method calls; emit diagnostics for legacy `.=` usage. Allow infix arithmetic/comparison with TypeScript precedence and compound assignment, but only one assignment per expression.
+- Allow stack locals for primitive scalars and struct references (indices) while keeping struct storage global-only.
+- Refresh docs/samples/tests to the new syntax; ensure lowering/semantics match updated rules.
+
+## CLI Quality-of-Life
+- `stasis test` with no path (or `--all`) should discover and run all `.stasis` files under the working directory.
+
 ## Sudoku CLI Mini-Game (Stasis)
 - Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.
 - Language/runtime gaps to close:

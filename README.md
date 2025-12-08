@@ -29,6 +29,7 @@ stasis test samples/tests.stasis --emit-ir > out.ll
 
 Options:
 - `run` or `test` subcommands (default is `run` if omitted).
+- `test` with no path (or `--all`) runs every `.stasis` file under the working directory.
 - `--with-tests` include test functions and harness during lowering even for `run`.
 - `--emit-ir` write IR to stdout and skip execution.
 - `--module <name>` set the LLVM module identifier (default `module`).
@@ -40,7 +41,8 @@ Options:
 
 ## Notes
 - Function calls and control flow are lowered; SoA globals follow the layout in `docs/spec.md`.
-- Locals and parameters are primitives only; structs and arrays live in static globals per spec.
+- Infix arithmetic/comparison (`+ - * / % < > ==`) with TypeScript-like precedence; compound assignment `= += -= *= /= %=`; operator-method forms remain supported.
+- Locals and parameters are primitive scalars or struct references; arrays and struct storage live in static globals per spec.
 - When `lli` is unavailable, the CLI compiles the IR with `clang`. On Windows it links against the latest installed Windows SDK (`ucrt`, `kernel32`, `legacy_stdio_definitions`) so the test harness `printf` resolves.
 
 ## Samples

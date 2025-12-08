@@ -1,18 +1,17 @@
-**clean, polished, fully updated LL(1)-friendly Stasis Grammar** incorporating:
+﻿**updated Stasis grammar and parser notes** incorporating:
 
-- **Assignment via operator-method** `.=( )`
-- **No infix operators**
-- **Variant D simplicity**
-- **AoS → SoA semantics represented cleanly**
-- **All productions structured for predictable recursive-descent parsing**
+- **Assignment via infix `=`** instead of `.=( )`
+- **Pratt parser for all expressions** (assignment is right-associative)
+- **Operator-method calls stay for arithmetic/comparison**
+- **AoS -> SoA semantics represented cleanly**
 
-This is the version you'd put in a language manual or compiler reference. The reference compiler targets C# with LLVMSharp bindings for IR generation and emission.
+The reference compiler targets C# with LLVMSharp bindings for IR generation and emission.
 
 ---
 
-# **Stasis Formal Grammar (LL1-Compatible)**
+# **Stasis Grammar & Parsing Notes**
 
-This grammar is suitable for a hand-written recursive-descent parser or for LL parser generators with minimal left-factoring.
+Declarations remain LL(1)-friendly and work with recursive-descent; expressions use a Pratt parser.
 
 ---
 
@@ -24,7 +23,7 @@ CompilationUnit  -> TopLevelItemList
 
 ```
 TopLevelItemList -> TopLevelItem TopLevelItemList
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -47,7 +46,7 @@ StructDecl       -> "struct" Identifier "{" StructFieldList "}"
 
 ```
 StructFieldList  -> StructField StructFieldList
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -69,7 +68,7 @@ EnumMemberList   -> Identifier EnumMemberRest
 ```
 EnumMemberRest   -> "," Identifier EnumMemberRest
                   | ","     (* optional trailing comma *)
-                  | ε
+                  | <empty>
 ```
 
 ---
@@ -94,12 +93,12 @@ FunctionDecl     -> ExportOpt
 
 ```
 ExportOpt        -> "export"
-                  | ε
+                  | <empty>
 ```
 
 ```
 ParamListOpt     -> ParamList
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -108,7 +107,7 @@ ParamList        -> Param ParamListRest
 
 ```
 ParamListRest    -> "," Param ParamListRest
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -117,7 +116,7 @@ Param            -> Identifier ":" Type
 
 ```
 ReturnTypeOpt    -> ":" Type
-                  | ε
+                  | <empty>
 ```
 
 ---
@@ -172,7 +171,7 @@ Block            -> "{" StatementList "}"
 
 ```
 StatementList    -> Statement StatementList
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -203,7 +202,7 @@ IfStatement      -> "if" "(" Expression ")" Block ElseOpt
 
 ```
 ElseOpt          -> "else" Block
-                  | ε
+                  | <empty>
 ```
 
 ---
@@ -218,7 +217,7 @@ ForStatement     -> "for"
                     Block
 
 ExpressionOpt    -> Expression
-                  | Îµ
+                  | <empty>
 ```
 
 ---
@@ -239,7 +238,7 @@ ReturnStatement  -> "return" ReturnValueOpt ";"
 
 ```
 ReturnValueOpt   -> Expression
-                  | ε
+                  | <empty>
 ```
 
 ---
@@ -251,76 +250,46 @@ ExpressionStatement
                   -> Expression ";"
 ```
 
-(Assignments are simply expressions using `.=( )`.)
-
 ---
 
-# **5. Expressions**
+# **5. Expressions (Pratt)**
+
+Expressions use a Pratt parser with the following precedence (low -> high):
+
+- Assignment `=` `+=` `-=` `*=` `/=` `%=` (right-associative)
+- Logical or `||`
+- Logical and `&&`
+- Unary prefix `-`, `!`
+- Postfix/member/call/operator-method
+
+Reference grammar mirroring those precedences:
 
 ```
-Expression       -> UnaryExpr
-```
-
----
-
-## 5.1 Unary Expressions
-
-```
+Expression       -> Assignment
+Assignment       -> LogicalOr (AssignOp Assignment)?
+AssignOp         -> "=" | "+=" | "-=" | "*=" | "/=" | "%="
+LogicalOr        -> LogicalAnd ("||" LogicalAnd)*
+LogicalAnd       -> UnaryExpr ("&&" UnaryExpr)*
 UnaryExpr        -> "-" UnaryExpr
                   | "!" UnaryExpr
                   | PostfixExpr
-```
-
----
-
-## 5.2 Postfix Expressions (Core of the Language)
-
-```
-PostfixExpr      -> PrimaryExpr PostfixOpList
-```
-
-```
-PostfixOpList    -> PostfixOp PostfixOpList
-                  | ε
-```
-
-```
+PostfixExpr      -> PrimaryExpr PostfixOp*
 PostfixOp        -> MemberAccess
                   | ArrayAccess
                   | FunctionCall
                   | OperatorMethodCall
 ```
 
----
-
-## 5.3 Postfix Operations
-
-### Field access
+### Postfix Operations
 
 ```
-MemberAccess     -> "." Identifier
+MemberAccess         -> "." Identifier
+ArrayAccess          -> "[" Expression "]"
+FunctionCall         -> "(" ArgumentListOpt ")"
+OperatorMethodCall   -> "." OperatorToken "(" ArgumentListOpt ")"
 ```
 
-### Array indexing
-
-```
-ArrayAccess      -> "[" Expression "]"
-```
-
-### Function call
-
-```
-FunctionCall     -> "(" ArgumentListOpt ")"
-```
-
-### Operator-method call, including assignment
-
-```
-OperatorMethodCall
-                  -> "." OperatorToken "(" ArgumentListOpt ")"
-```
-
-### Operator tokens
+### Operator tokens (method-style)
 
 ```
 OperatorToken    -> "+"
@@ -331,7 +300,6 @@ OperatorToken    -> "+"
                   | "<"
                   | ">"
                   | "=="
-                  | "="    (* assignment operator-method *)
 ```
 
 ---
@@ -350,7 +318,7 @@ PrimaryExpr      -> Literal
 
 ```
 ArgumentListOpt  -> ArgumentList
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -359,7 +327,7 @@ ArgumentList     -> Expression ArgumentListRest
 
 ```
 ArgumentListRest -> "," Expression ArgumentListRest
-                  | ε
+                  | <empty>
 ```
 
 ---
@@ -386,7 +354,7 @@ BoolLiteral      -> "true" | "false"
 ```
 Identifier       -> Letter IdentifierRest
 IdentifierRest   -> LetterOrDigitOrUnderscore IdentifierRest
-                  | ε
+                  | <empty>
 ```
 
 ```
@@ -406,14 +374,8 @@ BacktickString   -> '`' BacktickChar* '`'
 
 ---
 
-# ⭐ Notes on LL(1) Compatibility
+# Notes on parsing
 
-This grammar is **intentionally LL(1)-friendly**:
-
-- No left recursion
-- All productions deterministically distinguishable by first token
-- Assignment via `.=( )` eliminates the traditional assignment ambiguity
-- `PostfixExpr` grows cleanly without ambiguity
-- Expression parsing requires no precedence climbing
-
-A straightforward recursive-descent parser can implement this directly.
+- Declarations and statement shapes stay LL(1)-friendly; expressions rely on the Pratt precedence table above.
+- Assignment is written with infix `=`/compound forms; arithmetic/comparison can be infix with TypeScript-style precedence or expressed as operator-method calls (e.g., `hp.+(1)`, `hp.==(0)`).
+- Pratt precedence levels: assignment < `||` < `&&` < prefix < postfix.

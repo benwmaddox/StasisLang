@@ -207,7 +207,7 @@ public sealed class SemanticAnalyzer
     {
         if (v.Type is null)
         {
-            _diagnostics.Add(new Diagnostic("Local variables must declare a type; initialization uses .=( ).", v.Name.Span));
+            _diagnostics.Add(new Diagnostic("Local variables must declare a type; initialize with a following '=' assignment.", v.Name.Span));
         }
         else
         {
@@ -255,6 +255,12 @@ public sealed class SemanticAnalyzer
 
                 ValidateOperatorCall(op);
                 break;
+            case AssignmentExpressionSyntax assign:
+                AnalyzeExpression(assign.Left, scope);
+                AnalyzeExpression(assign.Right, scope);
+                ValidateAssignment(assign.Left, assign.OperatorToken);
+                ValidateSingleAssignment(assign);
+                break;
             case BinaryExpressionSyntax bin:
                 AnalyzeExpression(bin.Left, scope);
                 AnalyzeExpression(bin.Right, scope);
@@ -266,23 +272,17 @@ public sealed class SemanticAnalyzer
     private void ValidateOperatorCall(OperatorCallExpressionSyntax op)
     {
         var opText = op.OperatorToken.Text;
+        if (op.Arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span));
+        }
+
         if (opText == "=")
         {
-            if (op.Arguments.Count != 1)
-            {
-                _diagnostics.Add(new Diagnostic("Assignment operator .=( ) requires exactly one argument.", op.Span));
-            }
-
+            _diagnostics.Add(new Diagnostic("Use infix '=' for assignment.", op.Span));
             if (!IsAssignableReceiver(op.Receiver))
             {
-                _diagnostics.Add(new Diagnostic("Left side of .=( ) must be an assignable location (identifier, field, or array element).", op.Receiver.Span));
-            }
-        }
-        else
-        {
-            if (op.Arguments.Count != 1)
-            {
-                _diagnostics.Add(new Diagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span));
+                _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", op.Receiver.Span));
             }
         }
     }
@@ -292,15 +292,49 @@ public sealed class SemanticAnalyzer
         or MemberAccessExpressionSyntax
         or ArrayAccessExpressionSyntax;
 
-    private void ValidateBinary(BinaryExpressionSyntax bin)
+    private void ValidateAssignment(ExpressionSyntax target, Token opToken)
     {
-        var kind = bin.OperatorToken.Kind;
-        if (kind is TokenKind.AmpAmp or TokenKind.PipePipe)
+        if (!IsAssignableReceiver(target))
+        {
+            _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", target.Span));
+            return;
+        }
+
+        if (opToken.Kind is TokenKind.Equal)
         {
             return;
         }
 
-        _diagnostics.Add(new Diagnostic($"Unsupported binary operator '{bin.OperatorToken.Text}'. Use operator-methods for other operators.", bin.OperatorToken.Span));
+        if (opToken.Kind is TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic($"Unsupported assignment operator '{opToken.Text}'.", opToken.Span));
+    }
+
+    private void ValidateSingleAssignment(AssignmentExpressionSyntax assign)
+    {
+        if (assign.Left is AssignmentExpressionSyntax or BinaryExpressionSyntax { OperatorToken.Kind: TokenKind.Equal or TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual })
+        {
+            _diagnostics.Add(new Diagnostic("Only one assignment is permitted per expression.", assign.Left.Span));
+        }
+
+        if (assign.Right is AssignmentExpressionSyntax rightAssign)
+        {
+            _diagnostics.Add(new Diagnostic("Only one assignment is permitted per expression.", rightAssign.Span));
+        }
+    }
+
+    private void ValidateBinary(BinaryExpressionSyntax bin)
+    {
+        var kind = bin.OperatorToken.Kind;
+        if (kind is TokenKind.AmpAmp or TokenKind.PipePipe or TokenKind.Plus or TokenKind.Minus or TokenKind.Star or TokenKind.Slash or TokenKind.Percent or TokenKind.Less or TokenKind.Greater or TokenKind.EqualEqual)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic($"Unsupported infix operator '{bin.OperatorToken.Text}'.", bin.OperatorToken.Span));
     }
 
     private TypeSymbol? ResolveType(TypeSyntax typeSyntax)
@@ -356,7 +390,12 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types; structs/arrays live in static memory.", span));
+        if (type is NamedTypeSymbol)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types or struct references; arrays live in static memory.", span));
     }
 
     private void EnsureGlobalType(TypeSymbol? type, SourceSpan span)

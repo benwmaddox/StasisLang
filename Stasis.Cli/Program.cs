@@ -19,6 +19,7 @@ var includeTests = false;
 var moduleName = "module";
 var emitIrOnly = false;
 string? outputPath = null;
+var runAllInDirectory = false;
 
 while (cliArgs.Count > 0)
 {
@@ -48,6 +49,9 @@ while (cliArgs.Count > 0)
         case "--emit-ir":
             emitIrOnly = true;
             break;
+        case "--all":
+            runAllInDirectory = true;
+            break;
         case "--help":
             PrintUsage();
             return;
@@ -67,11 +71,19 @@ while (cliArgs.Count > 0)
 
 if (path is null)
 {
-    PrintUsage();
-    return;
+    if (mode == "test")
+    {
+        runAllInDirectory = true;
+        path = Directory.GetCurrentDirectory();
+    }
+    else
+    {
+        PrintUsage();
+        return;
+    }
 }
 
-if (!File.Exists(path))
+if (!File.Exists(path) && !Directory.Exists(path))
 {
     Console.Error.WriteLine($"error: file not found: {path}");
     Environment.Exit(1);
@@ -89,12 +101,37 @@ if (mode == "format")
     return;
 }
 
-var source = File.ReadAllText(path);
+if (runAllInDirectory && mode == "test")
+{
+    var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
+    var files = Directory.GetFiles(root, "*.stasis", SearchOption.AllDirectories).OrderBy(p => p).ToArray();
+    if (files.Length == 0)
+    {
+        Console.Error.WriteLine($"error: no .stasis files found under {root}");
+        Environment.Exit(1);
+    }
+
+    var overallExit = 0;
+    foreach (var file in files)
+    {
+        Console.WriteLine($"=== {file} ===");
+        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath));
+    }
+
+    Environment.Exit(overallExit);
+}
+
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath);
+Environment.Exit(singleExit);
+
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath)
+{
+    var source = File.ReadAllText(path);
 var parse = Parser.Parse(source);
 if (parse.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(parse.Diagnostics, source, path);
-    Environment.Exit(1);
+        PrintDiagnostics(parse.Diagnostics, source, path);
+        return 1;
 }
 
 LlvmNativeLoader.EnsureLoaded();
@@ -102,8 +139,8 @@ LlvmNativeLoader.EnsureLoaded();
 var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 if (sema.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(sema.Diagnostics, source, path);
-    Environment.Exit(1);
+        PrintDiagnostics(sema.Diagnostics, source, path);
+        return 1;
 }
 
 var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
@@ -112,15 +149,15 @@ var lowerOptions = includeTests ? LowerOptions.Default : LowerOptions.Production
 var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
 if (lower.Diagnostics.Count > 0)
 {
-    PrintDiagnostics(lower.Diagnostics, source, path);
-    Console.WriteLine(lower.Ir);
-    Environment.Exit(1);
+        PrintDiagnostics(lower.Diagnostics, source, path);
+        Console.WriteLine(lower.Ir);
+        return 1;
 }
 
 if (emitIrOnly)
 {
-    Console.WriteLine(lower.Ir);
-    Environment.Exit(lower.Diagnostics.Count > 0 ? 1 : 0);
+        Console.WriteLine(lower.Ir);
+        return lower.Diagnostics.Count > 0 ? 1 : 0;
 }
 
 var tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
@@ -132,12 +169,12 @@ try
     {
         var outPath = outputPath ?? BuildDefaultOutputPath(path);
         var exitCode = BuildExecutable(tempLl, outPath, includeTests);
-        Environment.Exit(exitCode);
+            return exitCode;
     }
     else
     {
         var exitCode = Execute(mode, tempLl);
-        Environment.Exit(exitCode);
+            return exitCode;
     }
 }
 finally
@@ -146,6 +183,8 @@ finally
     {
         File.Delete(tempLl);
     }
+}
+
 }
 
 static int Execute(string mode, string llPath)
@@ -302,10 +341,10 @@ static void PrintUsage()
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
-    Console.WriteLine("  stasisc test <file> [--module <name>] [--emit-ir]");
+    Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir]");
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>]");
     Console.WriteLine("  stasisc format <file>");
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. Build requires clang in PATH.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build requires clang in PATH.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)

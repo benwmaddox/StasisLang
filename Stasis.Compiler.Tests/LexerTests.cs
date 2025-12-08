@@ -38,9 +38,9 @@ public class LexerTests
     }
 
     [Fact]
-    public void Lexes_operator_method_chain()
+    public void Lexes_assignment_and_operator_method_chain()
     {
-        var input = "value.=(other.+(1))";
+        var input = "value = other.+(1)";
 
         var result = Lexer.Lex(input);
 
@@ -49,16 +49,40 @@ public class LexerTests
             new[]
             {
                 TokenKind.Identifier,
-                TokenKind.Dot,
                 TokenKind.Equal,
-                TokenKind.LParen,
                 TokenKind.Identifier,
                 TokenKind.Dot,
                 TokenKind.Plus,
                 TokenKind.LParen,
                 TokenKind.IntegerLiteral,
                 TokenKind.RParen,
-                TokenKind.RParen,
+                TokenKind.EndOfFile
+            },
+            result.Tokens.Select(t => t.Kind).ToArray());
+    }
+
+    [Fact]
+    public void Lexes_compound_assignment_tokens()
+    {
+        var input = "a+=b-=c*=d/=e%=f";
+
+        var result = Lexer.Lex(input);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Equal(
+            new[]
+            {
+                TokenKind.Identifier,
+                TokenKind.PlusEqual,
+                TokenKind.Identifier,
+                TokenKind.MinusEqual,
+                TokenKind.Identifier,
+                TokenKind.StarEqual,
+                TokenKind.Identifier,
+                TokenKind.SlashEqual,
+                TokenKind.Identifier,
+                TokenKind.PercentEqual,
+                TokenKind.Identifier,
                 TokenKind.EndOfFile
             },
             result.Tokens.Select(t => t.Kind).ToArray());

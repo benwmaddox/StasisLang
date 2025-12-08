@@ -76,7 +76,7 @@ public class LoweringTests
         var ir = Lower("""
             function one(): i32 {
                 let x: i32;
-                x.=(1);
+                x = 1;
                 return x;
             }
             """);
@@ -91,7 +91,7 @@ public class LoweringTests
         var ir = Lower("""
             global temps: f32[3];
             function set(i: i32, v: f32): void {
-                temps[i].=(v);
+                temps[i] = v;
             }
             """);
 
@@ -107,7 +107,7 @@ public class LoweringTests
             struct Player { hp: u8; score: i32; }
             global players: Player[2];
             function set(i: i32): void {
-                players[i].hp.=(1);
+                players[i].hp = 1;
             }
             """);
 
@@ -141,9 +141,9 @@ public class LoweringTests
         var ir = Lower("""
             function loop(n: i32): void {
                 let i: i32;
-                i.=(0);
-                for i.=(0); true; i.=(i.+(1)) {
-                    i.=(i);
+                i = 0;
+                for i = 0; true; i = i.+(1) {
+                    i = i;
                 }
             }
             """);
@@ -162,7 +162,7 @@ public class LoweringTests
             global values: i32[4];
             function sum(): void {
                 foreach (i in values) {
-                    values[i].=(values[i]);
+                    values[i] = values[i];
                 }
             }
             """);
@@ -206,7 +206,7 @@ public class LoweringTests
         var ir = Lower("""
             function tweak(x: f32, flag: bool): i32 {
                 let y: f32;
-                y.=(-(x));
+                y = (-(x));
                 return !(flag);
             }
             """);
@@ -222,7 +222,7 @@ public class LoweringTests
         var result = LowerWithDiagnostics("""
             function bad(): void {
                 let x: i32;
-                x.=(1, 2);
+                x.+(1, 2);
             }
             """);
 
@@ -235,7 +235,7 @@ public class LoweringTests
     {
         var result = LowerWithDiagnostics("""
             function bad(): void {
-                1.=(2);
+                1 = 2;
             }
             """);
 
@@ -250,7 +250,7 @@ public class LoweringTests
             struct Player { hp: u8; }
             global players: Player[2];
             function bad(i: i32): void {
-                players[i].mp.=(1);
+                players[i].mp = 1;
             }
             """);
 
@@ -264,12 +264,28 @@ public class LoweringTests
         var result = LowerWithDiagnostics("""
             global temps: i32[2];
             function bad(i: i32): void {
-                temps[i].hp.=(1);
+                temps[i].hp = 1;
             }
             """);
 
         Assert.NotEmpty(result.Diagnostics);
         Assert.Contains(result.Diagnostics, d => d.Message.Contains("not a struct array"));
+    }
+
+    [Fact]
+    public void Lowers_compound_assignment()
+    {
+        var ir = Lower("""
+            function bump(): i32 {
+                let x: i32;
+                x = 1;
+                x += 2;
+                return x;
+            }
+            """);
+
+        Assert.Contains("addtmp", ir);
+        Assert.Contains("store i32", ir);
     }
 
     [Fact]

@@ -317,58 +317,82 @@ public sealed class Parser
         return new ExpressionStatementSyntax(expr, semicolon);
     }
 
-    private ExpressionSyntax ParseExpression() => ParseLogicalOr();
-
-    private ExpressionSyntax ParseLogicalOr()
+    private ExpressionSyntax ParseExpression(int minPrecedence = 0)
     {
-        var expr = ParseLogicalAnd();
-        while (Match(TokenKind.PipePipe))
+        var expr = ParsePrefix();
+
+        while (true)
         {
-            var op = Previous;
-            var right = ParseLogicalAnd();
-            expr = new BinaryExpressionSyntax(expr, op, right);
+            if (Current.Kind == TokenKind.Dot && Peek(1).Kind == TokenKind.Equal)
+            {
+                var span = new SourceSpan(Current.Span.Start, Peek(1).Span.End - Current.Span.Start);
+                AddDiagnostic("Use infix '=' for assignments instead of '.=()'.", span);
+                Advance(); // '.'
+                Advance(); // '='
+
+                if (Match(TokenKind.LParen))
+                {
+                    var depth = 1;
+                    while (!IsAtEnd() && depth > 0)
+                    {
+                        if (Match(TokenKind.LParen))
+                        {
+                            depth++;
+                        }
+                        else if (Match(TokenKind.RParen))
+                        {
+                            depth--;
+                        }
+                        else
+                        {
+                            Advance();
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            var precedence = GetBinaryPrecedence(Current.Kind);
+            if (precedence < minPrecedence)
+            {
+                break;
+            }
+
+            var op = NextToken();
+            var right = ParseExpression(IsRightAssociative(op.Kind) ? precedence : precedence + 1);
+            if (IsAssignmentOperator(op.Kind))
+            {
+                expr = new AssignmentExpressionSyntax(expr, op, right);
+            }
+            else
+            {
+                expr = new BinaryExpressionSyntax(expr, op, right);
+            }
         }
 
         return expr;
     }
 
-    private ExpressionSyntax ParseLogicalAnd()
+    private ExpressionSyntax ParsePrefix()
     {
-        var expr = ParseUnary();
-        while (Match(TokenKind.AmpAmp))
+        if (Current.Kind is TokenKind.Bang or TokenKind.Minus)
         {
-            var op = Previous;
-            var right = ParseUnary();
-            expr = new BinaryExpressionSyntax(expr, op, right);
-        }
-
-        return expr;
-    }
-
-    private ExpressionSyntax ParseUnary()
-    {
-        if (Match(TokenKind.Bang) || Match(TokenKind.Minus))
-        {
-            var op = Previous;
-            var operand = ParseUnary();
+            var op = NextToken();
+            var operand = ParseExpression(PrefixPrecedence);
             return new UnaryExpressionSyntax(op, operand);
         }
 
         return ParsePostfix();
     }
 
+    private const int PrefixPrecedence = 8;
+
     private ExpressionSyntax ParsePostfix()
     {
         var expr = ParsePrimary();
         while (true)
         {
-            if (IsOperatorToken(Current.Kind))
-            {
-                AddDiagnostic($"Operator tokens must follow a '.' as method calls; found '{Current.Text}'.", Current.Span);
-                Advance();
-                continue;
-            }
-
             if (Current.Kind == TokenKind.Dot && IsOperatorToken(Peek(1).Kind))
             {
                 var dot = Consume(TokenKind.Dot, "Expected '.'.");
@@ -411,6 +435,24 @@ public sealed class Parser
 
         return expr;
     }
+
+    private int GetBinaryPrecedence(TokenKind kind) =>
+        kind switch
+        {
+            TokenKind.Equal or TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual => 1,
+            TokenKind.PipePipe => 2,
+            TokenKind.AmpAmp => 3,
+            TokenKind.EqualEqual => 4,
+            TokenKind.Less or TokenKind.Greater => 5,
+            TokenKind.Plus or TokenKind.Minus => 6,
+            TokenKind.Star or TokenKind.Slash or TokenKind.Percent => 7,
+            _ => -1
+        };
+
+    private bool IsRightAssociative(TokenKind kind) => IsAssignmentOperator(kind);
+
+    private bool IsAssignmentOperator(TokenKind kind) =>
+        kind is TokenKind.Equal or TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual;
 
     private IReadOnlyList<ExpressionSyntax> ParseArgumentList()
     {
@@ -497,8 +539,7 @@ public sealed class Parser
         or TokenKind.Percent
         or TokenKind.Less
         or TokenKind.Greater
-        or TokenKind.EqualEqual
-        or TokenKind.Equal;
+        or TokenKind.EqualEqual;
 
     private Token Consume(TokenKind kind, string message)
     {
