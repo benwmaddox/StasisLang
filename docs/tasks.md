@@ -34,6 +34,7 @@
 - Add first-class string literal support to the frontend (lex/parse), carry type info through symbols/sema, and lower string constants to immutable global buffers (null-terminated `i8` arrays).
 - Expose a `print(string)`/`puts`-style intrinsic in lowering: map a Stasis `string` to `i8*` in LLVM, emit globals for literals, and generate `printf("%s", ptr)`/`puts(ptr)` calls.
 - Update samples and tests to use string printing instead of manual `print_char` sequences; add negative tests for unterminated/invalid escapes.
+- Follow-ups: convert `samples/sudoku.stasis` prompts/labels/messages to string literals once lowering + `print(string)`/`puts` land; add Stasis-side tests that string-based prompts render and CLI tests that they appear.
 
 ## Sudoku CLI Mini-Game (Stasis)
 - Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.
@@ -49,4 +50,5 @@
   - `samples/sudoku.stasis` playable program + solver.
   - CLI documentation in README for Sudoku mode and controls.
   - Integration test ensuring Sudoku sample builds/solves via CLI.
+  - Follow-ups: replace char-by-char prints with strings in `samples/sudoku.stasis` and add regression tests once string support is implemented.
 
