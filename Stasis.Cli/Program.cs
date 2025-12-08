@@ -20,7 +20,6 @@ var moduleName = "module";
 var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
-var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
 while (cliArgs.Count > 0)
 {
@@ -118,13 +117,10 @@ if (runAllInDirectory && mode == "test")
         Console.WriteLine($"=== {file} ===");
         overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath));
     }
-
-    Console.WriteLine($"Completed in {stopwatch.ElapsedMilliseconds} ms");
     Environment.Exit(overallExit);
 }
 
 var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath);
-Console.WriteLine($"Completed in {stopwatch.ElapsedMilliseconds} ms");
 Environment.Exit(singleExit);
 
 static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath)
