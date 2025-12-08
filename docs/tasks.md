@@ -26,15 +26,31 @@
 - Allow stack locals for primitive scalars and struct references (indices) while keeping struct storage global-only.
 - Refresh docs/samples/tests to the new syntax; ensure lowering/semantics match updated rules.
 
+### Follow-ups
+- Add clarity on the new assignment rules (single assignment per expression, compound variants) to `docs/spec.md` and `AGENTS.md` so contributors understand the guarded Pratt parser expectations.
+- Ensure `samples/sudoku.stasis` and other fixtures follow the new syntax (no `>=`/ternary tokens) and include explicit tests that exercise the Pratt parser changes.
+
 ## CLI Quality-of-Life
 - `stasis test` with no path (or `--all`) should discover and run all `.stasis` files under the working directory.
 - `stasis release` builds optimized binaries via clang (defaults `-O3` + LTO); `build` remains unoptimized unless `--opt-level`/`--lto` are provided.
+
+### Follow-ups
+- Document the discovery behavior of `stasis test` and the per-file compile/test timing (`test-time` vs `total-time`) in the README or a CLI reference so users understand what’s running.
 
 ## String literals and printing
 - Add first-class string literal support to the frontend (lex/parse), carry type info through symbols/sema, and lower string constants to immutable global buffers (null-terminated `i8` arrays).
 - Expose a `print(string)`/`puts`-style intrinsic in lowering: map a Stasis `string` to `i8*` in LLVM, emit globals for literals, and generate `printf("%s", ptr)`/`puts(ptr)` calls.
 - Update samples and tests to use string printing instead of manual `print_char` sequences; add negative tests for unterminated/invalid escapes.
 - Follow-ups: convert `samples/sudoku.stasis` prompts/labels/messages to string literals once lowering + `print(string)`/`puts` land; add Stasis-side tests that string-based prompts render and CLI tests that they appear.
+- Ensure spec/AGENTS mention the new built-ins (`print_string`, `print`, `read_line`, etc.) and capture the expectation that string input/output is now first-class (including a plan for Elm-style diagnostics when strings fail to parse).
+
+## Phase 13: Diagnostics & Samples
+- Improve diagnostic clarity (Elm-style) by describing expected message structure, pointer to source spans, and user-friendly hints in `docs/spec.md`; link this guidance from AGENTS so formatter/resilience work can reference it.
+- Update `samples/sudoku.stasis` to:
+  - Use string-based prompts instead of numeric char sequences.
+  - Support a random seed (prompt input) to generate reproducible puzzles.
+  - Include Stasis-level tests for the seed parser and random puzzle generator to prevent regressions.
+- Record that `stasis test` must skip blocking IO-heavy tests on CI while still allowing the CLI to run interactive suites locally; add this to the tasks so future CI work can ramp in the right direction.
 
 ## Sudoku CLI Mini-Game (Stasis)
 - Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.

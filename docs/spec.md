@@ -75,12 +75,19 @@ struct enum global function export test return let if else for foreach in
 ### Operators
 
 - Infix arithmetic/comparison: `+ - * / % < > ==` with TypeScript-style precedence.
-- Compound assignment: `= += -= *= /= %=`
+- Compound assignment: `= += -= *= /= %=` 
 - Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .>() .==()`
+- Assignment expressions may appear only once per expression to keep the Pratt parser unambiguous; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
 
 ---
 
-# **3. Types**
+# **3. Diagnostics**
+
+- Diagnostics highlight the exact `SourceSpan` that triggered an error, include a concise human-friendly description, and often include a hint on how to fix it (similar to Elm's clarity).
+- The parser/semantic layers emit messages such as “Use infix '=' instead of '.='” or “Only one assignment per expression is permitted” so the code author immediately sees which operator or expression needs rewriting.
+- CLI tools and editors can read the `SourceSpan` attached to every diagnostic to underline the tokens, show line/column info, and include references to the spec section being violated.
+
+# **4. Types**
 
 ### Primitive Types
 
@@ -103,6 +110,13 @@ Type[IntegerLiteral]
 string[N]   // sugar for u8[N]
 ```
 
+### Built-in I/O helpers
+
+- `print_string(string[N])` prints a string literal that the compiler lowers to a null-terminated `u8` array in global memory; the runtime maps it to an LLVM `i8*`.
+- Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
+- Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
+- String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
+
 ### Struct Types
 
 Named via:
@@ -121,7 +135,7 @@ Enums are lowered to integers (`u32` by default).
 
 ---
 
-# **4. Memory Model**
+# **5. Memory Model**
 
 ### 4.1 Global Memory Only
 
@@ -183,13 +197,13 @@ Bounds checking rules may be:
 
 ---
 
-# **5. Expressions**
+# **6. Expressions**
 
 Stasis expressions allow infix arithmetic/comparison with TypeScript-style precedence (`||`, `&&`, equality, relational, additive, multiplicative) plus infix `=`/`+=`/`-=`/`*=` `/=` `%=`, and `&&`/`||` for logical flow. Operator-methods for arithmetic/comparison remain valid. A Pratt parser enforces precedence (assignments are right-associative).
 
 ---
 
-# **6. Built-in Operators (Complete List)**
+# **7. Built-in Operators (Complete List)**
 
 ## 6.1 Arithmetic Operators
 
@@ -270,7 +284,7 @@ Lowering:
 
 ---
 
-# **7. Statements**
+# **8. Statements**
 
 ### 7.1 Variable Declaration
 
@@ -321,7 +335,7 @@ return;
 
 ---
 
-# **8. Functions**
+# **9. Functions**
 
 ```
 function name(param: Type, ...): ReturnType {
@@ -338,7 +352,7 @@ function name(param: Type, ...): ReturnType {
 
 ---
 
-# **9. Globals**
+# **10. Globals**
 
 ```
 global enemies: Enemy[1000];
@@ -348,7 +362,7 @@ Global arrays of struct references become SoA automatically.
 
 ---
 
-# **10. Modules**
+# **11. Modules**
 
 - File = Module
 - All top-level declarations are visible by filename-level import (v2 will add explicit imports)
@@ -356,7 +370,7 @@ Global arrays of struct references become SoA automatically.
 
 ---
 
-# **11. Built-in Testing**
+# **12. Built-in Testing**
 
 ```
 test `enemy takes damage`(): bool {
@@ -374,7 +388,7 @@ Tests are:
 
 ---
 
-# **12. Compile-Time Memory Offsets**
+# **13. Compile-Time Memory Offsets**
 
 Stasis provides compile-time offsets:
 
@@ -388,7 +402,7 @@ Useful for JS interop, debugging, and memory inspection tools.
 
 ---
 
-# **13. Compiler Architecture**
+# **14. Compiler Architecture**
 
 ## Phase 1 — Signature Discovery
 
@@ -422,7 +436,7 @@ Generate:
 
 ---
 
-# **14. LLVM Backend Integration**
+# **15. LLVM Backend Integration**
 
 ### Struct Lowering
 
@@ -458,13 +472,13 @@ Compiles to:
 
 ---
 
-# **15. LL(1) Grammar (Final)**
+# **16. LL(1) Grammar (Final)**
 
 (You requested a clean formal version; already delivered, not duplicating here unless you want them merged together.)
 
 ---
 
-# **16. Examples (Full)**
+# **17. Examples (Full)**
 
 ### Full update step:
 
@@ -498,7 +512,7 @@ function damage(e: Enemy, amt: u8): void {
 
 ---
 
-# **17. Summary of Major Language Properties**
+# **18. Summary of Major Language Properties**
 
 | Feature                        | Status       |
 | ------------------------------ | ------------ |

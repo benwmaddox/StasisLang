@@ -23,6 +23,7 @@
 - Place host-side tests under `tests/` with filenames matching the feature under test (`tests/parser_assignment.stasis`, `tests/lowering_offsets.rs`).
 - Target high coverage of parsing, lowering, and static memory rules; include negative tests for invalid operator-method usage.
 - Keep tests fast; if slow paths are unavoidable, mark them and document expected runtime.
+- `stasis test` should discover every `.stasis` file in the working directory, print each file’s “Compiled in …”/`test-time` before test output, and avoid running IO-heavy suites on CI so the runs stay deterministic.
 
 ## Commit & Pull Request Guidelines
 - Use short, imperative commit subjects; Conventional Commit prefixes (`feat:`, `fix:`, `docs:`) are encouraged for clarity.
@@ -34,3 +35,5 @@
 - Implementation stack: C# front-end with recursive-descent parser (LL(1) per `docs/compilation.md`), lowering through LLVMSharp bindings to produce LLVM IR and WASM.
 - Keep the managed/native boundary explicit; encapsulate LLVMSharp interop in a thin layer to keep IR building testable.
 - Avoid hidden allocation or implicit copying; make side effects and memory writes explicit in both code and docs.
+- Favor Elm-inspired diagnostics that point to the offending span and offer actionable hints so developers fix parser or semantic issues quickly.
+- Keep string/seed-heavy samples such as `samples/sudoku.stasis` aligned with the built-in I/O helpers (`print_string`, `read_char`, `read_int`) and the deterministic random seed behavior exposed by the runtime so the CLI stays reproducible.
