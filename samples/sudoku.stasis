@@ -137,6 +137,50 @@ test `sudoku solves seed`() : bool {
     return true;
 }
 
+test `line_is_quit detects q`() : bool {
+    input_buf[0] = 113; // 'q'
+    return line_is_quit(1);
+}
+
+test `line_is_quit detects Q`() : bool {
+    input_buf[0] = 81; // 'Q'
+    return line_is_quit(1);
+}
+
+test `line_is_quit ignores digits`() : bool {
+    input_buf[0] = 52; // '4'
+    return !line_is_quit(1);
+}
+
+test `line_is_quit skips bom`() : bool {
+    input_buf[0] = 239; // UTF-8 BOM start
+    input_buf[1] = 187;
+    input_buf[2] = 191;
+    input_buf[3] = 113; // 'q'
+    return line_is_quit(4);
+}
+
+test `parse_move extracts row col val`() : bool {
+    // "2 3 4"
+    input_buf[0] = 50; // '2'
+    input_buf[1] = 32;
+    input_buf[2] = 51; // '3'
+    input_buf[3] = 32;
+    input_buf[4] = 52; // '4'
+    parse_next = 0;
+    parse_tmp = 0;
+    parse_row = 0;
+    parse_col = 0;
+    parse_val = 0;
+    let ok: bool;
+    ok = parse_move(5);
+    if (!ok) { return false; }
+    if (!parse_row == 2) { return false; }
+    if (!parse_col == 3) { return false; }
+    if (!parse_val == 4) { return false; }
+    return true;
+}
+
 function print_board(): void {
     print_sep_line();
     let r: i32;
