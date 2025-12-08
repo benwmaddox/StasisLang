@@ -116,78 +116,81 @@ if (runAllInDirectory && mode == "test")
     foreach (var file in files)
     {
         Console.WriteLine($"=== {file} ===");
-        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath, stopwatch));
+        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath));
     }
 
     Console.WriteLine($"Completed in {stopwatch.ElapsedMilliseconds} ms");
     Environment.Exit(overallExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, stopwatch);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath);
 Console.WriteLine($"Completed in {stopwatch.ElapsedMilliseconds} ms");
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, System.Diagnostics.Stopwatch stopwatch)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath)
 {
-    var source = File.ReadAllText(path);
-    var parse = Parser.Parse(source);
-    if (parse.Diagnostics.Count > 0)
-    {
-        PrintDiagnostics(parse.Diagnostics, source, path);
-        return 1;
-    }
-
-    LlvmNativeLoader.EnsureLoaded();
-
-    var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-    if (sema.Diagnostics.Count > 0)
-    {
-        PrintDiagnostics(sema.Diagnostics, source, path);
-        return 1;
-    }
-
-    var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-    var lowerer = new ModuleLowerer();
-    var lowerOptions = includeTests ? LowerOptions.Default : LowerOptions.Production;
-    var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
-    if (lower.Diagnostics.Count > 0)
-    {
-        PrintDiagnostics(lower.Diagnostics, source, path);
-        Console.WriteLine(lower.Ir);
-        return 1;
-    }
-
-    if (emitIrOnly)
-    {
-        Console.WriteLine(lower.Ir);
-        return lower.Diagnostics.Count > 0 ? 1 : 0;
-    }
-
-    var tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
-    File.WriteAllText(tempLl, lower.Ir);
+    var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var tempLl = string.Empty;
 
     try
     {
+        var source = File.ReadAllText(path);
+        var parse = Parser.Parse(source);
+        if (parse.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(parse.Diagnostics, source, path);
+            return 1;
+        }
+
+        LlvmNativeLoader.EnsureLoaded();
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        if (sema.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(sema.Diagnostics, source, path);
+            return 1;
+        }
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lowerer = new ModuleLowerer();
+        var lowerOptions = includeTests ? LowerOptions.Default : LowerOptions.Production;
+        var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
+        if (lower.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(lower.Diagnostics, source, path);
+            Console.WriteLine(lower.Ir);
+            return 1;
+        }
+
+        if (emitIrOnly)
+        {
+            Console.WriteLine(lower.Ir);
+            return lower.Diagnostics.Count > 0 ? 1 : 0;
+        }
+
+        tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+        File.WriteAllText(tempLl, lower.Ir);
+
         if (mode == "build")
         {
             var outPath = outputPath ?? BuildDefaultOutputPath(path);
             var exitCode = BuildExecutable(tempLl, outPath, includeTests);
             return exitCode;
         }
-        else
-        {
-            var exitCode = Execute(mode, tempLl);
-            return exitCode;
-        }
+
+        var executeExit = Execute(mode, tempLl);
+        return executeExit;
     }
     finally
-{
-    if (File.Exists(tempLl))
     {
-        File.Delete(tempLl);
-    }
-}
+        if (!string.IsNullOrEmpty(tempLl) && File.Exists(tempLl))
+        {
+            File.Delete(tempLl);
+        }
 
+        fileStopwatch.Stop();
+        Console.WriteLine($"Compiled in {fileStopwatch.ElapsedMilliseconds} ms");
+    }
 }
 
 static int Execute(string mode, string llPath)
