@@ -1,9 +1,10 @@
 @echo off
 setlocal
 set "SCRIPT_DIR=%~dp0"
-set "DOTNET_ARGS=--no-restore"
+set "CONFIG=Release"
+set "DOTNET_ARGS=--no-restore --configuration %CONFIG%"
 if "%1"=="test" (
-    set "DOTNET_ARGS=--no-build"
+    set "DOTNET_ARGS=--no-build --configuration %CONFIG%"
 )
 dotnet run %DOTNET_ARGS% --project "%SCRIPT_DIR%Stasis.Cli\Stasis.Cli.csproj" -- %*
 set "CODE=%ERRORLEVEL%"
