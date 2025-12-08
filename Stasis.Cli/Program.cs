@@ -257,6 +257,10 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     if (enableLto)
     {
         args.Add("-flto");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            args.Add("-fuse-ld=lld");
+        }
     }
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
