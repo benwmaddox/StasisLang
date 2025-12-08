@@ -180,4 +180,54 @@ public class ExecutionTests
             File.Delete(temp);
         }
     }
+
+    [Fact]
+    public void Runs_headless_graphics_builtins()
+    {
+        if (!TryFindLli(out var lliPath))
+        {
+            return;
+        }
+
+        var source = """
+            function main(): i32 {
+                let ok: bool;
+                ok = init_window(640, 480, "Stasis");
+                begin_frame();
+                clear(0.0, 0.0, 0.0, 1.0);
+                draw_line(-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+                let down: bool;
+                down = is_key_down(32);
+                let t: i32;
+                t = get_time_ms();
+                sleep_ms(0);
+                end_frame();
+                return 0;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(sema.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "gfxmodule", LowerOptions.Production);
+        Assert.Empty(lower.Diagnostics);
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, lower.Ir);
+
+        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        try
+        {
+            Assert.Equal(0, exitCode);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
 }
