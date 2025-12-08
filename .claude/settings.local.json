@@ -1,10 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dotnet test:*)",
-      "Bash(git checkout:*)",
-      "Bash(git add:*)",
-      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: add headless graphics built-in stubs\n\nAdd semantic recognition and lowering stubs for graphics built-ins:\n- init_window(width, height, title) -> bool\n- begin_frame(), end_frame() -> void\n- clear(r, g, b, a) -> void\n- draw_line(x1, y1, x2, y2, r, g, b, a) -> void\n- is_key_down(key) -> bool\n- get_time_ms() -> i32 (implemented with platform-specific clock)\n- sleep_ms(ms) -> void\n- time() -> i32 (returns epoch time truncated to i32)\n\nThese stubs validate argument counts and types during lowering, enabling\ncompilation of graphics-using programs. Full host runtime integration\n(SDL2/OpenGL) deferred to graphics-plan.md milestones.\n\nTest coverage: ExecutionTests.Runs_headless_graphics_builtins verifies\nall built-ins compile and execute via lli without runtime errors.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+      "Bash(git commit -m \"$(cat <<''EOF''\ntest: add CLI snapshot tests for Phase 9 verification\n\nAdd comprehensive CLI snapshot tests using Verify.Xunit to validate\nCLI stdout/stderr and exit codes for various scenarios:\n\n- EmitIr_Basic: verify LLVM IR emission for basic.stasis\n- EmitIr_Tests: verify LLVM IR emission with test harness\n- Run_Basic: end-to-end execution via lli (skipped if unavailable)\n- Test_TestsFile: test mode execution (skipped if lli unavailable)\n- Error_FileNotFound: verify error handling for missing files\n- Error_ParseError: verify parse error diagnostics\n\nSnapshot framework:\n- RunCli helper executes dotnet run with CLI args\n- ScrubOutput removes timing info for deterministic comparisons\n- Snapshots stored in Stasis.Compiler.Tests/Snapshots/\n- Tests use Verify.Xunit for baseline comparison\n\nThis completes Phase 9 verification requirements (snapshot tests\nfor CLI stdout/stderr and exit codes on fixtures).\n\nDependencies added:\n- Verify.Xunit 31.8.0\n- xunit.extensibility.core 2.9.3 (resolves version conflict)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
     ],
     "deny": [],
     "ask": []

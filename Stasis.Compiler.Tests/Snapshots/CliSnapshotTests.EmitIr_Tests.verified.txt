@@ -1,0 +1,72 @@
+﻿{
+  Stdout:
+; ModuleID = 'module'
+source_filename = "module"
+
+
+define i32 @add(i32 %0, i32 %1) {
+entry:
+  %a = alloca i32, align 4
+  store i32 %0, ptr %a, align 4
+  %b = alloca i32, align 4
+  store i32 %1, ptr %b, align 4
+  %a1 = load i32, ptr %a, align 4
+  %b2 = load i32, ptr %b, align 4
+  %addtmp = add i32 %a1, %b2
+  ret i32 %addtmp
+}
+
+define i32 @"`adds numbers`"() {
+entry:
+  %add.call = call i32 @add(i32 2, i32 3)
+  %ieq = icmp eq i32 %add.call, 5
+  %booltmp = zext i1 %ieq to i32
+  ret i32 %booltmp
+}
+
+define i32 @"`true is true`"() {
+entry:
+  ret i32 1
+}
+
+define i32 @run_tests() {
+entry:
+  %failures = alloca i32, align 4
+  store i32 0, ptr %failures, align 4
+  %time.start = call i64 @time(ptr null)
+  %clock.start = call i64 @clock()
+  %"`adds numbers`.call" = call i32 @"`adds numbers`"()
+  %to_bool = icmp ne i32 %"`adds numbers`.call", 0
+  %"`adds numbers`.fail" = xor i1 %to_bool, true
+  %"`adds numbers`.faili32" = zext i1 %"`adds numbers`.fail" to i32
+  %failcur = load i32, ptr %failures, align 4
+  %failnext = add i32 %failcur, %"`adds numbers`.faili32"
+  store i32 %failnext, ptr %failures, align 4
+  %"`true is true`.call" = call i32 @"`true is true`"()
+  %to_bool1 = icmp ne i32 %"`true is true`.call", 0
+  %"`true is true`.fail" = xor i1 %to_bool1, true
+  %"`true is true`.faili32" = zext i1 %"`true is true`.fail" to i32
+  %failcur2 = load i32, ptr %failures, align 4
+  %failnext3 = add i32 %failcur2, %"`true is true`.faili32"
+  store i32 %failnext3, ptr %failures, align 4
+  %failures.result = load i32, ptr %failures, align 4
+  %time.end = call i64 @time(ptr null)
+  %time.elapsed_sec = sub i64 %time.end, %time.start
+  %clock.end = call i64 @clock()
+  %clock.ticks = sub i64 %clock.end, %clock.start
+  %tests.passed = sub i32 2, %failures.result
+  %has_failures = icmp ne i32 %failures.result, 0
+  %tests_fmt = select i1 %has_failures, ptr @tests_fmt_fail, ptr @tests_fmt_pass
+  ret i32 %failures.result
+}
+
+declare i32 @puts(ptr)
+
+declare i64 @time(ptr)
+
+declare i64 @clock()
+
+declare i32 @printf(ptr, ...)
+,
+  Stderr: 
+}
