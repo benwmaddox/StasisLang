@@ -151,7 +151,7 @@ test `random puzzle reproducible`() : bool {
 
 test `random puzzle has enough clues`() : bool {
     generate_random_puzzle(73);
-    return count_clues() >= 36;
+    return !count_clues().<(36);
 }
 
 test `line_is_quit detects q`() : bool {
@@ -235,12 +235,12 @@ function is_complete(): bool {
 }
 
 function print_sep_line(): void {
-    print_string("  +--------+--------+--------+");
+    print_string("   +--------+--------+--------+");
     print_char(10);
 }
 
 function print_col_header(): void {
-    print_string("  1 2 3  4 5 6  7 8 9");
+    print_string("    1  2  3  4  5  6  7  8  9");
     print_char(10);
 }
 
@@ -532,13 +532,15 @@ function parse_seed_input(len: i32): i32 {
         let ch: i32;
         ch = input_buf[i];
         if (ch < 48) {
-            continue;
+            // skip
+        } else {
+            if (ch > 57) {
+                // skip
+            } else {
+                value = value * 10 + (ch - 48);
+                has_digit = true;
+            }
         }
-        if (ch > 57) {
-            continue;
-        }
-        value = value * 10 + (ch - 48);
-        has_digit = true;
     }
     if (has_digit) {
         return value;
@@ -557,7 +559,7 @@ function generate_random_puzzle(seed: i32): void {
         normalized = 1;
     }
     random_state = normalized;
-    copy_solution(base_solution, working_solution);
+    copy_base_to_working();
     let shift: i32;
     shift = ((normalized % 9) + 9) % 9;
     shift_solution_digits(shift);
@@ -586,10 +588,10 @@ function ensure_base_solution(): void {
     base_solution_ready = true;
 }
 
-function copy_solution(src: i32[81], dst: i32[81]): void {
+function copy_base_to_working(): void {
     let i: i32;
     for i = 0; i < 81; i = i + 1 {
-        dst[i] = src[i];
+        working_solution[i] = base_solution[i];
     }
 }
 
