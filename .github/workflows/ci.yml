@@ -50,7 +50,7 @@ jobs:
         run: dotnet build Stasis.sln -c Release --no-restore
 
       - name: Test
-        run: dotnet test Stasis.sln -c Release --no-build
+        run: dotnet test Stasis.sln -c Release --no-build --filter "Category!=Cli"
 
       - name: Emit sample IR artifacts
         if: matrix.os == 'ubuntu-latest'

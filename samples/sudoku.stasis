@@ -5,6 +5,10 @@ function idx(r: i32, c: i32): i32 {
 global puzzle: i32[81];
 global grid: i32[81];
 global clues: i32[81];
+global base_solution: i32[81];
+global working_solution: i32[81];
+global base_solution_ready: bool;
+global random_state: i32;
 
 function seed_puzzle(): void {
     let i: i32;
@@ -137,6 +141,19 @@ test `sudoku solves seed`() : bool {
     return true;
 }
 
+test `random puzzle reproducible`() : bool {
+    generate_random_puzzle(42);
+    let first: i32;
+    first = puzzle[0];
+    generate_random_puzzle(42);
+    return first == puzzle[0];
+}
+
+test `random puzzle has enough clues`() : bool {
+    generate_random_puzzle(73);
+    return count_clues() >= 36;
+}
+
 test `line_is_quit detects q`() : bool {
     input_buf[0] = 113; // 'q'
     return line_is_quit(1);
@@ -228,8 +245,9 @@ function print_col_header(): void {
 }
 
 function play(): i32 {
-    seed_puzzle();
-    reset_grid();
+    let seed: i32;
+    seed = prompt_seed();
+    generate_random_puzzle(seed);
 
     let game_loop: i32;
     for game_loop = 0; game_loop < 1; game_loop = game_loop {
@@ -489,6 +507,207 @@ function parse_move(len: i32): bool {
     if (i < len) { return false; }
 
     return true;
+}
+
+function prompt_seed(): i32 {
+    print_string("Enter puzzle seed (blank for default): ");
+    let len: i32;
+    len = read_line();
+    print_char(10);
+    let seed: i32;
+    seed = parse_seed_input(len);
+    if (seed == 0) {
+        seed = 1;
+    }
+    return seed;
+}
+
+function parse_seed_input(len: i32): i32 {
+    let i: i32;
+    let value: i32;
+    value = 0;
+    let has_digit: bool;
+    has_digit = false;
+    for i = 0; i < len; i = i + 1 {
+        let ch: i32;
+        ch = input_buf[i];
+        if (ch >= 48 && ch <= 57) {
+            value = value * 10 + (ch - 48);
+            has_digit = true;
+        }
+    }
+    return has_digit ? value : 0;
+}
+
+function generate_random_puzzle(seed: i32): void {
+    ensure_base_solution();
+    let normalized: i32;
+    normalized = seed;
+    if (normalized < 0) {
+        normalized = -normalized;
+    }
+    if (normalized == 0) {
+        normalized = 1;
+    }
+    random_state = normalized;
+    copy_solution(base_solution, working_solution);
+    let shift: i32;
+    shift = ((normalized % 9) + 9) % 9;
+    shift_solution_digits(shift);
+    permute_rows();
+    permute_columns();
+    mask_solution();
+    reset_grid();
+}
+
+function ensure_base_solution(): void {
+    if (base_solution_ready) {
+        return;
+    }
+
+    seed_puzzle();
+    reset_grid();
+    if (!solve()) {
+        return;
+    }
+
+    let i: i32;
+    for i = 0; i < 81; i = i + 1 {
+        base_solution[i] = grid[i];
+    }
+
+    base_solution_ready = true;
+}
+
+function copy_solution(src: i32[81], dst: i32[81]): void {
+    let i: i32;
+    for i = 0; i < 81; i = i + 1 {
+        dst[i] = src[i];
+    }
+}
+
+function shift_solution_digits(shift: i32): void {
+    if (shift == 0) {
+        return;
+    }
+
+    let i: i32;
+    for i = 0; i < 81; i = i + 1 {
+        let value: i32;
+        let shifted: i32;
+        value = working_solution[i];
+        shifted = (value - 1 + shift) % 9;
+        if (shifted < 0) {
+            shifted = shifted + 9;
+        }
+        working_solution[i] = shifted + 1;
+    }
+}
+
+function permute_rows(): void {
+    let band: i32;
+    for band = 0; band < 3; band = band + 1 {
+        let r1: i32;
+        let r2: i32;
+        r1 = band * 3 + (next_random() % 3);
+        r2 = band * 3 + (next_random() % 3);
+        swap_rows(r1, r2);
+    }
+}
+
+function swap_rows(r1: i32, r2: i32): void {
+    if (r1 == r2) {
+        return;
+    }
+
+    let c: i32;
+    for c = 0; c < 9; c = c + 1 {
+        let a: i32;
+        let b: i32;
+        let temp: i32;
+        a = r1 * 9 + c;
+        b = r2 * 9 + c;
+        temp = working_solution[a];
+        working_solution[a] = working_solution[b];
+        working_solution[b] = temp;
+    }
+}
+
+function permute_columns(): void {
+    let band: i32;
+    for band = 0; band < 3; band = band + 1 {
+        let c1: i32;
+        let c2: i32;
+        c1 = band * 3 + (next_random() % 3);
+        c2 = band * 3 + (next_random() % 3);
+        swap_columns(c1, c2);
+    }
+}
+
+function swap_columns(c1: i32, c2: i32): void {
+    if (c1 == c2) {
+        return;
+    }
+
+    let r: i32;
+    for r = 0; r < 9; r = r + 1 {
+        let a: i32;
+        let b: i32;
+        let temp: i32;
+        a = r * 9 + c1;
+        b = r * 9 + c2;
+        temp = working_solution[a];
+        working_solution[a] = working_solution[b];
+        working_solution[b] = temp;
+    }
+}
+
+function mask_solution(): void {
+    let kept: i32;
+    kept = 0;
+    let i: i32;
+    for i = 0; i < 81; i = i + 1 {
+        let keep: i32;
+        keep = next_random() % 100;
+        if (keep < 55) {
+            puzzle[i] = working_solution[i];
+            clues[i] = 1;
+            kept = kept + 1;
+        } else {
+            puzzle[i] = 0;
+            clues[i] = 0;
+        }
+    }
+
+    if (kept < 36) {
+        for i = 0; i < 81 && kept < 36; i = i + 1 {
+            if (puzzle[i] == 0) {
+                puzzle[i] = working_solution[i];
+                clues[i] = 1;
+                kept = kept + 1;
+            }
+        }
+    }
+}
+
+function next_random(): i32 {
+    random_state = random_state * 1103515245 + 12345;
+    if (random_state < 0) {
+        random_state = -random_state;
+    }
+    return random_state;
+}
+
+function count_clues(): i32 {
+    let i: i32;
+    let total: i32;
+    total = 0;
+    for i = 0; i < 81; i = i + 1 {
+        if (clues[i] == 1) {
+            total = total + 1;
+        }
+    }
+    return total;
 }
 
 function sudoku_print_prompt(): void {

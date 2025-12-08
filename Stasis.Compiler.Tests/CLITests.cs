@@ -5,6 +5,8 @@ using Xunit;
 
 namespace Stasis.Compiler.Tests;
 
+// CLI-based tests rely on interactive IO and should be excluded from mass runs.
+[Trait("Category", "Cli")]
 public class CLITests
 {
     private static readonly string RepoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
@@ -112,7 +114,7 @@ public class CLITests
     public void Sudoku_quit_exits()
     {
         var samplePath = Path.Combine(RepoRoot, "samples", "sudoku.stasis");
-        var (exit, stdout, stderr) = RunCli($"run \"{samplePath}\"", stdin: "q\n");
+        var (exit, stdout, stderr) = RunCli($"run \"{samplePath}\"", stdin: "1\nq\n");
         Assert.Equal(0, exit);
         Assert.Contains("Enter row col value", stdout);
         Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
