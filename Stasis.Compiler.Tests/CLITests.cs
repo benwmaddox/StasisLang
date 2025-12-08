@@ -32,7 +32,7 @@ public class CLITests
     public void Runs_operator_sample_tests()
     {
         var samplePath = Path.Combine(RepoRoot, "samples", "operators.stasis");
-        var (exit, stdout, stderr) = RunCli($"test \"{samplePath}\"");
+        var (exit, stdout, stderr) = RunCli($"test \"{samplePath}\" --emit-ir");
         Assert.Equal(0, exit);
         Assert.Contains("precedence", stdout);
         Assert.Contains("compound", stdout);
@@ -72,7 +72,7 @@ public class CLITests
                 test two(): bool { return true; }
                 """);
 
-            var (exit, stdout, stderr) = RunCli("test", tempDir);
+            var (exit, stdout, stderr) = RunCli("test --emit-ir", tempDir);
             Assert.Equal(0, exit);
             Assert.Contains("=== " + Path.Combine(tempDir, "a.stasis"), stdout);
             Assert.Contains("=== " + Path.Combine(tempDir, "b.stasis"), stdout);
