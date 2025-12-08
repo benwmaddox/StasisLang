@@ -131,7 +131,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
-    var compileTimePrinted = false;
 
     try
     {
@@ -172,10 +171,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
         File.WriteAllText(tempLl, lower.Ir);
 
-        fileStopwatch.Stop();
-        Console.WriteLine($"Compiled in {fileStopwatch.ElapsedMilliseconds} ms");
-        compileTimePrinted = true;
-
         if (mode == "build")
         {
             var outPath = outputPath ?? BuildDefaultOutputPath(path);
@@ -193,11 +188,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             File.Delete(tempLl);
         }
 
-        if (!compileTimePrinted && !string.IsNullOrEmpty(tempLl))
-        {
-            fileStopwatch.Stop();
-            Console.WriteLine($"Compiled in {fileStopwatch.ElapsedMilliseconds} ms");
-        }
+        fileStopwatch.Stop();
+        Console.WriteLine($"Compiled in {fileStopwatch.ElapsedMilliseconds} ms");
     }
 }
 
