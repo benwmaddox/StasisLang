@@ -115,6 +115,7 @@ string[N]   // sugar for u8[N]
 - `print_string(string[N])` prints a string literal that the compiler lowers to a null-terminated `u8` array in global memory; the runtime maps it to an LLVM `i8*`.
 - Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
+- `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
 - String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
 
 ### Struct Types

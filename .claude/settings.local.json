@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet test:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: add headless graphics built-in stubs\n\nAdd semantic recognition and lowering stubs for graphics built-ins:\n- init_window(width, height, title) -> bool\n- begin_frame(), end_frame() -> void\n- clear(r, g, b, a) -> void\n- draw_line(x1, y1, x2, y2, r, g, b, a) -> void\n- is_key_down(key) -> bool\n- get_time_ms() -> i32 (implemented with platform-specific clock)\n- sleep_ms(ms) -> void\n- time() -> i32 (returns epoch time truncated to i32)\n\nThese stubs validate argument counts and types during lowering, enabling\ncompilation of graphics-using programs. Full host runtime integration\n(SDL2/OpenGL) deferred to graphics-plan.md milestones.\n\nTest coverage: ExecutionTests.Runs_headless_graphics_builtins verifies\nall built-ins compile and execute via lli without runtime errors.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
