@@ -1,0 +1,469 @@
+// Asteroids - Minimal Vector Graphics Demo
+// Controls: A/D or Arrow keys to rotate, W or Up to thrust, Space to fire, Escape to quit
+
+// SDL Scancodes
+global KEY_W: i32;
+global KEY_A: i32;
+global KEY_D: i32;
+global KEY_SPACE: i32;
+global KEY_ESCAPE: i32;
+global KEY_LEFT: i32;
+global KEY_RIGHT: i32;
+global KEY_UP: i32;
+
+// Screen dimensions
+global SCREEN_W: f32;
+global SCREEN_H: f32;
+
+// Ship state
+global ship_x: f32;
+global ship_y: f32;
+global ship_vx: f32;
+global ship_vy: f32;
+global ship_angle: f32;
+
+// Asteroids (max 8)
+global MAX_ASTEROIDS: i32;
+global asteroid_x: f32[8];
+global asteroid_y: f32[8];
+global asteroid_vx: f32[8];
+global asteroid_vy: f32[8];
+global asteroid_size: f32[8];
+global asteroid_active: i32[8];
+global num_asteroids: i32;
+
+// Bullets (max 5)
+global MAX_BULLETS: i32;
+global bullet_x: f32[5];
+global bullet_y: f32[5];
+global bullet_vx: f32[5];
+global bullet_vy: f32[5];
+global bullet_life: i32[5];
+
+// Time tracking
+global last_time: i32;
+
+// RNG state
+global rng_state: i32;
+
+// Math constants (scaled integers for sin/cos lookup)
+global PI: f32;
+
+function init_constants(): void {
+    KEY_W = 26;
+    KEY_A = 4;
+    KEY_D = 7;
+    KEY_SPACE = 44;
+    KEY_ESCAPE = 41;
+    KEY_LEFT = 80;
+    KEY_RIGHT = 79;
+    KEY_UP = 82;
+    SCREEN_W = 800.0;
+    SCREEN_H = 600.0;
+    MAX_ASTEROIDS = 8;
+    MAX_BULLETS = 5;
+    PI = 3.14159;
+}
+
+function seed_rng(seed: i32): void {
+    rng_state = seed;
+}
+
+function next_rand(): i32 {
+    rng_state = rng_state * 1103515245 + 12345;
+    if (rng_state < 0) {
+        rng_state = 0 - rng_state;
+    }
+    return rng_state;
+}
+
+function rand_float(max: f32): f32 {
+    let r: i32;
+    let rf: f32;
+    r = next_rand() % 1000;
+    rf = r;
+    return (rf / 1000.0) * max;
+}
+
+// Sin approximation using Taylor series with range reduction
+function sin_approx(angle: f32): f32 {
+    // Normalize angle to [-PI, PI]
+    let a: f32;
+    let dummy: i32;
+    a = angle;
+    for dummy = 0; a > PI; dummy = 0 {
+        a = a - 2.0 * PI;
+    }
+    for dummy = 0; a < 0.0 - PI; dummy = 0 {
+        a = a + 2.0 * PI;
+    }
+
+    // Reduce to [-PI/2, PI/2] using sin(PI-x) = sin(x)
+    let sign: f32;
+    sign = 1.0;
+    if (a > PI / 2.0) {
+        a = PI - a;
+    }
+    if (a < 0.0 - PI / 2.0) {
+        a = 0.0 - PI - a;
+    }
+
+    // Taylor series: sin(x) ≈ x - x^3/6 + x^5/120 - x^7/5040
+    // Accurate for |x| <= PI/2
+    let x2: f32;
+    let x3: f32;
+    let x5: f32;
+    let x7: f32;
+    x2 = a * a;
+    x3 = x2 * a;
+    x5 = x3 * x2;
+    x7 = x5 * x2;
+    return a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0;
+}
+
+function cos_approx(angle: f32): f32 {
+    return sin_approx(angle + PI / 2.0);
+}
+
+function init_ship(): void {
+    ship_x = SCREEN_W / 2.0;
+    ship_y = SCREEN_H / 2.0;
+    ship_vx = 0.0;
+    ship_vy = 0.0;
+    ship_angle = 0.0;
+}
+
+function init_asteroids(): void {
+    num_asteroids = 4;
+    let i: i32;
+    for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
+        if (i < num_asteroids) {
+            asteroid_active[i] = 1;
+            asteroid_size[i] = 40.0;
+            asteroid_vx[i] = 0.5;
+            asteroid_vy[i] = 0.3;
+
+            // Place asteroids at known positions in corners
+            if (i == 0) {
+                asteroid_x[i] = 150.0;
+                asteroid_y[i] = 150.0;
+            }
+            if (i == 1) {
+                asteroid_x[i] = 650.0;
+                asteroid_y[i] = 150.0;
+            }
+            if (i == 2) {
+                asteroid_x[i] = 150.0;
+                asteroid_y[i] = 450.0;
+            }
+            if (i == 3) {
+                asteroid_x[i] = 650.0;
+                asteroid_y[i] = 450.0;
+            }
+        } else {
+            asteroid_active[i] = 0;
+        }
+    }
+}
+
+function init_bullets(): void {
+    let i: i32;
+    for i = 0; i < MAX_BULLETS; i = i + 1 {
+        bullet_life[i] = 0;
+    }
+}
+
+function wrap_position(px: f32, max: f32): f32 {
+    let result: f32;
+    result = px;
+    if (result < 0.0) {
+        result = result + max;
+    }
+    if (result > max) {
+        result = result - max;
+    }
+    return result;
+}
+
+function update_ship(dt: f32): void {
+    // Rotation (A/D or Left/Right arrows) - 5 radians/sec = ~286 degrees/sec
+    if (is_key_down(KEY_A) || is_key_down(KEY_LEFT)) {
+        ship_angle = ship_angle - 5.0 * dt;
+    }
+    if (is_key_down(KEY_D) || is_key_down(KEY_RIGHT)) {
+        ship_angle = ship_angle + 5.0 * dt;
+    }
+
+    // Thrust (W or Up arrow)
+    if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
+        let thrust: f32;
+        thrust = 150.0 * dt;
+        ship_vx = ship_vx + cos_approx(ship_angle) * thrust;
+        ship_vy = ship_vy + sin_approx(ship_angle) * thrust;
+    }
+
+    // Apply velocity with damping
+    ship_x = ship_x + ship_vx * dt;
+    ship_y = ship_y + ship_vy * dt;
+    ship_vx = ship_vx * 0.99;
+    ship_vy = ship_vy * 0.99;
+
+    // Wrap around screen
+    ship_x = wrap_position(ship_x, SCREEN_W);
+    ship_y = wrap_position(ship_y, SCREEN_H);
+}
+
+function update_asteroids(dt: f32): void {
+    let i: i32;
+    for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
+        if (asteroid_active[i] == 1) {
+            asteroid_x[i] = asteroid_x[i] + asteroid_vx[i] * dt * 60.0;
+            asteroid_y[i] = asteroid_y[i] + asteroid_vy[i] * dt * 60.0;
+            asteroid_x[i] = wrap_position(asteroid_x[i], SCREEN_W);
+            asteroid_y[i] = wrap_position(asteroid_y[i], SCREEN_H);
+        }
+    }
+}
+
+function fire_bullet(): void {
+    let i: i32;
+    for i = 0; i < MAX_BULLETS; i = i + 1 {
+        if (bullet_life[i] == 0) {
+            bullet_x[i] = ship_x + cos_approx(ship_angle) * 15.0;
+            bullet_y[i] = ship_y + sin_approx(ship_angle) * 15.0;
+            bullet_vx[i] = cos_approx(ship_angle) * 300.0;
+            bullet_vy[i] = sin_approx(ship_angle) * 300.0;
+            bullet_life[i] = 60;
+            return;
+        }
+    }
+}
+
+function update_bullets(dt: f32): void {
+    let i: i32;
+    for i = 0; i < MAX_BULLETS; i = i + 1 {
+        if (bullet_life[i] > 0) {
+            bullet_x[i] = bullet_x[i] + bullet_vx[i] * dt;
+            bullet_y[i] = bullet_y[i] + bullet_vy[i] * dt;
+            bullet_life[i] = bullet_life[i] - 1;
+
+            // Wrap bullets
+            bullet_x[i] = wrap_position(bullet_x[i], SCREEN_W);
+            bullet_y[i] = wrap_position(bullet_y[i], SCREEN_H);
+        }
+    }
+}
+
+function abs_f32(x: f32): f32 {
+    if (x < 0.0) {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+function check_collisions(): void {
+    let i: i32;
+    let j: i32;
+
+    // Bullet-asteroid collisions
+    for i = 0; i < MAX_BULLETS; i = i + 1 {
+        if (bullet_life[i] > 0) {
+            for j = 0; j < MAX_ASTEROIDS; j = j + 1 {
+                if (asteroid_active[j] == 1) {
+                    let dx: f32;
+                    let dy: f32;
+                    let dist: f32;
+                    dx = bullet_x[i] - asteroid_x[j];
+                    dy = bullet_y[i] - asteroid_y[j];
+                    dist = abs_f32(dx) + abs_f32(dy);
+
+                    if (dist < asteroid_size[j]) {
+                        bullet_life[i] = 0;
+                        asteroid_active[j] = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+function draw_ship(): void {
+    let c: f32;
+    let s: f32;
+    c = cos_approx(ship_angle);
+    s = sin_approx(ship_angle);
+
+    // Ship is a triangle
+    let size: f32;
+    size = 12.0;
+
+    // Nose
+    let nx: f32;
+    let ny: f32;
+    nx = ship_x + c * size;
+    ny = ship_y + s * size;
+
+    // Left wing
+    let lx: f32;
+    let ly: f32;
+    lx = ship_x + cos_approx(ship_angle + 2.4) * size;
+    ly = ship_y + sin_approx(ship_angle + 2.4) * size;
+
+    // Right wing
+    let rx: f32;
+    let ry: f32;
+    rx = ship_x + cos_approx(ship_angle - 2.4) * size;
+    ry = ship_y + sin_approx(ship_angle - 2.4) * size;
+
+    // Draw white lines
+    draw_line(nx, ny, lx, ly, 1.0, 1.0, 1.0, 1.0);
+    draw_line(lx, ly, rx, ry, 1.0, 1.0, 1.0, 1.0);
+    draw_line(rx, ry, nx, ny, 1.0, 1.0, 1.0, 1.0);
+
+    // Draw thrust flame when thrusting
+    if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
+        let tx: f32;
+        let ty: f32;
+        tx = ship_x - c * size * 1.5;
+        ty = ship_y - s * size * 1.5;
+        draw_line(lx, ly, tx, ty, 1.0, 0.5, 0.0, 1.0);
+        draw_line(rx, ry, tx, ty, 1.0, 0.5, 0.0, 1.0);
+    }
+}
+
+function draw_asteroids(): void {
+    let i: i32;
+    for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
+        if (asteroid_active[i] == 1) {
+            let x: f32;
+            let y: f32;
+            let sz: f32;
+            x = asteroid_x[i];
+            y = asteroid_y[i];
+            sz = asteroid_size[i];
+
+            // Draw as simple octagon (8 sides)
+            let j: i32;
+            let prev_x: f32;
+            let prev_y: f32;
+            let first_x: f32;
+            let first_y: f32;
+            let jf: f32;
+            let angle: f32;
+            let px: f32;
+            let py: f32;
+
+            // Calculate first point
+            first_x = x + sz;
+            first_y = y;
+            prev_x = first_x;
+            prev_y = first_y;
+
+            for j = 1; j < 9; j = j + 1 {
+                jf = j;
+                angle = (jf / 8.0) * 2.0 * PI;
+                px = x + cos_approx(angle) * sz;
+                py = y + sin_approx(angle) * sz;
+                draw_line(prev_x, prev_y, px, py, 0.7, 0.7, 0.7, 1.0);
+                prev_x = px;
+                prev_y = py;
+            }
+        }
+    }
+}
+
+function draw_bullets(): void {
+    let i: i32;
+    for i = 0; i < MAX_BULLETS; i = i + 1 {
+        if (bullet_life[i] > 0) {
+            let x: f32;
+            let y: f32;
+            x = bullet_x[i];
+            y = bullet_y[i];
+
+            // Draw as small cross
+            draw_line(x - 2.0, y, x + 2.0, y, 1.0, 1.0, 0.0, 1.0);
+            draw_line(x, y - 2.0, x, y + 2.0, 1.0, 1.0, 0.0, 1.0);
+        }
+    }
+}
+
+global fire_cooldown: i32;
+global running: i32;
+
+function main(): i32 {
+    init_constants();
+
+    let init_ok: bool;
+    init_ok = init_window(800, 600, "Stasis Asteroids");
+    if (!init_ok) {
+        return 1;
+    }
+
+    seed_rng(time());
+    init_ship();
+    init_asteroids();
+    init_bullets();
+
+    last_time = get_time_ms();
+    fire_cooldown = 0;
+    running = 1;
+
+    let frame: i32;
+    for frame = 0; running == 1; frame = frame + 1 {
+        let quit: bool;
+        quit = should_quit();
+        if (quit) {
+            running = 0;
+        }
+
+        if (running == 1) {
+            begin_frame();
+            clear(0.0, 0.0, 0.1, 1.0);
+
+            // Calculate delta time
+            let current_time: i32;
+            let delta_ms: i32;
+            let dt: f32;
+            current_time = get_time_ms();
+            delta_ms = current_time - last_time;
+            if (delta_ms < 1) {
+                delta_ms = 1;
+            }
+            if (delta_ms > 100) {
+                delta_ms = 100;
+            }
+            let delta_ms_f: f32;
+            delta_ms_f = delta_ms;
+            dt = delta_ms_f / 1000.0;
+            last_time = current_time;
+
+            // Handle fire input
+            if (fire_cooldown > 0) {
+                fire_cooldown = fire_cooldown - delta_ms;
+            }
+            if (is_key_down(KEY_SPACE) && fire_cooldown < 1) {
+                fire_bullet();
+                fire_cooldown = 200;
+            }
+
+            // Update game state
+            update_ship(dt);
+            update_asteroids(dt);
+            update_bullets(dt);
+            check_collisions();
+
+            // Draw everything
+            draw_ship();
+            draw_asteroids();
+            draw_bullets();
+
+            end_frame();
+
+            // Small delay to not spin CPU
+            sleep_ms(1);
+        }
+    }
+
+    return 0;
+}
