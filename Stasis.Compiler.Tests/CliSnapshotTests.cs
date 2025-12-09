@@ -80,12 +80,25 @@ public class CliSnapshotTests
 
     private static string ScrubOutput(string output)
     {
-        // Remove timing information as it varies between runs
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        // Remove timing information and platform-specific content
+        var lines = output.Split('\n');
         var filtered = lines
-            .Where(line => !line.Contains("Total time=") && !line.Contains("ms"))
+            .Where(line => !line.Contains("Total time=") && !line.Contains("test-time="))
+            .Where(line => !line.TrimStart().StartsWith("target triple"))  // Platform-specific
             .Select(line => line.TrimEnd('\r'));
-        return string.Join("\n", filtered);
+
+        // Normalize consecutive blank lines to single blank line
+        var result = new List<string>();
+        var lastWasBlank = false;
+        foreach (var line in filtered)
+        {
+            var isBlank = string.IsNullOrWhiteSpace(line);
+            if (isBlank && lastWasBlank) continue;
+            result.Add(line);
+            lastWasBlank = isBlank;
+        }
+
+        return string.Join("\n", result).Trim();
     }
 
     [Fact]
@@ -119,7 +132,7 @@ public class CliSnapshotTests
     {
         if (!TryFindLli())
         {
-            // Skip if lli not available
+            // lli not available - skip test
             return Task.CompletedTask;
         }
 
@@ -138,7 +151,7 @@ public class CliSnapshotTests
     {
         if (!TryFindLli())
         {
-            // Skip if lli not available
+            // lli not available - skip test
             return Task.CompletedTask;
         }
 
