@@ -24,15 +24,27 @@ public class CliSnapshotTests
         return Path.Combine(root, "samples", name);
     }
 
+    private static string GetBuildConfiguration()
+    {
+        // Detect configuration from the test assembly path
+        var assemblyPath = typeof(CliSnapshotTests).Assembly.Location;
+        if (assemblyPath.Contains("Release", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Release";
+        }
+        return "Debug";
+    }
+
     private static (int exitCode, string stdout, string stderr) RunCli(params string[] args)
     {
         var root = GetRepoRoot();
         var cliProj = Path.Combine(root, CliProject, $"{CliProject}.csproj");
+        var config = GetBuildConfiguration();
 
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --no-build --configuration Debug --project \"{cliProj}\" -- {string.Join(" ", args)}",
+            Arguments = $"run --no-build --configuration {config} --project \"{cliProj}\" -- {string.Join(" ", args)}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
