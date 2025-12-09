@@ -71,6 +71,7 @@ public sealed class SemanticAnalyzer
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
     }
 
     private void DeclareTypes(CompilationUnitSyntax compilationUnit)

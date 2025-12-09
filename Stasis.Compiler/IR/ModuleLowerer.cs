@@ -24,7 +24,7 @@ public sealed class ModuleLowerer
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests);
 
         var diagnostics = new List<Diagnostic>();
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests);
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics);
         lowerer.Lower(compilationUnit, opts.IncludeTests);
 
         if (opts.IncludeTests && opts.EmitTestHarness)
@@ -294,6 +294,101 @@ public sealed class ModuleLowerer
         return (clock, clockType);
     }
 
+    // Graphics runtime external functions
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInitWindow(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_init_window");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32, LLVMTypeRef.Int32, i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_init_window", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisBeginFrame(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_begin_frame");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_begin_frame", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisEndFrame(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_end_frame");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_end_frame", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisClear(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_clear");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_clear", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisDrawLine(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_draw_line");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] {
+            LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float,
+            LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float
+        }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_draw_line", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisIsKeyDown(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_is_key_down");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_is_key_down", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGetTimeMs(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_get_time_ms");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_get_time_ms", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSleepMs(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_sleep_ms");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_sleep_ms", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisShouldQuit(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_should_quit");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_should_quit", fnType);
+        return (fn, fnType);
+    }
+
     private static LLVMTypeRef GetFunctionType(LLVMValueRef fn)
     {
         var type = fn.TypeOf;
@@ -330,15 +425,19 @@ public sealed class ModuleLowerer
             "draw_line",
             "is_key_down",
             "get_time_ms",
-            "sleep_ms"
+            "sleep_ms",
+            "should_quit"
         };
         private int _blockId;
-        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests)
+        private readonly bool _headlessGraphics;
+
+        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests, bool headlessGraphics)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
             _globalLayouts = layout.Globals.ToDictionary(g => g.Name, g => g, StringComparer.Ordinal);
             _diagnostics = diagnostics;
+            _headlessGraphics = headlessGraphics;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit, bool includeTests)
@@ -564,6 +663,8 @@ public sealed class ModuleLowerer
             }
 
             var rhs = LowerExpression(builder, assign.Right, locals);
+            // Convert RHS to target type if needed (e.g., i32 -> f32)
+            rhs = ConvertToType(builder, rhs, ptrType);
             if (assign.OperatorToken.Kind == TokenKind.Equal)
             {
                 builder.BuildStore(rhs, ptr);
@@ -874,10 +975,15 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        _ = LowerExpression(builder, args[0], locals);
-                        _ = LowerExpression(builder, args[1], locals);
-                        _ = LowerExpression(builder, args[2], locals);
-                        return ConstI32(1);
+                        var w = LowerExpression(builder, args[0], locals);
+                        var h = LowerExpression(builder, args[1], locals);
+                        var title = LowerExpression(builder, args[2], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(1);
+
+                        var (fn, fnType) = GetOrDeclareStasisInitWindow(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { w, h, title }, "init_window.call");
                     }
                 case "begin_frame":
                     {
@@ -885,6 +991,12 @@ public sealed class ModuleLowerer
                         {
                             AddDiagnostic("begin_frame expects no arguments.", span);
                         }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisBeginFrame(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "");
                         return ConstI32(0);
                     }
                 case "end_frame":
@@ -893,6 +1005,12 @@ public sealed class ModuleLowerer
                         {
                             AddDiagnostic("end_frame expects no arguments.", span);
                         }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisEndFrame(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "");
                         return ConstI32(0);
                     }
                 case "clear":
@@ -903,11 +1021,16 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        foreach (var arg in args)
-                        {
-                            _ = LowerExpression(builder, arg, locals);
-                        }
+                        var r = LowerExpression(builder, args[0], locals);
+                        var g = LowerExpression(builder, args[1], locals);
+                        var b = LowerExpression(builder, args[2], locals);
+                        var a = LowerExpression(builder, args[3], locals);
 
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisClear(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, new[] { r, g, b, a }, "");
                         return ConstI32(0);
                     }
                 case "draw_line":
@@ -918,11 +1041,13 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        foreach (var arg in args)
-                        {
-                            _ = LowerExpression(builder, arg, locals);
-                        }
+                        var loweredArgs = args.Select(arg => LowerExpression(builder, arg, locals)).ToArray();
 
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisDrawLine(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, loweredArgs, "");
                         return ConstI32(0);
                     }
                 case "is_key_down":
@@ -933,8 +1058,13 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        _ = LowerExpression(builder, args[0], locals);
-                        return ConstI32(0);
+                        var key = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisIsKeyDown(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { key }, "is_key_down.call");
                     }
                 case "get_time_ms":
                     {
@@ -944,7 +1074,11 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        return EmitGetTimeMs(builder);
+                        if (_headlessGraphics)
+                            return EmitGetTimeMs(builder);
+
+                        var (fn, fnType) = GetOrDeclareStasisGetTimeMs(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "get_time_ms.call");
                     }
                 case "sleep_ms":
                     {
@@ -954,8 +1088,28 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        _ = LowerExpression(builder, args[0], locals);
+                        var ms = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisSleepMs(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, new[] { ms }, "");
                         return ConstI32(0);
+                    }
+                case "should_quit":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("should_quit expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisShouldQuit(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "should_quit.call");
                     }
                 default:
                     AddDiagnostic($"Unknown built-in '{name}'.", span);
@@ -1437,6 +1591,38 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef ConstI32(int value) =>
             LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
+
+        /// <summary>
+        /// Converts a value to the target type if needed (e.g., i32 -> f32 or f32 -> i32).
+        /// </summary>
+        private LLVMValueRef ConvertToType(LLVMBuilderRef builder, LLVMValueRef value, LLVMTypeRef targetType)
+        {
+            var sourceType = value.TypeOf;
+            if (sourceType.Kind == targetType.Kind)
+            {
+                return value;
+            }
+
+            var sourceIsInt = sourceType.Kind == LLVMTypeKind.LLVMIntegerTypeKind;
+            var sourceIsFloat = sourceType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            var targetIsInt = targetType.Kind == LLVMTypeKind.LLVMIntegerTypeKind;
+            var targetIsFloat = targetType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+
+            // i32 -> f32: signed int to float
+            if (sourceIsInt && targetIsFloat)
+            {
+                return builder.BuildSIToFP(value, targetType, "i2f");
+            }
+
+            // f32 -> i32: float to signed int
+            if (sourceIsFloat && targetIsInt)
+            {
+                return builder.BuildFPToSI(value, targetType, "f2i");
+            }
+
+            // No conversion needed or unsupported
+            return value;
+        }
 
         private LLVMValueRef UnsupportedOperator(SourceSpan span, LLVMValueRef fallback)
         {
