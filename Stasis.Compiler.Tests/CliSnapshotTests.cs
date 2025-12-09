@@ -80,12 +80,20 @@ public class CliSnapshotTests
 
     private static string ScrubOutput(string output)
     {
+        // Remove ANSI color codes
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\x1B\[[0-9;]*m", "");
+
         // Remove timing information and platform-specific content
         var lines = output.Split('\n');
         var filtered = lines
             .Where(line => !line.Contains("Total time=") && !line.Contains("test-time="))
             .Where(line => !line.TrimStart().StartsWith("target triple"))  // Platform-specific
-            .Select(line => line.TrimEnd('\r'));
+            .Select(line => line.TrimEnd('\r'))
+            .Select(line => line.TrimEnd());  // Remove trailing whitespace
+
+        // Normalize platform-specific clock constant (CLOCKS_PER_SEC differs: Linux=1000000, Windows=1000)
+        filtered = filtered.Select(line =>
+            System.Text.RegularExpressions.Regex.Replace(line, @"udiv i64 %clock\.ticks_ms, \d+", "udiv i64 %clock.ticks_ms, <CLOCKS_PER_SEC>"));
 
         // Normalize consecutive blank lines to single blank line
         var result = new List<string>();

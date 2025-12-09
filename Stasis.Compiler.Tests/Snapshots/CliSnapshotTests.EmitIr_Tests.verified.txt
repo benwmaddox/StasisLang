@@ -64,7 +64,7 @@ entry:
   %clock.end = call i64 @clock()
   %clock.ticks = sub i64 %clock.end, %clock.start
   %clock.ticks_ms = mul i64 %clock.ticks, 1000
-  %clock.ms64 = udiv i64 %clock.ticks_ms, 1000
+  %clock.ms64 = udiv i64 %clock.ticks_ms, <CLOCKS_PER_SEC>
   %time.nonzero = icmp ne i64 %time.elapsed_ms64, 0
   %elapsed.ms64 = select i1 %time.nonzero, i64 %time.elapsed_ms64, i64 %clock.ms64
   %elapsed.ms = trunc i64 %elapsed.ms64 to i32
