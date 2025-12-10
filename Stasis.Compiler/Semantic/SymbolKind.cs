@@ -5,6 +5,7 @@ public enum SymbolKind
     Struct,
     Enum,
     Global,
+    Const,
     Function,
     Test,
     Parameter,

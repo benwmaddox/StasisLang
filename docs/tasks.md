@@ -4,15 +4,52 @@
 - Phases 0-6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
 - Phase 7: lowering & codegen — control-flow lowering (`if`/`for`/`foreach`), operator-method comparisons/unary/boolean coercion, layout-driven SoA globals and field access via `LayoutPlan`, diagnostics for bad operator arity/unsupported targets/invalid field access, with IR coverage tests.
 - Phase 8: testing harness integration — IR emits `run_tests`; lowering options allow omitting tests/harness for production; `stasisc` CLI defaults to production and `--with-tests` enables harness emission.
-- Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, and sample IR artifacts for `samples/basic.stasis` and `samples/tests.stasis`.
+- Phase 9: CLI & UX — `stasisc` CLI with `run`/`test` commands, LLVM IR emission, snapshot tests for CLI stdout/stderr/exit codes. SDL2 graphics support with Asteroids demo game.
+- Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, sample IR artifacts, and platform-agnostic CLI snapshot tests.
 
-## Phase 8: Testing Harness Integration
-- Verify: `dotnet test` executes compiled Stasis tests; production build omits test roots.
+## Phase 10.5: Constants & Structured Globals
 
-## Phase 9: CLI & UX
-- Build `stasisc` CLI to lex/parse/typecheck/lower; flags for output (LLVM IR/WASM), debug dumps, layout inspection; deterministic defaults.
-- Verify: snapshot tests for CLI stdout/stderr and exit codes on fixtures (basic/test samples covered).
-- CLI runs `run`/`test` end-to-end via `lli` (preferred) or `clang` fallback; `stasis.{bat,sh}` are thin shims that delegate to the CLI.
+### Constant Support
+- Add `const` keyword for compile-time constant declarations (numeric, boolean, string literals).
+- Lex/parse: `const NAME: type = value;` syntax at module scope; disallow in functions.
+- Semantics: validate constants are initialized with literal values or expressions of other constants; disallow mutation attempts.
+- Lowering: fold constant expressions at compile time; emit as LLVM `constant` globals or inline directly into IR.
+- Error handling: diagnose uninitialized constants, non-literal initializers, and attempts to assign to constants.
+
+### Structured Global State
+- Enforce single global state struct pattern: all mutable state must be fields within a single root `global state: GameState;` declaration.
+- Allow nested structs and arrays within the state struct (e.g., `state.ship.x`, `state.asteroids[i].active`).
+- Update layout planner to handle nested struct access and emit proper GEP chains for deep field paths.
+- Diagnostics: warn or error when declaring multiple top-level `global` variables (except for the single state struct and any constants).
+
+### Migration & Samples
+- Refactor `samples/asteroids.stasis`:
+  - Convert SDL scancodes, screen dimensions, math constants, and limits to `const` declarations.
+  - Consolidate ship/asteroid/bullet/game state into a single nested struct:
+    ```
+    struct Ship { x: f32; y: f32; vx: f32; vy: f32; angle: f32; }
+    struct Asteroid { x: f32; y: f32; vx: f32; vy: f32; size: f32; active: bool; }
+    struct Bullet { x: f32; y: f32; vx: f32; vy: f32; life: i32; }
+    struct GameState {
+      ship: Ship;
+      asteroids: Asteroid[8];
+      bullets: Bullet[5];
+      num_asteroids: i32;
+      fire_cooldown: i32;
+      running: bool;
+      last_time: i32;
+      rng_state: i32;
+    }
+    global state: GameState;
+    ```
+  - Remove `init_constants()` function since constants are now declared inline.
+  - Update all function bodies to reference `state.ship.x` instead of `ship_x`, etc.
+- Update other samples (`basic.stasis`, `tests.stasis`, etc.) to follow the structured state pattern.
+- Add tests: verify constant folding in IR, nested field access lowering, diagnostics for multiple globals/constant mutation.
+
+### Follow-ups
+- Document the structured globals pattern in `docs/spec.md` and `AGENTS.md` so contributors understand the design rationale (simpler layout, clearer ownership, easier serialization).
+- Consider future extensions: allow multiple named global structs if use cases arise (e.g., `global input: InputState; global physics: PhysicsState;`), but start with single-struct restriction to validate the pattern.
 
 ## Phase 11: LLVM Execution Path
 - Implement end-to-end IR emission runnable via `lli` for sample programs (function calls, arithmetic, control flow, globals).
