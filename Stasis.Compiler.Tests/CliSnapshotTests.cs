@@ -83,10 +83,13 @@ public class CliSnapshotTests
         // Remove ANSI color codes
         output = System.Text.RegularExpressions.Regex.Replace(output, @"\x1B\[[0-9;]*m", "");
 
-        // Remove timing information and platform-specific content
+        // Remove timing information from lines (but keep the rest of the line)
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\s*Total time=\S*", "");
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\s*test-time=\S*", "");
+
+        // Remove platform-specific content
         var lines = output.Split('\n');
         var filtered = lines
-            .Where(line => !line.Contains("Total time=") && !line.Contains("test-time="))
             .Where(line => !line.TrimStart().StartsWith("target triple"))  // Platform-specific
             .Select(line => line.TrimEnd('\r'))
             .Select(line => line.TrimEnd());  // Remove trailing whitespace

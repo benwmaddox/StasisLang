@@ -7,6 +7,8 @@ source_filename = "module"
 @"`adds numbers`.failmsg" = private unnamed_addr constant [30 x i8] c"\1B[31mFAIL\1B[0m: `adds numbers`\00", align 1
 @"`true is true`.passmsg" = private unnamed_addr constant [30 x i8] c"\1B[32mPASS\1B[0m: `true is true`\00", align 1
 @"`true is true`.failmsg" = private unnamed_addr constant [30 x i8] c"\1B[31mFAIL\1B[0m: `true is true`\00", align 1
+@tests_fmt_pass = private unnamed_addr constant [52 x i8] c"Tests: \1B[32mpassed=%d\1B[0m failed=%d align 1
+@tests_fmt_fail = private unnamed_addr constant [52 x i8] c"Tests: passed=%d \1B[31mfailed=%d\1B[0m align 1
 
 define i32 @add(i32 %0, i32 %1) {
 entry:
