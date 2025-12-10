@@ -39,7 +39,7 @@ public sealed class LayoutPlanner
 
         if (global.Type is ArrayTypeSyntax arrayType && arrayType.ElementType is NamedTypeSyntax named && _structs.TryGetValue(named.Name, out var structDecl))
         {
-            // Struct array → SoA fields
+            // Struct array → SoA fields (e.g., global asteroids: Asteroid[10])
             foreach (var field in structDecl.Fields)
             {
                 var fieldSize = SizeOf(field.Type);
@@ -49,6 +49,15 @@ public sealed class LayoutPlanner
                 fields.Add(new FieldLayout($"{structDecl.Name.Text}_{field.Identifier.Text}", _offset, bytes));
                 _offset += bytes;
                 size += bytes;
+            }
+        }
+        else if (global.Type is NamedTypeSyntax namedType && _structs.TryGetValue(namedType.Name, out var structInstance))
+        {
+            // Struct instance → flatten fields (e.g., global state: GameState)
+            foreach (var field in structInstance.Fields)
+            {
+                var fieldBytes = PlanStructField(global.Name.Text, structInstance.Name.Text, field, ref fields);
+                size += fieldBytes;
             }
         }
         else if (global.Type is NamedTypeSyntax primitiveNamed)
@@ -75,6 +84,46 @@ public sealed class LayoutPlanner
         }
 
         return new GlobalLayout(global.Name.Text, fields.FirstOrDefault()?.Offset ?? _offset, size, fields);
+    }
+
+    private int PlanStructField(string globalName, string structName, StructFieldSyntax field, ref List<FieldLayout> fields)
+    {
+        var totalBytes = 0;
+
+        if (field.Type is ArrayTypeSyntax arrayType && arrayType.ElementType is NamedTypeSyntax nestedStruct && _structs.TryGetValue(nestedStruct.Name, out var nestedStructDecl))
+        {
+            // Nested struct array → SoA transformation (e.g., asteroids: Asteroid[8] inside GameState)
+            foreach (var nestedField in nestedStructDecl.Fields)
+            {
+                var fieldSize = SizeOf(nestedField.Type);
+                var count = int.TryParse(arrayType.SizeToken.Text, out var parsed) ? parsed : 1;
+                var bytes = fieldSize * count;
+                _offset = Align(_offset, fieldSize);
+                fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}_{nestedField.Identifier.Text}", _offset, bytes));
+                _offset += bytes;
+                totalBytes += bytes;
+            }
+        }
+        else if (field.Type is NamedTypeSyntax namedField && _structs.TryGetValue(namedField.Name, out var structInstance))
+        {
+            // Nested struct instance → recursively flatten (e.g., ship: Ship inside GameState)
+            foreach (var nestedField in structInstance.Fields)
+            {
+                var nestedBytes = PlanStructField($"{globalName}_{field.Identifier.Text}", structInstance.Name.Text, nestedField, ref fields);
+                totalBytes += nestedBytes;
+            }
+        }
+        else
+        {
+            // Scalar or primitive array field
+            var bytes = SizeOf(field.Type);
+            _offset = Align(_offset, bytes > 0 ? (bytes / (field.Type is ArrayTypeSyntax arr && int.TryParse(arr.SizeToken.Text, out var cnt) && cnt > 0 ? cnt : 1)) : 4);
+            fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}", _offset, bytes));
+            _offset += bytes;
+            totalBytes = bytes;
+        }
+
+        return totalBytes;
     }
 
     private int SizeOf(TypeSyntax type)

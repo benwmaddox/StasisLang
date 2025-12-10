@@ -1,0 +1,36 @@
+// Test struct instance global with AoS → SoA transformation
+
+struct Ship {
+    x: f32;
+    y: f32;
+    angle: f32;
+}
+
+struct Asteroid {
+    x: f32;
+    y: f32;
+    size: f32;
+}
+
+struct GameState {
+    ship_x: f32;
+    ship_y: f32;
+    score: i32;
+    asteroids: Asteroid[3];
+}
+
+global state: GameState;
+
+function main(): i32 {
+    // Test scalar field access
+    state.ship_x = 100.0;
+    state.ship_y = 200.0;
+    state.score = 42;
+
+    // Test nested array access
+    state.asteroids[0].x = 50.0;
+    state.asteroids[0].y = 75.0;
+    state.asteroids[0].size = 30.0;
+
+    return state.score;
+}
