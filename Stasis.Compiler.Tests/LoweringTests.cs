@@ -313,4 +313,58 @@ public class LoweringTests
         Assert.DoesNotContain("run_tests", result.Ir);
         Assert.DoesNotContain("check", result.Ir);
     }
+
+    [Fact]
+    public void Lowers_i32_to_f32_assignment_with_sitofp()
+    {
+        var ir = Lower("""
+            function convert(x: i32): f32 {
+                let result: f32;
+                result = x;
+                return result;
+            }
+            """);
+
+        // Should contain sitofp instruction for i32 -> f32 conversion
+        Assert.Contains("sitofp i32", ir);
+        Assert.Contains("to float", ir);
+    }
+
+    [Fact]
+    public void Lowers_f32_to_i32_assignment_with_fptosi()
+    {
+        var ir = Lower("""
+            function convert(x: f32): i32 {
+                let result: i32;
+                result = x;
+                return result;
+            }
+            """);
+
+        // Should contain fptosi instruction for f32 -> i32 conversion
+        Assert.Contains("fptosi float", ir);
+        Assert.Contains("to i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_i32_to_f32_in_loop()
+    {
+        var ir = Lower("""
+            function sum_as_float(): f32 {
+                let i: i32;
+                let total: f32;
+                total = 0.0;
+                for i = 0; i.<(5); i = i.+(1) {
+                    let if32: f32;
+                    if32 = i;
+                    total = total.+(if32);
+                }
+                return total;
+            }
+            """);
+
+        // Should contain sitofp for i32 -> f32 conversion inside loop
+        Assert.Contains("sitofp i32", ir);
+        Assert.Contains("to float", ir);
+    }
 }
