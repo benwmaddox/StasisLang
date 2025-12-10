@@ -22,6 +22,8 @@ string? outputPath = null;
 var runAllInDirectory = false;
 string? optLevel = null;
 var enableLto = false;
+var enableGraphics = false;
+string? graphicsLibPath = null;
 
 while (cliArgs.Count > 0)
 {
@@ -67,6 +69,13 @@ while (cliArgs.Count > 0)
             break;
         case "--no-lto":
             enableLto = false;
+            break;
+        case "--graphics":
+            enableGraphics = true;
+            break;
+        case "--graphics-lib" when cliArgs.Count > 0:
+            graphicsLibPath = cliArgs.Dequeue();
+            enableGraphics = true;
             break;
         case "--help":
             PrintUsage();
@@ -137,15 +146,15 @@ if (runAllInDirectory && mode == "test")
     foreach (var file in files)
     {
         Console.WriteLine($"=== {file} ===");
-        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto));
+        overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath));
     }
     Environment.Exit(overallExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
@@ -171,7 +180,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lowerer = new ModuleLowerer();
-        var lowerOptions = includeTests ? LowerOptions.Default : LowerOptions.Production;
+        var lowerOptions = enableGraphics
+            ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
+            : (includeTests ? LowerOptions.Default : LowerOptions.Production);
         var lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
         if (lower.Diagnostics.Count > 0)
         {
@@ -192,11 +203,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         if (mode == "build" || mode == "release")
         {
             var outPath = outputPath ?? BuildDefaultOutputPath(path);
-            var exitCode = BuildExecutable(tempLl, outPath, includeTests, optLevel, enableLto);
+            var exitCode = BuildExecutable(tempLl, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
             return exitCode;
         }
 
-        var executeExit = Execute(mode, tempLl, optLevel, enableLto);
+        var executeExit = Execute(mode, tempLl, optLevel, enableLto, enableGraphics, graphicsLibPath);
         return executeExit;
     }
     finally
@@ -211,9 +222,10 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     }
 }
 
-static int Execute(string mode, string llPath, string? optLevel, bool enableLto)
+static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
-    if (TryFindTool("lli", out var lli))
+    // lli doesn't support external libraries easily, so use clang when graphics is enabled
+    if (!enableGraphics && TryFindTool("lli", out var lli))
     {
         return RunProcess(lli, mode == "test" ? $"-entry-function=run_tests \"{llPath}\"" : $"\"{llPath}\"");
     }
@@ -223,7 +235,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto)
         var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
         try
         {
-            var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto);
+            var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
             var exit = RunProcess(clang, args);
             if (exit != 0)
             {
@@ -245,7 +257,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto)
     return 1;
 }
 
-static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto)
+static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
     args.Add("-Wno-override-module");
@@ -263,6 +275,26 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             args.Add("-Wl,/nodefaultlib:libucrt");
         }
     }
+
+    if (enableGraphics)
+    {
+        // Link against the stasis graphics runtime library
+        var libPath = graphicsLibPath ?? FindGraphicsLibrary();
+        if (!string.IsNullOrEmpty(libPath))
+        {
+            var libDir = Path.GetDirectoryName(libPath);
+            if (!string.IsNullOrEmpty(libDir))
+            {
+                args.Add($"-L\"{libDir}\"");
+            }
+            args.Add("-lstasis_graphics");
+        }
+        else
+        {
+            Console.Error.WriteLine("warning: --graphics specified but stasis_graphics library not found. Build runtime/stasis_graphics.c first.");
+        }
+    }
+
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         if (isTest)
@@ -291,6 +323,42 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     }
 
     return string.Join(" ", args);
+}
+
+static string? FindGraphicsLibrary()
+{
+    // Look for the graphics library in common locations
+    var searchPaths = new List<string>();
+
+    // Check relative to the CLI executable
+    var exeDir = AppContext.BaseDirectory;
+    searchPaths.Add(exeDir);
+    searchPaths.Add(Path.Combine(exeDir, "runtime"));
+
+    // Check relative to current working directory
+    searchPaths.Add(Directory.GetCurrentDirectory());
+    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime"));
+    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build"));
+    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "Debug"));
+
+    var libName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        ? "stasis_graphics.dll"
+        : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            ? "libstasis_graphics.dylib"
+            : "libstasis_graphics.so";
+
+    foreach (var dir in searchPaths)
+    {
+        var candidate = Path.Combine(dir, libName);
+        if (File.Exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    return null;
 }
 
 static string? GetLatestWindowsSdkLib()
@@ -348,7 +416,7 @@ static int RunProcess(string fileName, string arguments)
     return proc.ExitCode;
 }
 
-static int BuildExecutable(string llPath, string outputPath, bool isTest, string? optLevel, bool enableLto)
+static int BuildExecutable(string llPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     if (!TryFindTool("clang", out var clang))
     {
@@ -356,7 +424,7 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest, string
         return 1;
     }
 
-    var args = BuildClangArgs(llPath, outputPath, isTest, optLevel, enableLto);
+    var args = BuildClangArgs(llPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath);
     var exit = RunProcess(clang, args);
     if (exit != 0)
     {
@@ -381,12 +449,13 @@ static string BuildDefaultOutputPath(string sourcePath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir]");
+    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto]");
-    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto]");
+    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
 }
 
 static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)

@@ -24,15 +24,27 @@ public class CliSnapshotTests
         return Path.Combine(root, "samples", name);
     }
 
+    private static string GetBuildConfiguration()
+    {
+        // Detect configuration from the test assembly path
+        var assemblyPath = typeof(CliSnapshotTests).Assembly.Location;
+        if (assemblyPath.Contains("Release", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Release";
+        }
+        return "Debug";
+    }
+
     private static (int exitCode, string stdout, string stderr) RunCli(params string[] args)
     {
         var root = GetRepoRoot();
         var cliProj = Path.Combine(root, CliProject, $"{CliProject}.csproj");
+        var config = GetBuildConfiguration();
 
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --no-build --configuration Debug --project \"{cliProj}\" -- {string.Join(" ", args)}",
+            Arguments = $"run --no-build --configuration {config} --project \"{cliProj}\" -- {string.Join(" ", args)}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -68,12 +80,36 @@ public class CliSnapshotTests
 
     private static string ScrubOutput(string output)
     {
-        // Remove timing information as it varies between runs
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        // Remove ANSI color codes
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\x1B\[[0-9;]*m", "");
+
+        // Remove timing information from lines (but keep the rest of the line)
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\s*Total time=\S*", "");
+        output = System.Text.RegularExpressions.Regex.Replace(output, @"\s*test-time=\S*", "");
+
+        // Remove platform-specific content
+        var lines = output.Split('\n');
         var filtered = lines
-            .Where(line => !line.Contains("Total time=") && !line.Contains("ms"))
-            .Select(line => line.TrimEnd('\r'));
-        return string.Join("\n", filtered);
+            .Where(line => !line.TrimStart().StartsWith("target triple"))  // Platform-specific
+            .Select(line => line.TrimEnd('\r'))
+            .Select(line => line.TrimEnd());  // Remove trailing whitespace
+
+        // Normalize platform-specific clock constant (CLOCKS_PER_SEC differs: Linux=1000000, Windows=1000)
+        filtered = filtered.Select(line =>
+            System.Text.RegularExpressions.Regex.Replace(line, @"udiv i64 %clock\.ticks_ms, \d+", "udiv i64 %clock.ticks_ms, <CLOCKS_PER_SEC>"));
+
+        // Normalize consecutive blank lines to single blank line
+        var result = new List<string>();
+        var lastWasBlank = false;
+        foreach (var line in filtered)
+        {
+            var isBlank = string.IsNullOrWhiteSpace(line);
+            if (isBlank && lastWasBlank) continue;
+            result.Add(line);
+            lastWasBlank = isBlank;
+        }
+
+        return string.Join("\n", result).Trim();
     }
 
     [Fact]
@@ -107,7 +143,7 @@ public class CliSnapshotTests
     {
         if (!TryFindLli())
         {
-            // Skip if lli not available
+            // lli not available - skip test
             return Task.CompletedTask;
         }
 
@@ -126,7 +162,7 @@ public class CliSnapshotTests
     {
         if (!TryFindLli())
         {
-            // Skip if lli not available
+            // lli not available - skip test
             return Task.CompletedTask;
         }
 
