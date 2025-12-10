@@ -42,7 +42,7 @@ struct Asteroid {
     vx: f32;
     vy: f32;
     size: f32;
-    active: i32;
+    active: bool;
 }
 
 struct Bullet {
@@ -141,7 +141,7 @@ function init_asteroids(): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
         if (i < state.num_asteroids) {
-            state.asteroids[i].active = 1;
+            state.asteroids[i].active = true;
             state.asteroids[i].size = 40.0;
             state.asteroids[i].vx = 0.5;
             state.asteroids[i].vy = 0.3;
@@ -164,7 +164,7 @@ function init_asteroids(): void {
                 state.asteroids[i].y = 450.0;
             }
         } else {
-            state.asteroids[i].active = 0;
+            state.asteroids[i].active = false;
         }
     }
 }
@@ -236,7 +236,7 @@ function update_ship(dt: f32): void {
 function update_asteroids(dt: f32): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
-        if (state.asteroids[i].active == 1) {
+        if state.asteroids[i].active {
             state.asteroids[i].x = state.asteroids[i].x + state.asteroids[i].vx * dt * 60.0;
             state.asteroids[i].y = state.asteroids[i].y + state.asteroids[i].vy * dt * 60.0;
             state.asteroids[i].x = wrap_position(state.asteroids[i].x, SCREEN_W);
@@ -292,7 +292,7 @@ function check_collisions(): void {
     for i = 0; i < MAX_BULLETS; i = i + 1 {
         if (state.bullets[i].life > 0) {
             for j = 0; j < MAX_ASTEROIDS; j = j + 1 {
-                if (state.asteroids[j].active == 1) {
+                if state.asteroids[j].active {
                     let dx: f32;
                     let dy: f32;
                     let dist_sq: f32;
@@ -303,7 +303,7 @@ function check_collisions(): void {
                     radius = state.asteroids[j].size;
                     if (dist_sq < radius * radius) {
                         state.bullets[i].life = 0;
-                        state.asteroids[j].active = 0;
+                        state.asteroids[j].active = false;
                     }
                 }
             }
@@ -358,7 +358,7 @@ function draw_ship(): void {
 function draw_asteroids(): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
-        if (state.asteroids[i].active == 1) {
+        if state.asteroids[i].active {
             let x: f32;
             let y: f32;
             let sz: f32;
