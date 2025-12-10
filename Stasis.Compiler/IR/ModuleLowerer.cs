@@ -73,11 +73,59 @@ public sealed class ModuleLowerer
                         builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
                         break;
                     }
+                case NamedTypeSyntax namedType when structs.TryGetValue(namedType.Name, out var structInstance):
+                    {
+                        // Struct instance → emit flattened fields
+                        EmitStructInstanceGlobals(global.Name.Text, structInstance, symbols, structs, builder);
+                        break;
+                    }
                 case NamedTypeSyntax named:
                     {
                         var type = ResolveType(named, symbols);
                         var llvmType = builder.TypeMapper.Map(type);
                         builder.DefineGlobalScalar(global.Name.Text, llvmType);
+                        break;
+                    }
+            }
+        }
+    }
+
+    private static void EmitStructInstanceGlobals(string globalName, StructDeclarationSyntax structDecl, IReadOnlyDictionary<string, Symbol> symbols, Dictionary<string, StructDeclarationSyntax> structs, LlvmModuleBuilder builder)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            var fieldName = $"{globalName}_{field.Identifier.Text}";
+
+            switch (field.Type)
+            {
+                case ArrayTypeSyntax arrayType when arrayType.ElementType is NamedTypeSyntax nestedNamed && structs.TryGetValue(nestedNamed.Name, out var nestedStruct):
+                    {
+                        // Nested struct array → SoA
+                        var count = ParseArrayLength(arrayType.SizeToken.Text);
+                        foreach (var nestedField in nestedStruct.Fields)
+                        {
+                            var nestedFieldType = ResolveType(nestedField.Type, symbols);
+                            var llvmElem = builder.TypeMapper.Map(nestedFieldType);
+                            var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
+                            builder.DefineGlobalArray(nestedName, llvmElem, count);
+                        }
+                        break;
+                    }
+                case ArrayTypeSyntax arrayType:
+                    {
+                        // Primitive array
+                        var elemType = ResolveType(arrayType.ElementType, symbols);
+                        var llvmElem = builder.TypeMapper.Map(elemType);
+                        var count = ParseArrayLength(arrayType.SizeToken.Text);
+                        builder.DefineGlobalArray(fieldName, llvmElem, count);
+                        break;
+                    }
+                default:
+                    {
+                        // Scalar field
+                        var fieldType = ResolveType(field.Type, symbols);
+                        var llvmType = builder.TypeMapper.Map(fieldType);
+                        builder.DefineGlobalScalar(fieldName, llvmType);
                         break;
                     }
             }
@@ -784,6 +832,30 @@ public sealed class ModuleLowerer
 
                     return false;
 
+                case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax memberId:
+                    // Handle state.field assignment
+                    if (_symbols.TryGetValue(memberId.Identifier.Text, out var memberSym) &&
+                        (memberSym.Kind == SymbolKind.Global || memberSym.Kind == SymbolKind.Const) &&
+                        memberSym.Type is NamedTypeSymbol memberType &&
+                        _structs.TryGetValue(memberType.TypeName, out var memberStruct))
+                    {
+                        var flattenedName = $"{memberId.Identifier.Text}_{member.Member.Text}";
+                        var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                        if (global.Handle != IntPtr.Zero)
+                        {
+                            var field = memberStruct.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+                            if (field is not null)
+                            {
+                                var fieldType = ResolveType(field.Type, _symbols);
+                                ptr = global;
+                                type = _moduleBuilder.TypeMapper.Map(fieldType);
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+
                 default:
                     return false;
             }
@@ -1350,11 +1422,38 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerMemberAccess(LLVMBuilderRef builder, MemberAccessExpressionSyntax member, Dictionary<string, LocalBinding> locals)
         {
+            // Handle array[i].field syntax
             if (member.Receiver is ArrayAccessExpressionSyntax arr)
             {
                 if (TryLowerArrayElementPointer(builder, arr, member.Member.Text, locals, out var ptr, out var elemType))
                 {
                     return builder.BuildLoad2(elemType, ptr, "fieldload");
+                }
+            }
+
+            // Handle state.field syntax (global struct instance)
+            if (member.Receiver is IdentifierExpressionSyntax id &&
+                _symbols.TryGetValue(id.Identifier.Text, out var sym) &&
+                (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) &&
+                sym.Type is NamedTypeSymbol namedType)
+            {
+                // Check if this is a struct type
+                if (_structs.TryGetValue(namedType.TypeName, out var structDecl))
+                {
+                    // Load from flattened global: state.ship_x → state_ship_x
+                    var flattenedName = $"{id.Identifier.Text}_{member.Member.Text}";
+                    var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                    if (global.Handle != IntPtr.Zero)
+                    {
+                        // Determine the type by looking up the field in the struct
+                        var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+                        if (field is not null)
+                        {
+                            var fieldType = ResolveType(field.Type, _symbols);
+                            var llvmType = _moduleBuilder.TypeMapper.Map(fieldType);
+                            return builder.BuildLoad2(llvmType, global, flattenedName);
+                        }
+                    }
                 }
             }
 
