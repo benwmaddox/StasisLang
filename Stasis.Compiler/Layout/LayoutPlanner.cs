@@ -104,6 +104,15 @@ public sealed class LayoutPlanner
                 totalBytes += bytes;
             }
         }
+        else if (field.Type is NamedTypeSyntax namedField && _structs.TryGetValue(namedField.Name, out var structInstance))
+        {
+            // Nested struct instance → recursively flatten (e.g., ship: Ship inside GameState)
+            foreach (var nestedField in structInstance.Fields)
+            {
+                var nestedBytes = PlanStructField($"{globalName}_{field.Identifier.Text}", structInstance.Name.Text, nestedField, ref fields);
+                totalBytes += nestedBytes;
+            }
+        }
         else
         {
             // Scalar or primitive array field

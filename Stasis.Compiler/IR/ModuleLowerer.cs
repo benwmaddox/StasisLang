@@ -120,6 +120,12 @@ public sealed class ModuleLowerer
                         builder.DefineGlobalArray(fieldName, llvmElem, count);
                         break;
                     }
+                case NamedTypeSyntax namedField when structs.TryGetValue(namedField.Name, out var nestedStructDecl):
+                    {
+                        // Nested struct instance → recursively flatten
+                        EmitStructInstanceGlobals(fieldName, nestedStructDecl, symbols, structs, builder);
+                        break;
+                    }
                 default:
                     {
                         // Scalar field
@@ -856,6 +862,26 @@ public sealed class ModuleLowerer
 
                     return false;
 
+                case MemberAccessExpressionSyntax nestedMember:
+                    // Handle nested member access like state.ship.x
+                    var flattenedPath = BuildFlattenedMemberPath(nestedMember);
+                    if (flattenedPath is not null)
+                    {
+                        var flatGlobal = _moduleBuilder.Module.GetNamedGlobal(flattenedPath);
+                        if (flatGlobal.Handle != IntPtr.Zero)
+                        {
+                            // Determine the type by walking the member chain
+                            if (TryResolveMemberType(nestedMember, out var resolvedType))
+                            {
+                                ptr = flatGlobal;
+                                type = _moduleBuilder.TypeMapper.Map(resolvedType);
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+
                 default:
                     return false;
             }
@@ -1457,6 +1483,21 @@ public sealed class ModuleLowerer
                 }
             }
 
+            // Handle nested member access like state.ship.x (read)
+            if (member.Receiver is MemberAccessExpressionSyntax)
+            {
+                var flattenedPath = BuildFlattenedMemberPath(member);
+                if (flattenedPath is not null)
+                {
+                    var global = _moduleBuilder.Module.GetNamedGlobal(flattenedPath);
+                    if (global.Handle != IntPtr.Zero && TryResolveMemberType(member, out var resolvedType))
+                    {
+                        var llvmType = _moduleBuilder.TypeMapper.Map(resolvedType);
+                        return builder.BuildLoad2(llvmType, global, flattenedPath);
+                    }
+                }
+            }
+
             AddDiagnostic("Unable to lower member access.", member.Span);
             return ConstI32(0);
         }
@@ -1477,6 +1518,46 @@ public sealed class ModuleLowerer
             ptr = default;
             elemType = default;
 
+            // Handle state.field[i] pattern (nested member access)
+            if (arr.Receiver is MemberAccessExpressionSyntax memberAccess &&
+                memberAccess.Receiver is IdentifierExpressionSyntax structId &&
+                _symbols.TryGetValue(structId.Identifier.Text, out var structSym) &&
+                (structSym.Kind == SymbolKind.Global || structSym.Kind == SymbolKind.Const) &&
+                structSym.Type is NamedTypeSymbol structType &&
+                _structs.TryGetValue(structType.TypeName, out var parentStructDecl))
+            {
+                // Find the field in the struct that represents the array
+                var arrayField = parentStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
+                if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax &&
+                    arrayTypeSyntax.ElementType is NamedTypeSyntax arrayElemType &&
+                    _structs.TryGetValue(arrayElemType.Name, out var elemStructDecl))
+                {
+                    var zero = ConstI32(0);
+                    var index = LowerExpression(builder, arr.Index, locals);
+
+                    if (fieldName is not null)
+                    {
+                        // state.asteroids[i].x → state_asteroids_x[i]
+                        var flattenedName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
+                        var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                        if (global.Handle != IntPtr.Zero)
+                        {
+                            var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
+                            if (field is not null)
+                            {
+                                var fieldType = ResolveType(field.Type, _symbols);
+                                elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                                var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                                var casted = builder.BuildBitCast(global, elemPtrType, "fieldbase");
+                                ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle simple array[i] pattern
             if (arr.Receiver is IdentifierExpressionSyntax id)
             {
                 if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) && sym.Type is ArrayTypeSymbol arrayType)
@@ -1702,6 +1783,82 @@ public sealed class ModuleLowerer
             }
 
             return $"{structName}_{fieldName}";
+        }
+
+        private string? BuildFlattenedMemberPath(MemberAccessExpressionSyntax member)
+        {
+            // Build the flattened path by recursively walking the member chain
+            var parts = new List<string>();
+            var current = (ExpressionSyntax)member;
+
+            while (current is MemberAccessExpressionSyntax m)
+            {
+                parts.Add(m.Member.Text);
+                current = m.Receiver;
+            }
+
+            if (current is IdentifierExpressionSyntax id)
+            {
+                parts.Add(id.Identifier.Text);
+                parts.Reverse();
+                return string.Join("_", parts);
+            }
+
+            return null;
+        }
+
+        private bool TryResolveMemberType(MemberAccessExpressionSyntax member, out TypeSymbol type)
+        {
+            type = null!;
+
+            // Start from the root identifier
+            var current = (ExpressionSyntax)member;
+            var chain = new List<MemberAccessExpressionSyntax>();
+
+            while (current is MemberAccessExpressionSyntax m)
+            {
+                chain.Add(m);
+                current = m.Receiver;
+            }
+
+            if (current is not IdentifierExpressionSyntax rootId)
+            {
+                return false;
+            }
+
+            // Resolve the root symbol
+            if (!_symbols.TryGetValue(rootId.Identifier.Text, out var sym) || sym.Type is null)
+            {
+                return false;
+            }
+
+            var currentType = sym.Type;
+            chain.Reverse();
+
+            // Walk the chain from root to leaf
+            foreach (var memberAccess in chain)
+            {
+                if (currentType is not NamedTypeSymbol namedType)
+                {
+                    return false;
+                }
+
+                if (!_structs.TryGetValue(namedType.TypeName, out var structDecl))
+                {
+                    return false;
+                }
+
+                var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
+                if (field is null)
+                {
+                    return false;
+                }
+
+                currentType = ResolveType(field.Type, _symbols);
+            }
+
+            type = currentType;
+            return true;
         }
 
         private (LLVMTypeRef ReturnType, LLVMTypeRef[] Parameters) ResolveFunctionSignature(string name)
