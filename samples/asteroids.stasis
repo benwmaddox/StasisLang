@@ -1,6 +1,17 @@
 // Asteroids - Minimal Vector Graphics Demo
 // Controls: A/D or Arrow keys to rotate, W or Up to thrust, Space to fire, Escape to quit
 
+// External runtime APIs:
+// - init_window(width: i32, height: i32, title: string) -> bool: creates the SDL window/context.
+// - time() -> i64: returns unix timestamp seconds for seeding the PRNG.
+// - get_time_ms() -> i32: millisecond-resolution clock used for timing logic.
+// - sleep_ms(ms: i32): pauses the thread to pace the frame loop.
+// - should_quit() -> bool: polls SDL events for quit requests.
+// - begin_frame(), end_frame(): bracket GPU work for the graphics backend.
+// - clear(r: f32, g: f32, b: f32, a: f32): clears the frame buffer.
+// - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): renders debug lines.
+// - is_key_down(scancode: i32) -> bool: queries the current keyboard state.
+
 // SDL Scancodes (constants)
 const KEY_W: i32 = 26;
 const KEY_A: i32 = 4;
