@@ -15,6 +15,7 @@ _ReSharper.Caches/
 .DS_Store
 .vscode/
 .config/dotnet-tools.json.lock
+.claude/settings.local.json
 
 # Build artifacts
 *.dll
@@ -27,5 +28,7 @@ codevcpkg/
 # Debug/temp files
 nul
 samples/*_debug.stasis
-samples/*_test.stasis
+samples/*_test*.stasis
+samples/*test*.stasis
 samples/*_old.stasis
+samples/*_simple.stasis
