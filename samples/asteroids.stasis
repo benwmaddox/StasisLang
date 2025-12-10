@@ -156,27 +156,26 @@ function init_asteroids(): void {
             state.asteroids[i].size = 40.0;
             state.asteroids[i].vx = 0.5;
             state.asteroids[i].vy = 0.3;
-
-            // Place asteroids at known positions in corners
-            if (i == 0) {
-                state.asteroids[i].x = 150.0;
-                state.asteroids[i].y = 150.0;
-            }
-            if (i == 1) {
-                state.asteroids[i].x = 650.0;
-                state.asteroids[i].y = 150.0;
-            }
-            if (i == 2) {
-                state.asteroids[i].x = 150.0;
-                state.asteroids[i].y = 450.0;
-            }
-            if (i == 3) {
-                state.asteroids[i].x = 650.0;
-                state.asteroids[i].y = 450.0;
-            }
         } else {
             state.asteroids[i].active = false;
         }
+    }
+
+    if state.num_asteroids > 0 {
+        state.asteroids[0].x = 150.0;
+        state.asteroids[0].y = 150.0;
+    }
+    if state.num_asteroids > 1 {
+        state.asteroids[1].x = 650.0;
+        state.asteroids[1].y = 150.0;
+    }
+    if state.num_asteroids > 2 {
+        state.asteroids[2].x = 150.0;
+        state.asteroids[2].y = 450.0;
+    }
+    if state.num_asteroids > 3 {
+        state.asteroids[3].x = 650.0;
+        state.asteroids[3].y = 450.0;
     }
 }
 
