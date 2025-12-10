@@ -22,6 +22,10 @@ const MAX_BULLETS: i32 = 5;
 // Math constants
 const PI: f32 = 3.14159;
 
+// FPS control
+const TARGET_FPS: i32 = 60;
+const FRAME_TIME_MS: i32 = 16; // 1000ms / 60fps ≈ 16.67ms
+
 // Struct definitions
 struct Ship {
     x: f32;
@@ -56,6 +60,7 @@ struct GameState {
     fire_cooldown: i32;
     running: i32;
     last_time: i32;
+    frame_start_time: i32;
     rng_state: i32;
 }
 
@@ -403,13 +408,16 @@ function main(): i32 {
 
     let frame: i32;
     for frame = 0; state.running == 1; frame = frame + 1 {
+        // Record frame start time for FPS control
+        state.frame_start_time = get_time_ms();
+
         let quit: bool;
         quit = should_quit();
-        if (quit) {
+        if quit {
             state.running = 0;
         }
 
-        if (state.running == 1) {
+        if state.running == 1 {
             begin_frame();
             clear(0.0, 0.0, 0.1, 1.0);
 
@@ -419,10 +427,10 @@ function main(): i32 {
             let dt: f32;
             current_time = get_time_ms();
             delta_ms = current_time - state.last_time;
-            if (delta_ms < 1) {
+            if delta_ms < 1 {
                 delta_ms = 1;
             }
-            if (delta_ms > 100) {
+            if delta_ms > 100 {
                 delta_ms = 100;
             }
             let delta_ms_f: f32;
@@ -431,10 +439,10 @@ function main(): i32 {
             state.last_time = current_time;
 
             // Handle fire input
-            if (state.fire_cooldown > 0) {
+            if state.fire_cooldown > 0 {
                 state.fire_cooldown = state.fire_cooldown - delta_ms;
             }
-            if (is_key_down(KEY_SPACE) && state.fire_cooldown < 1) {
+            if is_key_down(KEY_SPACE) && state.fire_cooldown < 1 {
                 fire_bullet();
                 state.fire_cooldown = 200;
             }
@@ -452,8 +460,19 @@ function main(): i32 {
 
             end_frame();
 
-            // Small delay to not spin CPU
-            sleep_ms(1);
+            // FPS control: sleep for remaining frame time if ahead of schedule
+            let frame_end_time: i32;
+            let frame_elapsed: i32;
+            let sleep_time: i32;
+            frame_end_time = get_time_ms();
+            frame_elapsed = frame_end_time - state.frame_start_time;
+            sleep_time = FRAME_TIME_MS - frame_elapsed;
+
+            // Only sleep if we have time left in the frame budget
+            if sleep_time > 0 {
+                sleep_ms(sleep_time);
+            }
+            // If sleep_time <= 0, we're behind schedule - skip sleep and continue
         }
     }
 
