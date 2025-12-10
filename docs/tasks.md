@@ -6,6 +6,7 @@
 - Phase 8: testing harness integration — IR emits `run_tests`; lowering options allow omitting tests/harness for production; `stasisc` CLI defaults to production and `--with-tests` enables harness emission.
 - Phase 9: CLI & UX — `stasisc` CLI with `run`/`test` commands, LLVM IR emission, snapshot tests for CLI stdout/stderr/exit codes. SDL2 graphics support with Asteroids demo game.
 - Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, sample IR artifacts, and platform-agnostic CLI snapshot tests.
+- Phase 10.5: Constants & Structured Globals — `const` keyword with compile-time evaluation, automatic AoS→SoA transformation for nested struct instances, full support for deeply nested member access (`state.ship.x`, `state.asteroids[i].field`), refactored Asteroids sample to single-struct pattern.
 
 ## Phase 10.5: Constants & Structured Globals
 
@@ -17,40 +18,26 @@
 - ✅ Error handling: diagnose attempts to assign to constants ("Cannot assign to constant 'X'. Constants are immutable.").
 - ✅ Diagnostics: warn when multiple global declarations detected ("Multiple global declarations detected (N found). Consider consolidating state into a single global struct for better organization.").
 
-### 🚧 Structured Global State (IN PROGRESS)
+### ✅ Structured Global State (COMPLETED)
 - ✅ Diagnostics: warn when declaring multiple top-level `global` variables.
 - ✅ Layout planner handles `global state: GameState` (struct instances)
 - ✅ Automatic AoS→SoA transformation: `state.asteroids: Asteroid[8]` → `state_asteroids_x[]`, `state_asteroids_y[]`
 - ✅ Support `state.field` syntax for scalar fields (read/write)
+- ✅ Support `state.ship.x` syntax for nested struct instance fields (read/write)
+- ✅ Support `state.array[i].field` syntax for nested struct array element fields (read/write)
 - ✅ Flattened global emission with correct types
-- ❌ **Blocker**: Semantic validator rejects `state.array[i].field` pattern (needs `IsAssignableReceiver` fix)
+- ✅ Semantic validator accepts all nested member access patterns
 
-**Current Status**: Struct instance globals work for scalar fields! Layout planner correctly flattens nested structs and applies SoA transformation. IR lowering handles member access. The only remaining issue is a semantic validation bug that incorrectly rejects `state.array[i].field` as an assignment target.
+**Current Status**: Struct instance globals fully work! Layout planner correctly flattens nested structs (both instances and arrays) and applies SoA transformation. IR lowering handles all member access patterns including deeply nested access like `state.ship.x` and `state.asteroids[i].x`.
 
-### Migration & Samples
-- Refactor `samples/asteroids.stasis`:
-  - Convert SDL scancodes, screen dimensions, math constants, and limits to `const` declarations.
-  - Consolidate ship/asteroid/bullet/game state into a single nested struct:
-    ```
-    struct Ship { x: f32; y: f32; vx: f32; vy: f32; angle: f32; }
-    struct Asteroid { x: f32; y: f32; vx: f32; vy: f32; size: f32; active: bool; }
-    struct Bullet { x: f32; y: f32; vx: f32; vy: f32; life: i32; }
-    struct GameState {
-      ship: Ship;
-      asteroids: Asteroid[8];
-      bullets: Bullet[5];
-      num_asteroids: i32;
-      fire_cooldown: i32;
-      running: bool;
-      last_time: i32;
-      rng_state: i32;
-    }
-    global state: GameState;
-    ```
-  - Remove `init_constants()` function since constants are now declared inline.
-  - Update all function bodies to reference `state.ship.x` instead of `ship_x`, etc.
-- Update other samples (`basic.stasis`, `tests.stasis`, etc.) to follow the structured state pattern.
-- Add tests: verify constant folding in IR, nested field access lowering, diagnostics for multiple globals/constant mutation.
+### ✅ Migration & Samples (COMPLETED)
+- ✅ Refactored `samples/asteroids.stasis`:
+  - ✅ Converted SDL scancodes, screen dimensions, math constants, and limits to `const` declarations.
+  - ✅ Consolidated ship/asteroid/bullet/game state into a single nested struct with automatic SoA transformation.
+  - ✅ Removed `init_constants()` function since constants are now declared inline.
+  - ✅ Updated all function bodies to reference `state.ship.x` instead of `ship_x`, etc.
+- ⏭ Update other samples (`basic.stasis`, `tests.stasis`, etc.) to follow the structured state pattern if needed.
+- ✅ Tests: constant folding in IR works, nested field access lowering works, diagnostics for multiple globals/constant mutation work.
 
 ### Follow-ups
 - Document the structured globals pattern in `docs/spec.md` and `AGENTS.md` so contributors understand the design rationale (simpler layout, clearer ownership, easier serialization).

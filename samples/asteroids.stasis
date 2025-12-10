@@ -1,80 +1,77 @@
 // Asteroids - Minimal Vector Graphics Demo
 // Controls: A/D or Arrow keys to rotate, W or Up to thrust, Space to fire, Escape to quit
 
-// SDL Scancodes
-global KEY_W: i32;
-global KEY_A: i32;
-global KEY_D: i32;
-global KEY_SPACE: i32;
-global KEY_ESCAPE: i32;
-global KEY_LEFT: i32;
-global KEY_RIGHT: i32;
-global KEY_UP: i32;
+// SDL Scancodes (constants)
+const KEY_W: i32 = 26;
+const KEY_A: i32 = 4;
+const KEY_D: i32 = 7;
+const KEY_SPACE: i32 = 44;
+const KEY_ESCAPE: i32 = 41;
+const KEY_LEFT: i32 = 80;
+const KEY_RIGHT: i32 = 79;
+const KEY_UP: i32 = 82;
 
-// Screen dimensions
-global SCREEN_W: f32;
-global SCREEN_H: f32;
+// Screen dimensions (constants)
+const SCREEN_W: f32 = 800.0;
+const SCREEN_H: f32 = 600.0;
 
-// Ship state
-global ship_x: f32;
-global ship_y: f32;
-global ship_vx: f32;
-global ship_vy: f32;
-global ship_angle: f32;
+// Limits (constants)
+const MAX_ASTEROIDS: i32 = 8;
+const MAX_BULLETS: i32 = 5;
 
-// Asteroids (max 8)
-global MAX_ASTEROIDS: i32;
-global asteroid_x: f32[8];
-global asteroid_y: f32[8];
-global asteroid_vx: f32[8];
-global asteroid_vy: f32[8];
-global asteroid_size: f32[8];
-global asteroid_active: i32[8];
-global num_asteroids: i32;
+// Math constants
+const PI: f32 = 3.14159;
 
-// Bullets (max 5)
-global MAX_BULLETS: i32;
-global bullet_x: f32[5];
-global bullet_y: f32[5];
-global bullet_vx: f32[5];
-global bullet_vy: f32[5];
-global bullet_life: i32[5];
-
-// Time tracking
-global last_time: i32;
-
-// RNG state
-global rng_state: i32;
-
-// Math constants (scaled integers for sin/cos lookup)
-global PI: f32;
-
-function init_constants(): void {
-    KEY_W = 26;
-    KEY_A = 4;
-    KEY_D = 7;
-    KEY_SPACE = 44;
-    KEY_ESCAPE = 41;
-    KEY_LEFT = 80;
-    KEY_RIGHT = 79;
-    KEY_UP = 82;
-    SCREEN_W = 800.0;
-    SCREEN_H = 600.0;
-    MAX_ASTEROIDS = 8;
-    MAX_BULLETS = 5;
-    PI = 3.14159;
+// Struct definitions
+struct Ship {
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+    angle: f32;
 }
 
+struct Asteroid {
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+    size: f32;
+    active: i32;
+}
+
+struct Bullet {
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+    life: i32;
+}
+
+struct GameState {
+    ship: Ship;
+    asteroids: Asteroid[8];
+    bullets: Bullet[5];
+    num_asteroids: i32;
+    fire_cooldown: i32;
+    running: i32;
+    last_time: i32;
+    rng_state: i32;
+}
+
+// Single global state struct
+global state: GameState;
+
 function seed_rng(seed: i32): void {
-    rng_state = seed;
+    state.rng_state = seed;
 }
 
 function next_rand(): i32 {
-    rng_state = rng_state * 1103515245 + 12345;
-    if (rng_state < 0) {
-        rng_state = 0 - rng_state;
+    state.rng_state = state.rng_state * 1103515245 + 12345;
+    if (state.rng_state < 0) {
+        state.rng_state = 0 - state.rng_state;
     }
-    return rng_state;
+    return state.rng_state;
 }
 
 function rand_float(max: f32): f32 {
@@ -126,42 +123,42 @@ function cos_approx(angle: f32): f32 {
 }
 
 function init_ship(): void {
-    ship_x = SCREEN_W / 2.0;
-    ship_y = SCREEN_H / 2.0;
-    ship_vx = 0.0;
-    ship_vy = 0.0;
-    ship_angle = 0.0;
+    state.ship.x = SCREEN_W / 2.0;
+    state.ship.y = SCREEN_H / 2.0;
+    state.ship.vx = 0.0;
+    state.ship.vy = 0.0;
+    state.ship.angle = 0.0;
 }
 
 function init_asteroids(): void {
-    num_asteroids = 4;
+    state.num_asteroids = 4;
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
-        if (i < num_asteroids) {
-            asteroid_active[i] = 1;
-            asteroid_size[i] = 40.0;
-            asteroid_vx[i] = 0.5;
-            asteroid_vy[i] = 0.3;
+        if (i < state.num_asteroids) {
+            state.asteroids[i].active = 1;
+            state.asteroids[i].size = 40.0;
+            state.asteroids[i].vx = 0.5;
+            state.asteroids[i].vy = 0.3;
 
             // Place asteroids at known positions in corners
             if (i == 0) {
-                asteroid_x[i] = 150.0;
-                asteroid_y[i] = 150.0;
+                state.asteroids[i].x = 150.0;
+                state.asteroids[i].y = 150.0;
             }
             if (i == 1) {
-                asteroid_x[i] = 650.0;
-                asteroid_y[i] = 150.0;
+                state.asteroids[i].x = 650.0;
+                state.asteroids[i].y = 150.0;
             }
             if (i == 2) {
-                asteroid_x[i] = 150.0;
-                asteroid_y[i] = 450.0;
+                state.asteroids[i].x = 150.0;
+                state.asteroids[i].y = 450.0;
             }
             if (i == 3) {
-                asteroid_x[i] = 650.0;
-                asteroid_y[i] = 450.0;
+                state.asteroids[i].x = 650.0;
+                state.asteroids[i].y = 450.0;
             }
         } else {
-            asteroid_active[i] = 0;
+            state.asteroids[i].active = 0;
         }
     }
 }
@@ -169,7 +166,7 @@ function init_asteroids(): void {
 function init_bullets(): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
-        bullet_life[i] = 0;
+        state.bullets[i].life = 0;
     }
 }
 
@@ -188,39 +185,39 @@ function wrap_position(px: f32, max: f32): f32 {
 function update_ship(dt: f32): void {
     // Rotation (A/D or Left/Right arrows) - 5 radians/sec = ~286 degrees/sec
     if (is_key_down(KEY_A) || is_key_down(KEY_LEFT)) {
-        ship_angle = ship_angle - 5.0 * dt;
+        state.ship.angle = state.ship.angle - 5.0 * dt;
     }
     if (is_key_down(KEY_D) || is_key_down(KEY_RIGHT)) {
-        ship_angle = ship_angle + 5.0 * dt;
+        state.ship.angle = state.ship.angle + 5.0 * dt;
     }
 
     // Thrust (W or Up arrow)
     if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
         let thrust: f32;
         thrust = 150.0 * dt;
-        ship_vx = ship_vx + cos_approx(ship_angle) * thrust;
-        ship_vy = ship_vy + sin_approx(ship_angle) * thrust;
+        state.ship.vx = state.ship.vx + cos_approx(state.ship.angle) * thrust;
+        state.ship.vy = state.ship.vy + sin_approx(state.ship.angle) * thrust;
     }
 
     // Apply velocity with damping
-    ship_x = ship_x + ship_vx * dt;
-    ship_y = ship_y + ship_vy * dt;
-    ship_vx = ship_vx * 0.99;
-    ship_vy = ship_vy * 0.99;
+    state.ship.x = state.ship.x + state.ship.vx * dt;
+    state.ship.y = state.ship.y + state.ship.vy * dt;
+    state.ship.vx = state.ship.vx * 0.99;
+    state.ship.vy = state.ship.vy * 0.99;
 
     // Wrap around screen
-    ship_x = wrap_position(ship_x, SCREEN_W);
-    ship_y = wrap_position(ship_y, SCREEN_H);
+    state.ship.x = wrap_position(state.ship.x, SCREEN_W);
+    state.ship.y = wrap_position(state.ship.y, SCREEN_H);
 }
 
 function update_asteroids(dt: f32): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
-        if (asteroid_active[i] == 1) {
-            asteroid_x[i] = asteroid_x[i] + asteroid_vx[i] * dt * 60.0;
-            asteroid_y[i] = asteroid_y[i] + asteroid_vy[i] * dt * 60.0;
-            asteroid_x[i] = wrap_position(asteroid_x[i], SCREEN_W);
-            asteroid_y[i] = wrap_position(asteroid_y[i], SCREEN_H);
+        if (state.asteroids[i].active == 1) {
+            state.asteroids[i].x = state.asteroids[i].x + state.asteroids[i].vx * dt * 60.0;
+            state.asteroids[i].y = state.asteroids[i].y + state.asteroids[i].vy * dt * 60.0;
+            state.asteroids[i].x = wrap_position(state.asteroids[i].x, SCREEN_W);
+            state.asteroids[i].y = wrap_position(state.asteroids[i].y, SCREEN_H);
         }
     }
 }
@@ -228,12 +225,12 @@ function update_asteroids(dt: f32): void {
 function fire_bullet(): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (bullet_life[i] == 0) {
-            bullet_x[i] = ship_x + cos_approx(ship_angle) * 15.0;
-            bullet_y[i] = ship_y + sin_approx(ship_angle) * 15.0;
-            bullet_vx[i] = cos_approx(ship_angle) * 300.0;
-            bullet_vy[i] = sin_approx(ship_angle) * 300.0;
-            bullet_life[i] = 60;
+        if (state.bullets[i].life == 0) {
+            state.bullets[i].x = state.ship.x + cos_approx(state.ship.angle) * 15.0;
+            state.bullets[i].y = state.ship.y + sin_approx(state.ship.angle) * 15.0;
+            state.bullets[i].vx = cos_approx(state.ship.angle) * 300.0;
+            state.bullets[i].vy = sin_approx(state.ship.angle) * 300.0;
+            state.bullets[i].life = 60;
             return;
         }
     }
@@ -242,14 +239,14 @@ function fire_bullet(): void {
 function update_bullets(dt: f32): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (bullet_life[i] > 0) {
-            bullet_x[i] = bullet_x[i] + bullet_vx[i] * dt;
-            bullet_y[i] = bullet_y[i] + bullet_vy[i] * dt;
-            bullet_life[i] = bullet_life[i] - 1;
+        if (state.bullets[i].life > 0) {
+            state.bullets[i].x = state.bullets[i].x + state.bullets[i].vx * dt;
+            state.bullets[i].y = state.bullets[i].y + state.bullets[i].vy * dt;
+            state.bullets[i].life = state.bullets[i].life - 1;
 
             // Wrap bullets
-            bullet_x[i] = wrap_position(bullet_x[i], SCREEN_W);
-            bullet_y[i] = wrap_position(bullet_y[i], SCREEN_H);
+            state.bullets[i].x = wrap_position(state.bullets[i].x, SCREEN_W);
+            state.bullets[i].y = wrap_position(state.bullets[i].y, SCREEN_H);
         }
     }
 }
@@ -267,19 +264,19 @@ function check_collisions(): void {
 
     // Bullet-asteroid collisions
     for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (bullet_life[i] > 0) {
+        if (state.bullets[i].life > 0) {
             for j = 0; j < MAX_ASTEROIDS; j = j + 1 {
-                if (asteroid_active[j] == 1) {
+                if (state.asteroids[j].active == 1) {
                     let dx: f32;
                     let dy: f32;
                     let dist: f32;
-                    dx = bullet_x[i] - asteroid_x[j];
-                    dy = bullet_y[i] - asteroid_y[j];
+                    dx = state.bullets[i].x - state.asteroids[j].x;
+                    dy = state.bullets[i].y - state.asteroids[j].y;
                     dist = abs_f32(dx) + abs_f32(dy);
 
-                    if (dist < asteroid_size[j]) {
-                        bullet_life[i] = 0;
-                        asteroid_active[j] = 0;
+                    if (dist < state.asteroids[j].size) {
+                        state.bullets[i].life = 0;
+                        state.asteroids[j].active = 0;
                     }
                 }
             }
@@ -290,8 +287,8 @@ function check_collisions(): void {
 function draw_ship(): void {
     let c: f32;
     let s: f32;
-    c = cos_approx(ship_angle);
-    s = sin_approx(ship_angle);
+    c = cos_approx(state.ship.angle);
+    s = sin_approx(state.ship.angle);
 
     // Ship is a triangle
     let size: f32;
@@ -300,20 +297,20 @@ function draw_ship(): void {
     // Nose
     let nx: f32;
     let ny: f32;
-    nx = ship_x + c * size;
-    ny = ship_y + s * size;
+    nx = state.ship.x + c * size;
+    ny = state.ship.y + s * size;
 
     // Left wing
     let lx: f32;
     let ly: f32;
-    lx = ship_x + cos_approx(ship_angle + 2.4) * size;
-    ly = ship_y + sin_approx(ship_angle + 2.4) * size;
+    lx = state.ship.x + cos_approx(state.ship.angle + 2.4) * size;
+    ly = state.ship.y + sin_approx(state.ship.angle + 2.4) * size;
 
     // Right wing
     let rx: f32;
     let ry: f32;
-    rx = ship_x + cos_approx(ship_angle - 2.4) * size;
-    ry = ship_y + sin_approx(ship_angle - 2.4) * size;
+    rx = state.ship.x + cos_approx(state.ship.angle - 2.4) * size;
+    ry = state.ship.y + sin_approx(state.ship.angle - 2.4) * size;
 
     // Draw white lines
     draw_line(nx, ny, lx, ly, 1.0, 1.0, 1.0, 1.0);
@@ -324,8 +321,8 @@ function draw_ship(): void {
     if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
         let tx: f32;
         let ty: f32;
-        tx = ship_x - c * size * 1.5;
-        ty = ship_y - s * size * 1.5;
+        tx = state.ship.x - c * size * 1.5;
+        ty = state.ship.y - s * size * 1.5;
         draw_line(lx, ly, tx, ty, 1.0, 0.5, 0.0, 1.0);
         draw_line(rx, ry, tx, ty, 1.0, 0.5, 0.0, 1.0);
     }
@@ -334,13 +331,13 @@ function draw_ship(): void {
 function draw_asteroids(): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
-        if (asteroid_active[i] == 1) {
+        if (state.asteroids[i].active == 1) {
             let x: f32;
             let y: f32;
             let sz: f32;
-            x = asteroid_x[i];
-            y = asteroid_y[i];
-            sz = asteroid_size[i];
+            x = state.asteroids[i].x;
+            y = state.asteroids[i].y;
+            sz = state.asteroids[i].size;
 
             // Draw as simple octagon (8 sides)
             let j: i32;
@@ -375,11 +372,11 @@ function draw_asteroids(): void {
 function draw_bullets(): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (bullet_life[i] > 0) {
+        if (state.bullets[i].life > 0) {
             let x: f32;
             let y: f32;
-            x = bullet_x[i];
-            y = bullet_y[i];
+            x = state.bullets[i].x;
+            y = state.bullets[i].y;
 
             // Draw as small cross
             draw_line(x - 2.0, y, x + 2.0, y, 1.0, 1.0, 0.0, 1.0);
@@ -388,12 +385,7 @@ function draw_bullets(): void {
     }
 }
 
-global fire_cooldown: i32;
-global running: i32;
-
 function main(): i32 {
-    init_constants();
-
     let init_ok: bool;
     init_ok = init_window(800, 600, "Stasis Asteroids");
     if (!init_ok) {
@@ -405,19 +397,19 @@ function main(): i32 {
     init_asteroids();
     init_bullets();
 
-    last_time = get_time_ms();
-    fire_cooldown = 0;
-    running = 1;
+    state.last_time = get_time_ms();
+    state.fire_cooldown = 0;
+    state.running = 1;
 
     let frame: i32;
-    for frame = 0; running == 1; frame = frame + 1 {
+    for frame = 0; state.running == 1; frame = frame + 1 {
         let quit: bool;
         quit = should_quit();
         if (quit) {
-            running = 0;
+            state.running = 0;
         }
 
-        if (running == 1) {
+        if (state.running == 1) {
             begin_frame();
             clear(0.0, 0.0, 0.1, 1.0);
 
@@ -426,7 +418,7 @@ function main(): i32 {
             let delta_ms: i32;
             let dt: f32;
             current_time = get_time_ms();
-            delta_ms = current_time - last_time;
+            delta_ms = current_time - state.last_time;
             if (delta_ms < 1) {
                 delta_ms = 1;
             }
@@ -436,15 +428,15 @@ function main(): i32 {
             let delta_ms_f: f32;
             delta_ms_f = delta_ms;
             dt = delta_ms_f / 1000.0;
-            last_time = current_time;
+            state.last_time = current_time;
 
             // Handle fire input
-            if (fire_cooldown > 0) {
-                fire_cooldown = fire_cooldown - delta_ms;
+            if (state.fire_cooldown > 0) {
+                state.fire_cooldown = state.fire_cooldown - delta_ms;
             }
-            if (is_key_down(KEY_SPACE) && fire_cooldown < 1) {
+            if (is_key_down(KEY_SPACE) && state.fire_cooldown < 1) {
                 fire_bullet();
-                fire_cooldown = 200;
+                state.fire_cooldown = 200;
             }
 
             // Update game state
