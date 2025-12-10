@@ -184,15 +184,15 @@ function wrap_position(px: f32, max: f32): f32 {
 
 function update_ship(dt: f32): void {
     // Rotation (A/D or Left/Right arrows) - 5 radians/sec = ~286 degrees/sec
-    if (is_key_down(KEY_A) || is_key_down(KEY_LEFT)) {
+    if is_key_down(KEY_A) || is_key_down(KEY_LEFT) {
         state.ship.angle = state.ship.angle - 5.0 * dt;
     }
-    if (is_key_down(KEY_D) || is_key_down(KEY_RIGHT)) {
+    if is_key_down(KEY_D) || is_key_down(KEY_RIGHT) {
         state.ship.angle = state.ship.angle + 5.0 * dt;
     }
 
     // Thrust (W or Up arrow)
-    if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
+    if is_key_down(KEY_W) || is_key_down(KEY_UP) {
         let thrust: f32;
         thrust = 150.0 * dt;
         state.ship.vx = state.ship.vx + cos_approx(state.ship.angle) * thrust;
