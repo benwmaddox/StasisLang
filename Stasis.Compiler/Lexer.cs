@@ -7,6 +7,7 @@ public sealed class Lexer
         ["struct"] = TokenKind.StructKeyword,
         ["enum"] = TokenKind.EnumKeyword,
         ["global"] = TokenKind.GlobalKeyword,
+        ["const"] = TokenKind.ConstKeyword,
         ["function"] = TokenKind.FunctionKeyword,
         ["export"] = TokenKind.ExportKeyword,
         ["test"] = TokenKind.TestKeyword,

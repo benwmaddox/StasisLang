@@ -26,6 +26,7 @@ public sealed class SemanticAnalyzer
         DeclareBuiltIns();
         DeclareTypes(compilationUnit);
         DeclareGlobals(compilationUnit);
+        DeclareConstants(compilationUnit);
         DeclareFunctions(compilationUnit);
 
         foreach (var decl in compilationUnit.Declarations)
@@ -97,6 +98,19 @@ public sealed class SemanticAnalyzer
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Global, type, decl.Name.Span);
             EnsureGlobalType(type, decl.Type.Span);
+        }
+    }
+
+    private void DeclareConstants(CompilationUnitSyntax compilationUnit)
+    {
+        foreach (var decl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
+        {
+            var type = ResolveType(decl.Type);
+            AddSymbol(decl.Name.Text, SymbolKind.Const, type, decl.Name.Span);
+
+            // Validate that the initializer is a compile-time constant expression
+            // For now, we allow any expression - more sophisticated constant folding can be added later
+            // TODO: Add validation that initializer is a literal or constant expression
         }
     }
 

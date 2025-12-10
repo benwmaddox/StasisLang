@@ -21,6 +21,7 @@ public sealed class ModuleLowerer
         var opts = options ?? LowerOptions.Default;
         using var builder = new LlvmModuleBuilder(moduleName);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
+        EmitConstants(compilationUnit, semantic.Symbols, builder);
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests);
 
         var diagnostics = new List<Diagnostic>();
@@ -81,6 +82,44 @@ public sealed class ModuleLowerer
                     }
             }
         }
+    }
+
+    private static void EmitConstants(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)
+    {
+        foreach (var constDecl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
+        {
+            var type = ResolveType(constDecl.Type, symbols);
+            var llvmType = builder.TypeMapper.Map(type);
+
+            // Evaluate the initializer to get a constant value
+            var constValue = EvaluateConstantExpression(constDecl.Initializer, llvmType, builder.Context);
+            if (constValue.Handle != IntPtr.Zero)
+            {
+                builder.DefineConstantScalar(constDecl.Name.Text, llvmType, constValue);
+            }
+        }
+    }
+
+    private static LLVMValueRef EvaluateConstantExpression(ExpressionSyntax expr, LLVMTypeRef targetType, LLVMContextRef context)
+    {
+        if (expr is LiteralExpressionSyntax lit)
+        {
+            return lit.Literal.Kind switch
+            {
+                TokenKind.IntegerLiteral => int.TryParse(lit.Literal.Text, out var i)
+                    ? LLVMValueRef.CreateConstInt(targetType, (ulong)i, true)
+                    : default,
+                TokenKind.FloatLiteral => double.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)
+                    ? LLVMValueRef.CreateConstReal(targetType, f)
+                    : default,
+                TokenKind.TrueKeyword => LLVMValueRef.CreateConstInt(targetType, 1, false),
+                TokenKind.FalseKeyword => LLVMValueRef.CreateConstInt(targetType, 0, false),
+                _ => default
+            };
+        }
+
+        // For non-literal expressions, return invalid value (will be skipped)
+        return default;
     }
 
     private static uint ParseArrayLength(string text) =>
@@ -591,7 +630,7 @@ public sealed class ModuleLowerer
                         return value.Value;
                     }
 
-                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
+                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) && sym.Type is not null)
                     {
                         var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
                         var type = _moduleBuilder.TypeMapper.Map(sym.Type);
@@ -716,7 +755,7 @@ public sealed class ModuleLowerer
                         return true;
                     }
 
-                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is not null)
+                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) && sym.Type is not null)
                     {
                         ptr = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
                         type = _moduleBuilder.TypeMapper.Map(sym.Type);
@@ -1341,7 +1380,7 @@ public sealed class ModuleLowerer
 
             if (arr.Receiver is IdentifierExpressionSyntax id)
             {
-                if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is ArrayTypeSymbol arrayType)
+                if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) && sym.Type is ArrayTypeSymbol arrayType)
                 {
                     var zero = ConstI32(0);
                     var index = LowerExpression(builder, arr.Index, locals);

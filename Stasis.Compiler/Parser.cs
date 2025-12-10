@@ -45,6 +45,7 @@ public sealed class Parser
             TokenKind.StructKeyword => ParseStruct(),
             TokenKind.EnumKeyword => ParseEnum(),
             TokenKind.GlobalKeyword => ParseGlobal(),
+            TokenKind.ConstKeyword => ParseConst(),
             TokenKind.ExportKeyword or TokenKind.FunctionKeyword => ParseFunction(),
             TokenKind.TestKeyword => ParseTest(),
             _ => UnexpectedTopLevel()
@@ -130,6 +131,18 @@ public sealed class Parser
         var type = ParseType();
         var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after global declaration.");
         return new GlobalDeclarationSyntax(globalKeyword, name, type, semicolon);
+    }
+
+    private ConstDeclarationSyntax ParseConst()
+    {
+        var constKeyword = Consume(TokenKind.ConstKeyword, "Expected 'const'.");
+        var name = Consume(TokenKind.Identifier, "Expected constant name.");
+        Consume(TokenKind.Colon, "Expected ':' before type.");
+        var type = ParseType();
+        Consume(TokenKind.Equal, "Expected '=' before constant initializer.");
+        var initializer = ParseExpression();
+        var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after constant declaration.");
+        return new ConstDeclarationSyntax(constKeyword, name, type, initializer, semicolon);
     }
 
     private FunctionDeclarationSyntax ParseFunction()

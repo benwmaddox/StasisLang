@@ -37,6 +37,15 @@ public sealed class LlvmModuleBuilder : IDisposable
         return global;
     }
 
+    public LLVMValueRef DefineConstantScalar(string name, LLVMTypeRef elementType, LLVMValueRef initializer)
+    {
+        var global = Module.AddGlobal(elementType, name);
+        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.IsGlobalConstant = true;
+        global.Initializer = initializer;
+        return global;
+    }
+
     public LLVMValueRef DefineFunction(string name, LLVMTypeRef returnType, params LLVMTypeRef[] paramTypes)
     {
         var funcType = LLVMTypeRef.CreateFunction(returnType, paramTypes, false);
