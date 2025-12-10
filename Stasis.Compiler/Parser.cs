@@ -258,9 +258,21 @@ public sealed class Parser
     private IfStatementSyntax ParseIf()
     {
         var ifKeyword = Consume(TokenKind.IfKeyword, "Expected 'if'.");
-        Consume(TokenKind.LParen, "Expected '(' after 'if'.");
+
+        // Parentheses are optional
+        var hasParens = Current.Kind == TokenKind.LParen;
+        if (hasParens)
+        {
+            Consume(TokenKind.LParen, "Expected '('.");
+        }
+
         var condition = ParseExpression();
-        Consume(TokenKind.RParen, "Expected ')' after condition.");
+
+        if (hasParens)
+        {
+            Consume(TokenKind.RParen, "Expected ')' after condition.");
+        }
+
         var thenBlock = ParseBlock();
         BlockStatementSyntax? elseBlock = null;
         if (Match(TokenKind.ElseKeyword))
@@ -274,6 +286,14 @@ public sealed class Parser
     private ForStatementSyntax ParseFor()
     {
         var forKeyword = Consume(TokenKind.ForKeyword, "Expected 'for'.");
+
+        // Parentheses are optional
+        var hasParens = Current.Kind == TokenKind.LParen;
+        if (hasParens)
+        {
+            Consume(TokenKind.LParen, "Expected '('.");
+        }
+
         ExpressionSyntax? initializer = null;
         if (!Match(TokenKind.Semicolon))
         {
@@ -289,9 +309,14 @@ public sealed class Parser
         }
 
         ExpressionSyntax? step = null;
-        if (Current.Kind != TokenKind.LBrace)
+        if (hasParens && Current.Kind != TokenKind.RParen || !hasParens && Current.Kind != TokenKind.LBrace)
         {
             step = ParseExpression();
+        }
+
+        if (hasParens)
+        {
+            Consume(TokenKind.RParen, "Expected ')' after for header.");
         }
 
         var body = ParseBlock();
