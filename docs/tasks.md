@@ -18,12 +18,14 @@
 - ✅ Diagnostics: warn when multiple global declarations detected ("Multiple global declarations detected (N found). Consider consolidating state into a single global struct for better organization.").
 
 ### 🚧 Structured Global State (IN PROGRESS)
-- ⏳ Enforce single global state struct pattern: all mutable state must be fields within a single root `global state: GameState;` declaration.
-- ⏳ Allow nested structs and arrays within the state struct (e.g., `state.ship.x`, `state.asteroids[i].active`).
-- ⏳ Update layout planner to handle nested struct access and emit proper GEP chains for deep field paths.
 - ✅ Diagnostics: warn when declaring multiple top-level `global` variables.
+- ✅ Layout planner handles `global state: GameState` (struct instances)
+- ✅ Automatic AoS→SoA transformation: `state.asteroids: Asteroid[8]` → `state_asteroids_x[]`, `state_asteroids_y[]`
+- ✅ Support `state.field` syntax for scalar fields (read/write)
+- ✅ Flattened global emission with correct types
+- ❌ **Blocker**: Semantic validator rejects `state.array[i].field` pattern (needs `IsAssignableReceiver` fix)
 
-**Blocking Issue**: Current compiler uses Structure of Arrays (SoA) layout where struct fields become separate global arrays. Supporting `state.ship.x` syntax requires architectural changes to support nested field access with proper GEP chain generation.
+**Current Status**: Struct instance globals work for scalar fields! Layout planner correctly flattens nested structs and applies SoA transformation. IR lowering handles member access. The only remaining issue is a semantic validation bug that incorrectly rejects `state.array[i].field` as an assignment target.
 
 ### Migration & Samples
 - Refactor `samples/asteroids.stasis`:
