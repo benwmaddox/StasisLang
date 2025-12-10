@@ -187,6 +187,23 @@ function wrap_position(px: f32, max: f32): f32 {
     return result;
 }
 
+function sync_frame_rate(): void {
+    // Calculate elapsed time and sleep if ahead of schedule
+    let frame_end_time: i32;
+    let frame_elapsed: i32;
+    let sleep_time: i32;
+
+    frame_end_time = get_time_ms();
+    frame_elapsed = frame_end_time - state.frame_start_time;
+    sleep_time = FRAME_TIME_MS - frame_elapsed;
+
+    // Only sleep if we have time left in the frame budget
+    if sleep_time > 0 {
+        sleep_ms(sleep_time);
+    }
+    // If sleep_time <= 0, we're behind schedule - skip sleep and continue
+}
+
 function update_ship(dt: f32): void {
     // Rotation (A/D or Left/Right arrows) - 5 radians/sec = ~286 degrees/sec
     if is_key_down(KEY_A) || is_key_down(KEY_LEFT) {
@@ -461,18 +478,7 @@ function main(): i32 {
             end_frame();
 
             // FPS control: sleep for remaining frame time if ahead of schedule
-            let frame_end_time: i32;
-            let frame_elapsed: i32;
-            let sleep_time: i32;
-            frame_end_time = get_time_ms();
-            frame_elapsed = frame_end_time - state.frame_start_time;
-            sleep_time = FRAME_TIME_MS - frame_elapsed;
-
-            // Only sleep if we have time left in the frame budget
-            if sleep_time > 0 {
-                sleep_ms(sleep_time);
-            }
-            // If sleep_time <= 0, we're behind schedule - skip sleep and continue
+            sync_frame_rate();
         }
     }
 
