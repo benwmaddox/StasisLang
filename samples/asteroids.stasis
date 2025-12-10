@@ -18,6 +18,7 @@ const SCREEN_H: f32 = 600.0;
 // Limits (constants)
 const MAX_ASTEROIDS: i32 = 8;
 const MAX_BULLETS: i32 = 5;
+const BULLET_LIFETIME_MS: i32 = 1000;
 
 // Math constants
 const PI: f32 = 3.14159;
@@ -252,19 +253,22 @@ function fire_bullet(): void {
             state.bullets[i].y = state.ship.y + sin_approx(state.ship.angle) * 15.0;
             state.bullets[i].vx = cos_approx(state.ship.angle) * 300.0;
             state.bullets[i].vy = sin_approx(state.ship.angle) * 300.0;
-            state.bullets[i].life = 60;
+            state.bullets[i].life = BULLET_LIFETIME_MS;
             return;
         }
     }
 }
 
-function update_bullets(dt: f32): void {
+function update_bullets(dt: f32, delta_ms: i32): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
         if (state.bullets[i].life > 0) {
             state.bullets[i].x = state.bullets[i].x + state.bullets[i].vx * dt;
             state.bullets[i].y = state.bullets[i].y + state.bullets[i].vy * dt;
-            state.bullets[i].life = state.bullets[i].life - 1;
+            state.bullets[i].life = state.bullets[i].life - delta_ms;
+            if (state.bullets[i].life < 0) {
+                state.bullets[i].life = 0;
+            }
 
             // Wrap bullets
             state.bullets[i].x = wrap_position(state.bullets[i].x, SCREEN_W);
@@ -291,12 +295,13 @@ function check_collisions(): void {
                 if (state.asteroids[j].active == 1) {
                     let dx: f32;
                     let dy: f32;
-                    let dist: f32;
+                    let dist_sq: f32;
                     dx = state.bullets[i].x - state.asteroids[j].x;
                     dy = state.bullets[i].y - state.asteroids[j].y;
-                    dist = abs_f32(dx) + abs_f32(dy);
-
-                    if (dist < state.asteroids[j].size) {
+                    dist_sq = dx * dx + dy * dy;
+                    let radius: f32;
+                    radius = state.asteroids[j].size;
+                    if (dist_sq < radius * radius) {
                         state.bullets[i].life = 0;
                         state.asteroids[j].active = 0;
                     }
@@ -467,7 +472,7 @@ function main(): i32 {
             // Update game state
             update_ship(dt);
             update_asteroids(dt);
-            update_bullets(dt);
+            update_bullets(dt, delta_ms);
             check_collisions();
 
             // Draw everything
