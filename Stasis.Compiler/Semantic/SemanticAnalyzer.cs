@@ -93,7 +93,17 @@ public sealed class SemanticAnalyzer
 
     private void DeclareGlobals(CompilationUnitSyntax compilationUnit)
     {
-        foreach (var decl in compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>())
+        var globals = compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>().ToList();
+
+        // Warn about multiple top-level global declarations
+        if (globals.Count > 1)
+        {
+            _diagnostics.Add(new Diagnostic(
+                $"Multiple global declarations detected ({globals.Count} found). Consider consolidating state into a single global struct for better organization.",
+                globals[1].Name.Span));
+        }
+
+        foreach (var decl in globals)
         {
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Global, type, decl.Name.Span);
@@ -323,6 +333,13 @@ public sealed class SemanticAnalyzer
         if (!IsAssignableReceiver(target))
         {
             _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", target.Span));
+            return;
+        }
+
+        // Check if trying to assign to a constant
+        if (target is IdentifierExpressionSyntax id && _symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Const)
+        {
+            _diagnostics.Add(new Diagnostic($"Cannot assign to constant '{id.Identifier.Text}'. Constants are immutable.", target.Span));
             return;
         }
 
