@@ -18,6 +18,7 @@ public enum TokenKind
     StructKeyword,
     EnumKeyword,
     GlobalKeyword,
+    ConstKeyword,
     FunctionKeyword,
     ExportKeyword,
     TestKeyword,

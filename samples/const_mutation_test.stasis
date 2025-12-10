@@ -1,0 +1,11 @@
+// Test that assigning to constants produces errors
+
+const PI: f32 = 3.14159;
+const MAX_COUNT: i32 = 100;
+
+function main(): i32 {
+    // This should error: cannot assign to constant
+    PI = 3.0;
+    MAX_COUNT = 200;
+    return 0;
+}
