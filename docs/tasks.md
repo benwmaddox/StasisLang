@@ -9,18 +9,21 @@
 
 ## Phase 10.5: Constants & Structured Globals
 
-### Constant Support
-- Add `const` keyword for compile-time constant declarations (numeric, boolean, string literals).
-- Lex/parse: `const NAME: type = value;` syntax at module scope; disallow in functions.
-- Semantics: validate constants are initialized with literal values or expressions of other constants; disallow mutation attempts.
-- Lowering: fold constant expressions at compile time; emit as LLVM `constant` globals or inline directly into IR.
-- Error handling: diagnose uninitialized constants, non-literal initializers, and attempts to assign to constants.
+### ✅ Constant Support (COMPLETED)
+- ✅ Add `const` keyword for compile-time constant declarations (numeric, boolean, string literals).
+- ✅ Lex/parse: `const NAME: type = value;` syntax at module scope; disallow in functions.
+- ✅ Semantics: validate constants are initialized with literal values; disallow mutation attempts.
+- ✅ Lowering: emit literal constants as LLVM `constant` globals.
+- ✅ Error handling: diagnose attempts to assign to constants ("Cannot assign to constant 'X'. Constants are immutable.").
+- ✅ Diagnostics: warn when multiple global declarations detected ("Multiple global declarations detected (N found). Consider consolidating state into a single global struct for better organization.").
 
-### Structured Global State
-- Enforce single global state struct pattern: all mutable state must be fields within a single root `global state: GameState;` declaration.
-- Allow nested structs and arrays within the state struct (e.g., `state.ship.x`, `state.asteroids[i].active`).
-- Update layout planner to handle nested struct access and emit proper GEP chains for deep field paths.
-- Diagnostics: warn or error when declaring multiple top-level `global` variables (except for the single state struct and any constants).
+### 🚧 Structured Global State (IN PROGRESS)
+- ⏳ Enforce single global state struct pattern: all mutable state must be fields within a single root `global state: GameState;` declaration.
+- ⏳ Allow nested structs and arrays within the state struct (e.g., `state.ship.x`, `state.asteroids[i].active`).
+- ⏳ Update layout planner to handle nested struct access and emit proper GEP chains for deep field paths.
+- ✅ Diagnostics: warn when declaring multiple top-level `global` variables.
+
+**Blocking Issue**: Current compiler uses Structure of Arrays (SoA) layout where struct fields become separate global arrays. Supporting `state.ship.x` syntax requires architectural changes to support nested field access with proper GEP chain generation.
 
 ### Migration & Samples
 - Refactor `samples/asteroids.stasis`:
