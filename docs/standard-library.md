@@ -5,7 +5,7 @@ This document defines the standard library for the Stasis programming language.
 ## Design Principles
 
 1. **Prefix by module**: `str_`, `io_`, `sys_`, `math_`, `ascii_`, `mem_`, `gfx_`
-2. **UTF-8 everywhere**: All strings use the `string[N]` type (UTF-8 payload + length headers)
+2. **Text types**: `ascii[N]` for single-byte text, `utf8[N]` (aka `string[N]`) for full UTF-8
 3. **In-place operations**: Modify destination buffer, return length or success
 4. **Consistent naming**: `module_verb_noun` pattern
 5. **No app-specific functions**: Generic primitives only
@@ -15,15 +15,18 @@ This document defines the standard library for the Stasis programming language.
 
 ## String Model
 
-Stasis strings use a dedicated `string[N]` type with UTF-8 payload and tracked lengths.
+Stasis exposes two text types; `string[N]` remains an alias for `utf8[N]` for compatibility.
 
-- **Type**: `string[N]` where `N` is the maximum payload size in bytes (not counting headers)
-- **Layout (in memory)**: `[byte_length: i32][char_length: i32][data: u8[N]]`
-- **UTF-8 encoded payload**: `data` holds the UTF-8 bytes; `byte_length` is the used byte count
-- **Codepoint-aware**: `char_length` tracks the decoded codepoint count for the current payload
-- **Byte-indexed by default**: APIs accept byte indices for performance, but maintain codepoint counts
-- **Null sentinel**: `data[byte_length]` is always set to `0` for interop; the sentinel is not counted in `N`
-- **Header-driven ops**: `str_*` functions read and write the headers; raw byte helpers require a recount if they change payload bytes
+- **ASCII strings**: `ascii[N]`
+  - Layout: `[len: i32][data: u8[N]]`
+  - Invariants: `data[0..len)` are `< 128`; `len` is the used byte count; `data[len]` is `0` as a sentinel (not counted in `N`).
+  - Indexing: byte-indexed; O(1) access.
+
+- **UTF-8 strings**: `utf8[N]` (and `string[N]`)
+  - Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
+  - Invariants: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints; `data[byte_length]` is `0` as a sentinel (not counted in `N`).
+  - Indexing: byte-indexed by default; codepoint helpers available.
+  - Header-driven ops: `str_*` functions read/write headers; raw byte helpers require a recount if they change payload bytes.
 
 ### UTF-8 Encoding Basics
 
@@ -91,15 +94,15 @@ ascii_from_hex(d: i32): u8       // 0->'0', 10->'a', else '?'
 
 ## Module: `str_` (String Operations)
 
-All string functions operate on `string[N]` values (UTF-8 payload + length headers). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel.
+All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; ASCII inputs widen to UTF-8 when passed here.
 
 ### Length
 
 ```stasis
-str_len(s: string[]): i32              // Byte length from header (fast)
-str_len_utf8(s: string[]): i32         // Codepoint count from header
-str_is_empty(s: string[]): bool        // Returns byte_length == 0
-str_recount_utf8(s: string[]): i32     // Recompute lengths from payload, fix headers
+str_len(s: utf8[]): i32              // Byte length from header (fast)
+str_len_utf8(s: utf8[]): i32         // Codepoint count from header
+str_is_empty(s: utf8[]): bool        // Returns byte_length == 0
+str_recount_utf8(s: utf8[]): i32     // Recompute lengths from payload, fix headers
 ```
 
 ### Byte Access (Low-Level)
@@ -107,22 +110,22 @@ str_recount_utf8(s: string[]): i32     // Recompute lengths from payload, fix he
 These operate on raw bytes and do not adjust headers. Call `str_recount_utf8` after manual edits to resync lengths.
 
 ```stasis
-str_get_byte(s: string[], index: i32): u8       // Get byte at index (0 if out of bounds)
-str_set_byte(s: string[], index: i32, b: u8)    // Set byte at index (no-op if out of bounds)
+str_get_byte(s: utf8[], index: i32): u8       // Get byte at index (0 if out of bounds)
+str_set_byte(s: utf8[], index: i32, b: u8)    // Set byte at index (no-op if out of bounds)
 ```
 
 ### UTF-8 Iteration
 
 ```stasis
-str_next_codepoint(s: string[], byte_index: i32): i32
+str_next_codepoint(s: utf8[], byte_index: i32): i32
     // Returns byte index of next codepoint start, or -1 if at end
     // Usage: iterate codepoints without decoding
 
-str_decode_codepoint(s: string[], byte_index: i32): i32
+str_decode_codepoint(s: utf8[], byte_index: i32): i32
     // Decode codepoint at byte_index, return Unicode codepoint value
     // Returns -1 if invalid UTF-8 or out of bounds
 
-str_encode_codepoint(dst: string[], codepoint: i32): i32
+str_encode_codepoint(dst: utf8[], codepoint: i32): i32
     // Encode codepoint into dst payload, update lengths, return bytes written (1-4)
     // Returns 0 if invalid codepoint or no capacity
 ```
@@ -132,10 +135,10 @@ str_encode_codepoint(dst: string[], codepoint: i32): i32
 All comparisons are byte-wise, which preserves UTF-8 lexicographic order.
 
 ```stasis
-str_eq(a: string[], b: string[]): bool                 // Byte-wise equality
-str_cmp(a: string[], b: string[]): i32                 // -1, 0, 1 (lexicographic)
-str_starts_with(s: string[], prefix: string[]): bool   // Check prefix match
-str_ends_with(s: string[], suffix: string[]): bool     // Check suffix match
+str_eq(a: utf8[], b: utf8[]): bool                 // Byte-wise equality
+str_cmp(a: utf8[], b: utf8[]): i32                 // -1, 0, 1 (lexicographic)
+str_starts_with(s: utf8[], prefix: utf8[]): bool   // Check prefix match
+str_ends_with(s: utf8[], suffix: utf8[]): bool     // Check suffix match
 ```
 
 ### Search (Returns Byte Index)
@@ -143,20 +146,20 @@ str_ends_with(s: string[], suffix: string[]): bool     // Check suffix match
 These return **byte indices**. When searching for ASCII characters, results are always safe to use for splitting.
 
 ```stasis
-str_find(s: string[], needle: string[]): i32           // First byte index of needle, or -1
-str_find_byte(s: string[], b: u8): i32                 // First byte index of byte, or -1
-str_find_last_byte(s: string[], b: u8): i32            // Last byte index of byte, or -1
-str_contains(s: string[], needle: string[]): bool      // True if s contains needle
+str_find(s: utf8[], needle: utf8[]): i32           // First byte index of needle, or -1
+str_find_byte(s: utf8[], b: u8): i32                 // First byte index of byte, or -1
+str_find_last_byte(s: utf8[], b: u8): i32            // Last byte index of byte, or -1
+str_contains(s: utf8[], needle: utf8[]): bool      // True if s contains needle
 ```
 
 ### Modification (In-Place)
 
 ```stasis
-str_clear(s: string[])                                // Reset lengths to 0 and write null sentinel
-str_copy(dst: string[], src: string[]): i32           // Copy src to dst, return bytes copied
-str_append(dst: string[], src: string[]): i32         // Append src to dst, return new byte length
-str_append_byte(dst: string[], b: u8): i32            // Append single byte (must be ASCII), return new length
-str_append_codepoint(dst: string[], cp: i32): i32     // Append UTF-8 encoded codepoint, return bytes written
+str_clear(s: utf8[])                                // Reset lengths to 0 and write null sentinel
+str_copy(dst: utf8[], src: utf8[]): i32           // Copy src to dst, return bytes copied
+str_append(dst: utf8[], src: utf8[]): i32         // Append src to dst, return new byte length
+str_append_byte(dst: utf8[], b: u8): i32            // Append single byte (must be ASCII), return new length
+str_append_codepoint(dst: utf8[], cp: i32): i32     // Append UTF-8 encoded codepoint, return bytes written
 ```
 
 ### Substring (Byte-Based)
@@ -164,7 +167,7 @@ str_append_codepoint(dst: string[], cp: i32): i32     // Append UTF-8 encoded co
 These use byte indices. Caller must ensure indices don't split UTF-8 codepoints.
 
 ```stasis
-str_substr(dst: string[], src: string[], start: i32, byte_len: i32): i32
+str_substr(dst: utf8[], src: utf8[], start: i32, byte_len: i32): i32
     // Extract byte_len bytes starting at byte index start
     // Returns bytes copied
 ```
@@ -174,9 +177,9 @@ str_substr(dst: string[], src: string[], start: i32, byte_len: i32): i32
 Trims ASCII whitespace (space, tab, newline, carriage return). Safe for UTF-8 since these are all single-byte. Length headers are updated.
 
 ```stasis
-str_trim_start(s: string[]): i32    // Remove leading ASCII whitespace
-str_trim_end(s: string[]): i32      // Remove trailing ASCII whitespace
-str_trim(s: string[]): i32          // Remove both, return new byte length
+str_trim_start(s: utf8[]): i32    // Remove leading ASCII whitespace
+str_trim_end(s: utf8[]): i32      // Remove trailing ASCII whitespace
+str_trim(s: utf8[]): i32          // Remove both, return new byte length
 ```
 
 ### Case Conversion (ASCII Only, In-Place)
@@ -184,24 +187,24 @@ str_trim(s: string[]): i32          // Remove both, return new byte length
 Only converts ASCII letters (a-z, A-Z). Non-ASCII UTF-8 bytes are unchanged. Length headers are preserved.
 
 ```stasis
-str_to_upper(s: string[])           // Convert ASCII lowercase to uppercase
-str_to_lower(s: string[])           // Convert ASCII uppercase to lowercase
+str_to_upper(s: utf8[])           // Convert ASCII lowercase to uppercase
+str_to_lower(s: utf8[])           // Convert ASCII uppercase to lowercase
 ```
 
 ### Number Conversion
 
 ```stasis
-str_from_i32(dst: string[], value: i32): i32                   // Int to string, return byte length
-str_from_f32(dst: string[], value: f32, decimals: i32): i32    // Float to string
-str_to_i32(s: string[]): i32                                   // Parse int (0 on failure)
-str_to_f32(s: string[]): f32                                   // Parse float (0.0 on failure)
+str_from_i32(dst: utf8[], value: i32): i32                   // Int to string, return byte length
+str_from_f32(dst: utf8[], value: f32, decimals: i32): i32    // Float to string
+str_to_i32(s: utf8[]): i32                                   // Parse int (0 on failure)
+str_to_f32(s: utf8[]): f32                                   // Parse float (0.0 on failure)
 ```
 
 ### Validation
 
 ```stasis
-str_is_valid_utf8(s: string[]): bool              // Check if string is valid UTF-8
-str_sanitize_utf8(s: string[]): i32               // Replace invalid sequences with U+FFFD and fix headers
+str_is_valid_utf8(s: utf8[]): bool              // Check if string is valid UTF-8
+str_sanitize_utf8(s: utf8[]): i32               // Replace invalid sequences with U+FFFD and fix headers
 ```
 
 ---
@@ -211,8 +214,8 @@ str_sanitize_utf8(s: string[]): i32               // Replace invalid sequences w
 ### Console Output
 
 ```stasis
-io_print(s: string[])             // Print UTF-8 string (no newline)
-io_println(s: string[])           // Print UTF-8 string + newline
+io_print(s: utf8[])             // Print UTF-8 string (no newline)
+io_println(s: utf8[])           // Print UTF-8 string + newline
 io_print_i32(value: i32)          // Print integer
 io_print_f32(value: f32)          // Print float
 io_print_codepoint(cp: i32)       // Print single Unicode codepoint (UTF-8 encoded)
@@ -224,7 +227,7 @@ io_newline()                      // Print newline
 
 ```stasis
 io_read_byte(): i32               // Read single byte (blocking), -1 on EOF
-io_read_line(dst: string[]): i32  // Read UTF-8 line into buffer, return byte length
+io_read_line(dst: utf8[]): i32  // Read UTF-8 line into buffer, return byte length
 io_read_i32(): i32                // Read and parse integer
 ```
 
@@ -345,7 +348,7 @@ mem_cmp(a: u8[], b: u8[], count: i32): i32     // Compare bytes, return -1/0/1
 These are implemented in `runtime/stasis_graphics.c`, not as compiler built-ins.
 
 ```stasis
-gfx_init(width: i32, height: i32, title: string[]): bool
+gfx_init(width: i32, height: i32, title: utf8[]): bool
 gfx_begin_frame()
 gfx_end_frame()
 gfx_clear(r: f32, g: f32, b: f32, a: f32)
@@ -448,7 +451,7 @@ let t: i32 = sys_time_sec();
 ### Iterating Over Codepoints
 
 ```stasis
-global text: string[256];
+global text: utf8[256];
 global i: i32;
 global cp: i32;
 
@@ -468,8 +471,8 @@ function print_codepoints() {
 ### Safe String Splitting on ASCII Delimiter
 
 ```stasis
-global path: string[256];
-global filename: string[64];
+global path: utf8[256];
+global filename: utf8[64];
 
 function extract_filename() {
     // Find last '/' - safe because '/' is ASCII
