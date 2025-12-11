@@ -23,9 +23,11 @@ public sealed record ForStatementSyntax(
 
 public sealed record ForeachStatementSyntax(
     Token ForeachKeyword,
+    Token? LetKeyword,
     Token Iterator,
     ExpressionSyntax Iterable,
-    BlockStatementSyntax Body)
+    BlockStatementSyntax Body,
+    bool BindByElement)
     : StatementSyntax(new SourceSpan(ForeachKeyword.Span.Start, Body.Span.End - ForeachKeyword.Span.Start));
 
 public sealed record ReturnStatementSyntax(Token ReturnKeyword, ExpressionSyntax? Expression, Token Semicolon)

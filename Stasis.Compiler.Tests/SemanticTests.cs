@@ -76,7 +76,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("primitive types or struct references"));
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("primitive types, struct references, or arrays"));
     }
 
     [Fact]

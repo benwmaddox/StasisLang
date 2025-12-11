@@ -7,6 +7,7 @@ using Stasis.Compiler;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using System.Collections.Generic;
 
 namespace Stasis.Compiler.IR;
 
@@ -387,6 +388,34 @@ public sealed class ModuleLowerer
         return (clock, clockType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareLlvmSin(LlvmModuleBuilder builder)
+    {
+        var fnName = "llvm.sin.f32";
+        var fn = builder.Module.GetNamedFunction(fnName);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Float }, false);
+        if (fn.Handle != IntPtr.Zero)
+        {
+            return (fn, fnType);
+        }
+
+        fn = builder.Module.AddFunction(fnName, fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareLlvmCos(LlvmModuleBuilder builder)
+    {
+        var fnName = "llvm.cos.f32";
+        var fn = builder.Module.GetNamedFunction(fnName);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Float }, false);
+        if (fn.Handle != IntPtr.Zero)
+        {
+            return (fn, fnType);
+        }
+
+        fn = builder.Module.AddFunction(fnName, fnType);
+        return (fn, fnType);
+    }
+
     // Graphics runtime external functions
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInitWindow(LlvmModuleBuilder builder)
     {
@@ -488,6 +517,12 @@ public sealed class ModuleLowerer
         return type.Kind == LLVMTypeKind.LLVMPointerTypeKind ? type.ElementType : type;
     }
 
+    private sealed record ArrayDescriptorLayout(
+        LLVMTypeRef DescriptorType,
+        bool IsStructArray,
+        StructDeclarationSyntax? StructDecl,
+        Dictionary<string, int>? FieldOrder);
+
     private sealed class FunctionLowerer
     {
         private readonly LlvmModuleBuilder _moduleBuilder;
@@ -510,6 +545,10 @@ public sealed class ModuleLowerer
             "print_solved",
             "read_char",
             "read_int",
+            "sin",
+            "cos",
+            "sin_fast",
+            "cos_fast",
             "time",
             "init_window",
             "begin_frame",
@@ -569,7 +608,15 @@ public sealed class ModuleLowerer
             LowerFunctionCore(test.Name.Text, test.Parameters, test.ReturnType, test.Body);
         }
 
-        private readonly record struct LocalBinding(LLVMValueRef Value, LLVMTypeRef Type, bool IsAddress);
+        private readonly record struct LocalBinding(LLVMValueRef Value, LLVMTypeRef Type, bool IsAddress, ElementBinding? Element = null, TypeSymbol? SemanticType = null, ArrayDescriptorLayout? ArrayLayout = null, bool IsArrayDescriptor = false);
+
+        private readonly record struct ElementBinding(
+            StructDeclarationSyntax? StructDecl,
+            TypeSymbol ElementType,
+            LLVMValueRef IndexAlloca,
+            string? BaseName,
+            LLVMValueRef? PrimitiveBasePtr = null,
+            Dictionary<string, LLVMValueRef>? FieldPtrs = null);
 
         private void LowerFunctionCore(string name, IReadOnlyList<ParameterSyntax> parameters, TypeSyntax? returnType, BlockStatementSyntax body)
         {
@@ -590,11 +637,23 @@ public sealed class ModuleLowerer
             {
                 var param = parameters[i];
                 var paramType = ResolveType(param.Type, _symbols);
-                var llvmType = _moduleBuilder.TypeMapper.Map(paramType);
-                var paramVal = function.GetParam((uint)i);
-                var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
-                builder.BuildStore(paramVal, alloca);
-                locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true);
+                if (paramType is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    var llvmType = layout.DescriptorType;
+                    var paramVal = function.GetParam((uint)i);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(paramVal, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType, layout, true);
+                }
+                else
+                {
+                    var llvmType = _moduleBuilder.TypeMapper.Map(paramType);
+                    var paramVal = function.GetParam((uint)i);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(paramVal, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType);
+                }
             }
 
             var terminated = LowerBlock(builder, function, body, locals);
@@ -664,7 +723,7 @@ public sealed class ModuleLowerer
             var type = ResolveType(decl.Type, _symbols);
             var llvmType = _moduleBuilder.TypeMapper.Map(type);
             var alloca = builder.BuildAlloca(llvmType, decl.Name.Text);
-            locals[decl.Name.Text] = new LocalBinding(alloca, llvmType, true);
+            locals[decl.Name.Text] = new LocalBinding(alloca, llvmType, true, null, type);
         }
 
         private LLVMValueRef LowerExpression(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals)
@@ -676,6 +735,14 @@ public sealed class ModuleLowerer
                 case IdentifierExpressionSyntax id:
                     if (locals.TryGetValue(id.Identifier.Text, out var value))
                     {
+                        if (value.Element is not null && value.Element.Value.StructDecl is null)
+                        {
+                            if (TryBuildElementPointer(builder, value, fieldName: null, id.Span, out var elemPtr, out var elemType))
+                            {
+                                return builder.BuildLoad2(elemType, elemPtr, id.Identifier.Text);
+                            }
+                        }
+
                         if (value.IsAddress)
                         {
                             return builder.BuildLoad2(value.Type, value.Value, id.Identifier.Text);
@@ -796,6 +863,16 @@ public sealed class ModuleLowerer
                 case IdentifierExpressionSyntax id:
                     if (locals.TryGetValue(id.Identifier.Text, out var local))
                     {
+                        if (local.Element is not null && local.Element.Value.StructDecl is null)
+                        {
+                            if (TryBuildElementPointer(builder, local, fieldName: null, id.Span, out var elemPtrLocal, out var elemTypeLocal))
+                            {
+                                ptr = elemPtrLocal;
+                                type = elemTypeLocal;
+                                return true;
+                            }
+                        }
+
                         if (!local.IsAddress)
                         {
                             var promoted = builder.BuildAlloca(local.Type, id.Identifier.Text);
@@ -819,10 +896,10 @@ public sealed class ModuleLowerer
                     return false;
 
                 case ArrayAccessExpressionSyntax arr:
-                    if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var elemPtr, out var elemType))
+                    if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var elemPtrArray, out var elemTypeArray))
                     {
-                        ptr = elemPtr;
-                        type = elemType;
+                        ptr = elemPtrArray;
+                        type = elemTypeArray;
                         return true;
                     }
 
@@ -833,6 +910,16 @@ public sealed class ModuleLowerer
                     {
                         ptr = fieldPtr;
                         type = fieldElemType;
+                        return true;
+                    }
+
+                    return false;
+
+                case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax elemId && locals.TryGetValue(elemId.Identifier.Text, out var elemLocal) && elemLocal.Element is not null:
+                    if (TryBuildElementPointer(builder, elemLocal, member.Member.Text, member.Span, out var elemPtrMember, out var elemTypeMember))
+                    {
+                        ptr = elemPtrMember;
+                        type = elemTypeMember;
                         return true;
                     }
 
@@ -973,7 +1060,20 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
-            var argValues = call.Arguments.Select(a => LowerExpression(builder, a, locals)).ToArray();
+            var paramSymbols = ResolveParameterTypes(id.Identifier.Text);
+            var argValues = new LLVMValueRef[call.Arguments.Count];
+            for (int i = 0; i < call.Arguments.Count; i++)
+            {
+                if (i < paramSymbols.Length && paramSymbols[i] is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    argValues[i] = BuildArrayDescriptorValue(builder, call.Arguments[i], arr, layout, locals);
+                }
+                else
+                {
+                    argValues[i] = LowerExpression(builder, call.Arguments[i], locals);
+                }
+            }
             var signature = ResolveFunctionSignature(id.Identifier.Text);
             var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
 
@@ -986,6 +1086,106 @@ public sealed class ModuleLowerer
 
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
+        }
+
+        private LLVMValueRef BuildArrayDescriptorValue(LLVMBuilderRef builder, ExpressionSyntax expr, ArrayTypeSymbol arrayType, ArrayDescriptorLayout layout, Dictionary<string, LocalBinding> locals)
+        {
+            if (expr is IdentifierExpressionSyntax id && locals.TryGetValue(id.Identifier.Text, out var binding) && binding.IsArrayDescriptor)
+            {
+                return builder.BuildLoad2(layout.DescriptorType, binding.Value, $"{id.Identifier.Text}.desc");
+            }
+
+            string? baseName = null;
+            var resolvedLength = ResolveArrayLength(expr, arrayType);
+            if (expr is IdentifierExpressionSyntax globalId)
+            {
+                baseName = TryResolveGlobalName(globalId.Identifier.Text);
+            }
+            else if (expr is MemberAccessExpressionSyntax member && member.Receiver is IdentifierExpressionSyntax recv)
+            {
+                baseName = $"{recv.Identifier.Text}_{member.Member.Text}";
+            }
+
+            if (string.IsNullOrEmpty(baseName))
+            {
+                AddDiagnostic("Array arguments must be globals, struct fields, or existing array parameters.", expr.Span);
+                return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+            }
+
+            if (layout.IsStructArray)
+            {
+                if (arrayType.ElementType is not NamedTypeSymbol namedElem || layout.StructDecl is null || layout.FieldOrder is null)
+                {
+                    AddDiagnostic("Unable to build struct array descriptor.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+
+                var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                foreach (var field in layout.StructDecl.Fields)
+                {
+                    if (!layout.FieldOrder.TryGetValue(field.Identifier.Text, out var idx))
+                    {
+                        continue;
+                    }
+                    var fieldType = ResolveType(field.Type, _symbols);
+                    var llvmFieldType = _moduleBuilder.TypeMapper.Map(fieldType);
+                    var ptrType = LLVMTypeRef.CreatePointer(llvmFieldType, 0);
+                    var globalName = TryResolveFieldGlobalName(baseName, namedElem.TypeName, field.Identifier.Text);
+                    var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+                    if (global.Handle == IntPtr.Zero)
+                    {
+                        AddDiagnostic($"Missing global backing for field '{field.Identifier.Text}' on '{baseName}'.", expr.Span);
+                        return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                    }
+                    var bitcast = builder.BuildBitCast(global, ptrType, $"{globalName}.ptr");
+                    desc = builder.BuildInsertValue(desc, bitcast, (uint)idx, $"{globalName}.desc");
+                }
+                var lenIndex = (uint)layout.FieldOrder.Count;
+                var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)Math.Max(0, resolvedLength), true);
+                desc = builder.BuildInsertValue(desc, lenVal, lenIndex, $"{baseName}.len");
+                return desc;
+            }
+            else
+            {
+                var elementType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                var ptrType = LLVMTypeRef.CreatePointer(elementType, 0);
+                var global = _moduleBuilder.Module.GetNamedGlobal(baseName);
+                if (global.Handle == IntPtr.Zero)
+                {
+                    AddDiagnostic($"Missing array global '{baseName}'.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+                var bitcast = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+                var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                desc = builder.BuildInsertValue(desc, bitcast, 0, $"{baseName}.desc");
+                var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)Math.Max(0, resolvedLength), true);
+                desc = builder.BuildInsertValue(desc, lenVal, 1, $"{baseName}.len");
+                return desc;
+            }
+        }
+
+        private int ResolveArrayLength(ExpressionSyntax expr, ArrayTypeSymbol fallbackType)
+        {
+            if (fallbackType.Size > 0)
+            {
+                return fallbackType.Size;
+            }
+
+            if (expr is IdentifierExpressionSyntax id && _symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Type is ArrayTypeSymbol arrSym && arrSym.Size > 0)
+            {
+                return arrSym.Size;
+            }
+
+            if (expr is MemberAccessExpressionSyntax member && member.Receiver is IdentifierExpressionSyntax recv && _symbols.TryGetValue(recv.Identifier.Text, out var recvSym) && recvSym.Type is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+                if (field?.Type is ArrayTypeSyntax arraySyntax && int.TryParse(arraySyntax.SizeToken?.Text ?? string.Empty, out var parsed) && parsed > 0)
+                {
+                    return parsed;
+                }
+            }
+
+            return Math.Max(0, fallbackType.Size);
         }
 
         private LLVMValueRef LowerBuiltInCall(LLVMBuilderRef builder, string name, IReadOnlyList<ExpressionSyntax> args, Dictionary<string, LocalBinding> locals, SourceSpan span)
@@ -1095,6 +1295,32 @@ public sealed class ModuleLowerer
                     return EmitReadChar(builder);
                 case "read_int":
                     return EmitReadInt(builder);
+                case "sin":
+                case "cos":
+                case "sin_fast":
+                case "cos_fast":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic($"{name} expects a single f32 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        var arg = LowerExpression(builder, args[0], locals);
+                        var floatArg = ConvertToType(builder, arg, LLVMTypeRef.Float);
+                        var useSin = name.StartsWith("sin", StringComparison.Ordinal);
+                        var fast = name.EndsWith("_fast", StringComparison.Ordinal);
+                        var (fn, fnType) = useSin ? GetOrDeclareLlvmSin(_moduleBuilder) : GetOrDeclareLlvmCos(_moduleBuilder);
+                        var call = builder.BuildCall2(fnType, fn, new[] { floatArg }, $"{name}.call");
+                        if (fast)
+                        {
+                            unsafe
+                            {
+                                LLVM.SetFastMathFlags(call, (uint)LLVMFastMathFlags.LLVMFastMathAll);
+                            }
+                        }
+                        return call;
+                    }
                 case "time":
                     {
                         if (args.Count != 0)
@@ -1401,16 +1627,33 @@ public sealed class ModuleLowerer
             var exitBlock = function.AppendBasicBlock(NextBlockName("foreach.end"));
 
             var i32 = _moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32"));
-            var iterator = builder.BuildAlloca(i32, foreachStmt.Iterator.Text);
-            var loopLocals = new Dictionary<string, LocalBinding>(locals, StringComparer.Ordinal)
+            var loopLocals = new Dictionary<string, LocalBinding>(locals, StringComparer.Ordinal);
+            if (!TryResolveIterableInfo(builder, foreachStmt.Iterable, loopLocals, out var iterable))
             {
-                [foreachStmt.Iterator.Text] = new LocalBinding(iterator, i32, true)
-            };
+                AddDiagnostic("foreach target must be an array.", foreachStmt.Iterable.Span);
+                return false;
+            }
+
+            var iterator = builder.BuildAlloca(i32, $"{foreachStmt.Iterator.Text}.idx");
+            if (foreachStmt.BindByElement && iterable.ElementBinding is not null)
+            {
+                var boundElement = iterable.ElementBinding.Value with { IndexAlloca = iterator };
+                loopLocals[foreachStmt.Iterator.Text] = new LocalBinding(iterator, i32, true, boundElement);
+            }
+            else
+            {
+                loopLocals[foreachStmt.Iterator.Text] = new LocalBinding(iterator, i32, true);
+            }
 
             builder.BuildStore(ConstI32(0), iterator);
 
-            var length = ResolveIterableLength(foreachStmt.Iterable);
-            var lengthValue = LLVMValueRef.CreateConstInt(i32, (ulong)length, true);
+            if (iterable.LengthValue is null && iterable.ConstLength <= 0)
+            {
+                AddDiagnostic("foreach array requires a known length.", foreachStmt.Iterable.Span);
+                return false;
+            }
+
+            var lengthValue = iterable.LengthValue ?? LLVMValueRef.CreateConstInt(i32, (ulong)iterable.ConstLength, true);
 
             builder.BuildBr(condBlock);
 
@@ -1448,6 +1691,18 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerMemberAccess(LLVMBuilderRef builder, MemberAccessExpressionSyntax member, Dictionary<string, LocalBinding> locals)
         {
+            if (member.Receiver is IdentifierExpressionSyntax elemId &&
+                locals.TryGetValue(elemId.Identifier.Text, out var elemBinding) &&
+                elemBinding.Element is not null)
+            {
+                if (TryBuildElementPointer(builder, elemBinding, member.Member.Text, member.Span, out var ptr, out var elemType))
+                {
+                    return builder.BuildLoad2(elemType, ptr, "fieldload");
+                }
+
+                return ConstI32(0);
+            }
+
             // Handle array[i].field syntax
             if (member.Receiver is ArrayAccessExpressionSyntax arr)
             {
@@ -1608,6 +1863,99 @@ public sealed class ModuleLowerer
             return false;
         }
 
+        private bool TryBuildElementPointer(LLVMBuilderRef builder, LocalBinding binding, string? fieldName, SourceSpan span, out LLVMValueRef ptr, out LLVMTypeRef elemType)
+        {
+            ptr = default;
+            elemType = default;
+
+            if (binding.Element is null)
+            {
+                return false;
+            }
+
+            var element = binding.Element.Value;
+            var index = builder.BuildLoad2(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), element.IndexAlloca, "foreach.idx");
+
+            if (element.StructDecl is not null)
+            {
+                if (fieldName is null)
+                {
+                    AddDiagnostic("Struct elements in foreach require field access.", span);
+                    return false;
+                }
+
+                var field = element.StructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
+                if (field is null)
+                {
+                    AddDiagnostic($"Unknown field '{fieldName}' on struct '{element.StructDecl.Name.Text}'.", span);
+                    return false;
+                }
+
+                var fieldType = ResolveType(field.Type, _symbols);
+                elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                LLVMValueRef? basePtr = null;
+                if (element.FieldPtrs is not null && element.FieldPtrs.TryGetValue(fieldName, out var fp))
+                {
+                    basePtr = fp;
+                }
+                else
+                {
+                    var globalName = ResolveStructFieldGlobalName(element.BaseName ?? string.Empty, element.StructDecl, fieldName);
+                    var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+                    if (global.Handle == IntPtr.Zero)
+                    {
+                        AddDiagnostic($"Layout for '{element.BaseName}' missing field '{fieldName}'.", span);
+                        return false;
+                    }
+
+                    var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                    basePtr = builder.BuildBitCast(global, elemPtrType, "fieldbase");
+                }
+
+                ptr = builder.BuildGEP2(elemType, basePtr.Value, new[] { index }, "fieldaddr");
+                return true;
+            }
+
+            if (fieldName is not null)
+            {
+                AddDiagnostic("Field access requires struct array elements.", span);
+                return false;
+            }
+
+            elemType = _moduleBuilder.TypeMapper.Map(element.ElementType);
+            LLVMValueRef? basePrimitive = element.PrimitiveBasePtr;
+            if (basePrimitive is null && !string.IsNullOrEmpty(element.BaseName))
+            {
+                var baseGlobal = _moduleBuilder.Module.GetNamedGlobal(element.BaseName);
+                if (baseGlobal.Handle != IntPtr.Zero)
+                {
+                    var elemPtrTypePrimitive = LLVMTypeRef.CreatePointer(elemType, 0);
+                    basePrimitive = builder.BuildBitCast(baseGlobal, elemPtrTypePrimitive, "elembase");
+                }
+            }
+
+            if (basePrimitive is null)
+            {
+                AddDiagnostic($"Unknown array '{element.BaseName}' in foreach.", span);
+                return false;
+            }
+
+            ptr = builder.BuildGEP2(elemType, basePrimitive.Value, new[] { index }, "elemaddr");
+            return true;
+        }
+
+        private string ResolveStructFieldGlobalName(string baseName, StructDeclarationSyntax structDecl, string fieldName)
+        {
+            var candidate = $"{baseName}_{fieldName}";
+            if (_moduleBuilder.Module.GetNamedGlobal(candidate).Handle != IntPtr.Zero)
+            {
+                return candidate;
+            }
+
+            var structCandidate = $"{structDecl.Name.Text}_{fieldName}";
+            return structCandidate;
+        }
+
         private LLVMValueRef ConstBool(bool value) =>
             LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, value ? 1u : 0u, false);
 
@@ -1755,20 +2103,158 @@ public sealed class ModuleLowerer
 
         private string NextBlockName(string prefix) => $"{prefix}.{_blockId++}";
 
-        private int ResolveIterableLength(ExpressionSyntax iterable)
-        {
-            if (iterable is IdentifierExpressionSyntax id
-                && _symbols.TryGetValue(id.Identifier.Text, out var sym)
-                && sym.Type is ArrayTypeSymbol array)
-            {
-                return array.Size;
-            }
-
-            return 0;
-        }
+        private readonly record struct IterableInfo(int ConstLength, LLVMValueRef? LengthValue, ElementBinding? ElementBinding);
 
         private string TryResolveGlobalName(string name) =>
             _globalLayouts.TryGetValue(name, out var layout) ? layout.Name : name;
+
+        private bool TryResolveIterableInfo(LLVMBuilderRef builder, ExpressionSyntax iterable, Dictionary<string, LocalBinding> locals, out IterableInfo info)
+        {
+            // Local/parameter array descriptor
+            if (iterable is IdentifierExpressionSyntax localId && locals.TryGetValue(localId.Identifier.Text, out var localBinding) && localBinding.IsArrayDescriptor && localBinding.ArrayLayout is not null && localBinding.SemanticType is ArrayTypeSymbol localArray)
+            {
+                var descriptor = builder.BuildLoad2(localBinding.ArrayLayout.DescriptorType, localBinding.Value, $"{localId.Identifier.Text}.desc.load");
+                var lenIndex = localBinding.ArrayLayout.IsStructArray
+                    ? (uint)(localBinding.ArrayLayout.FieldOrder?.Count ?? 0)
+                    : 1u;
+
+                LLVMValueRef? lengthValue = null;
+                if (localArray.Size <= 0)
+                {
+                    lengthValue = builder.BuildExtractValue(descriptor, lenIndex, $"{localId.Identifier.Text}.len");
+                }
+
+                if (localBinding.ArrayLayout.IsStructArray && localBinding.ArrayLayout.StructDecl is not null && localBinding.ArrayLayout.FieldOrder is not null)
+                {
+                    var fieldPtrs = new Dictionary<string, LLVMValueRef>(StringComparer.Ordinal);
+                    foreach (var (fieldName, idx) in localBinding.ArrayLayout.FieldOrder)
+                    {
+                        var fieldPtr = builder.BuildExtractValue(descriptor, (uint)idx, $"{localId.Identifier.Text}.{fieldName}.ptr");
+                        fieldPtrs[fieldName] = fieldPtr;
+                    }
+
+                    info = new IterableInfo(localArray.Size, lengthValue, new ElementBinding(localBinding.ArrayLayout.StructDecl, localArray.ElementType, default, null, null, fieldPtrs));
+                    return true;
+                }
+                else
+                {
+                    var elemPtr = builder.BuildExtractValue(descriptor, 0, $"{localId.Identifier.Text}.ptr");
+                    info = new IterableInfo(localArray.Size, lengthValue, new ElementBinding(null, localArray.ElementType, default, null, elemPtr, null));
+                    return true;
+                }
+            }
+
+            // Global array identifier
+            if (iterable is IdentifierExpressionSyntax id && _symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Type is ArrayTypeSymbol array)
+            {
+                if (array.ElementType is NamedTypeSymbol namedElem && _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+                {
+                    var fieldPtrs = new Dictionary<string, LLVMValueRef>(StringComparer.Ordinal);
+                    foreach (var field in structDecl.Fields)
+                    {
+                        var fieldType = ResolveType(field.Type, _symbols);
+                        var llvmField = _moduleBuilder.TypeMapper.Map(fieldType);
+                        var ptrType = LLVMTypeRef.CreatePointer(llvmField, 0);
+                        var globalName = TryResolveFieldGlobalName(id.Identifier.Text, namedElem.TypeName, field.Identifier.Text);
+                        var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+                        if (global.Handle == IntPtr.Zero)
+                        {
+                            continue;
+                        }
+
+                        var bitcast = builder.BuildBitCast(global, ptrType, $"{globalName}.ptr");
+                        fieldPtrs[field.Identifier.Text] = bitcast;
+                    }
+
+                    info = new IterableInfo(array.Size, null, new ElementBinding(structDecl, array.ElementType, default, id.Identifier.Text, null, fieldPtrs));
+                    return true;
+                }
+                else
+                {
+                    var elemType = _moduleBuilder.TypeMapper.Map(array.ElementType);
+                    var ptrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                    var global = _moduleBuilder.Module.GetNamedGlobal(TryResolveGlobalName(id.Identifier.Text));
+                    if (global.Handle != IntPtr.Zero)
+                    {
+                        var bitcast = builder.BuildBitCast(global, ptrType, $"{id.Identifier.Text}.ptr");
+                        info = new IterableInfo(array.Size, null, new ElementBinding(null, array.ElementType, default, id.Identifier.Text, bitcast, null));
+                        return true;
+                    }
+                }
+            }
+
+            // Member access state.field arrays
+            if (iterable is MemberAccessExpressionSyntax member && member.Receiver is IdentifierExpressionSyntax recv && _symbols.TryGetValue(recv.Identifier.Text, out var recvSym) && recvSym.Type is NamedTypeSymbol recvType && _structs.TryGetValue(recvType.TypeName, out var structDecl2))
+            {
+                var field = structDecl2.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+                if (field?.Type is ArrayTypeSyntax arraySyntax)
+                {
+                    var elementType = ResolveType(arraySyntax.ElementType, _symbols);
+                    var size = int.TryParse(arraySyntax.SizeToken?.Text ?? string.Empty, out var parsed) ? parsed : -1;
+                    var baseName = $"{recv.Identifier.Text}_{member.Member.Text}";
+
+                    if (elementType is NamedTypeSymbol nested && _structs.TryGetValue(nested.TypeName, out var nestedStruct))
+                    {
+                        var fieldPtrs = new Dictionary<string, LLVMValueRef>(StringComparer.Ordinal);
+                        foreach (var nf in nestedStruct.Fields)
+                        {
+                            var nfType = ResolveType(nf.Type, _symbols);
+                            var llvmField = _moduleBuilder.TypeMapper.Map(nfType);
+                            var ptrType = LLVMTypeRef.CreatePointer(llvmField, 0);
+                            var globalName = TryResolveFieldGlobalName(baseName, nested.TypeName, nf.Identifier.Text);
+                            var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+                            if (global.Handle == IntPtr.Zero)
+                            {
+                                continue;
+                            }
+
+                            var bitcast = builder.BuildBitCast(global, ptrType, $"{globalName}.ptr");
+                            fieldPtrs[nf.Identifier.Text] = bitcast;
+                        }
+
+                        info = new IterableInfo(size, null, new ElementBinding(nestedStruct, elementType, default, baseName, null, fieldPtrs));
+                        return true;
+                    }
+                    else
+                    {
+                        var elemType = _moduleBuilder.TypeMapper.Map(elementType);
+                        var ptrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                        var global = _moduleBuilder.Module.GetNamedGlobal(baseName);
+                        if (global.Handle != IntPtr.Zero)
+                        {
+                            var bitcast = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+                            info = new IterableInfo(size, null, new ElementBinding(null, elementType, default, baseName, bitcast, null));
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            info = default;
+            return false;
+        }
+private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, string preferredName)
+        {
+            var firstField = structDecl.Fields.FirstOrDefault();
+            if (firstField is null)
+            {
+                return preferredName;
+            }
+
+            var candidatePrimary = $"{preferredName}_{firstField.Identifier.Text}";
+            if (_moduleBuilder.Module.GetNamedGlobal(candidatePrimary).Handle != IntPtr.Zero)
+            {
+                return preferredName;
+            }
+
+            var candidateStruct = $"{structDecl.Name.Text}_{firstField.Identifier.Text}";
+            if (_moduleBuilder.Module.GetNamedGlobal(candidateStruct).Handle != IntPtr.Zero)
+            {
+                return structDecl.Name.Text;
+            }
+
+            return preferredName;
+        }
 
         private string TryResolveFieldGlobalName(string parentGlobal, string structName, string fieldName)
         {
@@ -1868,7 +2354,17 @@ public sealed class ModuleLowerer
                 var retType = fn.ReturnType is null
                     ? LLVMTypeRef.Void
                     : _moduleBuilder.TypeMapper.Map(ResolveType(fn.ReturnType, _symbols));
-                var paramTypes = fn.Parameters.Select(p => _moduleBuilder.TypeMapper.Map(ResolveType(p.Type, _symbols))).ToArray();
+                var paramTypes = fn.Parameters.Select(p =>
+                {
+                    var pType = ResolveType(p.Type, _symbols);
+                    if (pType is ArrayTypeSymbol arr)
+                    {
+                        var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                        return layout.DescriptorType;
+                    }
+
+                    return _moduleBuilder.TypeMapper.Map(pType);
+                }).ToArray();
                 return (retType, paramTypes);
             }
 
@@ -1882,6 +2378,21 @@ public sealed class ModuleLowerer
             }
 
             return (LLVMTypeRef.Void, Array.Empty<LLVMTypeRef>());
+        }
+
+        private TypeSymbol[] ResolveParameterTypes(string name)
+        {
+            if (_functions.TryGetValue(name, out var fn))
+            {
+                return fn.Parameters.Select(p => ResolveType(p.Type, _symbols)).ToArray();
+            }
+
+            if (_tests.TryGetValue(name, out var test))
+            {
+                return test.Parameters.Select(p => ResolveType(p.Type, _symbols)).ToArray();
+            }
+
+            return Array.Empty<TypeSymbol>();
         }
 
         private LLVMValueRef ConstI32(int value) =>
@@ -1931,9 +2442,13 @@ public sealed class ModuleLowerer
 
     private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder, bool includeTests)
     {
+        var structs = compilationUnit.Declarations
+            .OfType<StructDeclarationSyntax>()
+            .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            EmitFunction(builder, symbols, fn.Name.Text, fn.ReturnType, fn.Parameters);
+            EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters);
         }
 
         if (!includeTests)
@@ -1943,18 +2458,28 @@ public sealed class ModuleLowerer
 
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
         {
-            EmitFunction(builder, symbols, test.Name.Text, test.ReturnType, test.Parameters);
+            EmitFunction(builder, symbols, structs, test.Name.Text, test.ReturnType, test.Parameters);
         }
     }
 
-    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters)
+    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters)
     {
         var ret = returnType is null
             ? LLVMTypeRef.Void
             : builder.TypeMapper.Map(ResolveType(returnType, symbols));
 
         var paramTypes = parameters
-            .Select(p => builder.TypeMapper.Map(ResolveType(p.Type, symbols)))
+            .Select(p =>
+            {
+                var paramType = ResolveType(p.Type, symbols);
+                if (paramType is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, builder.TypeMapper, structs, symbols);
+                    return layout.DescriptorType;
+                }
+
+                return builder.TypeMapper.Map(paramType);
+            })
             .ToArray();
 
         builder.DefineFunction(name, ret, paramTypes);
@@ -1978,10 +2503,37 @@ public sealed class ModuleLowerer
                 return new NamedTypeSymbol(named.Name);
             case ArrayTypeSyntax array:
                 var element = ResolveType(array.ElementType, symbols);
-                var size = int.TryParse(array.SizeToken.Text, out var parsed) ? parsed : 0;
+                var sizeText = array.SizeToken?.Text ?? string.Empty;
+                var size = int.TryParse(sizeText, out var parsed) ? parsed : -1;
                 return new ArrayTypeSymbol(element, size);
             default:
                 return new NamedTypeSymbol("unknown");
         }
+    }
+
+    private static ArrayDescriptorLayout CreateArrayDescriptorLayout(ArrayTypeSymbol arrayType, LlvmTypeMapper mapper, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, IReadOnlyDictionary<string, Symbol> symbols)
+    {
+        var int32 = LLVMTypeRef.Int32;
+        if (arrayType.ElementType is NamedTypeSymbol named && structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            var fieldOrder = new Dictionary<string, int>(StringComparer.Ordinal);
+            var elements = new List<LLVMTypeRef>();
+            for (int i = 0; i < structDecl.Fields.Count; i++)
+            {
+                var field = structDecl.Fields[i];
+                var fieldType = ResolveType(field.Type, symbols);
+                var fieldPtr = LLVMTypeRef.CreatePointer(mapper.Map(fieldType), 0);
+                fieldOrder[field.Identifier.Text] = i;
+                elements.Add(fieldPtr);
+            }
+
+            elements.Add(int32); // length
+            var descriptor = LLVMTypeRef.CreateStruct(elements.ToArray(), false);
+            return new ArrayDescriptorLayout(descriptor, true, structDecl, fieldOrder);
+        }
+
+        var elemPtr = LLVMTypeRef.CreatePointer(mapper.Map(arrayType.ElementType), 0);
+        var primitiveDescriptor = LLVMTypeRef.CreateStruct(new[] { elemPtr, int32 }, false);
+        return new ArrayDescriptorLayout(primitiveDescriptor, false, null, null);
     }
 }
