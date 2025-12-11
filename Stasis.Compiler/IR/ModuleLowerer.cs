@@ -511,6 +511,24 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSetPostfx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_set_postfx");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[]
+        {
+            LLVMTypeRef.Float, // strength
+            LLVMTypeRef.Float, // phase/time
+            LLVMTypeRef.Float, // speed
+            LLVMTypeRef.Float, // r
+            LLVMTypeRef.Float, // g
+            LLVMTypeRef.Float  // b
+        }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_set_postfx", fnType);
+        return (fn, fnType);
+    }
+
     // ============================================================
     // Standard Library: C library string function declarations
     // ============================================================
@@ -677,6 +695,7 @@ public sealed class ModuleLowerer
             "end_frame",
             "clear",
             "draw_line",
+            "set_postfx",
             "is_key_down",
             "should_quit",
 
@@ -1581,6 +1600,23 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
 
                         var (fn, fnType) = GetOrDeclareStasisDrawLine(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, loweredArgs, "");
+                        return ConstI32(0);
+                    }
+                case "set_postfx":
+                    {
+                        if (args.Count != 6)
+                        {
+                            AddDiagnostic("set_postfx expects strength, phase, speed, r, g, b.", span);
+                            return ConstI32(0);
+                        }
+
+                        var loweredArgs = args.Select(arg => LowerExpression(builder, arg, locals)).ToArray();
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisSetPostfx(_moduleBuilder);
                         builder.BuildCall2(fnType, fn, loweredArgs, "");
                         return ConstI32(0);
                     }
@@ -2786,30 +2822,47 @@ public sealed class ModuleLowerer
             {
                 // Find the field in the struct that represents the array
                 var arrayField = parentStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
-                if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax &&
-                    arrayTypeSyntax.ElementType is NamedTypeSyntax arrayElemType &&
-                    _structs.TryGetValue(arrayElemType.Name, out var elemStructDecl))
+                if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax)
                 {
-                    var zero = ConstI32(0);
                     var index = LowerExpression(builder, arr.Index, locals);
 
-                    if (fieldName is not null)
+                    // Struct array with nested fields (state.units[i].x)
+                    if (arrayTypeSyntax.ElementType is NamedTypeSyntax arrayElemType &&
+                        _structs.TryGetValue(arrayElemType.Name, out var elemStructDecl))
                     {
-                        // state.asteroids[i].x → state_asteroids_x[i]
-                        var flattenedName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
-                        var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                        if (fieldName is not null)
+                        {
+                            // state.asteroids[i].x → state_asteroids_x[i]
+                            var flattenedName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
+                            var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                            if (global.Handle != IntPtr.Zero)
+                            {
+                                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
+                                if (field is not null)
+                                {
+                                    var fieldType = ResolveType(field.Type, _symbols);
+                                    elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                                    var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                                    var casted = builder.BuildBitCast(global, elemPtrType, "fieldbase");
+                                    ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    else if (fieldName is null)
+                    {
+                        // Primitive array stored on a struct field (state.lane_lookup[i])
+                        var elemTypeSymbol = ResolveType(arrayTypeSyntax.ElementType, _symbols);
+                        elemType = _moduleBuilder.TypeMapper.Map(elemTypeSymbol);
+                        var baseName = TryResolveGlobalName($"{structId.Identifier.Text}_{memberAccess.Member.Text}");
+                        var global = _moduleBuilder.Module.GetNamedGlobal(baseName);
                         if (global.Handle != IntPtr.Zero)
                         {
-                            var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                            if (field is not null)
-                            {
-                                var fieldType = ResolveType(field.Type, _symbols);
-                                elemType = _moduleBuilder.TypeMapper.Map(fieldType);
-                                var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
-                                var casted = builder.BuildBitCast(global, elemPtrType, "fieldbase");
-                                ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
-                                return true;
-                            }
+                            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                            var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
+                            ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");
+                            return true;
                         }
                     }
                 }
