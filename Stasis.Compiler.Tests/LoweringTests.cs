@@ -367,4 +367,68 @@ public class LoweringTests
         Assert.Contains("sitofp i32", ir);
         Assert.Contains("to float", ir);
     }
+
+    [Fact]
+    public void Lowers_fast_math_trig_calls()
+    {
+        var ir = Lower("""
+            function trig(a: f32): f32 {
+                return sin_fast(a).+(cos_fast(a));
+            }
+            """);
+
+        Assert.Contains("call fast float @llvm.sin.f32", ir);
+        Assert.Contains("call fast float @llvm.cos.f32", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_over_array_parameter_descriptor()
+    {
+        var ir = Lower("""
+            function reset(values: i32[]): void {
+                foreach let v in values {
+                    v = 0;
+                }
+            }
+            """);
+
+        Assert.Contains("{ ptr, i32 }", ir);
+        Assert.Contains("extractvalue { ptr, i32 }", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_struct_array_parameter_descriptor_and_field_stores()
+    {
+        var ir = Lower("""
+            struct Bullet { life: i32; ttl: i32; }
+            function reset(bullets: Bullet[]): void {
+                foreach let b in bullets {
+                    b.life = 0;
+                    b.ttl = 0;
+                }
+            }
+            """);
+
+        Assert.Contains("{ ptr, ptr, i32 }", ir);
+        Assert.Contains("extractvalue { ptr, ptr, i32 }", ir);
+        Assert.Contains("store i32 0", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Builds_descriptor_when_passing_global_array_argument()
+    {
+        var ir = Lower("""
+            global values: i32[4];
+            function sink(values: i32[]): void {
+            }
+            function caller(): void {
+                sink(values);
+            }
+            """);
+
+        Assert.Contains("call void @sink({ ptr, i32 } { ptr @values, i32 4 })", ir);
+        Assert.Contains("call void @sink", ir);
+    }
 }

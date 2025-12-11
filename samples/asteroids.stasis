@@ -33,6 +33,7 @@ const BULLET_LIFETIME_MS: i32 = 1000;
 
 // Math constants
 const PI: f32 = 3.14159;
+// Trig helpers: sin/cos keep the precise LLVM intrinsics; sin_fast/cos_fast enable fast-math for faster, less accurate gameplay math.
 
 // FPS control
 const TARGET_FPS: i32 = 60;
@@ -99,46 +100,6 @@ function rand_float(max: f32): f32 {
     return (rf / 1000.0) * max;
 }
 
-// Sin approximation using Taylor series with range reduction
-function sin_approx(angle: f32): f32 {
-    // Normalize angle to [-PI, PI]
-    let a: f32;
-    let dummy: i32;
-    a = angle;
-    for dummy = 0; a > PI; dummy = 0 {
-        a = a - 2.0 * PI;
-    }
-    for dummy = 0; a < 0.0 - PI; dummy = 0 {
-        a = a + 2.0 * PI;
-    }
-
-    // Reduce to [-PI/2, PI/2] using sin(PI-x) = sin(x)
-    let sign: f32;
-    sign = 1.0;
-    if (a > PI / 2.0) {
-        a = PI - a;
-    }
-    if (a < 0.0 - PI / 2.0) {
-        a = 0.0 - PI - a;
-    }
-
-    // Taylor series: sin(x) ≈ x - x^3/6 + x^5/120 - x^7/5040
-    // Accurate for |x| <= PI/2
-    let x2: f32;
-    let x3: f32;
-    let x5: f32;
-    let x7: f32;
-    x2 = a * a;
-    x3 = x2 * a;
-    x5 = x3 * x2;
-    x7 = x5 * x2;
-    return a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0;
-}
-
-function cos_approx(angle: f32): f32 {
-    return sin_approx(angle + PI / 2.0);
-}
-
 function init_ship(): void {
     state.ship.x = SCREEN_W / 2.0;
     state.ship.y = SCREEN_H / 2.0;
@@ -180,9 +141,8 @@ function init_asteroids(): void {
 }
 
 function init_bullets(): void {
-    let i: i32;
-    for i = 0; i < MAX_BULLETS; i = i + 1 {
-        state.bullets[i].life = 0;
+    foreach let bullet in state.bullets {
+        bullet.life = 0;
     }
 }
 
@@ -228,8 +188,8 @@ function update_ship(dt: f32): void {
     if is_key_down(KEY_W) || is_key_down(KEY_UP) {
         let thrust: f32;
         thrust = 150.0 * dt;
-        state.ship.vx = state.ship.vx + cos_approx(state.ship.angle) * thrust;
-        state.ship.vy = state.ship.vy + sin_approx(state.ship.angle) * thrust;
+        state.ship.vx = state.ship.vx + cos_fast(state.ship.angle) * thrust;
+        state.ship.vy = state.ship.vy + sin_fast(state.ship.angle) * thrust;
     }
 
     // Apply velocity with damping
@@ -259,10 +219,10 @@ function fire_bullet(): void {
     let i: i32;
     for i = 0; i < MAX_BULLETS; i = i + 1 {
         if (state.bullets[i].life == 0) {
-            state.bullets[i].x = state.ship.x + cos_approx(state.ship.angle) * 15.0;
-            state.bullets[i].y = state.ship.y + sin_approx(state.ship.angle) * 15.0;
-            state.bullets[i].vx = cos_approx(state.ship.angle) * 300.0;
-            state.bullets[i].vy = sin_approx(state.ship.angle) * 300.0;
+            state.bullets[i].x = state.ship.x + cos_fast(state.ship.angle) * 15.0;
+            state.bullets[i].y = state.ship.y + sin_fast(state.ship.angle) * 15.0;
+            state.bullets[i].vx = cos_fast(state.ship.angle) * 300.0;
+            state.bullets[i].vy = sin_fast(state.ship.angle) * 300.0;
             state.bullets[i].life = BULLET_LIFETIME_MS;
             return;
         }
@@ -270,19 +230,18 @@ function fire_bullet(): void {
 }
 
 function update_bullets(dt: f32, delta_ms: i32): void {
-    let i: i32;
-    for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (state.bullets[i].life > 0) {
-            state.bullets[i].x = state.bullets[i].x + state.bullets[i].vx * dt;
-            state.bullets[i].y = state.bullets[i].y + state.bullets[i].vy * dt;
-            state.bullets[i].life = state.bullets[i].life - delta_ms;
-            if (state.bullets[i].life < 0) {
-                state.bullets[i].life = 0;
+    foreach let bullet in state.bullets {
+        if (bullet.life > 0) {
+            bullet.x = bullet.x + bullet.vx * dt;
+            bullet.y = bullet.y + bullet.vy * dt;
+            bullet.life = bullet.life - delta_ms;
+            if (bullet.life < 0) {
+                bullet.life = 0;
             }
 
             // Wrap bullets
-            state.bullets[i].x = wrap_position(state.bullets[i].x, SCREEN_W);
-            state.bullets[i].y = wrap_position(state.bullets[i].y, SCREEN_H);
+            bullet.x = wrap_position(bullet.x, SCREEN_W);
+            bullet.y = wrap_position(bullet.y, SCREEN_H);
         }
     }
 }
@@ -295,24 +254,23 @@ function abs_f32(x: f32): f32 {
 }
 
 function check_collisions(): void {
-    let i: i32;
     let j: i32;
 
     // Bullet-asteroid collisions
-    for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (state.bullets[i].life > 0) {
+    foreach let bullet in state.bullets {
+        if (bullet.life > 0) {
             for j = 0; j < MAX_ASTEROIDS; j = j + 1 {
                 if state.asteroids[j].active {
                     let dx: f32;
                     let dy: f32;
                     let dist_sq: f32;
-                    dx = state.bullets[i].x - state.asteroids[j].x;
-                    dy = state.bullets[i].y - state.asteroids[j].y;
+                    dx = bullet.x - state.asteroids[j].x;
+                    dy = bullet.y - state.asteroids[j].y;
                     dist_sq = dx * dx + dy * dy;
                     let radius: f32;
                     radius = state.asteroids[j].size;
                     if (dist_sq < radius * radius) {
-                        state.bullets[i].life = 0;
+                        bullet.life = 0;
                         state.asteroids[j].active = false;
                     }
                 }
@@ -324,8 +282,8 @@ function check_collisions(): void {
 function draw_ship(): void {
     let c: f32;
     let s: f32;
-    c = cos_approx(state.ship.angle);
-    s = sin_approx(state.ship.angle);
+    c = cos_fast(state.ship.angle);
+    s = sin_fast(state.ship.angle);
 
     // Ship is a triangle
     let size: f32;
@@ -340,14 +298,14 @@ function draw_ship(): void {
     // Left wing
     let lx: f32;
     let ly: f32;
-    lx = state.ship.x + cos_approx(state.ship.angle + 2.4) * size;
-    ly = state.ship.y + sin_approx(state.ship.angle + 2.4) * size;
+    lx = state.ship.x + cos_fast(state.ship.angle + 2.4) * size;
+    ly = state.ship.y + sin_fast(state.ship.angle + 2.4) * size;
 
     // Right wing
     let rx: f32;
     let ry: f32;
-    rx = state.ship.x + cos_approx(state.ship.angle - 2.4) * size;
-    ry = state.ship.y + sin_approx(state.ship.angle - 2.4) * size;
+    rx = state.ship.x + cos_fast(state.ship.angle - 2.4) * size;
+    ry = state.ship.y + sin_fast(state.ship.angle - 2.4) * size;
 
     // Draw white lines
     draw_line(nx, ny, lx, ly, 1.0, 1.0, 1.0, 1.0);
@@ -396,8 +354,8 @@ function draw_asteroids(): void {
             for j = 1; j < 9; j = j + 1 {
                 jf = j;
                 angle = (jf / 8.0) * 2.0 * PI;
-                px = x + cos_approx(angle) * sz;
-                py = y + sin_approx(angle) * sz;
+                px = x + cos_fast(angle) * sz;
+                py = y + sin_fast(angle) * sz;
                 draw_line(prev_x, prev_y, px, py, 0.7, 0.7, 0.7, 1.0);
                 prev_x = px;
                 prev_y = py;
@@ -407,13 +365,12 @@ function draw_asteroids(): void {
 }
 
 function draw_bullets(): void {
-    let i: i32;
-    for i = 0; i < MAX_BULLETS; i = i + 1 {
-        if (state.bullets[i].life > 0) {
+    foreach let bullet in state.bullets {
+        if (bullet.life > 0) {
             let x: f32;
             let y: f32;
-            x = state.bullets[i].x;
-            y = state.bullets[i].y;
+            x = bullet.x;
+            y = bullet.y;
 
             // Draw as small cross
             draw_line(x - 2.0, y, x + 2.0, y, 1.0, 1.0, 0.0, 1.0);
