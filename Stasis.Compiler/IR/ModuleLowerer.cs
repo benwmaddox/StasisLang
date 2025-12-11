@@ -57,7 +57,7 @@ public sealed class ModuleLowerer
                             var llvmElem = builder.TypeMapper.Map(fieldType);
                             var fieldLayout = globalLayout?.Fields.FirstOrDefault(f => string.Equals(f.Name, $"{structDecl.Name.Text}_{field.Identifier.Text}", StringComparison.Ordinal));
                             var length = fieldLayout is null
-                                ? ParseArrayLength(array.SizeToken.Text)
+                                ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
                                 : (uint)Math.Max(1, fieldLayout.Size / SizeOf(fieldType));
                             builder.DefineGlobalArray($"{structDecl.Name.Text}_{field.Identifier.Text}", llvmElem, length);
                         }
@@ -69,7 +69,7 @@ public sealed class ModuleLowerer
                         var elementType = ResolveType(array.ElementType, symbols);
                         var llvmElem = builder.TypeMapper.Map(elementType);
                         var length = globalLayout is null
-                            ? ParseArrayLength(array.SizeToken.Text)
+                            ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
                             : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
                         builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
                         break;
@@ -102,7 +102,7 @@ public sealed class ModuleLowerer
                 case ArrayTypeSyntax arrayType when arrayType.ElementType is NamedTypeSyntax nestedNamed && structs.TryGetValue(nestedNamed.Name, out var nestedStruct):
                     {
                         // Nested struct array → SoA
-                        var count = ParseArrayLength(arrayType.SizeToken.Text);
+                        var count = ParseArrayLength(arrayType.SizeToken?.Text ?? string.Empty);
                         foreach (var nestedField in nestedStruct.Fields)
                         {
                             var nestedFieldType = ResolveType(nestedField.Type, symbols);
@@ -117,7 +117,7 @@ public sealed class ModuleLowerer
                         // Primitive array
                         var elemType = ResolveType(arrayType.ElementType, symbols);
                         var llvmElem = builder.TypeMapper.Map(elemType);
-                        var count = ParseArrayLength(arrayType.SizeToken.Text);
+                        var count = ParseArrayLength(arrayType.SizeToken?.Text ?? string.Empty);
                         builder.DefineGlobalArray(fieldName, llvmElem, count);
                         break;
                     }

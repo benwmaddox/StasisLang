@@ -103,14 +103,6 @@ public sealed class SemanticAnalyzer
     {
         var globals = compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>().ToList();
 
-        // Warn about multiple top-level global declarations
-        if (globals.Count > 1)
-        {
-            _diagnostics.Add(new Diagnostic(
-                $"Multiple global declarations detected ({globals.Count} found). Consider consolidating state into a single global struct for better organization.",
-                globals[1].Name.Span));
-        }
-
         foreach (var decl in globals)
         {
             var type = ResolveType(decl.Type);
@@ -298,20 +290,21 @@ public sealed class SemanticAnalyzer
         if (v.Type is null)
         {
             _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
-            if (v.Initializer is not null)
-            {
-                AnalyzeExpression(v.Initializer, scope);
-            }
         }
         else
         {
             var type = ResolveType(v.Type);
             AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
             EnsurePrimitiveLocal(type, v.Name.Span);
-            if (v.Initializer is not null)
-            {
-                AnalyzeExpression(v.Initializer, scope);
-            }
+        }
+
+        if (v.Initializer is null)
+        {
+            _diagnostics.Add(new Diagnostic("Local variables must be initialized with a value.", v.Name.Span));
+        }
+        else
+        {
+            AnalyzeExpression(v.Initializer, scope);
         }
     }
 
@@ -466,7 +459,8 @@ public sealed class SemanticAnalyzer
                     return elementType is null ? null : new ArrayTypeSymbol(elementType, size);
                 }
 
-                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", array.SizeToken.Span));
+                var span = array.SizeToken?.Span ?? array.Span;
+                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", span));
                 return elementType;
             default:
                 return null;

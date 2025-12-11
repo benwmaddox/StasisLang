@@ -75,7 +75,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function one(): i32 {
-                let x: i32;
+                let x: i32 = 0;
                 x = 1;
                 return x;
             }
@@ -140,9 +140,8 @@ public class LoweringTests
     {
         var ir = Lower("""
             function loop(n: i32): void {
-                let i: i32;
-                i = 0;
-                for i = 0; true; i = i.+(1) {
+                let i: i32 = 0;
+                for (i = 0; true; i = i.+(1)) {
                     i = i;
                 }
             }
@@ -205,8 +204,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function tweak(x: f32, flag: bool): i32 {
-                let y: f32;
-                y = (-(x));
+                let y: f32 = (-(x));
                 return !(flag);
             }
             """);
@@ -221,7 +219,7 @@ public class LoweringTests
     {
         var result = LowerWithDiagnostics("""
             function bad(): void {
-                let x: i32;
+                let x: i32 = 0;
                 x.+(1, 2);
             }
             """);
@@ -277,8 +275,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function bump(): i32 {
-                let x: i32;
-                x = 1;
+                let x: i32 = 1;
                 x += 2;
                 return x;
             }
@@ -319,8 +316,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function convert(x: i32): f32 {
-                let result: f32;
-                result = x;
+                let result: f32 = x;
                 return result;
             }
             """);
@@ -335,8 +331,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function convert(x: f32): i32 {
-                let result: i32;
-                result = x;
+                let result: i32 = x;
                 return result;
             }
             """);
@@ -351,12 +346,10 @@ public class LoweringTests
     {
         var ir = Lower("""
             function sum_as_float(): f32 {
-                let i: i32;
-                let total: f32;
-                total = 0.0;
-                for i = 0; i.<(5); i = i.+(1) {
-                    let if32: f32;
-                    if32 = i;
+                let i: i32 = 0;
+                let total: f32 = 0.0;
+                for (i = 0; i.<(5); i = i.+(1)) {
+                    let if32: f32 = i;
                     total = total.+(if32);
                 }
                 return total;
@@ -399,7 +392,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function reset(values: i32[]): void {
-                foreach let v in values {
+                foreach (let v in values) {
                     v = 0;
                 }
             }
@@ -416,7 +409,7 @@ public class LoweringTests
         var ir = Lower("""
             struct Bullet { life: i32; ttl: i32; }
             function reset(bullets: Bullet[]): void {
-                foreach let b in bullets {
+                foreach (let b in bullets) {
                     b.life = 0;
                     b.ttl = 0;
                 }

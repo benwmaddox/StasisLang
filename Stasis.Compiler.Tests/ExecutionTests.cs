@@ -148,8 +148,7 @@ public class ExecutionTests
 
         var source = """
             function main(): i32 {
-                let x: i32;
-                x = 1;
+                let x: i32 = 1;
                 x += 2 * 3;
                 x -= 4 / 2;
                 return x;
@@ -191,15 +190,12 @@ public class ExecutionTests
 
         var source = """
             function main(): i32 {
-                let ok: bool;
-                ok = init_window(640, 480, "Stasis");
+                let ok: bool = init_window(640, 480, "Stasis");
                 begin_frame();
                 clear(0.0, 0.0, 0.0, 1.0);
                 draw_line(-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-                let down: bool;
-                down = is_key_down(32);
-                let t: i32;
-                t = get_time_ms();
+                let down: bool = is_key_down(32);
+                let t: i32 = get_time_ms();
                 sleep_ms(0);
                 end_frame();
                 return 0;
