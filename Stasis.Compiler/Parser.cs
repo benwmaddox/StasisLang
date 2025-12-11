@@ -251,8 +251,16 @@ public sealed class Parser
             type = ParseType();
         }
 
+        Token? equals = null;
+        ExpressionSyntax? initializer = null;
+        if (Match(TokenKind.Equal))
+        {
+            equals = Previous;
+            initializer = ParseExpression();
+        }
+
         var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after variable declaration.");
-        return new VariableDeclarationSyntax(letKeyword, name, type, semicolon);
+        return new VariableDeclarationSyntax(letKeyword, name, type, equals, initializer, semicolon);
     }
 
     private IfStatementSyntax ParseIf()
@@ -326,13 +334,26 @@ public sealed class Parser
     private ForeachStatementSyntax ParseForeach()
     {
         var foreachKeyword = Consume(TokenKind.ForeachKeyword, "Expected 'foreach'.");
-        Consume(TokenKind.LParen, "Expected '(' after 'foreach'.");
+        var hasParens = Match(TokenKind.LParen);
+
+        Token? letKeyword = null;
+        if (Match(TokenKind.LetKeyword))
+        {
+            letKeyword = Previous;
+        }
+
         var iterator = Consume(TokenKind.Identifier, "Expected iterator name.");
         Consume(TokenKind.InKeyword, "Expected 'in'.");
         var iterable = ParseExpression();
-        Consume(TokenKind.RParen, "Expected ')' after iterable.");
+
+        if (hasParens)
+        {
+            Consume(TokenKind.RParen, "Expected ')' after iterable.");
+        }
+
         var body = ParseBlock();
-        return new ForeachStatementSyntax(foreachKeyword, iterator, iterable, body);
+        var bindByElement = letKeyword is not null;
+        return new ForeachStatementSyntax(foreachKeyword, letKeyword, iterator, iterable, body, bindByElement);
     }
 
     private ReturnStatementSyntax ParseReturn()
@@ -561,7 +582,11 @@ public sealed class Parser
         if (Match(TokenKind.LBracket))
         {
             var lbracket = Previous;
-            var sizeToken = Consume(TokenKind.IntegerLiteral, "Expected array size.");
+            Token? sizeToken = null;
+            if (Current.Kind != TokenKind.RBracket)
+            {
+                sizeToken = Consume(TokenKind.IntegerLiteral, "Expected array size.");
+            }
             var rbracket = Consume(TokenKind.RBracket, "Expected ']'.");
             return new ArrayTypeSyntax(type, lbracket, sizeToken, rbracket);
         }
