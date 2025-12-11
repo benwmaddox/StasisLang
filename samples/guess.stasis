@@ -46,28 +46,24 @@ function print_intro(): void {
 
 function main(): i32 {
     print_intro();
-    let seed: i32;
-    seed = read_int();
+    let seed: i32 = read_int();
     if (seed == 0) {
         return 0;
     }
     seed_rng(seed);
 
-    let target: i32;
-    target = next_rand(99);
+    let target: i32 = next_rand(99);
     if (target < 1) { target = 1; }
     if (target > 99) { target = target % 99 + 1; }
 
-    let tries: i32;
-    for tries = 0; tries < 20; tries = tries + 1 {
+    let tries: i32 = 0;
+    for (tries = 0; tries < 20; tries = tries + 1) {
         print_text_guess();
-        let guess: i32;
-        guess = read_int();
+        let guess: i32 = read_int();
         if (guess == 0) {
             return 0;
         }
-        let bad: bool;
-        bad = false;
+        let bad: bool = false;
         if (guess < 1 || guess > 99) {
             bad = true;
         }

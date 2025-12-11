@@ -39,7 +39,7 @@ public class SemanticTests
         var source = """
             struct Player { hp: u8; }
             function f(): void {
-                let p: Player;
+                let p: Player = 0;
             }
             """;
 
@@ -84,7 +84,7 @@ public class SemanticTests
     {
         var source = """
             function f(): i32 {
-                let x: i32;
+                let x: i32 = 0;
                 x += 2;
                 return x;
             }

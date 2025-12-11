@@ -15,8 +15,7 @@ function abs_f32(x: f32): f32 {
 }
 
 function approx_eq(a: f32, b: f32, tolerance: f32): bool {
-    let diff: f32;
-    diff = abs_f32(a - b);
+    let diff: f32 = abs_f32(a - b);
     return diff < tolerance;
 }
 
@@ -25,30 +24,29 @@ function approx_eq(a: f32, b: f32, tolerance: f32): bool {
 // ============================================
 
 test loop_executes_correct_times(): bool {
-    let count: i32;
-    let i: i32;
+    let count: i32 = 0;
+    let i: i32 = 0;
     count = 0;
-    for i = 0; i < 5; i = i + 1 {
+    for (i = 0; i < 5; i = i + 1) {
         count = count + 1;
     }
     return count == 5;
 }
 
 test loop_counter_reaches_final_value(): bool {
-    let i: i32;
-    for i = 0; i < 10; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 10; i = i + 1) {
         // empty body
-        let dummy: i32;
-        dummy = 0;
+        let dummy: i32 = 0;
     }
     return i == 10;
 }
 
 test loop_with_start_value(): bool {
-    let sum: i32;
-    let i: i32;
+    let sum: i32 = 0;
+    let i: i32 = 0;
     sum = 0;
-    for i = 5; i < 10; i = i + 1 {
+    for (i = 5; i < 10; i = i + 1) {
         sum = sum + i;
     }
     // 5+6+7+8+9 = 35
@@ -60,10 +58,9 @@ test loop_with_start_value(): bool {
 // ============================================
 
 test assign_i32_in_loop(): bool {
-    let i: i32;
-    let value: i32;
-    value = 0;
-    for i = 0; i < 5; i = i + 1 {
+    let i: i32 = 0;
+    let value: i32 = 0;
+    for (i = 0; i < 5; i = i + 1) {
         value = i;
     }
     // After loop, value should be 4 (last assignment)
@@ -71,12 +68,10 @@ test assign_i32_in_loop(): bool {
 }
 
 test assign_f32_in_loop(): bool {
-    let i: i32;
-    let value: f32;
-    value = 0.0;
-    for i = 0; i < 5; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    let i: i32 = 0;
+    let value: f32 = 0.0;
+    for (i = 0; i < 5; i = i + 1) {
+        let if32: f32 = i;
         value = if32;
     }
     // After loop, value should be 4.0
@@ -84,12 +79,10 @@ test assign_f32_in_loop(): bool {
 }
 
 test i32_to_f32_conversion_in_loop(): bool {
-    let i: i32;
-    let sum: f32;
-    sum = 0.0;
-    for i = 0; i < 5; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    let i: i32 = 0;
+    let sum: f32 = 0.0;
+    for (i = 0; i < 5; i = i + 1) {
+        let if32: f32 = i;
         sum = sum + if32;
     }
     // 0+1+2+3+4 = 10
@@ -97,12 +90,10 @@ test i32_to_f32_conversion_in_loop(): bool {
 }
 
 test calculation_with_converted_value(): bool {
-    let i: i32;
-    let result: f32;
-    result = 0.0;
-    for i = 0; i < 3; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    let i: i32 = 0;
+    let result: f32 = 0.0;
+    for (i = 0; i < 3; i = i + 1) {
+        let if32: f32 = i;
         result = 100.0 + if32 * 50.0;
     }
     // After i=0: result = 100
@@ -116,11 +107,11 @@ test calculation_with_converted_value(): bool {
 // ============================================
 
 test accumulator_i32(): bool {
-    let i: i32;
-    let prev: i32;
-    let curr: i32;
+    let i: i32 = 0;
+    let prev: i32 = 0;
+    let curr: i32 = 0;
     prev = 0;
-    for i = 1; i < 5; i = i + 1 {
+    for (i = 1; i < 5; i = i + 1) {
         curr = prev + i;
         prev = curr;
     }
@@ -129,13 +120,12 @@ test accumulator_i32(): bool {
 }
 
 test accumulator_f32(): bool {
-    let i: i32;
-    let prev: f32;
-    let curr: f32;
+    let i: i32 = 0;
+    let prev: f32 = 0.0;
+    let curr: f32 = 0.0;
     prev = 0.0;
-    for i = 1; i < 5; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    for (i = 1; i < 5; i = i + 1) {
+        let if32: f32 = i;
         curr = prev + if32;
         prev = curr;
     }
@@ -143,14 +133,13 @@ test accumulator_f32(): bool {
 }
 
 test prev_curr_pattern_like_asteroids(): bool {
-    let i: i32;
-    let prev_x: f32;
-    let curr_x: f32;
-    let last_prev: f32;
+    let i: i32 = 0;
+    let prev_x: f32 = 0.0;
+    let curr_x: f32 = 0.0;
+    let last_prev: f32 = 0.0;
     prev_x = 100.0;
-    for i = 1; i < 4; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    for (i = 1; i < 4; i = i + 1) {
+        let if32: f32 = i;
         curr_x = 100.0 + if32 * 30.0;
         last_prev = prev_x;
         prev_x = curr_x;
@@ -166,12 +155,11 @@ test prev_curr_pattern_like_asteroids(): bool {
 // ============================================
 
 test nested_loop_count(): bool {
-    let i: i32;
-    let j: i32;
-    let count: i32;
-    count = 0;
-    for i = 0; i < 3; i = i + 1 {
-        for j = 0; j < 4; j = j + 1 {
+    let i: i32 = 0;
+    let j: i32 = 0;
+    let count: i32 = 0;
+    for (i = 0; i < 3; i = i + 1) {
+        for (j = 0; j < 4; j = j + 1) {
             count = count + 1;
         }
     }
@@ -183,12 +171,10 @@ test nested_loop_count(): bool {
 // ============================================
 
 test division_in_loop(): bool {
-    let i: i32;
-    let result: f32;
-    result = 0.0;
-    for i = 0; i < 4; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    let i: i32 = 0;
+    let result: f32 = 0.0;
+    for (i = 0; i < 4; i = i + 1) {
+        let if32: f32 = i;
         result = if32 / 4.0;
     }
     // After i=3: result = 3/4 = 0.75
@@ -196,14 +182,12 @@ test division_in_loop(): bool {
 }
 
 test angle_calculation_like_asteroids(): bool {
-    let i: i32;
-    let angle: f32;
-    let PI: f32;
-    PI = 3.14159;
+    let i: i32 = 0;
+    let angle: f32 = 0.0;
+    let PI: f32 = 3.14159;
     angle = 0.0;
-    for i = 1; i < 5; i = i + 1 {
-        let if32: f32;
-        if32 = i;
+    for (i = 1; i < 5; i = i + 1) {
+        let if32: f32 = i;
         angle = (if32 / 8.0) * 2.0 * PI;
     }
     // After i=4: angle = (4/8) * 2 * PI = PI
@@ -215,10 +199,9 @@ test angle_calculation_like_asteroids(): bool {
 // ============================================
 
 test pure_f32_loop_no_conversion(): bool {
-    let i: i32;
-    let value: f32;
-    value = 0.0;
-    for i = 0; i < 5; i = i + 1 {
+    let i: i32 = 0;
+    let value: f32 = 0.0;
+    for (i = 0; i < 5; i = i + 1) {
         value = value + 10.0;
     }
     // Should be 50.0
@@ -226,11 +209,11 @@ test pure_f32_loop_no_conversion(): bool {
 }
 
 test pure_f32_accumulator(): bool {
-    let i: i32;
-    let prev: f32;
-    let curr: f32;
+    let i: i32 = 0;
+    let prev: f32 = 0.0;
+    let curr: f32 = 0.0;
     prev = 100.0;
-    for i = 0; i < 3; i = i + 1 {
+    for (i = 0; i < 3; i = i + 1) {
         curr = prev + 25.0;
         prev = curr;
     }
@@ -239,10 +222,9 @@ test pure_f32_accumulator(): bool {
 }
 
 test f32_multiply_in_loop(): bool {
-    let i: i32;
-    let value: f32;
-    value = 1.0;
-    for i = 0; i < 4; i = i + 1 {
+    let i: i32 = 0;
+    let value: f32 = 1.0;
+    for (i = 0; i < 4; i = i + 1) {
         value = value * 2.0;
     }
     // 1*2*2*2*2 = 16
@@ -256,23 +238,23 @@ test f32_multiply_in_loop(): bool {
 global test_array: i32[5];
 
 test array_write_in_loop(): bool {
-    let i: i32;
-    for i = 0; i < 5; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 5; i = i + 1) {
         test_array[i] = i * 10;
     }
     return test_array[0] == 0 && test_array[2] == 20 && test_array[4] == 40;
 }
 
 test array_read_in_loop(): bool {
-    let i: i32;
-    let sum: i32;
+    let i: i32 = 0;
+    let sum: i32 = 0;
     // First set values
-    for i = 0; i < 5; i = i + 1 {
+    for (i = 0; i < 5; i = i + 1) {
         test_array[i] = i;
     }
     // Then sum them
     sum = 0;
-    for i = 0; i < 5; i = i + 1 {
+    for (i = 0; i < 5; i = i + 1) {
         sum = sum + test_array[i];
     }
     return sum == 10;

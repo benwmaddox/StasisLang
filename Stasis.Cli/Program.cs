@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Stasis.Compiler;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
+using Stasis.Compiler.Syntax;
 using Stasis.Cli;
 
 var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
@@ -145,6 +146,22 @@ if (runAllInDirectory && mode == "test")
     var overallExit = 0;
     foreach (var file in files)
     {
+        var source = File.ReadAllText(file);
+        var parse = Parser.Parse(source);
+        if (parse.Diagnostics.Count > 0)
+        {
+            Console.WriteLine($"=== {file} ===");
+            PrintDiagnostics(parse.Diagnostics, source, file);
+            overallExit = 1;
+            continue;
+        }
+
+        var hasTests = parse.CompilationUnit.Declarations.OfType<TestDeclarationSyntax>().Any();
+        if (!hasTests)
+        {
+            continue;
+        }
+
         Console.WriteLine($"=== {file} ===");
         overallExit = Math.Max(overallExit, ProcessFile(file, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath));
     }
