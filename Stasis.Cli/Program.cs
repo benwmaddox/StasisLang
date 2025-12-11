@@ -159,7 +159,7 @@ if (runAllInDirectory && mode == "test")
 var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock = true)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
@@ -187,7 +187,14 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
             : (includeTests ? LowerOptions.Default : LowerOptions.Production);
         LowerResult lower;
-        lock (LlvmLock.Lower)
+        if (useLowerLock)
+        {
+            lock (LlvmLock.Lower)
+            {
+                lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
+            }
+        }
+        else
         {
             lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
         }
@@ -465,10 +472,10 @@ static void PrintUsage()
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -497,14 +504,14 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
         }
     })).ToArray();
 
-    var lowerer = Task.Run(async () =>
+    var lowerWorkers = Enumerable.Range(0, Math.Max(1, lowerDegree)).Select(_ => Task.Run(async () =>
     {
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
-            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, enableGraphics);
+            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, enableGraphics, useLowerLock);
             await resultChannel.Writer.WriteAsync(result);
         }
-    });
+    })).ToArray();
 
     var exitCode = 0;
     var consumer = Task.Run(async () =>
@@ -517,7 +524,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
 
     await Task.WhenAll(producers);
     prepChannel.Writer.Complete();
-    await lowerer;
+    await Task.WhenAll(lowerWorkers);
     resultChannel.Writer.Complete();
     await consumer;
     return exitCode;
@@ -556,7 +563,7 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly)
     }
 }
 
-static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics)
+static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, bool useLowerLock)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
@@ -570,7 +577,14 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
             ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
             : (includeTests ? LowerOptions.Default : LowerOptions.Production);
         LowerResult lower;
-        lock (LlvmLock.Lower)
+        if (useLowerLock)
+        {
+            lock (LlvmLock.Lower)
+            {
+                lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
+            }
+        }
+        else
         {
             lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
         }
