@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git commit -m \"$(cat <<''EOF''\ntest: add CLI snapshot tests for Phase 9 verification\n\nAdd comprehensive CLI snapshot tests using Verify.Xunit to validate\nCLI stdout/stderr and exit codes for various scenarios:\n\n- EmitIr_Basic: verify LLVM IR emission for basic.stasis\n- EmitIr_Tests: verify LLVM IR emission with test harness\n- Run_Basic: end-to-end execution via lli (skipped if unavailable)\n- Test_TestsFile: test mode execution (skipped if lli unavailable)\n- Error_FileNotFound: verify error handling for missing files\n- Error_ParseError: verify parse error diagnostics\n\nSnapshot framework:\n- RunCli helper executes dotnet run with CLI args\n- ScrubOutput removes timing info for deterministic comparisons\n- Snapshots stored in Stasis.Compiler.Tests/Snapshots/\n- Tests use Verify.Xunit for baseline comparison\n\nThis completes Phase 9 verification requirements (snapshot tests\nfor CLI stdout/stderr and exit codes on fixtures).\n\nDependencies added:\n- Verify.Xunit 31.8.0\n- xunit.extensibility.core 2.9.3 (resolves version conflict)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
-    ],
-    "deny": [],
-    "ask": []
-  }
-}
