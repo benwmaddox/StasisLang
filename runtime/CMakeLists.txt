@@ -6,6 +6,7 @@ find_package(SDL2 CONFIG REQUIRED)
 
 # Find OpenGL
 find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
 
 # Create shared library
 add_library(stasis_graphics SHARED stasis_graphics.c)
@@ -15,6 +16,7 @@ target_link_libraries(stasis_graphics PRIVATE
     $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
     $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
     OpenGL::GL
+    GLEW::GLEW
 )
 
 # Export symbols on Windows

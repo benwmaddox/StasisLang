@@ -3,6 +3,7 @@
  * SDL2 + OpenGL backend for vector graphics rendering
  */
 
+#include <GL/glew.h>
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <stdbool.h>
@@ -227,6 +228,17 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_gl_context = SDL_GL_CreateContext(g_window);
     if (!g_gl_context) {
         SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
+        SDL_DestroyWindow(g_window);
+        SDL_Quit();
+        return 0;
+    }
+
+    /* Load OpenGL functions (glew) */
+    glewExperimental = GL_TRUE;
+    GLenum glew_status = glewInit();
+    if (glew_status != GLEW_OK) {
+        SDL_Log("glewInit failed: %s", (const char*)glewGetErrorString(glew_status));
+        SDL_GL_DeleteContext(g_gl_context);
         SDL_DestroyWindow(g_window);
         SDL_Quit();
         return 0;
