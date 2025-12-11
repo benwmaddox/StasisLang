@@ -511,6 +511,119 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    // ============================================================
+    // Standard Library: C library string function declarations
+    // ============================================================
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrlen(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int64, new[] { i8Ptr }, false);
+        var fn = builder.Module.GetNamedFunction("strlen");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strlen", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrcmp(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr, i8Ptr }, false);
+        var fn = builder.Module.GetNamedFunction("strcmp");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strcmp", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrncmp(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr, i8Ptr, LLVMTypeRef.Int64 }, false);
+        var fn = builder.Module.GetNamedFunction("strncmp");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strncmp", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrcpy(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, i8Ptr }, false);
+        var fn = builder.Module.GetNamedFunction("strcpy");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strcpy", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrcat(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, i8Ptr }, false);
+        var fn = builder.Module.GetNamedFunction("strcat");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strcat", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrchr(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, LLVMTypeRef.Int32 }, false);
+        var fn = builder.Module.GetNamedFunction("strchr");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strchr", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrrchr(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, LLVMTypeRef.Int32 }, false);
+        var fn = builder.Module.GetNamedFunction("strrchr");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strrchr", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStrstr(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, i8Ptr }, false);
+        var fn = builder.Module.GetNamedFunction("strstr");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("strstr", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareMemcpy(LlvmModuleBuilder builder)
+    {
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(i8Ptr, new[] { i8Ptr, i8Ptr, LLVMTypeRef.Int64 }, false);
+        var fn = builder.Module.GetNamedFunction("memcpy");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("memcpy", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareAbort(LlvmModuleBuilder builder)
+    {
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, Array.Empty<LLVMTypeRef>(), false);
+        var fn = builder.Module.GetNamedFunction("abort");
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("abort", fnType);
+        return (fn, fnType);
+    }
+
     private static LLVMTypeRef GetFunctionType(LLVMValueRef fn)
     {
         var type = fn.TypeOf;
@@ -534,6 +647,7 @@ public sealed class ModuleLowerer
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
         {
+            // Legacy I/O (to be deprecated)
             "print_string",
             "print",
             "print_int",
@@ -545,20 +659,70 @@ public sealed class ModuleLowerer
             "print_solved",
             "read_char",
             "read_int",
+
+            // Legacy math (to be renamed)
             "sin",
             "cos",
             "sin_fast",
             "cos_fast",
+
+            // Legacy system (to be renamed)
             "time",
+            "get_time_ms",
+            "sleep_ms",
+
+            // Legacy graphics (external runtime)
             "init_window",
             "begin_frame",
             "end_frame",
             "clear",
             "draw_line",
             "is_key_down",
-            "get_time_ms",
-            "sleep_ms",
-            "should_quit"
+            "should_quit",
+
+            // Standard Library: char_* module
+            "char_is_digit",
+            "char_is_alpha",
+            "char_is_alnum",
+            "char_is_space",
+            "char_is_upper",
+            "char_is_lower",
+            "char_is_hex",
+            "char_is_print",
+            "char_to_upper",
+            "char_to_lower",
+            "char_to_digit",
+            "char_from_digit",
+            "char_to_hex",
+            "char_from_hex",
+
+            // Standard Library: str_* module
+            "str_len",
+            "str_is_empty",
+            "str_get",
+            "str_set",
+            "str_eq",
+            "str_cmp",
+            "str_starts_with",
+            "str_ends_with",
+            "str_find",
+            "str_find_char",
+            "str_find_last_char",
+            "str_contains",
+            "str_clear",
+            "str_copy",
+            "str_append",
+            "str_append_char",
+            "str_substr",
+            "str_trim_start",
+            "str_trim_end",
+            "str_trim",
+            "str_to_upper",
+            "str_to_lower",
+            "str_from_i32",
+            "str_from_f32",
+            "str_to_i32",
+            "str_to_f32"
         };
         private int _blockId;
         private readonly bool _headlessGraphics;
@@ -1481,10 +1645,842 @@ public sealed class ModuleLowerer
                         var (fn, fnType) = GetOrDeclareStasisShouldQuit(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "should_quit.call");
                     }
+
+                // ============================================================
+                // Standard Library: char_* module (character/byte utilities)
+                // ============================================================
+
+                case "char_is_digit":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_digit expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // c >= '0' && c <= '9'
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
+                        var result = builder.BuildAnd(ge0, le9, "is_digit");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_digit.i32");
+                    }
+
+                case "char_is_alpha":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_alpha expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
+                        var lower = builder.BuildAnd(geA, leZ, "lower");
+                        var geAU = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leZU = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
+                        var upper = builder.BuildAnd(geAU, leZU, "upper");
+                        var result = builder.BuildOr(lower, upper, "is_alpha");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_alpha.i32");
+                    }
+
+                case "char_is_alnum":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_alnum expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // digit or alpha
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
+                        var digit = builder.BuildAnd(ge0, le9, "digit");
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
+                        var lower = builder.BuildAnd(geA, leZ, "lower");
+                        var geAU = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leZU = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
+                        var upper = builder.BuildAnd(geAU, leZU, "upper");
+                        var alpha = builder.BuildOr(lower, upper, "alpha");
+                        var result = builder.BuildOr(digit, alpha, "is_alnum");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_alnum.i32");
+                    }
+
+                case "char_is_space":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_space expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // c == ' ' || c == '\t' || c == '\n' || c == '\r'
+                        var isSpace = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32(' '), "isSpace");
+                        var isTab = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32('\t'), "isTab");
+                        var isNewline = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32('\n'), "isNewline");
+                        var isCr = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32('\r'), "isCr");
+                        var r1 = builder.BuildOr(isSpace, isTab, "r1");
+                        var r2 = builder.BuildOr(r1, isNewline, "r2");
+                        var result = builder.BuildOr(r2, isCr, "is_space");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_space.i32");
+                    }
+
+                case "char_is_upper":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_upper expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
+                        var result = builder.BuildAnd(geA, leZ, "is_upper");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_upper.i32");
+                    }
+
+                case "char_is_lower":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_lower expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
+                        var result = builder.BuildAnd(geA, leZ, "is_lower");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_lower.i32");
+                    }
+
+                case "char_is_hex":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_hex expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // digit or 'a'-'f' or 'A'-'F'
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
+                        var digit = builder.BuildAnd(ge0, le9, "digit");
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leF = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('f'), "lef");
+                        var lowerHex = builder.BuildAnd(geA, leF, "lowerHex");
+                        var geAU = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leFU = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('F'), "leF");
+                        var upperHex = builder.BuildAnd(geAU, leFU, "upperHex");
+                        var hex = builder.BuildOr(lowerHex, upperHex, "hex");
+                        var result = builder.BuildOr(digit, hex, "is_hex");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_hex.i32");
+                    }
+
+                case "char_is_print":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_is_print expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // c >= 32 && c <= 126
+                        var ge32 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32(32), "ge32");
+                        var le126 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32(126), "le126");
+                        var result = builder.BuildAnd(ge32, le126, "is_print");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "is_print.i32");
+                    }
+
+                case "char_to_upper":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_to_upper expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // if c >= 'a' && c <= 'z' then c - 32 else c
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
+                        var isLower = builder.BuildAnd(geA, leZ, "isLower");
+                        var upper = builder.BuildSub(c, ConstI32(32), "upper");
+                        return builder.BuildSelect(isLower, upper, c, "char_to_upper");
+                    }
+
+                case "char_to_lower":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_to_lower expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // if c >= 'A' && c <= 'Z' then c + 32 else c
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
+                        var isUpper = builder.BuildAnd(geA, leZ, "isUpper");
+                        var lower = builder.BuildAdd(c, ConstI32(32), "lower");
+                        return builder.BuildSelect(isUpper, lower, c, "char_to_lower");
+                    }
+
+                case "char_to_digit":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_to_digit expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        // if c >= '0' && c <= '9' then c - '0' else -1
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
+                        var isDigit = builder.BuildAnd(ge0, le9, "isDigit");
+                        var digit = builder.BuildSub(c, ConstI32('0'), "digit");
+                        return builder.BuildSelect(isDigit, digit, ConstI32(-1), "char_to_digit");
+                    }
+
+                case "char_from_digit":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_from_digit expects 1 argument (d: i32).", span);
+                            return ConstI32(0);
+                        }
+                        var d = LowerExpression(builder, args[0], locals);
+                        // if d >= 0 && d <= 9 then d + '0' else '?'
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, d, ConstI32(0), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, d, ConstI32(9), "le9");
+                        var valid = builder.BuildAnd(ge0, le9, "valid");
+                        var ch = builder.BuildAdd(d, ConstI32('0'), "ch");
+                        return builder.BuildSelect(valid, ch, ConstI32('?'), "char_from_digit");
+                    }
+
+                case "char_to_hex":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_to_hex expects 1 argument (c: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var c = LowerExpression(builder, args[0], locals);
+                        var function = builder.InsertBlock.Parent;
+
+                        // Check digit first
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
+                        var isDigit = builder.BuildAnd(ge0, le9, "isDigit");
+
+                        var digitBlock = AppendBlock(function, NextBlockName("hex.digit"));
+                        var lowerBlock = AppendBlock(function, NextBlockName("hex.lower"));
+                        var upperBlock = AppendBlock(function, NextBlockName("hex.upper"));
+                        var invalidBlock = AppendBlock(function, NextBlockName("hex.invalid"));
+                        var mergeBlock = AppendBlock(function, NextBlockName("hex.merge"));
+
+                        builder.BuildCondBr(isDigit, digitBlock, lowerBlock);
+
+                        builder.PositionAtEnd(digitBlock);
+                        var digitVal = builder.BuildSub(c, ConstI32('0'), "digitVal");
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(lowerBlock);
+                        var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
+                        var leF = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('f'), "lef");
+                        var isLower = builder.BuildAnd(geA, leF, "isLower");
+                        builder.BuildCondBr(isLower, AppendBlock(function, NextBlockName("hex.lowerVal")), upperBlock);
+
+                        var lowerValBlock = function.LastBasicBlock;
+                        builder.PositionAtEnd(lowerValBlock);
+                        var lowerVal = builder.BuildSub(c, ConstI32('a' - 10), "lowerVal");
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(upperBlock);
+                        var geAU = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
+                        var leFU = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('F'), "leF");
+                        var isUpper = builder.BuildAnd(geAU, leFU, "isUpper");
+                        builder.BuildCondBr(isUpper, AppendBlock(function, NextBlockName("hex.upperVal")), invalidBlock);
+
+                        var upperValBlock = function.LastBasicBlock;
+                        builder.PositionAtEnd(upperValBlock);
+                        var upperVal = builder.BuildSub(c, ConstI32('A' - 10), "upperVal");
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(invalidBlock);
+                        builder.BuildBr(mergeBlock);
+
+                        builder.PositionAtEnd(mergeBlock);
+                        var phi = builder.BuildPhi(LLVMTypeRef.Int32, "hex.result");
+                        phi.AddIncoming(new[] { digitVal }, new[] { digitBlock }, 1);
+                        phi.AddIncoming(new[] { lowerVal }, new[] { lowerValBlock }, 1);
+                        phi.AddIncoming(new[] { upperVal }, new[] { upperValBlock }, 1);
+                        phi.AddIncoming(new[] { ConstI32(-1) }, new[] { invalidBlock }, 1);
+                        return phi;
+                    }
+
+                case "char_from_hex":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("char_from_hex expects 1 argument (d: i32).", span);
+                            return ConstI32(0);
+                        }
+                        var d = LowerExpression(builder, args[0], locals);
+                        // if d >= 0 && d <= 9 then d + '0'
+                        // else if d >= 10 && d <= 15 then d - 10 + 'a'
+                        // else '?'
+                        var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, d, ConstI32(0), "ge0");
+                        var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, d, ConstI32(9), "le9");
+                        var isDigit = builder.BuildAnd(ge0, le9, "isDigit");
+                        var ge10 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, d, ConstI32(10), "ge10");
+                        var le15 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, d, ConstI32(15), "le15");
+                        var isHexLetter = builder.BuildAnd(ge10, le15, "isHexLetter");
+                        var digitCh = builder.BuildAdd(d, ConstI32('0'), "digitCh");
+                        var hexCh = builder.BuildAdd(builder.BuildSub(d, ConstI32(10), "d10"), ConstI32('a'), "hexCh");
+                        var temp = builder.BuildSelect(isHexLetter, hexCh, ConstI32('?'), "temp");
+                        return builder.BuildSelect(isDigit, digitCh, temp, "char_from_hex");
+                    }
+
+                // ============================================================
+                // Standard Library: str_* module (string operations)
+                // ============================================================
+
+                case "str_len":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("str_len expects 1 argument (s: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        // Get pointer to the array and call strlen
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_len requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptr }, "strlen.call");
+                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_len");
+                    }
+
+                case "str_is_empty":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("str_is_empty expects 1 argument (s: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_is_empty requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var firstByte = builder.BuildLoad2(LLVMTypeRef.Int8, ptr, "firstByte");
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, firstByte, ConstI8(0), "isZero");
+                        return builder.BuildZExt(isZero, LLVMTypeRef.Int32, "str_is_empty");
+                    }
+
+                case "str_get":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_get expects 2 arguments (s: u8[], index: i32).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        var index = LowerExpression(builder, args[1], locals);
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_get requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { index }, "elemPtr");
+                        var val = builder.BuildLoad2(LLVMTypeRef.Int8, elemPtr, "str_get");
+                        return builder.BuildZExt(val, LLVMTypeRef.Int32, "str_get.i32");
+                    }
+
+                case "str_set":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("str_set expects 3 arguments (s: u8[], index: i32, byte: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        var index = LowerExpression(builder, args[1], locals);
+                        var byteVal = LowerExpression(builder, args[2], locals);
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_set requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { index }, "elemPtr");
+                        var truncated = builder.BuildTrunc(byteVal, LLVMTypeRef.Int8, "byte");
+                        builder.BuildStore(truncated, elemPtr);
+                        return ConstI32(0);
+                    }
+
+                case "str_eq":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_eq expects 2 arguments (a: u8[], b: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strcmpFn, strcmpType) = GetOrDeclareStrcmp(_moduleBuilder);
+                        var ptrA = LowerArrayPointer(builder, args[0], locals);
+                        var ptrB = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrA.Handle == IntPtr.Zero || ptrB.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_eq requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        var cmp = builder.BuildCall2(strcmpType, strcmpFn, new[] { ptrA, ptrB }, "strcmp.call");
+                        var isEqual = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cmp, ConstI32(0), "isEqual");
+                        return builder.BuildZExt(isEqual, LLVMTypeRef.Int32, "str_eq");
+                    }
+
+                case "str_cmp":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_cmp expects 2 arguments (a: u8[], b: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strcmpFn, strcmpType) = GetOrDeclareStrcmp(_moduleBuilder);
+                        var ptrA = LowerArrayPointer(builder, args[0], locals);
+                        var ptrB = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrA.Handle == IntPtr.Zero || ptrB.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_cmp requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        return builder.BuildCall2(strcmpType, strcmpFn, new[] { ptrA, ptrB }, "str_cmp");
+                    }
+
+                case "str_copy":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_copy expects 2 arguments (dst: u8[], src: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strcpyFn, strcpyType) = GetOrDeclareStrcpy(_moduleBuilder);
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptrDst = LowerArrayPointer(builder, args[0], locals);
+                        var ptrSrc = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrDst.Handle == IntPtr.Zero || ptrSrc.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_copy requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        builder.BuildCall2(strcpyType, strcpyFn, new[] { ptrDst, ptrSrc }, "");
+                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
+                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_copy.len");
+                    }
+
+                case "str_append":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_append expects 2 arguments (dst: u8[], src: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strcatFn, strcatType) = GetOrDeclareStrcat(_moduleBuilder);
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptrDst = LowerArrayPointer(builder, args[0], locals);
+                        var ptrSrc = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrDst.Handle == IntPtr.Zero || ptrSrc.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_append requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        builder.BuildCall2(strcatType, strcatFn, new[] { ptrDst, ptrSrc }, "");
+                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
+                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_append.len");
+                    }
+
+                case "str_append_char":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_append_char expects 2 arguments (dst: u8[], byte: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptrDst = LowerArrayPointer(builder, args[0], locals);
+                        var byteVal = LowerExpression(builder, args[1], locals);
+                        if (ptrDst.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_append_char requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
+                        var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "len");
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { len }, "elemPtr");
+                        var truncated = builder.BuildTrunc(byteVal, LLVMTypeRef.Int8, "byte");
+                        builder.BuildStore(truncated, elemPtr);
+                        var nextPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { builder.BuildAdd(len, ConstI32(1), "next") }, "nextPtr");
+                        builder.BuildStore(ConstI8(0), nextPtr);
+                        return builder.BuildAdd(len, ConstI32(1), "str_append_char.len");
+                    }
+
+                case "str_clear":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("str_clear expects 1 argument (s: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_clear requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        builder.BuildStore(ConstI8(0), ptr);
+                        return ConstI32(0);
+                    }
+
+                case "str_find_char":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_find_char expects 2 arguments (s: u8[], byte: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        var byteVal = builder.BuildTrunc(LowerExpression(builder, args[1], locals), LLVMTypeRef.Int8, "find_char.byte");
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_find_char requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_char.idx");
+                        var resultAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_char.result");
+                        builder.BuildStore(ConstI32(0), idxAlloca);
+                        builder.BuildStore(ConstI32(-1), resultAlloca);
+
+                        var fn = builder.InsertBlock.Parent;
+                        var loopBlock = AppendBlock(fn, NextBlockName("find_char.loop"));
+                        var checkZeroBlock = AppendBlock(fn, NextBlockName("find_char.zero"));
+                        var incBlock = AppendBlock(fn, NextBlockName("find_char.inc"));
+                        var hitBlock = AppendBlock(fn, NextBlockName("find_char.hit"));
+                        var missBlock = AppendBlock(fn, NextBlockName("find_char.miss"));
+                        var exitBlock = AppendBlock(fn, NextBlockName("find_char.exit"));
+
+                        builder.BuildBr(loopBlock);
+
+                        builder.PositionAtEnd(loopBlock);
+                        var idx = builder.BuildLoad2(LLVMTypeRef.Int32, idxAlloca, "find_char.idx.cur");
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { idx }, "find_char.ptr");
+                        var cur = builder.BuildLoad2(LLVMTypeRef.Int8, elemPtr, "find_char.cur");
+                        var isMatch = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cur, byteVal, "find_char.match");
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cur, ConstI8(0), "find_char.zero");
+                        builder.BuildCondBr(isMatch, hitBlock, checkZeroBlock);
+
+                        builder.PositionAtEnd(checkZeroBlock);
+                        builder.BuildCondBr(isZero, missBlock, incBlock);
+
+                        builder.PositionAtEnd(incBlock);
+                        var next = builder.BuildAdd(idx, ConstI32(1), "find_char.next");
+                        builder.BuildStore(next, idxAlloca);
+                        builder.BuildBr(loopBlock);
+
+                        builder.PositionAtEnd(hitBlock);
+                        builder.BuildStore(idx, resultAlloca);
+                        builder.BuildBr(exitBlock);
+
+                        builder.PositionAtEnd(missBlock);
+                        builder.BuildStore(ConstI32(-1), resultAlloca);
+                        builder.BuildBr(exitBlock);
+
+                        builder.PositionAtEnd(exitBlock);
+                        var result = builder.BuildLoad2(LLVMTypeRef.Int32, resultAlloca, "find_char.result.val");
+                        return result;
+                    }
+
+                case "str_contains":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_contains expects 2 arguments (s: u8[], needle: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strstrFn, strstrType) = GetOrDeclareStrstr(_moduleBuilder);
+                        var ptrS = LowerArrayPointer(builder, args[0], locals);
+                        var ptrNeedle = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrS.Handle == IntPtr.Zero || ptrNeedle.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_contains requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        var found = builder.BuildCall2(strstrType, strstrFn, new[] { ptrS, ptrNeedle }, "strstr.call");
+                        var isNotNull = builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, found, LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0)), "isNotNull");
+                        return builder.BuildZExt(isNotNull, LLVMTypeRef.Int32, "str_contains");
+                    }
+
+                case "str_find":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_find expects 2 arguments (s: u8[], needle: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strstrFn, strstrType) = GetOrDeclareStrstr(_moduleBuilder);
+                        var ptrS = LowerArrayPointer(builder, args[0], locals);
+                        var ptrNeedle = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrS.Handle == IntPtr.Zero || ptrNeedle.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_find requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        var found = builder.BuildCall2(strstrType, strstrFn, new[] { ptrS, ptrNeedle }, "strstr.call");
+                        var isNull = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, found, LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0)), "isNull");
+                        // Manual pointer diff: convert both pointers to int64, subtract, then truncate to i32
+                        var foundInt = builder.BuildPtrToInt(found, LLVMTypeRef.Int64, "found.int");
+                        var ptrSInt = builder.BuildPtrToInt(ptrS, LLVMTypeRef.Int64, "ptrS.int");
+                        var diff = builder.BuildSub(foundInt, ptrSInt, "diff");
+                        var idx = builder.BuildTrunc(diff, LLVMTypeRef.Int32, "idx");
+                        return builder.BuildSelect(isNull, ConstI32(-1), idx, "str_find");
+                    }
+
+                case "str_starts_with":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_starts_with expects 2 arguments (s: u8[], prefix: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strncmpFn, strncmpType) = GetOrDeclareStrncmp(_moduleBuilder);
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptrS = LowerArrayPointer(builder, args[0], locals);
+                        var ptrPrefix = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrS.Handle == IntPtr.Zero || ptrPrefix.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_starts_with requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        var prefixLen = builder.BuildCall2(strlenType, strlenFn, new[] { ptrPrefix }, "prefixLen");
+                        var cmp = builder.BuildCall2(strncmpType, strncmpFn, new[] { ptrS, ptrPrefix, prefixLen }, "strncmp.call");
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cmp, ConstI32(0), "isZero");
+                        return builder.BuildZExt(isZero, LLVMTypeRef.Int32, "str_starts_with");
+                    }
+
+                case "str_ends_with":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_ends_with expects 2 arguments (s: u8[], suffix: u8[]).", span);
+                            return ConstI32(0);
+                        }
+                        var (strncmpFn, strncmpType) = GetOrDeclareStrncmp(_moduleBuilder);
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var ptrS = LowerArrayPointer(builder, args[0], locals);
+                        var ptrSuffix = LowerArrayPointer(builder, args[1], locals);
+                        if (ptrS.Handle == IntPtr.Zero || ptrSuffix.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_ends_with requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+                        var sLen = builder.BuildCall2(strlenType, strlenFn, new[] { ptrS }, "sLen");
+                        var suffixLen = builder.BuildCall2(strlenType, strlenFn, new[] { ptrSuffix }, "suffixLen");
+                        var offset = builder.BuildSub(sLen, suffixLen, "offset");
+                        var offset32 = builder.BuildTrunc(offset, LLVMTypeRef.Int32, "offset32");
+                        var endPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrS, new[] { offset32 }, "endPtr");
+                        var cmp = builder.BuildCall2(strncmpType, strncmpFn, new[] { endPtr, ptrSuffix, suffixLen }, "strncmp.call");
+                        // Also check that sLen >= suffixLen
+                        var lenOk = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, sLen, suffixLen, "lenOk");
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cmp, ConstI32(0), "isZero");
+                        var result = builder.BuildAnd(lenOk, isZero, "ends_with");
+                        return builder.BuildZExt(result, LLVMTypeRef.Int32, "str_ends_with");
+                    }
+
+                case "str_find_last_char":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("str_find_last_char expects 2 arguments (s: u8[], byte: u8).", span);
+                            return ConstI32(0);
+                        }
+                        var ptr = LowerArrayPointer(builder, args[0], locals);
+                        var byteVal = builder.BuildTrunc(LowerExpression(builder, args[1], locals), LLVMTypeRef.Int8, "find_last_char.byte");
+                        if (ptr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_find_last_char requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_last.idx");
+                        var lastAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_last.last");
+                        builder.BuildStore(ConstI32(0), idxAlloca);
+                        builder.BuildStore(ConstI32(-1), lastAlloca);
+
+                        var fn = builder.InsertBlock.Parent;
+                        var loopBlock = AppendBlock(fn, NextBlockName("find_last.loop"));
+                        var afterMatchBlock = AppendBlock(fn, NextBlockName("find_last.after"));
+                        var endBlock = AppendBlock(fn, NextBlockName("find_last.end"));
+
+                        builder.BuildBr(loopBlock);
+
+                        builder.PositionAtEnd(loopBlock);
+                        var idx = builder.BuildLoad2(LLVMTypeRef.Int32, idxAlloca, "find_last.idx.cur");
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { idx }, "find_last.ptr");
+                        var cur = builder.BuildLoad2(LLVMTypeRef.Int8, elemPtr, "find_last.cur");
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cur, ConstI8(0), "find_last.zero");
+                        var isMatch = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cur, byteVal, "find_last.match");
+                        builder.BuildCondBr(isZero, endBlock, afterMatchBlock);
+
+                        builder.PositionAtEnd(afterMatchBlock);
+                        var lastCur = builder.BuildLoad2(LLVMTypeRef.Int32, lastAlloca, "find_last.last.cur");
+                        var newLast = builder.BuildSelect(isMatch, idx, lastCur, "find_last.last.next");
+                        builder.BuildStore(newLast, lastAlloca);
+                        var nextIdx = builder.BuildAdd(idx, ConstI32(1), "find_last.next");
+                        builder.BuildStore(nextIdx, idxAlloca);
+                        builder.BuildBr(loopBlock);
+
+                        builder.PositionAtEnd(endBlock);
+                        return builder.BuildLoad2(LLVMTypeRef.Int32, lastAlloca, "find_last.result");
+                    }
+
+                case "str_substr":
+                    {
+                        if (args.Count != 4)
+                        {
+                            AddDiagnostic("str_substr expects 4 arguments (dst: u8[], src: u8[], start: i32, byte_len: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var ptrDst = LowerArrayPointer(builder, args[0], locals);
+                        var ptrSrc = LowerArrayPointer(builder, args[1], locals);
+                        var start = LowerExpression(builder, args[2], locals);
+                        var byteLen = LowerExpression(builder, args[3], locals);
+                        if (ptrDst.Handle == IntPtr.Zero || ptrSrc.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("str_substr requires array arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var (memcpyFn, memcpyType) = GetOrDeclareMemcpy(_moduleBuilder);
+                        var (abortFn, abortType) = GetOrDeclareAbort(_moduleBuilder);
+
+                        var srcLen64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrSrc }, "substr.srclen64");
+                        var srcLen = builder.BuildTrunc(srcLen64, LLVMTypeRef.Int32, "substr.srclen");
+                        var end = builder.BuildAdd(start, byteLen, "substr.end");
+
+                        // Validate start/end ranges: start >= 0, byteLen >= 0, end <= srcLen
+                        var startNeg = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, start, ConstI32(0), "substr.startNeg");
+                        var lenNeg = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, byteLen, ConstI32(0), "substr.lenNeg");
+                        var endGt = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, end, srcLen, "substr.endGt");
+                        var badRange = builder.BuildOr(builder.BuildOr(startNeg, lenNeg, "substr.badRange1"), endGt, "substr.badRange");
+
+                        var fn = builder.InsertBlock.Parent;
+                        var rangeOkBlock = AppendBlock(fn, NextBlockName("substr.range_ok"));
+                        var abortBlock = AppendBlock(fn, NextBlockName("substr.abort"));
+                        builder.BuildCondBr(badRange, abortBlock, rangeOkBlock);
+
+                        builder.PositionAtEnd(abortBlock);
+                        builder.BuildCall2(abortType, abortFn, Array.Empty<LLVMValueRef>(), "substr.abort");
+                        builder.BuildUnreachable();
+
+                        builder.PositionAtEnd(rangeOkBlock);
+                        // Boundary validation: bytes at start and end must not be UTF-8 continuation bytes
+                        var startPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrSrc, new[] { start }, "substr.startPtr");
+                        var startByte = builder.BuildLoad2(LLVMTypeRef.Int8, startPtr, "substr.startByte");
+                        var startCont = BuildIsContinuationByte(builder, startByte);
+
+                        var endPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrSrc, new[] { end }, "substr.endPtr");
+                        var endByte = builder.BuildLoad2(LLVMTypeRef.Int8, endPtr, "substr.endByte");
+                        var endCont = BuildIsContinuationByte(builder, endByte);
+
+                        var misaligned = builder.BuildOr(startCont, endCont, "substr.misaligned");
+
+                        var okBlock = AppendBlock(fn, NextBlockName("substr.ok"));
+                        builder.BuildCondBr(misaligned, abortBlock, okBlock);
+
+                        builder.PositionAtEnd(okBlock);
+                        var len64 = builder.BuildZExt(byteLen, LLVMTypeRef.Int64, "substr.len64");
+                        builder.BuildCall2(memcpyType, memcpyFn, new[] { ptrDst, startPtr, len64 }, "substr.copy");
+                        var terminatorPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { byteLen }, "substr.term");
+                        builder.BuildStore(ConstI8(0), terminatorPtr);
+                        return byteLen;
+                    }
+
+                case "str_trim_start":
+                case "str_trim_end":
+                case "str_trim":
+                case "str_to_upper":
+                case "str_to_lower":
+                case "str_from_i32":
+                case "str_from_f32":
+                case "str_to_i32":
+                case "str_to_f32":
+                    AddDiagnostic($"Built-in '{name}' is not yet implemented.", span);
+                    return ConstI32(0);
+
                 default:
                     AddDiagnostic($"Unknown built-in '{name}'.", span);
                     return ConstI32(0);
             }
+        }
+
+        private LLVMValueRef LowerArrayPointer(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals)
+        {
+            // Get a pointer to the first element of an array
+            if (expr is IdentifierExpressionSyntax id)
+            {
+                // Check if it's a global array
+                if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Global && sym.Type is ArrayTypeSymbol arrayTypeSym)
+                {
+                    var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
+                    if (global.Handle != IntPtr.Zero)
+                    {
+                        // Get element type from the semantic type symbol
+                        var elemType = _moduleBuilder.TypeMapper.Map(arrayTypeSym.ElementType);
+                        var size = arrayTypeSym.Size;
+                        var llvmArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, size));
+                        // GEP to get pointer to first element
+                        return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{id.Identifier.Text}.ptr");
+                    }
+                }
+                // Check for local array binding
+                if (locals.TryGetValue(id.Identifier.Text, out var local) && local.IsAddress)
+                {
+                    return local.Value;
+                }
+            }
+            else if (expr is MemberAccessExpressionSyntax member)
+            {
+                // Handle struct field arrays like state.buffer
+                var flattenedPath = BuildFlattenedMemberPath(member);
+                if (flattenedPath is not null)
+                {
+                    // Try to resolve the type from member access
+                    if (TryResolveMemberType(member, out var memberType) && memberType is ArrayTypeSymbol memberArrayType)
+                    {
+                        var global = _moduleBuilder.Module.GetNamedGlobal(flattenedPath);
+                        if (global.Handle != IntPtr.Zero)
+                        {
+                            var elemType = _moduleBuilder.TypeMapper.Map(memberArrayType.ElementType);
+                            var size = memberArrayType.Size;
+                            var llvmArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, size));
+                            return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedPath}.ptr");
+                        }
+                    }
+                }
+            }
+            return default;
+        }
+
+        private static LLVMValueRef ConstI8(int value) =>
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, (ulong)value, false);
+
+        private LLVMValueRef BuildIsContinuationByte(LLVMBuilderRef builder, LLVMValueRef byteVal)
+        {
+            var byteI32 = builder.BuildZExt(byteVal, LLVMTypeRef.Int32, "byte.i32");
+            var masked = builder.BuildAnd(byteI32, ConstI32(0xC0), "byte.mask");
+            return builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, masked, ConstI32(0x80), "byte.is_cont");
         }
 
         private LLVMValueRef LowerOperatorCall(LLVMBuilderRef builder, OperatorCallExpressionSyntax op, Dictionary<string, LocalBinding> locals)
