@@ -27,7 +27,7 @@ Stasis exposes two text types; `string[N]` remains an alias for `utf8[N]` for co
   - Invariants: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints; `data[byte_length]` is `0` as a sentinel (not counted in `N`).
   - Indexing: byte-indexed by default; codepoint helpers available.
   - Header-driven ops: `str_*` functions read/write headers; raw byte helpers require a recount if they change payload bytes.
-  - Boundary checks: UTF-8 mutators that take byte indices validate codepoint boundaries; invalid ranges are rejected without mutation.
+  - Boundary checks: UTF-8 mutators that take byte indices validate codepoint boundaries; invalid ranges trigger a fatal exit (coding error).
 
 ### UTF-8 Encoding Basics
 
@@ -56,8 +56,8 @@ Stasis exposes two text types; `string[N]` remains an alias for `utf8[N]` for co
 - Iterating from start to end, respecting codepoint boundaries
 
 **Unsafe without care:**
-- Truncating at arbitrary byte positions (may split a codepoint; validated mutators will reject)
-- Extracting substrings by byte index (validated mutators will reject mid-codepoint ranges)
+- Truncating at arbitrary byte positions (validated mutators will abort on mid-codepoint splits)
+- Extracting substrings by byte index (validated mutators will abort on mid-codepoint ranges)
 - Case conversion (only reliable for ASCII a-z/A-Z)
 
 ---
@@ -96,7 +96,7 @@ ascii_from_hex(d: i32): u8       // 0->'0', 10->'a', else '?'
 ## Module: `str_` (String Operations)
 
 All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; ASCII inputs widen to UTF-8 when passed here.
-All operations that accept byte indices validate UTF-8 codepoint boundaries before mutating; invalid ranges leave the destination unchanged and return `-1` or `0` as noted.
+All operations that accept byte indices validate UTF-8 codepoint boundaries before mutating; invalid ranges are treated as coding errors and trigger a fatal exit rather than continuing with partial writes.
 
 ### Length
 
@@ -166,12 +166,12 @@ str_append_codepoint(dst: utf8[], cp: i32): i32     // Append UTF-8 encoded code
 
 ### Substring (Byte-Based)
 
-These use byte indices and validate UTF-8 boundaries before copying.
+These use byte indices and validate UTF-8 boundaries before copying. Misaligned ranges abort.
 
 ```stasis
 str_substr(dst: utf8[], src: utf8[], start: i32, byte_len: i32): i32
     // Extract byte_len bytes starting at byte index start
-    // Returns bytes copied, or -1 if start/length are not on codepoint boundaries or out of range
+    // Returns bytes copied; aborts if start/length are not on codepoint boundaries or out of range
 ```
 
 ### Trimming (In-Place, ASCII Whitespace)
