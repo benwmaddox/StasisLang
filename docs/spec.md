@@ -104,15 +104,28 @@ bool
 Type[IntegerLiteral]
 ```
 
-### Strings
+### String Types
 
 ```
-string[N]   // sugar for u8[N]
+ascii[N]   // fixed-byte ASCII strings (single-byte code units)
+utf8[N]    // UTF-8 strings with tracked byte and codepoint lengths
+string[N]  // alias for utf8[N] (backward compatibility)
 ```
+
+**ascii[N] layout and invariants**
+- Layout: `[len: i32][data: u8[N]]`
+- Invariant: all bytes are `< 128`; `len` is the used byte count.
+- `data[len]` is set to `0` as a sentinel; sentinel is not counted in `N`.
+
+**utf8[N] layout and invariants**
+- Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
+- Invariant: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints.
+- `data[byte_length]` is set to `0` as a sentinel; sentinel is not counted in `N`.
 
 ### Built-in I/O helpers
 
-- `print_string(string[N])` prints a string literal that the compiler lowers to a null-terminated `u8` array in global memory; the runtime maps it to an LLVM `i8*`.
+- `print_string(utf8[N])` prints a UTF-8 string literal; the compiler lowers it to global static storage with headers and a null sentinel, and the runtime maps the payload to an LLVM `i8*`.
+- ASCII literals may be typed as `ascii[N]` and widen to `utf8[N]` when passed to UTF-8 APIs.
 - Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
