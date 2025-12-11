@@ -131,7 +131,7 @@ public sealed class LayoutPlanner
         return type switch
         {
             NamedTypeSyntax named => SizeOfNamed(named.Name),
-            ArrayTypeSyntax array => SizeOf(array.ElementType) * (int.TryParse(array.SizeToken.Text, out var count) ? count : 1),
+            ArrayTypeSyntax array => SizeOf(array.ElementType) * (int.TryParse(array.SizeToken?.Text, out var count) ? count : 1),
             _ => 0
         };
     }

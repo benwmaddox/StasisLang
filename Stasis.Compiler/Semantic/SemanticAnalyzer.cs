@@ -1,3 +1,4 @@
+using System.Linq;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
 
@@ -20,6 +21,7 @@ public sealed class SemanticAnalyzer
 
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
     private readonly List<Diagnostic> _diagnostics = new();
+    private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
 
     public SemanticResult Analyze(CompilationUnitSyntax compilationUnit)
     {
@@ -63,6 +65,10 @@ public sealed class SemanticAnalyzer
         AddSymbol("print_solved", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("read_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("cos", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("sin_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("cos_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
         AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("init_window", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("begin_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
@@ -83,6 +89,8 @@ public sealed class SemanticAnalyzer
             {
                 case StructDeclarationSyntax s:
                     AddSymbol(s.Name.Text, SymbolKind.Struct, new NamedTypeSymbol(s.Name.Text), s.Name.Span);
+                    _structs[s.Name.Text] = s;
+                    ValidateStructFields(s);
                     break;
                 case EnumDeclarationSyntax e:
                     AddSymbol(e.Name.Text, SymbolKind.Enum, new NamedTypeSymbol(e.Name.Text), e.Name.Span);
@@ -180,6 +188,37 @@ public sealed class SemanticAnalyzer
         }
     }
 
+    private TypeSymbol? ResolveIterableElementType(ExpressionSyntax iterable, IReadOnlyDictionary<string, Symbol> scope)
+    {
+        if (iterable is IdentifierExpressionSyntax id)
+        {
+            if (scope.TryGetValue(id.Identifier.Text, out var localSym) && localSym.Type is ArrayTypeSymbol localArray)
+            {
+                return localArray.ElementType;
+            }
+
+            if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Type is ArrayTypeSymbol array)
+            {
+                return array.ElementType;
+            }
+        }
+
+        if (iterable is MemberAccessExpressionSyntax member &&
+            member.Receiver is IdentifierExpressionSyntax recv &&
+            _symbols.TryGetValue(recv.Identifier.Text, out var recvSym) &&
+            recvSym.Type is NamedTypeSymbol named &&
+            _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+            if (field?.Type is ArrayTypeSyntax arraySyntax)
+            {
+                return ResolveType(arraySyntax.ElementType);
+            }
+        }
+
+        return null;
+    }
+
     private void AnalyzeStatement(StatementSyntax stmt, Dictionary<string, Symbol> scope)
     {
         switch (stmt)
@@ -222,9 +261,24 @@ public sealed class SemanticAnalyzer
             case ForeachStatementSyntax fes:
                 AnalyzeExpression(fes.Iterable, scope);
                 var foreachScope = new Dictionary<string, Symbol>(scope, StringComparer.Ordinal);
-                var iteratorType = BuiltInTypes["i32"];
-                AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
-                EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
+                if (fes.BindByElement)
+                {
+                    var elementType = ResolveIterableElementType(fes.Iterable, scope);
+                    if (elementType is null)
+                    {
+                        _diagnostics.Add(new Diagnostic("foreach target must be an array.", fes.Iterable.Span));
+                        break;
+                    }
+
+                    AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, elementType, fes.Iterator.Span);
+                    EnsurePrimitiveLocal(elementType, fes.Iterator.Span);
+                }
+                else
+                {
+                    var iteratorType = BuiltInTypes["i32"];
+                    AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
+                    EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
+                }
                 AnalyzeBlock(fes.Body, foreachScope);
                 break;
             case ReturnStatementSyntax rs:
@@ -243,13 +297,21 @@ public sealed class SemanticAnalyzer
     {
         if (v.Type is null)
         {
-            _diagnostics.Add(new Diagnostic("Local variables must declare a type; initialize with a following '=' assignment.", v.Name.Span));
+            _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
+            if (v.Initializer is not null)
+            {
+                AnalyzeExpression(v.Initializer, scope);
+            }
         }
         else
         {
             var type = ResolveType(v.Type);
             AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
             EnsurePrimitiveLocal(type, v.Name.Span);
+            if (v.Initializer is not null)
+            {
+                AnalyzeExpression(v.Initializer, scope);
+            }
         }
     }
 
@@ -394,6 +456,11 @@ public sealed class SemanticAnalyzer
                 return new NamedTypeSymbol(named.Name);
             case ArrayTypeSyntax array:
                 var elementType = ResolveType(array.ElementType);
+                if (string.IsNullOrEmpty(array.SizeText))
+                {
+                    return elementType is null ? null : new ArrayTypeSymbol(elementType, -1);
+                }
+
                 if (int.TryParse(array.SizeText, out var size) && size > 0)
                 {
                     return elementType is null ? null : new ArrayTypeSymbol(elementType, size);
@@ -438,7 +505,12 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types or struct references; arrays live in static memory.", span));
+        if (type is ArrayTypeSymbol)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types, struct references, or arrays.", span));
     }
 
     private void EnsureGlobalType(TypeSymbol? type, SourceSpan span)
@@ -448,12 +520,34 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        if (type is PrimitiveTypeSymbol or NamedTypeSymbol or ArrayTypeSymbol)
+        if (type is ArrayTypeSymbol arr)
+        {
+            if (arr.Size > 0)
+            {
+                return;
+            }
+
+            _diagnostics.Add(new Diagnostic("Global arrays must declare a positive length.", span));
+            return;
+        }
+
+        if (type is PrimitiveTypeSymbol or NamedTypeSymbol)
         {
             return;
         }
 
         _diagnostics.Add(new Diagnostic("Globals must be primitive, struct, or array types.", span));
+    }
+
+    private void ValidateStructFields(StructDeclarationSyntax structDecl)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            if (field.Type is ArrayTypeSyntax array && string.IsNullOrEmpty(array.SizeText))
+            {
+                _diagnostics.Add(new Diagnostic("Struct array fields must declare a positive length.", field.Type.Span));
+            }
+        }
     }
 
     private void AddSymbol(string name, SymbolKind kind, TypeSymbol? type, SourceSpan span)
