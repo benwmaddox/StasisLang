@@ -459,7 +459,8 @@ public sealed class SemanticAnalyzer
                     return elementType is null ? null : new ArrayTypeSymbol(elementType, size);
                 }
 
-                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", array.SizeToken.Span));
+                var span = array.SizeToken?.Span ?? array.Span;
+                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", span));
                 return elementType;
             default:
                 return null;

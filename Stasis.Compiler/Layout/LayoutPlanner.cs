@@ -43,7 +43,7 @@ public sealed class LayoutPlanner
             foreach (var field in structDecl.Fields)
             {
                 var fieldSize = SizeOf(field.Type);
-                var count = int.TryParse(arrayType.SizeToken.Text, out var parsed) ? parsed : 1;
+                var count = int.TryParse(arrayType.SizeToken?.Text, out var parsed) ? parsed : 1;
                 var bytes = fieldSize * count;
                 _offset = Align(_offset, fieldSize);
                 fields.Add(new FieldLayout($"{structDecl.Name.Text}_{field.Identifier.Text}", _offset, bytes));
@@ -71,7 +71,7 @@ public sealed class LayoutPlanner
         else if (global.Type is ArrayTypeSyntax arrayPrim && arrayPrim.ElementType is NamedTypeSyntax prim)
         {
             var elemSize = SizeOf(prim);
-            var count = int.TryParse(arrayPrim.SizeToken.Text, out var parsed) ? parsed : 1;
+            var count = int.TryParse(arrayPrim.SizeToken?.Text, out var parsed) ? parsed : 1;
             var bytes = elemSize * count;
             _offset = Align(_offset, elemSize);
             fields.Add(new FieldLayout(global.Name.Text, _offset, bytes));
@@ -83,7 +83,9 @@ public sealed class LayoutPlanner
             // Unknown type; still reserve nothing to keep deterministic offsets.
         }
 
-        return new GlobalLayout(global.Name.Text, fields.FirstOrDefault()?.Offset ?? _offset, size, fields);
+        var firstField = fields.FirstOrDefault();
+        var firstOffset = firstField is null ? _offset : firstField.Offset;
+        return new GlobalLayout(global.Name.Text, firstOffset, size, fields);
     }
 
     private int PlanStructField(string globalName, string structName, StructFieldSyntax field, ref List<FieldLayout> fields)
@@ -96,7 +98,7 @@ public sealed class LayoutPlanner
             foreach (var nestedField in nestedStructDecl.Fields)
             {
                 var fieldSize = SizeOf(nestedField.Type);
-                var count = int.TryParse(arrayType.SizeToken.Text, out var parsed) ? parsed : 1;
+                var count = int.TryParse(arrayType.SizeToken?.Text, out var parsed) ? parsed : 1;
                 var bytes = fieldSize * count;
                 _offset = Align(_offset, fieldSize);
                 fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}_{nestedField.Identifier.Text}", _offset, bytes));
@@ -117,7 +119,8 @@ public sealed class LayoutPlanner
         {
             // Scalar or primitive array field
             var bytes = SizeOf(field.Type);
-            _offset = Align(_offset, bytes > 0 ? (bytes / (field.Type is ArrayTypeSyntax arr && int.TryParse(arr.SizeToken.Text, out var cnt) && cnt > 0 ? cnt : 1)) : 4);
+            var divisor = field.Type is ArrayTypeSyntax arr && int.TryParse(arr.SizeToken?.Text, out var cnt) && cnt > 0 ? cnt : 1;
+            _offset = Align(_offset, bytes > 0 ? (bytes / divisor) : 4);
             fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}", _offset, bytes));
             _offset += bytes;
             totalBytes = bytes;
