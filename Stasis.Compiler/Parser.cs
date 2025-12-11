@@ -251,8 +251,16 @@ public sealed class Parser
             type = ParseType();
         }
 
+        Token? equals = null;
+        ExpressionSyntax? initializer = null;
+        if (Match(TokenKind.Equal))
+        {
+            equals = Previous;
+            initializer = ParseExpression();
+        }
+
         var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after variable declaration.");
-        return new VariableDeclarationSyntax(letKeyword, name, type, semicolon);
+        return new VariableDeclarationSyntax(letKeyword, name, type, equals, initializer, semicolon);
     }
 
     private IfStatementSyntax ParseIf()

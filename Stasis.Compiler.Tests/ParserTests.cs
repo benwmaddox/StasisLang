@@ -56,12 +56,16 @@ public class ParserTests
     public void Reports_equal_in_let()
     {
         var source = """
-            let x = 1;
+            function f(): void {
+                let x = 1;
+            }
             """;
 
         var result = Parser.Parse(source);
 
-        Assert.NotEmpty(result.Diagnostics);
+        Assert.Empty(result.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
+        Assert.NotEmpty(sema.Diagnostics);
     }
 
     [Fact]

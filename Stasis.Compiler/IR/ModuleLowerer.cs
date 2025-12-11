@@ -724,6 +724,13 @@ public sealed class ModuleLowerer
             var llvmType = _moduleBuilder.TypeMapper.Map(type);
             var alloca = builder.BuildAlloca(llvmType, decl.Name.Text);
             locals[decl.Name.Text] = new LocalBinding(alloca, llvmType, true, null, type);
+
+            if (decl.Initializer is not null)
+            {
+                var initValue = LowerExpression(builder, decl.Initializer, locals);
+                var converted = ConvertToType(builder, initValue, llvmType);
+                builder.BuildStore(converted, alloca);
+            }
         }
 
         private LLVMValueRef LowerExpression(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals)

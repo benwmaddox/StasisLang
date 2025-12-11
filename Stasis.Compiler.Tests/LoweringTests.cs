@@ -369,6 +369,19 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_let_with_initializer_store()
+    {
+        var ir = Lower("""
+            function f(): i32 {
+                let x: i32 = 5;
+                return x;
+            }
+            """);
+
+        Assert.Contains("store i32 5", ir);
+    }
+
+    [Fact]
     public void Lowers_fast_math_trig_calls()
     {
         var ir = Lower("""

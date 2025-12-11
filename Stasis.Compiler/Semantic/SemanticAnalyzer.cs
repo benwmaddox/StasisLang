@@ -297,13 +297,21 @@ public sealed class SemanticAnalyzer
     {
         if (v.Type is null)
         {
-            _diagnostics.Add(new Diagnostic("Local variables must declare a type; initialize with a following '=' assignment.", v.Name.Span));
+            _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
+            if (v.Initializer is not null)
+            {
+                AnalyzeExpression(v.Initializer, scope);
+            }
         }
         else
         {
             var type = ResolveType(v.Type);
             AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
             EnsurePrimitiveLocal(type, v.Name.Span);
+            if (v.Initializer is not null)
+            {
+                AnalyzeExpression(v.Initializer, scope);
+            }
         }
     }
 
