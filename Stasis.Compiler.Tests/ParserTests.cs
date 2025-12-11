@@ -163,7 +163,7 @@ public class ParserTests
     {
         var source = """
             function loop(): void {
-                for i = 0; i.<(10); i = i.+(1) {
+                for (i = 0; i.<(10); i = i.+(1)) {
                 }
             }
             """;
