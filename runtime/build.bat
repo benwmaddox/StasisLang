@@ -19,7 +19,7 @@ if not defined VCPKG_ROOT (
 
 :: Install SDL2 if not present
 echo Checking for SDL2...
-%VCPKG_ROOT%\vcpkg install sdl2:x64-windows --recurse
+%VCPKG_ROOT%\vcpkg install sdl2:x64-windows glew:x64-windows --recurse
 
 :: Create build directory
 if not exist build mkdir build
