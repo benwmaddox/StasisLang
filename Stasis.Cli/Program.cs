@@ -256,6 +256,15 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                 return exit;
             }
 
+            if (enableGraphics)
+            {
+                var exeDir = Path.GetDirectoryName(exePath);
+                if (!string.IsNullOrEmpty(exeDir))
+                {
+                    CopyGraphicsRuntimeDependencies(exeDir, graphicsLibPath);
+                }
+            }
+
             return RunProcess(exePath, string.Empty);
         }
         finally
@@ -337,6 +346,81 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     }
 
     return string.Join(" ", args);
+}
+
+static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLibPath)
+{
+    try
+    {
+        Directory.CreateDirectory(targetDir);
+
+        var candidates = new List<string>();
+
+        // Prefer explicit lib path (derive DLL alongside .lib)
+        if (!string.IsNullOrEmpty(graphicsLibPath))
+        {
+            if (Path.GetExtension(graphicsLibPath).Equals(".lib", StringComparison.OrdinalIgnoreCase))
+            {
+                var dllGuess = Path.ChangeExtension(graphicsLibPath, ".dll");
+                if (File.Exists(dllGuess))
+                {
+                    candidates.Add(dllGuess);
+                }
+            }
+
+            if (File.Exists(graphicsLibPath) && Path.GetExtension(graphicsLibPath).Equals(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                candidates.Add(graphicsLibPath);
+            }
+        }
+
+        // Fall back to search helper
+        var foundDll = FindGraphicsLibrary();
+        if (!string.IsNullOrEmpty(foundDll))
+        {
+            candidates.Add(foundDll);
+        }
+
+        // Copy primary graphics DLL + common deps if present in the same directory
+        foreach (var src in candidates)
+        {
+            var fileName = Path.GetFileName(src);
+            if (string.IsNullOrEmpty(fileName))
+            {
+                continue;
+            }
+
+            var dest = Path.Combine(targetDir, fileName);
+            if (!File.Exists(dest))
+            {
+                File.Copy(src, dest, overwrite: false);
+            }
+
+            var depDir = Path.GetDirectoryName(src);
+            if (string.IsNullOrEmpty(depDir))
+            {
+                continue;
+            }
+
+            var deps = new[] { "SDL2.dll", "glew32.dll" };
+            foreach (var dep in deps)
+            {
+                var depSrc = Path.Combine(depDir, dep);
+                if (File.Exists(depSrc))
+                {
+                    var depDest = Path.Combine(targetDir, dep);
+                    if (!File.Exists(depDest))
+                    {
+                        File.Copy(depSrc, depDest, overwrite: false);
+                    }
+                }
+            }
+        }
+    }
+    catch
+    {
+        // Best-effort; missing copies will surface as runtime load errors.
+    }
 }
 
 static string? FindGraphicsLibrary()
