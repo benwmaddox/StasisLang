@@ -277,32 +277,23 @@ function check_collisions(): void {
 }
 
 function draw_ship(): void {
-    let c: f32;
-    let s: f32;
-    c = cos_fast(state.ship.angle);
-    s = sin_fast(state.ship.angle);
+    let c: f32 = cos_fast(state.ship.angle);
+    let s: f32 = sin_fast(state.ship.angle);
 
     // Ship is a triangle
-    let size: f32;
-    size = 12.0;
+    let size: f32 = 12.0;
 
     // Nose
-    let nx: f32;
-    let ny: f32;
-    nx = state.ship.x + c * size;
-    ny = state.ship.y + s * size;
+    let nx: f32 = state.ship.x + c * size;
+    let ny: f32 = state.ship.y + s * size;
 
     // Left wing
-    let lx: f32;
-    let ly: f32;
-    lx = state.ship.x + cos_fast(state.ship.angle + 2.4) * size;
-    ly = state.ship.y + sin_fast(state.ship.angle + 2.4) * size;
+    let lx: f32 = state.ship.x + cos_fast(state.ship.angle + 2.4) * size;
+    let ly: f32 = state.ship.y + sin_fast(state.ship.angle + 2.4) * size;
 
     // Right wing
-    let rx: f32;
-    let ry: f32;
-    rx = state.ship.x + cos_fast(state.ship.angle - 2.4) * size;
-    ry = state.ship.y + sin_fast(state.ship.angle - 2.4) * size;
+    let rx: f32 = state.ship.x + cos_fast(state.ship.angle - 2.4) * size;
+    let ry: f32 = state.ship.y + sin_fast(state.ship.angle - 2.4) * size;
 
     // Draw white lines
     draw_line(nx, ny, lx, ly, 1.0, 1.0, 1.0, 1.0);
@@ -311,10 +302,8 @@ function draw_ship(): void {
 
     // Draw thrust flame when thrusting
     if (is_key_down(KEY_W) || is_key_down(KEY_UP)) {
-        let tx: f32;
-        let ty: f32;
-        tx = state.ship.x - c * size * 1.5;
-        ty = state.ship.y - s * size * 1.5;
+        let tx: f32 = state.ship.x - c * size * 1.5;
+        let ty: f32 = state.ship.y - s * size * 1.5;
         draw_line(lx, ly, tx, ty, 1.0, 0.5, 0.0, 1.0);
         draw_line(rx, ry, tx, ty, 1.0, 0.5, 0.0, 1.0);
     }
@@ -324,29 +313,23 @@ function draw_asteroids(): void {
     let i: i32;
     for i = 0; i < MAX_ASTEROIDS; i = i + 1 {
         if state.asteroids[i].active {
-            let x: f32;
-            let y: f32;
-            let sz: f32;
-            x = state.asteroids[i].x;
-            y = state.asteroids[i].y;
-            sz = state.asteroids[i].size;
+            let x: f32 = state.asteroids[i].x;
+            let y: f32 = state.asteroids[i].y;
+            let sz: f32 = state.asteroids[i].size;
 
             // Draw as simple octagon (8 sides)
             let j: i32;
-            let prev_x: f32;
-            let prev_y: f32;
-            let first_x: f32;
-            let first_y: f32;
+            let first_x: f32 = x + sz;
+            let first_y: f32 = y;
+            let prev_x: f32 = first_x;
+            let prev_y: f32 = first_y;
             let jf: f32;
             let angle: f32;
             let px: f32;
             let py: f32;
 
             // Calculate first point
-            first_x = x + sz;
-            first_y = y;
-            prev_x = first_x;
-            prev_y = first_y;
+            // (first point already computed above)
 
             for j = 1; j < 9; j = j + 1 {
                 jf = j;
