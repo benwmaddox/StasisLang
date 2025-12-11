@@ -58,6 +58,7 @@ Options:
 - `samples/tests.stasis` includes Stasis `test` declarations; the emitted `run_tests` function prints a summary and returns the failure count.
 - `samples/sudoku.stasis` playable Sudoku: `stasis run samples/sudoku.stasis` then enter `row col value` (1-9, 0 clears) or `q` to quit. Clue cells are colored differently; invalid moves are rejected.
 - `samples/guess.stasis` number guessing game: `stasis run samples/guess.stasis` then enter guesses (1-99, 0 to quit); it tells you higher/lower or win.
+- `samples/underwater_automation.stasis` calm automation prototype with vertical lanes and transformation modules; run with graphics enabled: `stasis run samples/underwater_automation.stasis --graphics`.
 
 ## Git hooks
 - Shared pre-push hook lives at `tools/git-hooks/pre-push` and runs `dotnet format --verify-no-changes` then `dotnet test -c Release --no-build`.
