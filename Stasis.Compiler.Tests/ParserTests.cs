@@ -69,7 +69,7 @@ public class ParserTests
     }
 
     [Fact]
-    public void Parses_typed_let_without_initializer()
+    public void Parses_typed_let_without_initializer_still_parses()
     {
         var source = """
             function f(): void {
@@ -82,6 +82,8 @@ public class ParserTests
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
         Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body.Statements));
+        var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("must be initialized"));
     }
 
     [Fact]
