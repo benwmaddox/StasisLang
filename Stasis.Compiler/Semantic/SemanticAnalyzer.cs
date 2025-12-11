@@ -103,14 +103,6 @@ public sealed class SemanticAnalyzer
     {
         var globals = compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>().ToList();
 
-        // Warn about multiple top-level global declarations
-        if (globals.Count > 1)
-        {
-            _diagnostics.Add(new Diagnostic(
-                $"Multiple global declarations detected ({globals.Count} found). Consider consolidating state into a single global struct for better organization.",
-                globals[1].Name.Span));
-        }
-
         foreach (var decl in globals)
         {
             var type = ResolveType(decl.Type);

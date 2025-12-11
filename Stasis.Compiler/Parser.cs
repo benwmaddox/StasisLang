@@ -266,20 +266,9 @@ public sealed class Parser
     private IfStatementSyntax ParseIf()
     {
         var ifKeyword = Consume(TokenKind.IfKeyword, "Expected 'if'.");
-
-        // Parentheses are optional
-        var hasParens = Current.Kind == TokenKind.LParen;
-        if (hasParens)
-        {
-            Consume(TokenKind.LParen, "Expected '('.");
-        }
-
+        Consume(TokenKind.LParen, "Expected '('.");
         var condition = ParseExpression();
-
-        if (hasParens)
-        {
-            Consume(TokenKind.RParen, "Expected ')' after condition.");
-        }
+        Consume(TokenKind.RParen, "Expected ')' after condition.");
 
         var thenBlock = ParseBlock();
         BlockStatementSyntax? elseBlock = null;
@@ -294,13 +283,7 @@ public sealed class Parser
     private ForStatementSyntax ParseFor()
     {
         var forKeyword = Consume(TokenKind.ForKeyword, "Expected 'for'.");
-
-        // Parentheses are optional
-        var hasParens = Current.Kind == TokenKind.LParen;
-        if (hasParens)
-        {
-            Consume(TokenKind.LParen, "Expected '('.");
-        }
+        Consume(TokenKind.LParen, "Expected '('.");
 
         ExpressionSyntax? initializer = null;
         if (!Match(TokenKind.Semicolon))
@@ -317,15 +300,12 @@ public sealed class Parser
         }
 
         ExpressionSyntax? step = null;
-        if (hasParens && Current.Kind != TokenKind.RParen || !hasParens && Current.Kind != TokenKind.LBrace)
+        if (Current.Kind != TokenKind.RParen)
         {
             step = ParseExpression();
         }
 
-        if (hasParens)
-        {
-            Consume(TokenKind.RParen, "Expected ')' after for header.");
-        }
+        Consume(TokenKind.RParen, "Expected ')' after for header.");
 
         var body = ParseBlock();
         return new ForStatementSyntax(forKeyword, initializer, condition, step, body);
@@ -334,7 +314,7 @@ public sealed class Parser
     private ForeachStatementSyntax ParseForeach()
     {
         var foreachKeyword = Consume(TokenKind.ForeachKeyword, "Expected 'foreach'.");
-        var hasParens = Match(TokenKind.LParen);
+        Consume(TokenKind.LParen, "Expected '('.");
 
         Token? letKeyword = null;
         if (Match(TokenKind.LetKeyword))
@@ -346,10 +326,7 @@ public sealed class Parser
         Consume(TokenKind.InKeyword, "Expected 'in'.");
         var iterable = ParseExpression();
 
-        if (hasParens)
-        {
-            Consume(TokenKind.RParen, "Expected ')' after iterable.");
-        }
+        Consume(TokenKind.RParen, "Expected ')' after iterable.");
 
         var body = ParseBlock();
         var bindByElement = letKeyword is not null;
