@@ -7,8 +7,8 @@ public abstract record StatementSyntax(SourceSpan Span) : SyntaxNode(Span);
 public sealed record BlockStatementSyntax(Token OpenBrace, IReadOnlyList<StatementSyntax> Statements, Token CloseBrace)
     : StatementSyntax(new SourceSpan(OpenBrace.Span.Start, CloseBrace.Span.End - OpenBrace.Span.Start));
 
-public sealed record VariableDeclarationSyntax(Token LetKeyword, Token Name, TypeSyntax? Type, Token Semicolon)
-    : StatementSyntax(new SourceSpan(LetKeyword.Span.Start, Semicolon.Span.End - LetKeyword.Span.Start));
+public sealed record VariableDeclarationSyntax(Token LetKeyword, Token Name, TypeSyntax? Type, Token? EqualsToken, ExpressionSyntax? Initializer, Token Semicolon)
+    : StatementSyntax(new SourceSpan(LetKeyword.Span.Start, (Initializer?.Span.End ?? Semicolon.Span.End) - LetKeyword.Span.Start));
 
 public sealed record IfStatementSyntax(Token IfKeyword, ExpressionSyntax Condition, BlockStatementSyntax ThenBlock, BlockStatementSyntax? ElseBlock)
     : StatementSyntax(new SourceSpan(IfKeyword.Span.Start, (ElseBlock ?? ThenBlock).Span.End - IfKeyword.Span.Start));

@@ -261,12 +261,9 @@ function check_collisions(): void {
         if (bullet.life > 0) {
             for j = 0; j < MAX_ASTEROIDS; j = j + 1 {
                 if state.asteroids[j].active {
-                    let dx: f32;
-                    let dy: f32;
-                    let dist_sq: f32;
-                    dx = bullet.x - state.asteroids[j].x;
-                    dy = bullet.y - state.asteroids[j].y;
-                    dist_sq = dx * dx + dy * dy;
+                    let dx: f32 = bullet.x - state.asteroids[j].x;
+                    let dy: f32 = bullet.y - state.asteroids[j].y;
+                    let dist_sq: f32 = dx * dx + dy * dy;
                     let radius: f32;
                     radius = state.asteroids[j].size;
                     if (dist_sq < radius * radius) {
