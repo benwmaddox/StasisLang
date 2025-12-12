@@ -75,7 +75,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function one(): i32 {
-                let x: i32;
+                let x: i32 = 0;
                 x = 1;
                 return x;
             }
@@ -167,9 +167,8 @@ public class LoweringTests
     {
         var ir = Lower("""
             function loop(n: i32): void {
-                let i: i32;
-                i = 0;
-                for i = 0; true; i = i.+(1) {
+                let i: i32 = 0;
+                for (i = 0; true; i = i.+(1)) {
                     i = i;
                 }
             }
@@ -232,8 +231,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function tweak(x: f32, flag: bool): i32 {
-                let y: f32;
-                y = (-(x));
+                let y: f32 = (-(x));
                 return !(flag);
             }
             """);
@@ -248,7 +246,7 @@ public class LoweringTests
     {
         var result = LowerWithDiagnostics("""
             function bad(): void {
-                let x: i32;
+                let x: i32 = 0;
                 x.+(1, 2);
             }
             """);
@@ -304,8 +302,7 @@ public class LoweringTests
     {
         var ir = Lower("""
             function bump(): i32 {
-                let x: i32;
-                x = 1;
+                let x: i32 = 1;
                 x += 2;
                 return x;
             }
@@ -339,5 +336,132 @@ public class LoweringTests
 
         Assert.DoesNotContain("run_tests", result.Ir);
         Assert.DoesNotContain("check", result.Ir);
+    }
+
+    [Fact]
+    public void Lowers_i32_to_f32_assignment_with_sitofp()
+    {
+        var ir = Lower("""
+            function convert(x: i32): f32 {
+                let result: f32 = x;
+                return result;
+            }
+            """);
+
+        // Should contain sitofp instruction for i32 -> f32 conversion
+        Assert.Contains("sitofp i32", ir);
+        Assert.Contains("to float", ir);
+    }
+
+    [Fact]
+    public void Lowers_f32_to_i32_assignment_with_fptosi()
+    {
+        var ir = Lower("""
+            function convert(x: f32): i32 {
+                let result: i32 = x;
+                return result;
+            }
+            """);
+
+        // Should contain fptosi instruction for f32 -> i32 conversion
+        Assert.Contains("fptosi float", ir);
+        Assert.Contains("to i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_i32_to_f32_in_loop()
+    {
+        var ir = Lower("""
+            function sum_as_float(): f32 {
+                let i: i32 = 0;
+                let total: f32 = 0.0;
+                for (i = 0; i.<(5); i = i.+(1)) {
+                    let if32: f32 = i;
+                    total = total.+(if32);
+                }
+                return total;
+            }
+            """);
+
+        // Should contain sitofp for i32 -> f32 conversion inside loop
+        Assert.Contains("sitofp i32", ir);
+        Assert.Contains("to float", ir);
+    }
+
+    [Fact]
+    public void Lowers_let_with_initializer_store()
+    {
+        var ir = Lower("""
+            function f(): i32 {
+                let x: i32 = 5;
+                return x;
+            }
+            """);
+
+        Assert.Contains("store i32 5", ir);
+    }
+
+    [Fact]
+    public void Lowers_fast_math_trig_calls()
+    {
+        var ir = Lower("""
+            function trig(a: f32): f32 {
+                return sin_fast(a).+(cos_fast(a));
+            }
+            """);
+
+        Assert.Contains("call fast float @llvm.sin.f32", ir);
+        Assert.Contains("call fast float @llvm.cos.f32", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_over_array_parameter_descriptor()
+    {
+        var ir = Lower("""
+            function reset(values: i32[]): void {
+                foreach (let v in values) {
+                    v = 0;
+                }
+            }
+            """);
+
+        Assert.Contains("{ ptr, i32 }", ir);
+        Assert.Contains("extractvalue { ptr, i32 }", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_struct_array_parameter_descriptor_and_field_stores()
+    {
+        var ir = Lower("""
+            struct Bullet { life: i32; ttl: i32; }
+            function reset(bullets: Bullet[]): void {
+                foreach (let b in bullets) {
+                    b.life = 0;
+                    b.ttl = 0;
+                }
+            }
+            """);
+
+        Assert.Contains("{ ptr, ptr, i32 }", ir);
+        Assert.Contains("extractvalue { ptr, ptr, i32 }", ir);
+        Assert.Contains("store i32 0", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Builds_descriptor_when_passing_global_array_argument()
+    {
+        var ir = Lower("""
+            global values: i32[4];
+            function sink(values: i32[]): void {
+            }
+            function caller(): void {
+                sink(values);
+            }
+            """);
+
+        Assert.Contains("call void @sink({ ptr, i32 } { ptr @values, i32 4 })", ir);
+        Assert.Contains("call void @sink", ir);
     }
 }

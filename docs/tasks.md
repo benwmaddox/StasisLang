@@ -4,15 +4,44 @@
 - Phases 0-6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
 - Phase 7: lowering & codegen — control-flow lowering (`if`/`for`/`foreach`), operator-method comparisons/unary/boolean coercion, layout-driven SoA globals and field access via `LayoutPlan`, diagnostics for bad operator arity/unsupported targets/invalid field access, with IR coverage tests.
 - Phase 8: testing harness integration — IR emits `run_tests`; lowering options allow omitting tests/harness for production; `stasisc` CLI defaults to production and `--with-tests` enables harness emission.
-- Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, and sample IR artifacts for `samples/basic.stasis` and `samples/tests.stasis`.
+- Phase 9: CLI & UX — `stasisc` CLI with `run`/`test` commands, LLVM IR emission, snapshot tests for CLI stdout/stderr/exit codes. SDL2 graphics support with Asteroids demo game.
+- Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, sample IR artifacts, and platform-agnostic CLI snapshot tests.
+- Phase 10.5: Constants & Structured Globals — `const` keyword with compile-time evaluation, automatic AoS→SoA transformation for nested struct instances, full support for deeply nested member access (`state.ship.x`, `state.asteroids[i].field`), refactored Asteroids sample to single-struct pattern.
 
-## Phase 8: Testing Harness Integration
-- Verify: `dotnet test` executes compiled Stasis tests; production build omits test roots.
+## Phase 10.5: Constants & Structured Globals
 
-## Phase 9: CLI & UX
-- Build `stasisc` CLI to lex/parse/typecheck/lower; flags for output (LLVM IR/WASM), debug dumps, layout inspection; deterministic defaults.
-- Verify: snapshot tests for CLI stdout/stderr and exit codes on fixtures (basic/test samples covered).
-- CLI runs `run`/`test` end-to-end via `lli` (preferred) or `clang` fallback; `stasis.{bat,sh}` are thin shims that delegate to the CLI.
+### ✅ Constant Support (COMPLETED)
+- ✅ Add `const` keyword for compile-time constant declarations (numeric, boolean, string literals).
+- ✅ Lex/parse: `const NAME: type = value;` syntax at module scope; disallow in functions.
+- ✅ Semantics: validate constants are initialized with literal values; disallow mutation attempts.
+- ✅ Lowering: emit literal constants as LLVM `constant` globals.
+- ✅ Error handling: diagnose attempts to assign to constants ("Cannot assign to constant 'X'. Constants are immutable.").
+- ✅ Diagnostics: warn when multiple global declarations detected ("Multiple global declarations detected (N found). Consider consolidating state into a single global struct for better organization.").
+
+### ✅ Structured Global State (COMPLETED)
+- ✅ Diagnostics: warn when declaring multiple top-level `global` variables.
+- ✅ Layout planner handles `global state: GameState` (struct instances)
+- ✅ Automatic AoS→SoA transformation: `state.asteroids: Asteroid[8]` → `state_asteroids_x[]`, `state_asteroids_y[]`
+- ✅ Support `state.field` syntax for scalar fields (read/write)
+- ✅ Support `state.ship.x` syntax for nested struct instance fields (read/write)
+- ✅ Support `state.array[i].field` syntax for nested struct array element fields (read/write)
+- ✅ Flattened global emission with correct types
+- ✅ Semantic validator accepts all nested member access patterns
+
+**Current Status**: Struct instance globals fully work! Layout planner correctly flattens nested structs (both instances and arrays) and applies SoA transformation. IR lowering handles all member access patterns including deeply nested access like `state.ship.x` and `state.asteroids[i].x`.
+
+### ✅ Migration & Samples (COMPLETED)
+- ✅ Refactored `samples/asteroids.stasis`:
+  - ✅ Converted SDL scancodes, screen dimensions, math constants, and limits to `const` declarations.
+  - ✅ Consolidated ship/asteroid/bullet/game state into a single nested struct with automatic SoA transformation.
+  - ✅ Removed `init_constants()` function since constants are now declared inline.
+  - ✅ Updated all function bodies to reference `state.ship.x` instead of `ship_x`, etc.
+- ⏭ Update other samples (`basic.stasis`, `tests.stasis`, etc.) to follow the structured state pattern if needed.
+- ✅ Tests: constant folding in IR works, nested field access lowering works, diagnostics for multiple globals/constant mutation work.
+
+### Follow-ups
+- Document the structured globals pattern in `docs/spec.md` and `AGENTS.md` so contributors understand the design rationale (simpler layout, clearer ownership, easier serialization).
+- Consider future extensions: allow multiple named global structs if use cases arise (e.g., `global input: InputState; global physics: PhysicsState;`), but start with single-struct restriction to validate the pattern.
 
 ## Phase 11: LLVM Execution Path
 - Implement end-to-end IR emission runnable via `lli` for sample programs (function calls, arithmetic, control flow, globals).

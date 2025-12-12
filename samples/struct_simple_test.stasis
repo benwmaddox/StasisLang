@@ -1,0 +1,14 @@
+// Simpler test - just scalar fields
+
+struct GameState {
+    ship_x: f32;
+    score: i32;
+}
+
+global state: GameState;
+
+function main(): i32 {
+    state.ship_x = 100.0;
+    state.score = 42;
+    return state.score;
+}

@@ -1,3 +1,4 @@
+using System.Linq;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
 
@@ -20,12 +21,14 @@ public sealed class SemanticAnalyzer
 
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
     private readonly List<Diagnostic> _diagnostics = new();
+    private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
 
     public SemanticResult Analyze(CompilationUnitSyntax compilationUnit)
     {
         DeclareBuiltIns();
         DeclareTypes(compilationUnit);
         DeclareGlobals(compilationUnit);
+        DeclareConstants(compilationUnit);
         DeclareFunctions(compilationUnit);
 
         foreach (var decl in compilationUnit.Declarations)
@@ -51,6 +54,7 @@ public sealed class SemanticAnalyzer
             _symbols[name] = new Symbol(name, SymbolKind.Struct, type);
         }
 
+        // Legacy I/O functions (to be deprecated)
         AddSymbol("print_string", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("print_int", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
@@ -62,15 +66,97 @@ public sealed class SemanticAnalyzer
         AddSymbol("print_solved", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("read_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
+        // Legacy math functions (to be renamed to math_*)
+        AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("cos", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("sin_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("cos_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+
+        // Legacy system functions (to be renamed to sys_*)
         AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+
+        // Legacy graphics functions (external runtime)
         AddSymbol("init_window", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("begin_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("end_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("draw_line", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("set_postfx", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+
+        // ============================================================
+        // Standard Library: char_* module (character/byte utilities)
+        // ============================================================
+
+        // Classification
+        AddSymbol("char_is_digit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alpha", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alnum", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_space", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_upper", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_lower", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_hex", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_print", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+
+        // Conversion
+        AddSymbol("char_to_upper", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_to_lower", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_to_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_from_digit", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_to_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_from_hex", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+
+        // ============================================================
+        // Standard Library: str_* module (string operations)
+        // ============================================================
+
+        // Length & Capacity
+        AddSymbol("str_len", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_is_empty", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+
+        // Character Access
+        AddSymbol("str_get", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("str_set", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+
+        // Comparison
+        AddSymbol("str_eq", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_cmp", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_starts_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_ends_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+
+        // Search
+        AddSymbol("str_find", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_find_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_find_last_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_contains", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+
+        // Modification (in-place)
+        AddSymbol("str_clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("str_copy", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_append", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_append_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
+        // Substring
+        AddSymbol("str_substr", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
+        // Trimming
+        AddSymbol("str_trim_start", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_trim_end", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_trim", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
+        // Case conversion
+        AddSymbol("str_to_upper", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("str_to_lower", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+
+        // Number conversion
+        AddSymbol("str_from_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_from_f32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_to_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_to_f32", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
     }
 
     private void DeclareTypes(CompilationUnitSyntax compilationUnit)
@@ -81,6 +167,8 @@ public sealed class SemanticAnalyzer
             {
                 case StructDeclarationSyntax s:
                     AddSymbol(s.Name.Text, SymbolKind.Struct, new NamedTypeSymbol(s.Name.Text), s.Name.Span);
+                    _structs[s.Name.Text] = s;
+                    ValidateStructFields(s);
                     break;
                 case EnumDeclarationSyntax e:
                     AddSymbol(e.Name.Text, SymbolKind.Enum, new NamedTypeSymbol(e.Name.Text), e.Name.Span);
@@ -91,11 +179,26 @@ public sealed class SemanticAnalyzer
 
     private void DeclareGlobals(CompilationUnitSyntax compilationUnit)
     {
-        foreach (var decl in compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>())
+        var globals = compilationUnit.Declarations.OfType<GlobalDeclarationSyntax>().ToList();
+
+        foreach (var decl in globals)
         {
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Global, type, decl.Name.Span);
             EnsureGlobalType(type, decl.Type.Span);
+        }
+    }
+
+    private void DeclareConstants(CompilationUnitSyntax compilationUnit)
+    {
+        foreach (var decl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
+        {
+            var type = ResolveType(decl.Type);
+            AddSymbol(decl.Name.Text, SymbolKind.Const, type, decl.Name.Span);
+
+            // Validate that the initializer is a compile-time constant expression
+            // For now, we allow any expression - more sophisticated constant folding can be added later
+            // TODO: Add validation that initializer is a literal or constant expression
         }
     }
 
@@ -155,6 +258,37 @@ public sealed class SemanticAnalyzer
         }
     }
 
+    private TypeSymbol? ResolveIterableElementType(ExpressionSyntax iterable, IReadOnlyDictionary<string, Symbol> scope)
+    {
+        if (iterable is IdentifierExpressionSyntax id)
+        {
+            if (scope.TryGetValue(id.Identifier.Text, out var localSym) && localSym.Type is ArrayTypeSymbol localArray)
+            {
+                return localArray.ElementType;
+            }
+
+            if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Type is ArrayTypeSymbol array)
+            {
+                return array.ElementType;
+            }
+        }
+
+        if (iterable is MemberAccessExpressionSyntax member &&
+            member.Receiver is IdentifierExpressionSyntax recv &&
+            _symbols.TryGetValue(recv.Identifier.Text, out var recvSym) &&
+            recvSym.Type is NamedTypeSymbol named &&
+            _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+            if (field?.Type is ArrayTypeSyntax arraySyntax)
+            {
+                return ResolveType(arraySyntax.ElementType);
+            }
+        }
+
+        return null;
+    }
+
     private void AnalyzeStatement(StatementSyntax stmt, Dictionary<string, Symbol> scope)
     {
         switch (stmt)
@@ -197,9 +331,24 @@ public sealed class SemanticAnalyzer
             case ForeachStatementSyntax fes:
                 AnalyzeExpression(fes.Iterable, scope);
                 var foreachScope = new Dictionary<string, Symbol>(scope, StringComparer.Ordinal);
-                var iteratorType = BuiltInTypes["i32"];
-                AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
-                EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
+                if (fes.BindByElement)
+                {
+                    var elementType = ResolveIterableElementType(fes.Iterable, scope);
+                    if (elementType is null)
+                    {
+                        _diagnostics.Add(new Diagnostic("foreach target must be an array.", fes.Iterable.Span));
+                        break;
+                    }
+
+                    AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, elementType, fes.Iterator.Span);
+                    EnsurePrimitiveLocal(elementType, fes.Iterator.Span);
+                }
+                else
+                {
+                    var iteratorType = BuiltInTypes["i32"];
+                    AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
+                    EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
+                }
                 AnalyzeBlock(fes.Body, foreachScope);
                 break;
             case ReturnStatementSyntax rs:
@@ -218,13 +367,22 @@ public sealed class SemanticAnalyzer
     {
         if (v.Type is null)
         {
-            _diagnostics.Add(new Diagnostic("Local variables must declare a type; initialize with a following '=' assignment.", v.Name.Span));
+            _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
         }
         else
         {
             var type = ResolveType(v.Type);
             AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
             EnsurePrimitiveLocal(type, v.Name.Span);
+        }
+
+        if (v.Initializer is null)
+        {
+            _diagnostics.Add(new Diagnostic("Local variables must be initialized with a value.", v.Name.Span));
+        }
+        else
+        {
+            AnalyzeExpression(v.Initializer, scope);
         }
     }
 
@@ -311,6 +469,13 @@ public sealed class SemanticAnalyzer
             return;
         }
 
+        // Check if trying to assign to a constant
+        if (target is IdentifierExpressionSyntax id && _symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Const)
+        {
+            _diagnostics.Add(new Diagnostic($"Cannot assign to constant '{id.Identifier.Text}'. Constants are immutable.", target.Span));
+            return;
+        }
+
         if (opToken.Kind is TokenKind.Equal)
         {
             return;
@@ -362,12 +527,18 @@ public sealed class SemanticAnalyzer
                 return new NamedTypeSymbol(named.Name);
             case ArrayTypeSyntax array:
                 var elementType = ResolveType(array.ElementType);
+                if (string.IsNullOrEmpty(array.SizeText))
+                {
+                    return elementType is null ? null : new ArrayTypeSymbol(elementType, -1);
+                }
+
                 if (int.TryParse(array.SizeText, out var size) && size > 0)
                 {
                     return elementType is null ? null : new ArrayTypeSymbol(elementType, size);
                 }
 
-                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", array.SizeToken.Span));
+                var span = array.SizeToken?.Span ?? array.Span;
+                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", span));
                 return elementType;
             default:
                 return null;
@@ -406,7 +577,12 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types or struct references; arrays live in static memory.", span));
+        if (type is ArrayTypeSymbol)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types, struct references, or arrays.", span));
     }
 
     private void EnsureGlobalType(TypeSymbol? type, SourceSpan span)
@@ -416,12 +592,34 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        if (type is PrimitiveTypeSymbol or NamedTypeSymbol or ArrayTypeSymbol)
+        if (type is ArrayTypeSymbol arr)
+        {
+            if (arr.Size > 0)
+            {
+                return;
+            }
+
+            _diagnostics.Add(new Diagnostic("Global arrays must declare a positive length.", span));
+            return;
+        }
+
+        if (type is PrimitiveTypeSymbol or NamedTypeSymbol)
         {
             return;
         }
 
         _diagnostics.Add(new Diagnostic("Globals must be primitive, struct, or array types.", span));
+    }
+
+    private void ValidateStructFields(StructDeclarationSyntax structDecl)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            if (field.Type is ArrayTypeSyntax array && string.IsNullOrEmpty(array.SizeText))
+            {
+                _diagnostics.Add(new Diagnostic("Struct array fields must declare a positive length.", field.Type.Span));
+            }
+        }
     }
 
     private void AddSymbol(string name, SymbolKind kind, TypeSymbol? type, SourceSpan span)

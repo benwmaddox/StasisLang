@@ -1,8 +1,8 @@
 function fib(n: i32): i32 {
-    let a: i32;
-    let b: i32;
-    let i: i32;
-    let next: i32;
+    let a: i32 = 0;
+    let b: i32 = 0;
+    let i: i32 = 0;
+    let next: i32 = 0;
 
     a = 0;
     b = 1;
@@ -11,7 +11,7 @@ function fib(n: i32): i32 {
         return 0;
     }
 
-    for i = 1; i < n; i = i + 1 {
+    for (i = 1; i < n; i = i + 1) {
         next = a + b;
         a = b;
         b = next;

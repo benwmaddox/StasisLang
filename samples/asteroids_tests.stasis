@@ -1,0 +1,364 @@
+// Unit tests for Asteroids game logic
+// Run with: dotnet run --project Stasis.Cli -- test samples/asteroids_tests.stasis
+
+global PI: f32;
+
+function init_pi(): void {
+    PI = 3.14159;
+}
+
+// ============================================
+// Sin/Cos approximation tests
+// ============================================
+
+function sin_approx(angle: f32): f32 {
+    // Normalize angle to [-PI, PI]
+    let a: f32 = 0.0;
+    let dummy: i32 = 0;
+    a = angle;
+    for (dummy = 0; a > PI; dummy = 0) {
+        a = a - 2.0 * PI;
+    }
+    for (dummy = 0; a < 0.0 - PI; dummy = 0) {
+        a = a + 2.0 * PI;
+    }
+
+    // Reduce to [-PI/2, PI/2] using sin(PI-x) = sin(x)
+    if (a > PI / 2.0) {
+        a = PI - a;
+    }
+    if (a < 0.0 - PI / 2.0) {
+        a = 0.0 - PI - a;
+    }
+
+    // Taylor series: sin(x) ≈ x - x^3/6 + x^5/120 - x^7/5040
+    let x2: f32 = 0.0;
+    let x3: f32 = 0.0;
+    let x5: f32 = 0.0;
+    let x7: f32 = 0.0;
+    x2 = a * a;
+    x3 = x2 * a;
+    x5 = x3 * x2;
+    x7 = x5 * x2;
+    return a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0;
+}
+
+function cos_approx(angle: f32): f32 {
+    return sin_approx(angle + PI / 2.0);
+}
+
+function abs_f32(x: f32): f32 {
+    if (x < 0.0) {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+function approx_eq(a: f32, b: f32, tolerance: f32): bool {
+    let diff: f32 = abs_f32(a - b);
+    return diff < tolerance;
+}
+
+test sin_zero_is_zero(): bool {
+    init_pi();
+    let result: f32 = sin_approx(0.0);
+    return approx_eq(result, 0.0, 0.01);
+}
+
+test cos_zero_is_one(): bool {
+    init_pi();
+    let result: f32 = cos_approx(0.0);
+    return approx_eq(result, 1.0, 0.01);
+}
+
+test sin_pi_half_is_one(): bool {
+    init_pi();
+    let result: f32 = sin_approx(PI / 2.0);
+    return approx_eq(result, 1.0, 0.01);
+}
+
+test cos_pi_half_is_zero(): bool {
+    init_pi();
+    let result: f32 = cos_approx(PI / 2.0);
+    return approx_eq(result, 0.0, 0.01);
+}
+
+test sin_pi_is_zero(): bool {
+    init_pi();
+    let result: f32 = sin_approx(PI);
+    return approx_eq(result, 0.0, 0.01);
+}
+
+test cos_pi_is_negative_one(): bool {
+    init_pi();
+    let result: f32 = cos_approx(PI);
+    return approx_eq(result, 0.0 - 1.0, 0.01);
+}
+
+// ============================================
+// Ship rotation tests
+// ============================================
+
+global ship_angle: f32;
+
+function reset_ship(): void {
+    ship_angle = 0.0;
+}
+
+function rotate_left(dt: f32): void {
+    ship_angle = ship_angle - 5.0 * dt;
+}
+
+function rotate_right(dt: f32): void {
+    ship_angle = ship_angle + 5.0 * dt;
+}
+
+test rotation_starts_at_zero(): bool {
+    reset_ship();
+    return approx_eq(ship_angle, 0.0, 0.001);
+}
+
+test rotate_left_decreases_angle(): bool {
+    reset_ship();
+    rotate_left(0.1);
+    // After 0.1 sec at 5 rad/sec, angle should be -0.5
+    return ship_angle < 0.0 && approx_eq(ship_angle, 0.0 - 0.5, 0.001);
+}
+
+test rotate_right_increases_angle(): bool {
+    reset_ship();
+    rotate_right(0.1);
+    // After 0.1 sec at 5 rad/sec, angle should be +0.5
+    return ship_angle > 0.0 && approx_eq(ship_angle, 0.5, 0.001);
+}
+
+test rotation_accumulates(): bool {
+    reset_ship();
+    rotate_right(0.1);
+    rotate_right(0.1);
+    rotate_right(0.1);
+    // After 0.3 sec, angle should be 1.5
+    return approx_eq(ship_angle, 1.5, 0.001);
+}
+
+// ============================================
+// Ship thrust/velocity tests
+// ============================================
+
+global ship_vx: f32;
+global ship_vy: f32;
+
+function reset_velocity(): void {
+    ship_vx = 0.0;
+    ship_vy = 0.0;
+}
+
+function apply_thrust(dt: f32): void {
+    init_pi();
+    let thrust: f32 = 150.0 * dt;
+    ship_vx = ship_vx + cos_approx(ship_angle) * thrust;
+    ship_vy = ship_vy + sin_approx(ship_angle) * thrust;
+}
+
+test velocity_starts_at_zero(): bool {
+    reset_velocity();
+    return approx_eq(ship_vx, 0.0, 0.001) && approx_eq(ship_vy, 0.0, 0.001);
+}
+
+test thrust_at_angle_zero_increases_vx(): bool {
+    reset_ship();
+    reset_velocity();
+    apply_thrust(0.1);
+    // At angle 0, cos=1, sin=0, so vx increases, vy stays 0
+    // thrust = 150 * 0.1 = 15, so vx should be 15
+    return ship_vx > 0.0 && approx_eq(ship_vx, 15.0, 0.5) && approx_eq(ship_vy, 0.0, 0.5);
+}
+
+test thrust_at_angle_pi_half_increases_vy(): bool {
+    init_pi();
+    reset_velocity();
+    ship_angle = PI / 2.0;
+    apply_thrust(0.1);
+    // At angle PI/2, cos=0, sin=1, so vy increases, vx stays 0
+    return ship_vy > 0.0 && approx_eq(ship_vy, 15.0, 0.5) && approx_eq(ship_vx, 0.0, 0.5);
+}
+
+test thrust_accumulates(): bool {
+    reset_ship();
+    reset_velocity();
+    apply_thrust(0.1);
+    apply_thrust(0.1);
+    // Two thrusts should give vx = 30
+    return approx_eq(ship_vx, 30.0, 1.0);
+}
+
+// ============================================
+// Position wrapping tests
+// ============================================
+
+function wrap_position(px: f32, max: f32): f32 {
+    let result: f32 = px;
+    if (result < 0.0) {
+        result = result + max;
+    }
+    if (result > max) {
+        result = result - max;
+    }
+    return result;
+}
+
+test wrap_no_change_in_bounds(): bool {
+    let result: f32 = wrap_position(400.0, 800.0);
+    return approx_eq(result, 400.0, 0.001);
+}
+
+test wrap_negative_wraps_to_positive(): bool {
+    let result: f32 = wrap_position(0.0 - 10.0, 800.0);
+    return approx_eq(result, 790.0, 0.001);
+}
+
+test wrap_over_max_wraps_to_low(): bool {
+    let result: f32 = wrap_position(810.0, 800.0);
+    return approx_eq(result, 10.0, 0.001);
+}
+
+// ============================================
+// Asteroid initialization tests
+// ============================================
+
+global asteroid_x: f32[8];
+global asteroid_y: f32[8];
+global asteroid_active: i32[8];
+global asteroid_size: f32[8];
+
+function init_test_asteroids(): void {
+    let i: i32 = 0;
+    for (i = 0; i < 4; i = i + 1) {
+        asteroid_active[i] = 1;
+        asteroid_size[i] = 40.0;
+        if (i == 0) {
+            asteroid_x[i] = 150.0;
+            asteroid_y[i] = 150.0;
+        }
+        if (i == 1) {
+            asteroid_x[i] = 650.0;
+            asteroid_y[i] = 150.0;
+        }
+        if (i == 2) {
+            asteroid_x[i] = 150.0;
+            asteroid_y[i] = 450.0;
+        }
+        if (i == 3) {
+            asteroid_x[i] = 650.0;
+            asteroid_y[i] = 450.0;
+        }
+    }
+    for (i = 4; i < 8; i = i + 1) {
+        asteroid_active[i] = 0;
+    }
+}
+
+test asteroids_initialized_correctly(): bool {
+    init_test_asteroids();
+    let ok: bool = asteroid_active[0] == 1;
+    ok = ok && asteroid_active[1] == 1;
+    ok = ok && asteroid_active[2] == 1;
+    ok = ok && asteroid_active[3] == 1;
+    ok = ok && asteroid_active[4] == 0;
+    return ok;
+}
+
+test asteroid_positions_correct(): bool {
+    init_test_asteroids();
+    let ok: bool = approx_eq(asteroid_x[0], 150.0, 0.01);
+    ok = ok && approx_eq(asteroid_y[0], 150.0, 0.01);
+    ok = ok && approx_eq(asteroid_x[1], 650.0, 0.01);
+    ok = ok && approx_eq(asteroid_size[0], 40.0, 0.01);
+    return ok;
+}
+
+// ============================================
+// Drawing coordinate calculation tests
+// ============================================
+
+global ship_x: f32;
+global ship_y: f32;
+
+function calc_ship_nose(out_x: f32, out_y: f32): i32 {
+    init_pi();
+    let c: f32 = 0.0;
+    let s: f32 = 0.0;
+    let size: f32 = 12.0;
+    c = cos_approx(ship_angle);
+    s = sin_approx(ship_angle);
+    // Can't return multiple values, so we'll test components separately
+    // Return 1 if nose x > ship_x when angle is 0
+    let nx: f32 = ship_x + c * size;
+    if (nx > ship_x) {
+        return 1;
+    }
+    return 0;
+}
+
+test ship_nose_points_right_at_angle_zero(): bool {
+    init_pi();
+    reset_ship();
+    ship_x = 400.0;
+    ship_y = 300.0;
+    let result: i32 = calc_ship_nose(0.0, 0.0);
+    // At angle 0, cos=1, so nose should be to the right of ship center
+    return result == 1;
+}
+
+test ship_drawing_changes_with_angle(): bool {
+    init_pi();
+    ship_x = 400.0;
+    ship_y = 300.0;
+
+    // At angle 0, nose is at x = 400 + 12 = 412
+    ship_angle = 0.0;
+    let c0: f32 = cos_approx(ship_angle);
+    let nx0: f32 = ship_x + c0 * 12.0;
+
+    // At angle PI, nose is at x = 400 - 12 = 388
+    ship_angle = PI;
+    let cpi: f32 = cos_approx(ship_angle);
+    let nxpi: f32 = ship_x + cpi * 12.0;
+
+    // The x positions should be different
+    return !approx_eq(nx0, nxpi, 1.0);
+}
+
+// ============================================
+// Integration test: rotation changes drawing
+// ============================================
+
+test rotation_affects_ship_drawing(): bool {
+    init_pi();
+    ship_x = 400.0;
+    ship_y = 300.0;
+
+    // Get nose position at angle 0
+    ship_angle = 0.0;
+    let nx_before: f32 = 0.0;
+    let ny_before: f32 = 0.0;
+    nx_before = ship_x + cos_approx(ship_angle) * 12.0;
+    ny_before = ship_y + sin_approx(ship_angle) * 12.0;
+
+    // Rotate by PI/2 (90 degrees)
+    ship_angle = PI / 2.0;
+    let nx_after: f32 = 0.0;
+    let ny_after: f32 = 0.0;
+    nx_after = ship_x + cos_approx(ship_angle) * 12.0;
+    ny_after = ship_y + sin_approx(ship_angle) * 12.0;
+
+    // At angle 0: nose at (412, 300)
+    // At angle PI/2: nose at (400, 312)
+    // The positions should be different
+    let x_changed: bool = false;
+    let y_changed: bool = false;
+    x_changed = !approx_eq(nx_before, nx_after, 1.0);
+    y_changed = !approx_eq(ny_before, ny_after, 1.0);
+
+    return x_changed && y_changed;
+}

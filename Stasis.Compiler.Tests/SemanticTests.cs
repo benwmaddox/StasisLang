@@ -39,7 +39,7 @@ public class SemanticTests
         var source = """
             struct Player { hp: u8; }
             function f(): void {
-                let p: Player;
+                let p: Player = 0;
             }
             """;
 
@@ -76,7 +76,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("primitive types or struct references"));
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("primitive types, struct references, or arrays"));
     }
 
     [Fact]
@@ -84,7 +84,7 @@ public class SemanticTests
     {
         var source = """
             function f(): i32 {
-                let x: i32;
+                let x: i32 = 0;
                 x += 2;
                 return x;
             }
