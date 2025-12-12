@@ -45,7 +45,6 @@ static struct {
     float r, g, b, a;
 } g_lines[MAX_LINES];
 static int g_line_count = 0;
-static int g_debug_flush_frame = 0;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -61,11 +60,6 @@ static float screen_to_ndc_y(float y) {
 static void flush_lines(void) {
     if (g_line_count == 0) return;
 
-    /* Debug: log first few frames to confirm draw calls flow */
-    if (g_debug_flush_frame < 3) {
-        SDL_Log("flush_lines frame %d: count=%d", g_debug_flush_frame, g_line_count);
-    }
-
     glBegin(GL_LINES);
     for (int i = 0; i < g_line_count; i++) {
         glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
@@ -74,7 +68,6 @@ static void flush_lines(void) {
     }
     glEnd();
 
-    g_debug_flush_frame++;
     g_line_count = 0;
 }
 
