@@ -248,7 +248,11 @@ public class ExecutionTests
                 src[3] = 65;
                 src[4] = 0;
                 let len: i32 = str_substr(dst, src, 0, 3);
-                return (len == 3) && (dst[0] == 226) && (dst[1] == 130) && (dst[2] == 172) && (dst[3] == 0);
+                let d0: i32 = dst[0];
+                let d1: i32 = dst[1];
+                let d2: i32 = dst[2];
+                let d3: i32 = dst[3];
+                return (len == 3) && (d0 == 226) && (d1 == 130) && (d2 == 172) && (d3 == 0);
             }
             """;
 
