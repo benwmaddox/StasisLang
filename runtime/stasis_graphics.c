@@ -199,6 +199,7 @@ static void render_postfx(void) {
  * Returns 1 on success, 0 on failure
  */
 STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
+    SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
