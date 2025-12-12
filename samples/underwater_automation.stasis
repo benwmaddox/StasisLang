@@ -95,12 +95,12 @@ struct GameState {
     postfx_strength: f32;
     postfx_phase: f32;
     postfx_speed: f32;
-    light_time: f32;
 
     running: bool;
     paused: bool;
     last_tick_ms: i32;
     frame_start_ms: i32;
+    lighting_clock_ms: i32;
 
     rng_state: i32;
 }
@@ -280,7 +280,7 @@ function init_state(): void {
     state.postfx_strength = 0.35;
     state.postfx_phase = 0.0;
     state.postfx_speed = 0.4;
-    state.light_time = 0.0;
+    state.lighting_clock_ms = 0;
     setup_layout();
     init_units();
 }
@@ -440,29 +440,50 @@ function update_units(delta_ms: i32): void {
 }
 
 function update_lighting(delta_ms: i32): void {
-    let dt: f32 = delta_ms;
-    dt = dt / 1000.0;
-    state.light_time = state.light_time + dt;
-    state.postfx_phase = state.postfx_phase + dt * state.postfx_speed;
-    if (state.postfx_phase > 100000.0) {
-        state.postfx_phase = 0.0;
+    state.lighting_clock_ms = state.lighting_clock_ms + delta_ms;
+    if (state.lighting_clock_ms > 1000000) {
+        state.lighting_clock_ms = state.lighting_clock_ms - 1000000;
     }
 
-    let i: i32 = 0;
-    for (i = 0; i < MAP_SIZE; i = i + 1) {
-        let depth_band: i32 = state.tiles[i].depth;
-        let base: f32 = 0.18;
-        if (depth_band == DEPTH_MID) {
-            base = 0.24;
+    let flicker_tick: i32 = state.lighting_clock_ms / 33; // ~30Hz wobble
+    let y: i32 = 0;
+    for (y = 0; y < MAP_H; y = y + 1) {
+        let x: i32 = 0;
+        for (x = 0; x < MAP_W; x = x + 1) {
+            let idx: i32 = tile_index(x, y);
+            let depth_band: i32 = state.tiles[idx].depth;
+            let base: f32 = 0.16;
+            if (depth_band == DEPTH_MID) {
+                base = 0.22;
+            }
+            if (depth_band == DEPTH_DEEP) {
+                base = 0.28;
+            }
+
+            let noise_seed: i32 = x * 17 + y * 23 + flicker_tick * 13;
+            if (noise_seed < 0) {
+                noise_seed = 0 - noise_seed;
+            }
+            noise_seed = noise_seed % 97;
+            let flicker: f32 = noise_seed;
+            flicker = flicker / 97.0;
+            flicker = 0.04 + flicker * 0.08;
+
+            let module_bonus: f32 = 0.0;
+            if (state.tiles[idx].module == MODULE_LIGHT_ANCHOR) {
+                module_bonus = 0.35;
+            }
+
+            let light_value: f32 = base + flicker + module_bonus;
+            state.tiles[idx].light = clamp01(light_value);
         }
-        if (depth_band == DEPTH_DEEP) {
-            base = 0.30;
-        }
-        let tile_index_float: f32 = i;
-        let flicker: f32 = sin(tile_index_float * 0.005 + state.light_time * 0.9);
-        let ripple: f32 = sin(tile_index_float * 0.003 + state.postfx_phase * 2.2);
-        let light: f32 = base + 0.08 * flicker + 0.06 * ripple;
-        state.tiles[i].light = clamp01(light);
+    }
+
+    let dt_seconds: f32 = delta_ms;
+    dt_seconds = dt_seconds / 1000.0;
+    state.postfx_phase = state.postfx_phase + dt_seconds * state.postfx_speed;
+    if (state.postfx_phase > 100000.0) {
+        state.postfx_phase = 0.0;
     }
 }
 
@@ -677,6 +698,21 @@ test `router shifts to neighbor lane`() : bool {
     return state.units[0].x == target_x;
 }
 
+test `light anchor boosts brightness`() : bool {
+    init_state();
+    let idx: i32 = tile_index(state.lane_columns[0], 20);
+    state.tiles[idx].module = MODULE_LIGHT_ANCHOR;
+    state.lighting_clock_ms = 0;
+    update_lighting(16);
+    let lit_with_anchor: f32 = state.tiles[idx].light;
+
+    state.tiles[idx].module = MODULE_NONE;
+    update_lighting(16);
+    let lit_without_anchor: f32 = state.tiles[idx].light;
+
+    return lit_with_anchor > lit_without_anchor && lit_with_anchor > 0.3;
+}
+
 function main(): i32 {
     let ok: bool = init_window(SCREEN_W_PX, SCREEN_H_PX, "Underwater Automation");
     if (!ok) {
@@ -689,29 +725,28 @@ function main(): i32 {
     for (; state.running; ) {
         state.frame_start_ms = get_time_ms();
         handle_input();
+        if (should_quit()) {
+            state.running = false;
+        }
 
-        let now: i32 = get_time_ms();
-        let delta_ms: i32 = now - state.last_tick_ms;
+        let now_ms: i32 = get_time_ms();
+        let delta_ms: i32 = now_ms - state.last_tick_ms;
         if (delta_ms < 1) {
             delta_ms = 1;
         }
         if (delta_ms > 120) {
             delta_ms = 120;
         }
-        state.last_tick_ms = now;
-
-        if (should_quit()) {
-            state.running = false;
-        }
+        state.last_tick_ms = now_ms;
 
         step_sim(delta_ms);
         render();
 
-        let frame_end: i32 = get_time_ms();
-        let elapsed: i32 = frame_end - state.frame_start_ms;
-        let sleep_needed: i32 = FRAME_TIME_MS - elapsed;
-        if (sleep_needed > 0) {
-            sleep_ms(sleep_needed);
+        let frame_end_ms: i32 = get_time_ms();
+        let elapsed_ms: i32 = frame_end_ms - state.frame_start_ms;
+        let sleep_for_ms: i32 = FRAME_TIME_MS - elapsed_ms;
+        if (sleep_for_ms > 0) {
+            sleep_ms(sleep_for_ms);
         }
     }
 
