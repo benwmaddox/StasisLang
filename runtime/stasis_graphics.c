@@ -47,6 +47,7 @@ typedef struct {
     float x, y;
     float r, g, b, a;
 } LineVertex;
+static LineVertex g_sdl_line_vertices[MAX_LINES * 2];
 static struct {
     float x1, y1, x2, y2;
     float r, g, b, a;
@@ -503,7 +504,28 @@ STASIS_EXPORT void stasis_end_frame(void) {
     }
 
     if (g_use_sdl_renderer) {
+        /* Batch SDL lines */
+        int vtx_count = g_line_count * 2;
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_Vertex verts[MAX_LINES * 2];
+        SDL_Color color;
+        for (int i = 0; i < g_line_count; i++) {
+            color.r = (Uint8)(g_lines[i].r * 255.0f);
+            color.g = (Uint8)(g_lines[i].g * 255.0f);
+            color.b = (Uint8)(g_lines[i].b * 255.0f);
+            color.a = (Uint8)(g_lines[i].a * 255.0f);
+            verts[i * 2 + 0].position.x = g_lines[i].x1;
+            verts[i * 2 + 0].position.y = g_lines[i].y1;
+            verts[i * 2 + 0].color = color;
+            verts[i * 2 + 1].position.x = g_lines[i].x2;
+            verts[i * 2 + 1].position.y = g_lines[i].y2;
+            verts[i * 2 + 1].color = color;
+        }
+        if (g_line_count > 0) {
+            SDL_RenderGeometry(g_renderer, NULL, verts, vtx_count, NULL, 0);
+        }
         SDL_RenderPresent(g_renderer);
+        g_line_count = 0;
     } else {
         flush_lines();
         render_postfx();
@@ -550,8 +572,19 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
                                     float r, float g, float b, float a) {
     if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
-        SDL_RenderDrawLineF(g_renderer, x1, y1, x2, y2);
+        if (g_line_count >= MAX_LINES) {
+            /* Cap silently */
+            return;
+        }
+        g_lines[g_line_count].x1 = x1;
+        g_lines[g_line_count].y1 = y1;
+        g_lines[g_line_count].x2 = x2;
+        g_lines[g_line_count].y2 = y2;
+        g_lines[g_line_count].r = r;
+        g_lines[g_line_count].g = g;
+        g_lines[g_line_count].b = b;
+        g_lines[g_line_count].a = a;
+        g_line_count++;
         return;
     }
 
