@@ -117,7 +117,7 @@ function init_asteroids(): void {
 
         // Random direction and slower speed for readability
         let dir_angle: f32 = rand_float(6.28318);          // 0..2π
-        let speed: f32 = 10.0 + rand_float(20.0);          // 10..30 units/sec
+        let speed: f32 = 2.0 + rand_float(3.0);            // 2..5 units/sec
         let vx: f32 = cos_fast(dir_angle) * speed;
         let vy: f32 = sin_fast(dir_angle) * speed;
 
