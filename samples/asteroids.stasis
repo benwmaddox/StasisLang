@@ -70,23 +70,31 @@ struct Bullet {
     life: i32;
 }
 
+struct Timers {
+    last_time: i32;
+    frame_start_time: i32;
+    fire_cooldown: i32;
+    death_anim_ms: i32;
+    restart_timer_ms: i32;
+    level_start_timer_ms: i32;
+}
+
+struct LevelState {
+    level: i32;
+    next_level: i32;
+    num_asteroids: i32;
+}
+
 struct GameState {
     ship: Ship;
     asteroids: Asteroid[50];
     bullets: Bullet[5];
-    num_asteroids: i32;
-    fire_cooldown: i32;
-    running: i32;
-    last_time: i32;
-    frame_start_time: i32;
+    timers: Timers;
+    level_state: LevelState;
     rng_state: i32;
+    running: i32;
     ship_hp: i32;
     ship_alive: bool;
-    death_anim_ms: i32;
-    restart_timer_ms: i32;
-    level: i32;
-    level_start_timer_ms: i32;
-    next_level: i32;
 }
 
 // Single global state struct
@@ -118,17 +126,20 @@ function init_ship(): void {
     state.ship.angle = 0.0;
     state.ship_hp = SHIP_MAX_HP;
     state.ship_alive = true;
-    state.death_anim_ms = 0;
-    state.restart_timer_ms = 0;
-    state.level = 1;
-    state.level_start_timer_ms = 0;
-    state.next_level = 1;
+    state.timers.death_anim_ms = 0;
+    state.timers.restart_timer_ms = 0;
+    state.level_state.level = 1;
+    state.timers.level_start_timer_ms = 0;
+    state.level_state.next_level = 1;
+    state.timers.fire_cooldown = 0;
+    state.timers.last_time = get_time_ms();
+    state.timers.frame_start_time = 0;
 }
 
 function configure_level(level: i32): void {
-    state.level = level;
-    state.level_start_timer_ms = 0;
-    state.next_level = level + 1;
+    state.level_state.level = level;
+    state.timers.level_start_timer_ms = 0;
+    state.level_state.next_level = level + 1;
 
     // Determine asteroid count/size/speed by parity
     let count: i32 = 4;
@@ -164,7 +175,7 @@ function configure_level(level: i32): void {
         }
     }
 
-    state.num_asteroids = count;
+    state.level_state.num_asteroids = count;
     let i: i32 = 0;
     for (i = 0; i < MAX_ASTEROIDS; i = i + 1) {
         // Random spawn across the screen
@@ -211,14 +222,14 @@ function active_asteroid_count(): i32 {
 
 function compute_delta_ms(): i32 {
     let current_time: i32 = get_time_ms();
-    let delta_ms: i32 = current_time - state.last_time;
+    let delta_ms: i32 = current_time - state.timers.last_time;
     if (delta_ms < 1) {
         delta_ms = 1;
     }
     if (delta_ms > 100) {
         delta_ms = 100;
     }
-    state.last_time = current_time;
+    state.timers.last_time = current_time;
     return delta_ms;
 }
 
@@ -236,7 +247,7 @@ function wrap_position(px: f32, max: f32): f32 {
 function sync_frame_rate(): void {
     // Calculate elapsed time and sleep if ahead of schedule
     let frame_end_time: i32 = get_time_ms();
-    let frame_elapsed: i32 = frame_end_time - state.frame_start_time;
+    let frame_elapsed: i32 = frame_end_time - state.timers.frame_start_time;
     let sleep_time: i32 = FRAME_TIME_MS - frame_elapsed;
 
     // Only sleep if we have time left in the frame budget
@@ -490,9 +501,9 @@ function draw_bullets(): void {
 
 function trigger_ship_death(): void {
     state.ship_alive = false;
-    state.death_anim_ms = DEATH_ANIM_MS;
-    state.restart_timer_ms = RESTART_DELAY_MS;
-    state.level_start_timer_ms = 0;
+    state.timers.death_anim_ms = DEATH_ANIM_MS;
+    state.timers.restart_timer_ms = RESTART_DELAY_MS;
+    state.timers.level_start_timer_ms = 0;
 
     // Stop bullets immediately
     foreach (let bullet in state.bullets) {
@@ -504,16 +515,16 @@ function reset_game(): void {
     init_ship();
     configure_level(1);
     init_bullets();
-    state.fire_cooldown = 0;
-    state.last_time = get_time_ms();
+    state.timers.fire_cooldown = 0;
+    state.timers.last_time = get_time_ms();
 }
 
 function draw_death_effect(): void {
-    if (state.death_anim_ms < 1) {
+    if (state.timers.death_anim_ms < 1) {
         return;
     }
 
-    let remaining: f32 = state.death_anim_ms;
+    let remaining: f32 = state.timers.death_anim_ms;
     let death_total_ms: f32 = 1000.0;
     let t: f32 = remaining / death_total_ms;
     let burst_len: f32 = 60.0 * t;
@@ -698,7 +709,7 @@ function draw_letter(char_id: i32, x: f32, y: f32, scale: f32): void {
 }
 
 function draw_restart_overlay(): void {
-    if (state.restart_timer_ms < 1) {
+    if (state.timers.restart_timer_ms < 1) {
         return;
     }
 
@@ -724,8 +735,8 @@ function draw_restart_overlay(): void {
     draw_letter(78, cursor, base_y, scale); cursor = cursor + scale * 1.4;
 
     // Countdown digits
-    let secs: i32 = state.restart_timer_ms / 1000;
-    if ((state.restart_timer_ms % 1000) > 0) {
+    let secs: i32 = state.timers.restart_timer_ms / 1000;
+    if ((state.timers.restart_timer_ms % 1000) > 0) {
         // show ceil-like behavior
         secs = secs + 1;
     }
@@ -743,7 +754,7 @@ function draw_restart_overlay(): void {
     let bar_h: f32 = 6.0;
     let bar_x: f32 = base_x + scale * 0.2;
     let bar_y: f32 = digit_y + scale * 1.6;
-    let restart_ms_f: f32 = state.restart_timer_ms;
+    let restart_ms_f: f32 = state.timers.restart_timer_ms;
     let restart_delay_f: f32 = 15000.0;
     let t_remaining: f32 = restart_ms_f / restart_delay_f;
     let fill_w: f32 = bar_w * t_remaining;
@@ -756,7 +767,7 @@ function draw_restart_overlay(): void {
 }
 
 function draw_level_overlay(): void {
-    if (state.level_start_timer_ms < 1) {
+    if (state.timers.level_start_timer_ms < 1) {
         return;
     }
 
@@ -782,7 +793,7 @@ function draw_level_overlay(): void {
     draw_letter(76, cursor, base_y, scale); cursor = cursor + scale * 1.2; // L
 
     // Level number (two digits)
-    let lvl: i32 = state.next_level;
+    let lvl: i32 = state.level_state.next_level;
     if (lvl < 0) { lvl = 0; }
     if (lvl > 99) { lvl = 99; }
     let tens: i32 = lvl / 10;
@@ -792,8 +803,8 @@ function draw_level_overlay(): void {
     draw_segment_digit(ones, base_x + scale * 10.4, digit_y, scale * 0.9);
 
     // Countdown
-    let secs: i32 = state.level_start_timer_ms / 1000;
-    if ((state.level_start_timer_ms % 1000) > 0) {
+    let secs: i32 = state.timers.level_start_timer_ms / 1000;
+    if ((state.timers.level_start_timer_ms % 1000) > 0) {
         secs = secs + 1;
     }
     if (secs > 99) {
@@ -810,12 +821,12 @@ function handle_fire_input(delta_ms: i32): void {
     if (!state.ship_alive) {
         return;
     }
-    if (state.fire_cooldown > 0) {
-        state.fire_cooldown = state.fire_cooldown - delta_ms;
+    if (state.timers.fire_cooldown > 0) {
+        state.timers.fire_cooldown = state.timers.fire_cooldown - delta_ms;
     }
-    if (is_key_down(KEY_SPACE) && state.fire_cooldown < 1) {
+    if (is_key_down(KEY_SPACE) && state.timers.fire_cooldown < 1) {
         fire_bullet();
-        state.fire_cooldown = 200;
+        state.timers.fire_cooldown = 200;
     }
 }
 
@@ -826,15 +837,15 @@ function tick_level_progression(delta_ms: i32): void {
 
     let remaining: i32 = active_asteroid_count();
     if (remaining == 0) {
-        if (state.level_start_timer_ms < 1) {
-            state.level_start_timer_ms = LEVEL_START_DELAY_MS;
-            state.next_level = state.level + 1;
+        if (state.timers.level_start_timer_ms < 1) {
+            state.timers.level_start_timer_ms = LEVEL_START_DELAY_MS;
+            state.level_state.next_level = state.level_state.level + 1;
         }
     }
-    if (state.level_start_timer_ms > 0) {
-        state.level_start_timer_ms = state.level_start_timer_ms - delta_ms;
-        if (state.level_start_timer_ms < 1) {
-            state.level_start_timer_ms = 0;
+    if (state.timers.level_start_timer_ms > 0) {
+        state.timers.level_start_timer_ms = state.timers.level_start_timer_ms - delta_ms;
+        if (state.timers.level_start_timer_ms < 1) {
+            state.timers.level_start_timer_ms = 0;
             // Repair ship by 1 HP on level completion, up to max
             if (state.ship_hp < SHIP_MAX_HP) {
                 state.ship_hp = state.ship_hp + 1;
@@ -842,7 +853,7 @@ function tick_level_progression(delta_ms: i32): void {
                     state.ship_hp = SHIP_MAX_HP;
                 }
             }
-            configure_level(state.next_level);
+            configure_level(state.level_state.next_level);
         }
     }
 }
@@ -851,16 +862,16 @@ function tick_death_timers(delta_ms: i32): void {
     if (state.ship_alive) {
         return;
     }
-    if (state.death_anim_ms > 0) {
-        state.death_anim_ms = state.death_anim_ms - delta_ms;
-        if (state.death_anim_ms < 0) {
-            state.death_anim_ms = 0;
+    if (state.timers.death_anim_ms > 0) {
+        state.timers.death_anim_ms = state.timers.death_anim_ms - delta_ms;
+        if (state.timers.death_anim_ms < 0) {
+            state.timers.death_anim_ms = 0;
         }
     }
-    if (state.restart_timer_ms > 0) {
-        state.restart_timer_ms = state.restart_timer_ms - delta_ms;
-        if (state.restart_timer_ms < 0) {
-            state.restart_timer_ms = 0;
+    if (state.timers.restart_timer_ms > 0) {
+        state.timers.restart_timer_ms = state.timers.restart_timer_ms - delta_ms;
+        if (state.timers.restart_timer_ms < 0) {
+            state.timers.restart_timer_ms = 0;
         }
     } else {
         reset_game();
@@ -897,14 +908,14 @@ function main(): i32 {
     configure_level(1);
     init_bullets();
 
-    state.last_time = get_time_ms();
-    state.fire_cooldown = 0;
+    state.timers.last_time = get_time_ms();
+    state.timers.fire_cooldown = 0;
     state.running = 1;
 
     let frame: i32 = 0;
     for (frame = 0; state.running == 1; frame = frame + 1) {
         // Record frame start time for FPS control
-        state.frame_start_time = get_time_ms();
+        state.timers.frame_start_time = get_time_ms();
 
         let quit: bool = should_quit();
         if (quit) {
