@@ -824,6 +824,13 @@ function tick_level_progression(delta_ms: i32): void {
             state.level_start_timer_ms = 0;
         }
         if (state.level_start_timer_ms == 0) {
+            // Repair ship by 1 HP on level completion, up to max
+            if (state.ship_hp < SHIP_MAX_HP) {
+                state.ship_hp = state.ship_hp + 1;
+                if (state.ship_hp > SHIP_MAX_HP) {
+                    state.ship_hp = SHIP_MAX_HP;
+                }
+            }
             configure_level(state.next_level);
         }
     }
