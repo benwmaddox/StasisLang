@@ -78,14 +78,6 @@ static void flush_lines(void) {
         SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
     }
 
-    if (g_debug_frame_counter == 0) {
-        glBegin(GL_LINES);
-        glColor4f(1.0f, 0.0f, 0.0f, 1.0f);
-        glVertex2f(0.0f, 0.0f);
-        glVertex2f((float)g_window_width, (float)g_window_height);
-        glEnd();
-    }
-
     glBegin(GL_LINES);
     for (int i = 0; i < g_line_count; i++) {
         glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
@@ -295,6 +287,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     init_postfx_shader();
 
     SDL_Log("Stasis graphics initialized: %dx%d", width, height);
+    SDL_Log("GL_VENDOR: %s", (const char*)glGetString(GL_VENDOR));
+    SDL_Log("GL_RENDERER: %s", (const char*)glGetString(GL_RENDERER));
+    SDL_Log("GL_VERSION: %s", (const char*)glGetString(GL_VERSION));
     return 1;
 }
 
