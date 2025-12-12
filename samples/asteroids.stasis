@@ -793,6 +793,81 @@ function draw_level_overlay(): void {
     draw_segment_digit(cd_ones, base_x + scale * 10.2, cd_y, scale * 0.8);
 }
 
+function handle_fire_input(delta_ms: i32): void {
+    if (!state.ship_alive) {
+        return;
+    }
+    if (state.fire_cooldown > 0) {
+        state.fire_cooldown = state.fire_cooldown - delta_ms;
+    }
+    if (is_key_down(KEY_SPACE) && state.fire_cooldown < 1) {
+        fire_bullet();
+        state.fire_cooldown = 200;
+    }
+}
+
+function tick_level_progression(delta_ms: i32): void {
+    if (!state.ship_alive) {
+        return;
+    }
+
+    let remaining: i32 = active_asteroid_count();
+    if (remaining == 0) {
+        if (state.level_start_timer_ms < 1) {
+            state.level_start_timer_ms = LEVEL_START_DELAY_MS;
+            state.next_level = state.level + 1;
+        }
+    }
+    if (state.level_start_timer_ms > 0) {
+        state.level_start_timer_ms = state.level_start_timer_ms - delta_ms;
+        if (state.level_start_timer_ms < 0) {
+            state.level_start_timer_ms = 0;
+        }
+        if (state.level_start_timer_ms == 0) {
+            configure_level(state.next_level);
+        }
+    }
+}
+
+function tick_death_timers(delta_ms: i32): void {
+    if (state.ship_alive) {
+        return;
+    }
+    if (state.death_anim_ms > 0) {
+        state.death_anim_ms = state.death_anim_ms - delta_ms;
+        if (state.death_anim_ms < 0) {
+            state.death_anim_ms = 0;
+        }
+    }
+    if (state.restart_timer_ms > 0) {
+        state.restart_timer_ms = state.restart_timer_ms - delta_ms;
+        if (state.restart_timer_ms < 0) {
+            state.restart_timer_ms = 0;
+        }
+    } else {
+        reset_game();
+    }
+}
+
+function update_sim(dt: f32, delta_ms: i32): void {
+    update_ship(dt);
+    update_asteroids(dt);
+    update_bullets(dt, delta_ms);
+    check_collisions();
+    tick_level_progression(delta_ms);
+    tick_death_timers(delta_ms);
+}
+
+function draw_frame(): void {
+    draw_ship();
+    draw_asteroids();
+    draw_bullets();
+    draw_health_bar();
+    draw_death_effect();
+    draw_restart_overlay();
+    draw_level_overlay();
+}
+
 function main(): i32 {
     let init_ok: bool = init_window(800, 600, "Stasis Asteroids");
     if (!init_ok) {
@@ -835,69 +910,9 @@ function main(): i32 {
             let dt: f32 = delta_ms_f / 1000.0;
             state.last_time = current_time;
 
-            if (state.ship_alive) {
-                // Handle fire input
-                if (state.fire_cooldown > 0) {
-                    state.fire_cooldown = state.fire_cooldown - delta_ms;
-                }
-                if (is_key_down(KEY_SPACE) && state.fire_cooldown < 1) {
-                    fire_bullet();
-                    state.fire_cooldown = 200;
-                }
-            }
-
-            // Update game state
-            update_ship(dt);
-            update_asteroids(dt);
-            update_bullets(dt, delta_ms);
-            check_collisions();
-
-            // Level progression: if all asteroids are gone and not already counting down, start next level timer
-            if (state.ship_alive) {
-                let remaining: i32 = active_asteroid_count();
-                if (remaining == 0) {
-                    if (state.level_start_timer_ms < 1) {
-                        state.level_start_timer_ms = LEVEL_START_DELAY_MS;
-                        state.next_level = state.level + 1;
-                    }
-                }
-                if (state.level_start_timer_ms > 0) {
-                    state.level_start_timer_ms = state.level_start_timer_ms - delta_ms;
-                    if (state.level_start_timer_ms < 0) {
-                        state.level_start_timer_ms = 0;
-                    }
-                    if (state.level_start_timer_ms == 0) {
-                        configure_level(state.next_level);
-                    }
-                }
-            }
-
-            // Handle death timers
-            if (!state.ship_alive) {
-                if (state.death_anim_ms > 0) {
-                    state.death_anim_ms = state.death_anim_ms - delta_ms;
-                    if (state.death_anim_ms < 0) {
-                        state.death_anim_ms = 0;
-                    }
-                }
-                if (state.restart_timer_ms > 0) {
-                    state.restart_timer_ms = state.restart_timer_ms - delta_ms;
-                    if (state.restart_timer_ms < 0) {
-                        state.restart_timer_ms = 0;
-                    }
-                } else {
-                    reset_game();
-                }
-            }
-
-            // Draw everything
-            draw_ship();
-            draw_asteroids();
-            draw_bullets();
-            draw_health_bar();
-            draw_death_effect();
-            draw_restart_overlay();
-            draw_level_overlay();
+            handle_fire_input(delta_ms);
+            update_sim(dt, delta_ms);
+            draw_frame();
 
             end_frame();
 
