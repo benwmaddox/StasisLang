@@ -283,6 +283,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
+    var linkingStaticGraphics = false;
     args.Add("-Wno-override-module");
     if (!string.IsNullOrWhiteSpace(optLevel))
     {
@@ -306,11 +307,45 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         if (!string.IsNullOrEmpty(libPath))
         {
             var libDir = Path.GetDirectoryName(libPath);
+            var libFile = Path.GetFileName(libPath);
+            var isStaticLib = libFile != null && libFile.Contains("static", StringComparison.OrdinalIgnoreCase);
+            linkingStaticGraphics = isStaticLib;
+
             if (!string.IsNullOrEmpty(libDir))
             {
                 args.Add($"-L\"{libDir}\"");
             }
-            args.Add("-lstasis_graphics");
+
+            // When a full path is known, pass it directly so clang doesn't guess the name
+            if (!string.IsNullOrEmpty(libFile))
+            {
+                args.Add($"\"{libPath}\"");
+            }
+            else
+            {
+                args.Add("-lstasis_graphics");
+            }
+
+            // If we are linking the static runtime, pull in its static deps for a single EXE.
+            if (isStaticLib && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                args.Add("-lSDL2main");
+                args.Add("-lSDL2-static");
+                args.Add("-lglew32");
+                args.Add("-lopengl32");
+                args.Add("-luser32");
+                args.Add("-lgdi32");
+                args.Add("-limm32");
+                args.Add("-lshell32");
+                args.Add("-lsetupapi");
+                args.Add("-lwinmm");
+                args.Add("-lversion");
+                args.Add("-lole32");
+                args.Add("-loleaut32");
+                args.Add("-ladvapi32");
+                args.Add("-lcfgmgr32");
+                args.Add("-lbcrypt");
+            }
         }
         else
         {
@@ -335,9 +370,13 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             var um = Path.Combine(sdkRoot, "um", "x64");
             args.Add($"-L\"{ucrt}\"");
             args.Add($"-L\"{um}\"");
-            args.Add("-lucrt");
+            // When linking static graphics, let clang pick CRT defaults to avoid duplicate ucrt linkage.
             args.Add("-lkernel32");
-            args.Add("-llegacy_stdio_definitions");
+            if (!linkingStaticGraphics)
+            {
+                args.Add("-lucrt");
+                args.Add("-llegacy_stdio_definitions");
+            }
         }
     }
     else if (isTest)
@@ -359,6 +398,13 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
         // Prefer explicit lib path (derive DLL alongside .lib)
         if (!string.IsNullOrEmpty(graphicsLibPath))
         {
+            var libFile = Path.GetFileName(graphicsLibPath);
+            if (libFile != null && libFile.Contains("static", StringComparison.OrdinalIgnoreCase))
+            {
+                // Static runtime: nothing to copy
+                return;
+            }
+
             if (Path.GetExtension(graphicsLibPath).Equals(".lib", StringComparison.OrdinalIgnoreCase))
             {
                 var dllGuess = Path.ChangeExtension(graphicsLibPath, ".dll");
@@ -433,26 +479,51 @@ static string? FindGraphicsLibrary()
     searchPaths.Add(exeDir);
     searchPaths.Add(Path.Combine(exeDir, "runtime"));
 
-    // Check relative to current working directory
-    searchPaths.Add(Directory.GetCurrentDirectory());
-    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime"));
-    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build"));
-    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "bin"));
-    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "Release"));
-    searchPaths.Add(Path.Combine(Directory.GetCurrentDirectory(), "runtime", "build", "Debug"));
+    // Prefer workspace runtime outputs before falling back to cwd root
+    var cwd = Directory.GetCurrentDirectory();
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
+    searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(cwd);
 
-    var libName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        ? "stasis_graphics.dll"
-        : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-            ? "libstasis_graphics.dylib"
-            : "libstasis_graphics.so";
+    string[] candidates;
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        candidates = new[]
+        {
+            "stasis_graphics_static.lib",
+            "stasis_graphics.lib",
+            "stasis_graphics.dll"
+        };
+    }
+    else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+    {
+        candidates = new[]
+        {
+            "libstasis_graphics_static.a",
+            "libstasis_graphics.dylib"
+        };
+    }
+    else
+    {
+        candidates = new[]
+        {
+            "libstasis_graphics_static.a",
+            "libstasis_graphics.so"
+        };
+    }
 
     foreach (var dir in searchPaths)
     {
-        var candidate = Path.Combine(dir, libName);
-        if (File.Exists(candidate))
+        foreach (var name in candidates)
         {
-            return candidate;
+            var candidate = Path.Combine(dir, name);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
         }
     }
 

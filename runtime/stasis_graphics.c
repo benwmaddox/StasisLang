@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifdef _WIN32
+#if defined(STASIS_GRAPHICS_STATIC)
+#define STASIS_EXPORT
+#elif defined(_WIN32)
 #define STASIS_EXPORT __declspec(dllexport)
 #else
 #define STASIS_EXPORT __attribute__((visibility("default")))
