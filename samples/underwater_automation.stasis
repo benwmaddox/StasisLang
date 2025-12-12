@@ -757,7 +757,11 @@ function main(): i32 {
         }
     }
 
+    print_string("underwater exit reason=");
+    print_int(state.exit_reason);
+    print_string(" code=");
     print_int(8000 + state.exit_reason);
+    print_string("\n");
     sleep_ms(250);
 
     return 0;
