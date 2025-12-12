@@ -362,6 +362,7 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
 
         args.Add("-Wl,/subsystem:console");
         args.Add("-Wl,/ignore:4210");
+        args.Add("-Wl,/STACK:8388608");
 
         var sdkRoot = GetLatestWindowsSdkLib();
         if (sdkRoot is not null)

@@ -728,7 +728,8 @@ function main(): i32 {
     seed_rng(time());
     init_state();
 
-    for (; state.running; ) {
+    let frame_counter: i32 = 0;
+    for (frame_counter = 0; state.running; frame_counter = frame_counter + 1) {
         state.frame_start_ms = get_time_ms();
         handle_input();
         if (should_quit()) {
