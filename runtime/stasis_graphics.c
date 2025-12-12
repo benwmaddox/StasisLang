@@ -45,6 +45,7 @@ static struct {
     float r, g, b, a;
 } g_lines[MAX_LINES];
 static int g_line_count = 0;
+static int g_debug_frame_counter = 0;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -56,15 +57,40 @@ static float screen_to_ndc_y(float y) {
     return 1.0f - (y / g_window_height) * 2.0f;
 }
 
+STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
+                                    float r, float g, float b, float a);
+
+static void setup_ortho(void) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, (double)g_window_width, (double)g_window_height, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
 /* Flush all batched lines to OpenGL */
 static void flush_lines(void) {
     if (g_line_count == 0) return;
 
+    glUseProgram(0);
+
+    if (g_debug_frame_counter < 5) {
+        SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
+    }
+
+    if (g_debug_frame_counter == 0) {
+        glBegin(GL_LINES);
+        glColor4f(1.0f, 0.0f, 0.0f, 1.0f);
+        glVertex2f(0.0f, 0.0f);
+        glVertex2f((float)g_window_width, (float)g_window_height);
+        glEnd();
+    }
+
     glBegin(GL_LINES);
     for (int i = 0; i < g_line_count; i++) {
         glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
-        glVertex2f(screen_to_ndc_x(g_lines[i].x1), screen_to_ndc_y(g_lines[i].y1));
-        glVertex2f(screen_to_ndc_x(g_lines[i].x2), screen_to_ndc_y(g_lines[i].y2));
+        glVertex2f(g_lines[i].x1, g_lines[i].y1);
+        glVertex2f(g_lines[i].x2, g_lines[i].y2);
     }
     glEnd();
 
@@ -253,14 +279,16 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     /* Setup OpenGL state */
     glViewport(0, 0, width, height);
+    glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glLineWidth(2.0f);
+    glLineWidth(1.0f);
 
     g_window_width = width;
     g_window_height = height;
+    setup_ortho();
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
@@ -281,6 +309,11 @@ STASIS_EXPORT void stasis_begin_frame(void) {
  * End frame: flush lines, swap buffers, poll events
  */
 STASIS_EXPORT void stasis_end_frame(void) {
+    if (g_debug_frame_counter < 3 && g_line_count == 0) {
+        /* Inject a visible debug line if nothing was queued */
+        stasis_draw_line(0.0f, 0.0f, (float)g_window_width, (float)g_window_height, 1.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     flush_lines();
     render_postfx();
 
@@ -302,6 +335,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
                 break;
         }
     }
+
+    g_debug_frame_counter++;
 }
 
 /*
@@ -373,6 +408,7 @@ STASIS_EXPORT void stasis_set_postfx(float strength, float phase, float speed, f
     g_postfx_color[0] = r;
     g_postfx_color[1] = g;
     g_postfx_color[2] = b;
+    g_postfx_enabled = true;
 }
 
 /*
