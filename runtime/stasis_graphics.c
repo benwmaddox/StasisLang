@@ -3,12 +3,17 @@
  * SDL2 + OpenGL backend for vector graphics rendering
  */
 
+#include <GL/glew.h>
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-#ifdef _WIN32
+#if defined(STASIS_GRAPHICS_STATIC)
+#define STASIS_EXPORT
+#elif defined(_WIN32)
 #define STASIS_EXPORT __declspec(dllexport)
 #else
 #define STASIS_EXPORT __attribute__((visibility("default")))
@@ -17,18 +22,47 @@
 /* Global state */
 static SDL_Window* g_window = NULL;
 static SDL_GLContext g_gl_context = NULL;
+static SDL_Renderer* g_renderer = NULL;
+static bool g_use_sdl_renderer = false;
 static bool g_should_quit = false;
 static const Uint8* g_keyboard_state = NULL;
 static int g_window_width = 800;
 static int g_window_height = 600;
+static bool g_postfx_enabled = false;
+static GLuint g_postfx_program = 0;
+static GLint g_postfx_time_loc = -1;
+static GLint g_postfx_depth_loc = -1;
+static GLint g_postfx_intensity_loc = -1;
+static GLint g_postfx_surface_loc = -1;
+static GLint g_postfx_color_loc = -1;
+static float g_postfx_strength = 0.0f;
+static float g_postfx_phase = 0.0f;
+static float g_postfx_speed = 0.0f;
+static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
+static bool g_postfx_force_disable = false;
 
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
+typedef struct {
+    float x, y;
+    float r, g, b, a;
+} LineVertex;
+static LineVertex g_sdl_line_vertices[MAX_LINES * 2];
 static struct {
     float x1, y1, x2, y2;
     float r, g, b, a;
 } g_lines[MAX_LINES];
+static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
+static int g_debug_frame_counter = 0;
+static bool g_force_debug_overlay = true;
+
+/* Simple shader + buffer for line rendering */
+static GLuint g_line_program = 0;
+static GLuint g_line_vbo = 0;
+static GLuint g_line_vao = 0;
+static GLint g_line_pos_loc = -1;
+static GLint g_line_color_loc = -1;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -40,19 +74,295 @@ static float screen_to_ndc_y(float y) {
     return 1.0f - (y / g_window_height) * 2.0f;
 }
 
+STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
+                                    float r, float g, float b, float a);
+
+static void setup_ortho(void) {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, (double)g_window_width, (double)g_window_height, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+static GLuint compile_simple_shader(GLenum type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    GLint status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status != GL_TRUE) {
+        char log[512];
+        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+        SDL_Log("Simple shader compile error: %s", log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static void ensure_line_program(void) {
+    if (g_line_program != 0) return;
+
+    const char* vs_src =
+        "#version 120\n"
+        "attribute vec2 a_pos;\n"
+        "attribute vec4 a_color;\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_Position = vec4((a_pos.xy / vec2(%f,%f))*2.0 - 1.0, 0.0, 1.0); v_color = a_color; }\n";
+    const char* fs_src =
+        "#version 120\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_FragColor = v_color; }\n";
+
+    char vs_buf[256];
+    snprintf(vs_buf, sizeof(vs_buf), vs_src, (float)g_window_width, (float)g_window_height);
+
+    GLuint vs = compile_simple_shader(GL_VERTEX_SHADER, vs_buf);
+    GLuint fs = compile_simple_shader(GL_FRAGMENT_SHADER, fs_src);
+    if (vs == 0 || fs == 0) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return;
+    }
+
+    g_line_program = glCreateProgram();
+    glAttachShader(g_line_program, vs);
+    glAttachShader(g_line_program, fs);
+    glBindAttribLocation(g_line_program, 0, "a_pos");
+    glBindAttribLocation(g_line_program, 1, "a_color");
+    glLinkProgram(g_line_program);
+    GLint linked = 0;
+    glGetProgramiv(g_line_program, GL_LINK_STATUS, &linked);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (linked != GL_TRUE) {
+        char log[512];
+        glGetProgramInfoLog(g_line_program, sizeof(log), NULL, log);
+        SDL_Log("Simple program link error: %s", log);
+        glDeleteProgram(g_line_program);
+        g_line_program = 0;
+        return;
+    }
+
+    g_line_pos_loc = 0;
+    g_line_color_loc = 1;
+
+    if (g_line_vao == 0) {
+        glGenVertexArrays(1, &g_line_vao);
+    }
+    if (g_line_vbo == 0) {
+        glGenBuffers(1, &g_line_vbo);
+    }
+}
+
 /* Flush all batched lines to OpenGL */
 static void flush_lines(void) {
     if (g_line_count == 0) return;
 
-    glBegin(GL_LINES);
-    for (int i = 0; i < g_line_count; i++) {
-        glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
-        glVertex2f(screen_to_ndc_x(g_lines[i].x1), screen_to_ndc_y(g_lines[i].y1));
-        glVertex2f(screen_to_ndc_x(g_lines[i].x2), screen_to_ndc_y(g_lines[i].y2));
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
+
+    if (g_debug_frame_counter < 5) {
+        SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
+        if (g_line_count > 0) {
+            SDL_Log("line0: (%.2f,%.2f)->(%.2f,%.2f) rgba=%.2f,%.2f,%.2f,%.2f",
+                g_lines[0].x1, g_lines[0].y1, g_lines[0].x2, g_lines[0].y2,
+                g_lines[0].r, g_lines[0].g, g_lines[0].b, g_lines[0].a);
+        }
     }
+
+    /* Debug overlay: white quad + red cross to ensure pixels appear */
+    glBegin(GL_QUADS);
+    glColor4f(1.0f, 1.0f, 1.0f, 0.15f);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f((float)g_window_width, 0.0f);
+    glVertex2f((float)g_window_width, (float)g_window_height);
+    glVertex2f(0.0f, (float)g_window_height);
     glEnd();
 
+    glBegin(GL_LINES);
+    glColor4f(1.0f, 0.0f, 0.0f, 0.8f);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f((float)g_window_width, (float)g_window_height);
+    glVertex2f((float)g_window_width, 0.0f);
+    glVertex2f(0.0f, (float)g_window_height);
+    glEnd();
+
+    /* Build vertex buffer */
+    int vtx_count = g_line_count * 2;
+    for (int i = 0; i < g_line_count; i++) {
+        g_line_vertices[i * 2 + 0].x = g_lines[i].x1;
+        g_line_vertices[i * 2 + 0].y = g_lines[i].y1;
+        g_line_vertices[i * 2 + 0].r = g_lines[i].r;
+        g_line_vertices[i * 2 + 0].g = g_lines[i].g;
+        g_line_vertices[i * 2 + 0].b = g_lines[i].b;
+        g_line_vertices[i * 2 + 0].a = g_lines[i].a;
+
+        g_line_vertices[i * 2 + 1].x = g_lines[i].x2;
+        g_line_vertices[i * 2 + 1].y = g_lines[i].y2;
+        g_line_vertices[i * 2 + 1].r = g_lines[i].r;
+        g_line_vertices[i * 2 + 1].g = g_lines[i].g;
+        g_line_vertices[i * 2 + 1].b = g_lines[i].b;
+        g_line_vertices[i * 2 + 1].a = g_lines[i].a;
+    }
+
+    ensure_line_program();
+    if (g_line_program != 0) {
+        glUseProgram(g_line_program);
+        glBindVertexArray(g_line_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_line_vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(LineVertex) * vtx_count, g_line_vertices, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray((GLuint)g_line_pos_loc);
+        glVertexAttribPointer((GLuint)g_line_pos_loc, 2, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, x));
+        glEnableVertexAttribArray((GLuint)g_line_color_loc);
+        glVertexAttribPointer((GLuint)g_line_color_loc, 4, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, r));
+        glDrawArrays(GL_LINES, 0, vtx_count);
+        glDisableVertexAttribArray((GLuint)g_line_pos_loc);
+        glDisableVertexAttribArray((GLuint)g_line_color_loc);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
+
+    if (g_debug_frame_counter < 5) {
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            SDL_Log("GL error after flush_lines frame %d: 0x%x", g_debug_frame_counter, err);
+        }
+    }
+
     g_line_count = 0;
+}
+
+static char* read_text_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    char* data = (char*)malloc((size_t)len + 1);
+    if (!data) {
+        fclose(f);
+        return NULL;
+    }
+    size_t read = fread(data, 1, (size_t)len, f);
+    fclose(f);
+    data[read] = 0;
+    return data;
+}
+
+static GLuint compile_shader(GLenum type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    GLint status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status != GL_TRUE) {
+        char log[512];
+        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+        SDL_Log("Shader compile error: %s", log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static GLuint link_program(GLuint vs, GLuint fs) {
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint status = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        char log[512];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        SDL_Log("Program link error: %s", log);
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+static const char* kFallbackPostfxVert =
+"#version 120\n"
+"varying vec2 v_uv;\n"
+"void main(){ v_uv = gl_MultiTexCoord0.xy; gl_Position = gl_Vertex; }\n";
+
+static const char* kFallbackPostfxFrag =
+"#version 120\n"
+"varying vec2 v_uv;\n"
+"uniform float u_time;\n"
+"uniform float u_depth_scale;\n"
+"uniform float u_intensity;\n"
+"uniform float u_surface_jitter;\n"
+"uniform vec3 u_biolume_color;\n"
+"float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
+"float noise(vec2 p){ vec2 i=floor(p); vec2 f=fract(p); float a=hash(i); float b=hash(i+vec2(1.0,0.0)); float c=hash(i+vec2(0.0,1.0)); float d=hash(i+vec2(1.0,1.0)); vec2 u=f*f*(3.0-2.0*f); return mix(a,b,u.x)+(c-a)*u.y*(1.0-u.x)+(d-b)*u.x*u.y; }\n"
+"void main(){ float depth=clamp(v_uv.y*u_depth_scale,0.0,1.0); float ripple=noise(v_uv*6.0+u_time*0.25); float wave=sin((v_uv.y*8.0)+(u_time*0.6)+ripple*u_surface_jitter); float c=0.5+0.5*wave; vec3 deep=vec3(0.02,0.08,0.12); vec3 mid=vec3(0.00,0.16,0.22); vec3 base=mix(deep,mid,depth); vec3 color=base+u_intensity*c*u_biolume_color; float atten=mix(1.0,0.25,depth); gl_FragColor=vec4(color*atten,0.45); }\n";
+
+static void init_postfx_shader(void) {
+    const char* fragSource = kFallbackPostfxFrag;
+    char* fileSource = read_text_file("docs/assets/underwater/caustics.glsl");
+    if (fileSource) {
+        fragSource = fileSource;
+    }
+
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, kFallbackPostfxVert);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragSource);
+    if (fileSource) {
+        free(fileSource);
+    }
+    if (vs == 0 || fs == 0) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        g_postfx_program = 0;
+        return;
+    }
+
+    g_postfx_program = link_program(vs, fs);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (g_postfx_program != 0) {
+        g_postfx_time_loc = glGetUniformLocation(g_postfx_program, "u_time");
+        g_postfx_depth_loc = glGetUniformLocation(g_postfx_program, "u_depth_scale");
+        g_postfx_intensity_loc = glGetUniformLocation(g_postfx_program, "u_intensity");
+        g_postfx_surface_loc = glGetUniformLocation(g_postfx_program, "u_surface_jitter");
+        g_postfx_color_loc = glGetUniformLocation(g_postfx_program, "u_biolume_color");
+        g_postfx_enabled = true;
+    }
+}
+
+static void render_postfx(void) {
+    if (g_postfx_force_disable) {
+        return;
+    }
+
+    if (!g_postfx_enabled || g_postfx_program == 0) {
+        return;
+    }
+
+    glUseProgram(g_postfx_program);
+    if (g_postfx_time_loc >= 0) glUniform1f(g_postfx_time_loc, g_postfx_phase);
+    if (g_postfx_depth_loc >= 0) glUniform1f(g_postfx_depth_loc, 1.6f);
+    if (g_postfx_intensity_loc >= 0) glUniform1f(g_postfx_intensity_loc, g_postfx_strength);
+    if (g_postfx_surface_loc >= 0) glUniform1f(g_postfx_surface_loc, 1.1f + g_postfx_speed * 0.5f);
+    if (g_postfx_color_loc >= 0) glUniform3f(g_postfx_color_loc, g_postfx_color[0], g_postfx_color[1], g_postfx_color[2]);
+
+    glBegin(GL_TRIANGLES);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
+    glTexCoord2f(2.0f, 0.0f); glVertex2f( 3.0f, -1.0f);
+    glTexCoord2f(0.0f, 2.0f); glVertex2f(-1.0f,  3.0f);
+    glEnd();
+
+    glUseProgram(0);
 }
 
 /*
@@ -60,16 +370,23 @@ static void flush_lines(void) {
  * Returns 1 on success, 0 on failure
  */
 STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
+    SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
 
-    /* Request OpenGL 2.1 compatibility profile for immediate mode */
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
+    bool want_sdl = (force_sdl && strcmp(force_sdl, "0") != 0);
+
+    if (!want_sdl) {
+        /* Request OpenGL 2.1 compatibility profile for immediate mode */
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    }
 
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
@@ -77,7 +394,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_WINDOWPOS_CENTERED,
         width,
         height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
+        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN
     );
 
     if (!g_window) {
@@ -86,30 +403,69 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         return 0;
     }
 
-    g_gl_context = SDL_GL_CreateContext(g_window);
-    if (!g_gl_context) {
-        SDL_Log("SDL_GL_CreateContext failed: %s", SDL_GetError());
-        SDL_DestroyWindow(g_window);
-        SDL_Quit();
-        return 0;
+    /* Try GL first unless overridden */
+    if (!want_sdl) {
+        g_gl_context = SDL_GL_CreateContext(g_window);
+        if (g_gl_context) {
+            glewExperimental = GL_TRUE;
+            GLenum glew_status = glewInit();
+            if (glew_status != GLEW_OK) {
+                SDL_Log("glewInit failed: %s", (const char*)glewGetErrorString(glew_status));
+                SDL_GL_DeleteContext(g_gl_context);
+                g_gl_context = NULL;
+            } else {
+                SDL_GL_SetSwapInterval(1);
+                glViewport(0, 0, width, height);
+                glDisable(GL_SCISSOR_TEST);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDisable(GL_DEPTH_TEST);
+                glDisable(GL_CULL_FACE);
+                glLineWidth(1.0f);
+
+                g_window_width = width;
+                g_window_height = height;
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glDrawBuffer(GL_BACK);
+                glReadBuffer(GL_BACK);
+                setup_ortho();
+                ensure_line_program();
+                init_postfx_shader();
+
+                SDL_Log("Stasis graphics initialized: %dx%d", width, height);
+                SDL_Log("GL_VENDOR: %s", (const char*)glGetString(GL_VENDOR));
+                SDL_Log("GL_RENDERER: %s", (const char*)glGetString(GL_RENDERER));
+                SDL_Log("GL_VERSION: %s", (const char*)glGetString(GL_VERSION));
+            }
+        }
     }
 
-    /* Enable vsync */
-    SDL_GL_SetSwapInterval(1);
-
-    /* Setup OpenGL state */
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
-    glLineWidth(2.0f);
+    if (g_gl_context == NULL) {
+        g_use_sdl_renderer = true;
+        g_postfx_force_disable = true;
+        g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!g_renderer) {
+            SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
+            SDL_DestroyWindow(g_window);
+            SDL_Quit();
+            return 0;
+        }
+        SDL_RenderSetLogicalSize(g_renderer, width, height);
+        SDL_RendererInfo info;
+        if (SDL_GetRendererInfo(g_renderer, &info) == 0) {
+            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s flags=0x%x", width, height, info.name ? info.name : "?", info.flags);
+        } else {
+            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d", width, height);
+        }
+    } else {
+        g_use_sdl_renderer = false;
+    }
 
     g_window_width = width;
     g_window_height = height;
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
-
-    SDL_Log("Stasis graphics initialized: %dx%d", width, height);
     return 1;
 }
 
@@ -118,15 +474,54 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(g_renderer, 26, 153, 26, 255);
+        SDL_RenderClear(g_renderer);
+        /* Debug overlay: yellow block and red cross */
+        SDL_SetRenderDrawColor(g_renderer, 255, 255, 0, 160);
+        SDL_FRect rect = { 0.0f, 0.0f, 120.0f, 120.0f };
+        SDL_RenderFillRectF(g_renderer, &rect);
+        SDL_SetRenderDrawColor(g_renderer, 255, 0, 0, 255);
+        SDL_RenderDrawLineF(g_renderer, 0.0f, 0.0f, (float)g_window_width, (float)g_window_height);
+        SDL_RenderDrawLineF(g_renderer, (float)g_window_width, 0.0f, 0.0f, (float)g_window_height);
+    } else {
+        if (g_force_debug_overlay) {
+            setup_ortho();
+            glClearColor(0.1f, 0.6f, 0.1f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+    }
 }
 
 /*
  * End frame: flush lines, swap buffers, poll events
  */
 STASIS_EXPORT void stasis_end_frame(void) {
-    flush_lines();
+    if (g_debug_frame_counter < 3 && g_line_count == 0) {
+        /* Inject a visible debug line if nothing was queued */
+        stasis_draw_line(0.0f, 0.0f, (float)g_window_width, (float)g_window_height, 1.0f, 0.0f, 0.0f, 1.0f);
+    }
 
-    SDL_GL_SwapWindow(g_window);
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_Color color;
+        /* Render lines one by one; could be grouped by color if needed */
+        for (int i = 0; i < g_line_count; i++) {
+            color.r = (Uint8)(g_lines[i].r * 255.0f);
+            color.g = (Uint8)(g_lines[i].g * 255.0f);
+            color.b = (Uint8)(g_lines[i].b * 255.0f);
+            color.a = (Uint8)(g_lines[i].a * 255.0f);
+            SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+            SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+        }
+        SDL_RenderPresent(g_renderer);
+        g_line_count = 0;
+    } else {
+        flush_lines();
+        render_postfx();
+        SDL_GL_SwapWindow(g_window);
+    }
 
     /* Poll events */
     SDL_Event event;
@@ -140,16 +535,25 @@ STASIS_EXPORT void stasis_end_frame(void) {
                     g_should_quit = true;
                 }
                 break;
+            default:
+                break;
         }
     }
+
+    g_debug_frame_counter++;
 }
 
 /*
  * Clear screen with color
  */
 STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
-    glClearColor(r, g, b, a);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_RenderClear(g_renderer);
+    } else {
+        glClearColor(r, g, b, a);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
 }
 
 /*
@@ -157,7 +561,24 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
  * Coordinates in screen space (0,0 = top-left)
  */
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
-                                     float r, float g, float b, float a) {
+                                    float r, float g, float b, float a) {
+    if (g_use_sdl_renderer) {
+        if (g_line_count >= MAX_LINES) {
+            /* Cap silently */
+            return;
+        }
+        g_lines[g_line_count].x1 = x1;
+        g_lines[g_line_count].y1 = y1;
+        g_lines[g_line_count].x2 = x2;
+        g_lines[g_line_count].y2 = y2;
+        g_lines[g_line_count].r = r;
+        g_lines[g_line_count].g = g;
+        g_lines[g_line_count].b = b;
+        g_lines[g_line_count].a = a;
+        g_line_count++;
+        return;
+    }
+
     if (g_line_count >= MAX_LINES) {
         flush_lines();
     }
@@ -203,6 +624,20 @@ STASIS_EXPORT void stasis_sleep_ms(int ms) {
 }
 
 /*
+ * Configure fullscreen post-processing parameters.
+ * strength: 0-1, phase/time: seconds, speed: oscillation scalar, color: rgb tint (0-1).
+ */
+STASIS_EXPORT void stasis_set_postfx(float strength, float phase, float speed, float r, float g, float b) {
+    g_postfx_strength = strength;
+    g_postfx_phase = phase;
+    g_postfx_speed = speed;
+    g_postfx_color[0] = r;
+    g_postfx_color[1] = g;
+    g_postfx_color[2] = b;
+    g_postfx_enabled = true;
+}
+
+/*
  * Check if window should close
  */
 STASIS_EXPORT int stasis_should_quit(void) {
@@ -216,6 +651,10 @@ STASIS_EXPORT void stasis_shutdown(void) {
     if (g_gl_context) {
         SDL_GL_DeleteContext(g_gl_context);
         g_gl_context = NULL;
+    }
+    if (g_postfx_program) {
+        glDeleteProgram(g_postfx_program);
+        g_postfx_program = 0;
     }
     if (g_window) {
         SDL_DestroyWindow(g_window);

@@ -1,0 +1,11 @@
+# Underwater automation palette (hex, no alpha)
+background_deep=#0b1f2b
+background_mid=#0d2d3a
+lane=#1b9aaa
+module=#45c4b0
+biolume=#5ef2d0
+unit_drone=#f0f4ff
+unit_pressurized=#8be0f5
+unit_abyssal=#64b9f5
+unit_payload=#f0d16a
+ui_text=#c8e6ff
