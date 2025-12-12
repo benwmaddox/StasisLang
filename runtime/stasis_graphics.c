@@ -37,15 +37,28 @@ static float g_postfx_strength = 0.0f;
 static float g_postfx_phase = 0.0f;
 static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
+static bool g_postfx_force_disable = false;
 
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
+typedef struct {
+    float x, y;
+    float r, g, b, a;
+} LineVertex;
 static struct {
     float x1, y1, x2, y2;
     float r, g, b, a;
 } g_lines[MAX_LINES];
+static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
+static bool g_force_debug_overlay = true;
+
+/* Simple shader + buffer for line rendering */
+static GLuint g_line_program = 0;
+static GLuint g_line_vbo = 0;
+static GLint g_line_pos_loc = -1;
+static GLint g_line_color_loc = -1;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -68,11 +81,81 @@ static void setup_ortho(void) {
     glLoadIdentity();
 }
 
+static GLuint compile_simple_shader(GLenum type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+    GLint status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status != GL_TRUE) {
+        char log[512];
+        glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+        SDL_Log("Simple shader compile error: %s", log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static void ensure_line_program(void) {
+    if (g_line_program != 0) return;
+
+    const char* vs_src =
+        "#version 120\n"
+        "attribute vec2 a_pos;\n"
+        "attribute vec4 a_color;\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_Position = vec4((a_pos.xy / vec2(%f,%f))*2.0 - 1.0, 0.0, 1.0); v_color = a_color; }\n";
+    const char* fs_src =
+        "#version 120\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_FragColor = v_color; }\n";
+
+    char vs_buf[256];
+    snprintf(vs_buf, sizeof(vs_buf), vs_src, (float)g_window_width, (float)g_window_height);
+
+    GLuint vs = compile_simple_shader(GL_VERTEX_SHADER, vs_buf);
+    GLuint fs = compile_simple_shader(GL_FRAGMENT_SHADER, fs_src);
+    if (vs == 0 || fs == 0) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return;
+    }
+
+    g_line_program = glCreateProgram();
+    glAttachShader(g_line_program, vs);
+    glAttachShader(g_line_program, fs);
+    glBindAttribLocation(g_line_program, 0, "a_pos");
+    glBindAttribLocation(g_line_program, 1, "a_color");
+    glLinkProgram(g_line_program);
+    GLint linked = 0;
+    glGetProgramiv(g_line_program, GL_LINK_STATUS, &linked);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (linked != GL_TRUE) {
+        char log[512];
+        glGetProgramInfoLog(g_line_program, sizeof(log), NULL, log);
+        SDL_Log("Simple program link error: %s", log);
+        glDeleteProgram(g_line_program);
+        g_line_program = 0;
+        return;
+    }
+
+    g_line_pos_loc = 0;
+    g_line_color_loc = 1;
+
+    if (g_line_vbo == 0) {
+        glGenBuffers(1, &g_line_vbo);
+    }
+}
+
 /* Flush all batched lines to OpenGL */
 static void flush_lines(void) {
     if (g_line_count == 0) return;
 
     glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
 
     if (g_debug_frame_counter < 5) {
         SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
@@ -95,13 +178,46 @@ static void flush_lines(void) {
     glVertex2f(0.0f, (float)g_window_height);
     glEnd();
 
-    glBegin(GL_LINES);
+    /* Build vertex buffer */
+    int vtx_count = g_line_count * 2;
     for (int i = 0; i < g_line_count; i++) {
-        glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
-        glVertex2f(g_lines[i].x1, g_lines[i].y1);
-        glVertex2f(g_lines[i].x2, g_lines[i].y2);
+        g_line_vertices[i * 2 + 0].x = g_lines[i].x1;
+        g_line_vertices[i * 2 + 0].y = g_lines[i].y1;
+        g_line_vertices[i * 2 + 0].r = g_lines[i].r;
+        g_line_vertices[i * 2 + 0].g = g_lines[i].g;
+        g_line_vertices[i * 2 + 0].b = g_lines[i].b;
+        g_line_vertices[i * 2 + 0].a = g_lines[i].a;
+
+        g_line_vertices[i * 2 + 1].x = g_lines[i].x2;
+        g_line_vertices[i * 2 + 1].y = g_lines[i].y2;
+        g_line_vertices[i * 2 + 1].r = g_lines[i].r;
+        g_line_vertices[i * 2 + 1].g = g_lines[i].g;
+        g_line_vertices[i * 2 + 1].b = g_lines[i].b;
+        g_line_vertices[i * 2 + 1].a = g_lines[i].a;
     }
-    glEnd();
+
+    ensure_line_program();
+    if (g_line_program != 0) {
+        glUseProgram(g_line_program);
+        glBindBuffer(GL_ARRAY_BUFFER, g_line_vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(LineVertex) * vtx_count, g_line_vertices, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray((GLuint)g_line_pos_loc);
+        glVertexAttribPointer((GLuint)g_line_pos_loc, 2, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, x));
+        glEnableVertexAttribArray((GLuint)g_line_color_loc);
+        glVertexAttribPointer((GLuint)g_line_color_loc, 4, GL_FLOAT, GL_FALSE, sizeof(LineVertex), (void*)offsetof(LineVertex, r));
+        glDrawArrays(GL_LINES, 0, vtx_count);
+        glDisableVertexAttribArray((GLuint)g_line_pos_loc);
+        glDisableVertexAttribArray((GLuint)g_line_color_loc);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+    }
+
+    if (g_debug_frame_counter < 5) {
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            SDL_Log("GL error after flush_lines frame %d: 0x%x", g_debug_frame_counter, err);
+        }
+    }
 
     g_line_count = 0;
 }
@@ -211,6 +327,10 @@ static void init_postfx_shader(void) {
 }
 
 static void render_postfx(void) {
+    if (g_postfx_force_disable) {
+        return;
+    }
+
     if (!g_postfx_enabled || g_postfx_program == 0) {
         return;
     }
@@ -297,7 +417,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     g_window_width = width;
     g_window_height = height;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
+    glReadBuffer(GL_BACK);
     setup_ortho();
+    ensure_line_program();
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
@@ -314,6 +438,12 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
+    if (g_force_debug_overlay) {
+        setup_ortho();
+        glClearColor(0.1f, 0.6f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
     g_line_count = 0;
 }
 
@@ -364,7 +494,7 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
  * Coordinates in screen space (0,0 = top-left)
  */
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
-                                     float r, float g, float b, float a) {
+                                    float r, float g, float b, float a) {
     if (g_line_count >= MAX_LINES) {
         flush_lines();
     }
