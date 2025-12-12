@@ -373,6 +373,7 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             args.Add($"-L\"{um}\"");
             // When linking static graphics, let clang pick CRT defaults to avoid duplicate ucrt linkage.
             args.Add("-lkernel32");
+            args.Add("-lmsvcrt");
             if (!linkingStaticGraphics)
             {
                 args.Add("-lucrt");
