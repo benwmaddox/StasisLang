@@ -529,6 +529,15 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest, string
         return exit;
     }
 
+    if (enableGraphics)
+    {
+        var exeDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(exeDir))
+        {
+            CopyGraphicsRuntimeDependencies(exeDir, graphicsLibPath);
+        }
+    }
+
     Console.WriteLine($"built: {outputPath}");
     return 0;
 }

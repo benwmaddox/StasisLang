@@ -292,6 +292,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
                     g_should_quit = true;
                 }
                 break;
+            default:
+                break;
         }
     }
 }
