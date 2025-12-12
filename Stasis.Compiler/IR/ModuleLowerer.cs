@@ -500,6 +500,14 @@ public sealed class ModuleLowerer
                     }
 
                     return ConstI32(0);
+                case MemberAccessExpressionSyntax member when string.Equals(member.Member.Text, "length", StringComparison.Ordinal):
+                    if (TryResolveArrayLength(member.Receiver, out var length))
+                    {
+                        return ConstI32(length);
+                    }
+
+                    AddDiagnostic("'.length' is only available on fixed-size arrays.", member.Span);
+                    return ConstI32(0);
                 case MemberAccessExpressionSyntax member:
                     return LowerMemberAccess(builder, member, locals);
                 case ArrayAccessExpressionSyntax arr:
@@ -1384,14 +1392,67 @@ public sealed class ModuleLowerer
 
         private int ResolveIterableLength(ExpressionSyntax iterable)
         {
-            if (iterable is IdentifierExpressionSyntax id
-                && _symbols.TryGetValue(id.Identifier.Text, out var sym)
-                && sym.Type is ArrayTypeSymbol array)
+            if (TryResolveArrayLength(iterable, out var length))
             {
-                return array.Size;
+                return length;
             }
 
             return 0;
+        }
+
+        private bool TryResolveArrayLength(ExpressionSyntax expr, out int length)
+        {
+            length = 0;
+            var type = ResolveExpressionType(expr);
+            if (type is ArrayTypeSymbol array)
+            {
+                length = array.Size;
+                return true;
+            }
+
+            return false;
+        }
+
+        private TypeSymbol? ResolveExpressionType(ExpressionSyntax expr)
+        {
+            switch (expr)
+            {
+                case IdentifierExpressionSyntax id:
+                    if (_symbols.TryGetValue(id.Identifier.Text, out var sym))
+                    {
+                        return sym.Type;
+                    }
+
+                    return null;
+                case MemberAccessExpressionSyntax member:
+                    var receiverType = ResolveExpressionType(member.Receiver);
+                    if (receiverType is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+                    {
+                        var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, member.Member.Text, StringComparison.Ordinal));
+                        if (field is not null)
+                        {
+                            return ResolveType(field.Type, _symbols);
+                        }
+                    }
+
+                    if (receiverType is ArrayTypeSymbol && string.Equals(member.Member.Text, "length", StringComparison.Ordinal))
+                    {
+                        return new PrimitiveTypeSymbol("i32");
+                    }
+
+                    return null;
+                case ArrayAccessExpressionSyntax arr:
+                    if (ResolveExpressionType(arr.Receiver) is ArrayTypeSymbol array)
+                    {
+                        return array.ElementType;
+                    }
+
+                    return null;
+                case ParenthesizedExpressionSyntax paren:
+                    return ResolveExpressionType(paren.Expression);
+                default:
+                    return null;
+            }
         }
 
         private string TryResolveGlobalName(string name) =>

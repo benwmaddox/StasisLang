@@ -117,6 +117,33 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_array_length_property_to_constant()
+    {
+        var ir = Lower("""
+            global temps: i32[4];
+            function len(): i32 {
+                return temps.length;
+            }
+            """);
+
+        Assert.Contains("ret i32 4", ir);
+    }
+
+    [Fact]
+    public void Lowers_nested_array_length_from_struct_field()
+    {
+        var ir = Lower("""
+            struct GameState { values: f32[5]; }
+            global state: GameState;
+            function len(): i32 {
+                return state.values.length;
+            }
+            """);
+
+        Assert.Contains("ret i32 5", ir);
+    }
+
+    [Fact]
     public void Lowers_if_with_conditional_branches()
     {
         var ir = Lower("""
