@@ -2692,6 +2692,12 @@ public sealed class ModuleLowerer
                 loopLocals[foreachStmt.Iterator.Text] = new LocalBinding(iterator, i32, true);
             }
 
+            // If an index variable is provided, expose the iterator as a separate local
+            if (foreachStmt.IndexVariable is not null)
+            {
+                loopLocals[foreachStmt.IndexVariable.Text] = new LocalBinding(iterator, i32, true);
+            }
+
             builder.BuildStore(ConstI32(0), iterator);
 
             if (iterable.LengthValue is null && iterable.ConstLength <= 0)
