@@ -27,7 +27,7 @@ const SCREEN_W: f32 = 800.0;
 const SCREEN_H: f32 = 600.0;
 
 // Limits (constants)
-const MAX_ASTEROIDS: i32 = 50;
+const MAX_ASTEROIDS: i32 = 25;
 const MAX_BULLETS: i32 = 5;
 const BULLET_LIFETIME_MS: i32 = 1000;
 
@@ -115,14 +115,14 @@ function init_asteroids(): void {
         let spawn_x: f32 = rand_float(SCREEN_W);
         let spawn_y: f32 = rand_float(SCREEN_H);
 
-        // Random direction and speed for variety
+        // Random direction and slower speed for readability
         let dir_angle: f32 = rand_float(6.28318);          // 0..2π
-        let speed: f32 = 20.0 + rand_float(40.0);          // 20..60 units/sec
+        let speed: f32 = 10.0 + rand_float(20.0);          // 10..30 units/sec
         let vx: f32 = cos_fast(dir_angle) * speed;
         let vy: f32 = sin_fast(dir_angle) * speed;
 
         state.asteroids[i].active = true;
-        state.asteroids[i].size = 20.0; // half the previous size
+        state.asteroids[i].size = 20.0; // half the original size
         state.asteroids[i].x = spawn_x;
         state.asteroids[i].y = spawn_y;
         state.asteroids[i].vx = vx;
