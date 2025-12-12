@@ -50,6 +50,8 @@ struct Ship {
     vx: f32;
     vy: f32;
     angle: f32;
+    hp: i32;
+    alive: bool;
 }
 
 struct Asteroid {
@@ -93,8 +95,6 @@ struct GameState {
     level_state: LevelState;
     rng_state: i32;
     running: i32;
-    ship_hp: i32;
-    ship_alive: bool;
 }
 
 // Single global state struct
@@ -124,8 +124,8 @@ function init_ship(): void {
     state.ship.vx = 0.0;
     state.ship.vy = 0.0;
     state.ship.angle = 0.0;
-    state.ship_hp = SHIP_MAX_HP;
-    state.ship_alive = true;
+    state.ship.hp = SHIP_MAX_HP;
+    state.ship.alive = true;
     state.timers.death_anim_ms = 0;
     state.timers.restart_timer_ms = 0;
     state.level_state.level = 1;
@@ -258,7 +258,7 @@ function sync_frame_rate(): void {
 }
 
 function update_ship(dt: f32): void {
-    if (!state.ship_alive) {
+    if (!state.ship.alive) {
         return;
     }
 
@@ -360,7 +360,7 @@ function check_collisions(): void {
     }
 
     // Ship-asteroid collisions
-    if (state.ship_alive) {
+    if (state.ship.alive) {
         let ship_radius: f32 = 12.0;
         for (j = 0; j < MAX_ASTEROIDS; j = j + 1) {
             if (state.asteroids[j].active) {
@@ -370,10 +370,10 @@ function check_collisions(): void {
                 let sum_r: f32 = ship_radius + state.asteroids[j].size;
                 if (dist_sq2 < sum_r * sum_r) {
                     if (!state.asteroids[j].touching_ship) {
-                        state.ship_hp = state.ship_hp - 1;
+                        state.ship.hp = state.ship.hp - 1;
                         state.asteroids[j].touching_ship = true;
-                        if (state.ship_hp < 1) {
-                            state.ship_hp = 0;
+                        if (state.ship.hp < 1) {
+                            state.ship.hp = 0;
                             trigger_ship_death();
                         }
                     }
@@ -386,7 +386,7 @@ function check_collisions(): void {
 }
 
 function draw_ship(): void {
-    if (!state.ship_alive) {
+    if (!state.ship.alive) {
         return;
     }
 
@@ -427,7 +427,7 @@ function draw_health_bar(): void {
     let bar_h: f32 = 8.0;
     let bar_x: f32 = (SCREEN_W - bar_w) * 0.5;
     let bar_y: f32 = 20.0;
-    let hp_ratio_num: f32 = state.ship_hp;
+    let hp_ratio_num: f32 = state.ship.hp;
     let hp_ratio_den: f32 = SHIP_MAX_HP;
     let hp_ratio: f32 = hp_ratio_num / hp_ratio_den;
     if (hp_ratio < 0.0) {
@@ -500,7 +500,7 @@ function draw_bullets(): void {
 }
 
 function trigger_ship_death(): void {
-    state.ship_alive = false;
+    state.ship.alive = false;
     state.timers.death_anim_ms = DEATH_ANIM_MS;
     state.timers.restart_timer_ms = RESTART_DELAY_MS;
     state.timers.level_start_timer_ms = 0;
@@ -818,7 +818,7 @@ function draw_level_overlay(): void {
 }
 
 function handle_fire_input(delta_ms: i32): void {
-    if (!state.ship_alive) {
+    if (!state.ship.alive) {
         return;
     }
     if (state.timers.fire_cooldown > 0) {
@@ -831,7 +831,7 @@ function handle_fire_input(delta_ms: i32): void {
 }
 
 function tick_level_progression(delta_ms: i32): void {
-    if (!state.ship_alive) {
+    if (!state.ship.alive) {
         return;
     }
 
@@ -847,10 +847,10 @@ function tick_level_progression(delta_ms: i32): void {
         if (state.timers.level_start_timer_ms < 1) {
             state.timers.level_start_timer_ms = 0;
             // Repair ship by 1 HP on level completion, up to max
-            if (state.ship_hp < SHIP_MAX_HP) {
-                state.ship_hp = state.ship_hp + 1;
-                if (state.ship_hp > SHIP_MAX_HP) {
-                    state.ship_hp = SHIP_MAX_HP;
+            if (state.ship.hp < SHIP_MAX_HP) {
+                state.ship.hp = state.ship.hp + 1;
+                if (state.ship.hp > SHIP_MAX_HP) {
+                    state.ship.hp = SHIP_MAX_HP;
                 }
             }
             configure_level(state.level_state.next_level);
@@ -859,7 +859,7 @@ function tick_level_progression(delta_ms: i32): void {
 }
 
 function tick_death_timers(delta_ms: i32): void {
-    if (state.ship_alive) {
+    if (state.ship.alive) {
         return;
     }
     if (state.timers.death_anim_ms > 0) {
