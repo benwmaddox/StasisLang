@@ -504,25 +504,16 @@ STASIS_EXPORT void stasis_end_frame(void) {
     }
 
     if (g_use_sdl_renderer) {
-        /* Batch SDL lines */
-        int vtx_count = g_line_count * 2;
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_Vertex verts[MAX_LINES * 2];
         SDL_Color color;
+        /* Render lines one by one; could be grouped by color if needed */
         for (int i = 0; i < g_line_count; i++) {
             color.r = (Uint8)(g_lines[i].r * 255.0f);
             color.g = (Uint8)(g_lines[i].g * 255.0f);
             color.b = (Uint8)(g_lines[i].b * 255.0f);
             color.a = (Uint8)(g_lines[i].a * 255.0f);
-            verts[i * 2 + 0].position.x = g_lines[i].x1;
-            verts[i * 2 + 0].position.y = g_lines[i].y1;
-            verts[i * 2 + 0].color = color;
-            verts[i * 2 + 1].position.x = g_lines[i].x2;
-            verts[i * 2 + 1].position.y = g_lines[i].y2;
-            verts[i * 2 + 1].color = color;
-        }
-        if (g_line_count > 0) {
-            SDL_RenderGeometry(g_renderer, NULL, verts, vtx_count, NULL, 0);
+            SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+            SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
