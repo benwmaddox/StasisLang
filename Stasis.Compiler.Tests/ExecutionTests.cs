@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Stasis.Compiler.IR;
@@ -220,6 +221,103 @@ public class ExecutionTests
         {
             Assert.Equal(0, exitCode);
             Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    [Fact]
+    public void StrSubstr_copies_full_codepoint()
+    {
+        if (!TryFindLli(out var lliPath))
+        {
+            return;
+        }
+
+        var source = """
+            global src: u8[16];
+            global dst: u8[16];
+
+            function main(): i32 {
+                // src = 0xE2 0x82 0xAC 'A' '\0'
+                src[0] = 226;
+                src[1] = 130;
+                src[2] = 172;
+                src[3] = 65;
+                src[4] = 0;
+                let len: i32 = str_substr(dst, src, 0, 3);
+                return len.==(3).&&(dst[0].==(226)).&&(dst[1].==(130)).&&(dst[2].==(172)).&&(dst[3].==(0));
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(sema.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "substr_ok", LowerOptions.Production);
+        Assert.Empty(lower.Diagnostics);
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, lower.Ir);
+
+        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        try
+        {
+            Assert.Equal(1, exitCode);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    [Fact]
+    public void StrSubstr_aborts_on_misaligned_boundary()
+    {
+        if (!TryFindLli(out var lliPath))
+        {
+            return;
+        }
+
+        var source = """
+            global src: u8[16];
+            global dst: u8[16];
+
+            function main(): i32 {
+                // src = 0xE2 0x82 0xAC 'A' '\0'
+                src[0] = 226;
+                src[1] = 130;
+                src[2] = 172;
+                src[3] = 65;
+                src[4] = 0;
+                return str_substr(dst, src, 1, 2); // mid-codepoint start should abort
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(sema.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "substr_abort", LowerOptions.Production);
+        Assert.Empty(lower.Diagnostics);
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, lower.Ir);
+
+        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        try
+        {
+            Assert.NotEqual(0, exitCode);
+            Assert.True(string.IsNullOrWhiteSpace(stderr) || stderr.Contains("abort", StringComparison.OrdinalIgnoreCase), stderr);
         }
         finally
         {
