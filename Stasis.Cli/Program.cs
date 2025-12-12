@@ -593,6 +593,12 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest, string
         return 1;
     }
 
+    var outDir = Path.GetDirectoryName(outputPath);
+    if (!string.IsNullOrEmpty(outDir))
+    {
+        Directory.CreateDirectory(outDir);
+    }
+
     var args = BuildClangArgs(llPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath);
     var exit = RunProcess(clang, args);
     if (exit != 0)

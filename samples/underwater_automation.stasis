@@ -515,9 +515,9 @@ function to_screen_y(grid_y: i32): f32 {
 function draw_background(): void {
     let t: f32 = state.postfx_phase;
     let caustic: f32 = sin(t * 0.75);
-    let base_r: f32 = 0.03 + 0.01 * caustic * state.postfx_strength;
-    let base_g: f32 = 0.10 + 0.02 * caustic * state.postfx_strength;
-    let base_b: f32 = 0.14 + 0.03 * caustic * state.postfx_strength;
+    let base_r: f32 = 0.06 + 0.02 * caustic * state.postfx_strength;
+    let base_g: f32 = 0.16 + 0.03 * caustic * state.postfx_strength;
+    let base_b: f32 = 0.24 + 0.04 * caustic * state.postfx_strength;
     clear(base_r, base_g, base_b, 1.0);
 }
 
@@ -535,13 +535,13 @@ function draw_lanes(): void {
     for (i = 0; i < state.lane_count; i = i + 1) {
         let x: i32 = state.lane_columns[i];
         let sx: f32 = to_screen_x(x);
-        draw_line(sx, to_screen_y(0), sx, to_screen_y(MAP_H - 1), 0.10, 0.55, 0.65, 0.8);
+        draw_line(sx, to_screen_y(0), sx, to_screen_y(MAP_H - 1), 0.18, 0.70, 0.82, 0.9);
     }
 
     for (i = 0; i < state.crossbar_count; i = i + 1) {
         let row: i32 = state.crossbar_rows[i];
         let sy: f32 = to_screen_y(row);
-        draw_line(to_screen_x(state.lane_columns[0]), sy, to_screen_x(state.lane_columns[state.lane_count - 1]), sy, 0.12, 0.45, 0.55, 0.4);
+        draw_line(to_screen_x(state.lane_columns[0]), sy, to_screen_x(state.lane_columns[state.lane_count - 1]), sy, 0.24, 0.55, 0.68, 0.6);
     }
 }
 
@@ -628,6 +628,9 @@ function draw_units(): void {
 }
 
 function draw_overlay(): void {
+    // Dock baseline for visual anchoring at the bottom of the grid
+    draw_line(24.0, SCREEN_H - 20.0, SCREEN_W - 24.0, SCREEN_H - 20.0, 0.22, 0.66, 0.84, 0.8);
+
     let max_payloads: i32 = 20;
     let delivered: i32 = state.delivered_payloads;
     if (delivered > max_payloads) {
