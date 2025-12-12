@@ -209,6 +209,19 @@ function active_asteroid_count(): i32 {
     return count;
 }
 
+function compute_delta_ms(): i32 {
+    let current_time: i32 = get_time_ms();
+    let delta_ms: i32 = current_time - state.last_time;
+    if (delta_ms < 1) {
+        delta_ms = 1;
+    }
+    if (delta_ms > 100) {
+        delta_ms = 100;
+    }
+    state.last_time = current_time;
+    return delta_ms;
+}
+
 function wrap_position(px: f32, max: f32): f32 {
     let result: f32 = px;
     if (result < 0.0) {
@@ -903,17 +916,9 @@ function main(): i32 {
             clear(0.0, 0.0, 0.1, 1.0);
 
             // Calculate delta time
-            let current_time: i32 = get_time_ms();
-            let delta_ms: i32 = current_time - state.last_time;
-            if (delta_ms < 1) {
-                delta_ms = 1;
-            }
-            if (delta_ms > 100) {
-                delta_ms = 100;
-            }
+            let delta_ms: i32 = compute_delta_ms();
             let delta_ms_f: f32 = delta_ms;
             let dt: f32 = delta_ms_f / 1000.0;
-            state.last_time = current_time;
 
             handle_fire_input(delta_ms);
             update_sim(dt, delta_ms);
