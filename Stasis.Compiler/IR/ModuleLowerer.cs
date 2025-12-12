@@ -2425,7 +2425,7 @@ public sealed class ModuleLowerer
                         builder.BuildCondBr(badRange, abortBlock, rangeOkBlock);
 
                         builder.PositionAtEnd(abortBlock);
-                        builder.BuildCall2(abortType, abortFn, Array.Empty<LLVMValueRef>(), "substr.abort");
+                        builder.BuildCall2(abortType, abortFn, Array.Empty<LLVMValueRef>(), "");
                         builder.BuildUnreachable();
 
                         builder.PositionAtEnd(rangeOkBlock);
