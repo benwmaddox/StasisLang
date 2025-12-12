@@ -165,6 +165,11 @@ static void flush_lines(void) {
 
     if (g_debug_frame_counter < 5) {
         SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
+        if (g_line_count > 0) {
+            SDL_Log("line0: (%.2f,%.2f)->(%.2f,%.2f) rgba=%.2f,%.2f,%.2f,%.2f",
+                g_lines[0].x1, g_lines[0].y1, g_lines[0].x2, g_lines[0].y2,
+                g_lines[0].r, g_lines[0].g, g_lines[0].b, g_lines[0].a);
+        }
     }
 
     /* Debug overlay: white quad + red cross to ensure pixels appear */
@@ -445,7 +450,12 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             return 0;
         }
         SDL_RenderSetLogicalSize(g_renderer, width, height);
-        SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d", width, height);
+        SDL_RendererInfo info;
+        if (SDL_GetRendererInfo(g_renderer, &info) == 0) {
+            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d name=%s flags=0x%x", width, height, info.name ? info.name : "?", info.flags);
+        } else {
+            SDL_Log("Stasis graphics initialized (SDL renderer): %dx%d", width, height);
+        }
     } else {
         g_use_sdl_renderer = false;
     }
@@ -464,8 +474,16 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
     if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(g_renderer, 26, 153, 26, 255);
         SDL_RenderClear(g_renderer);
+        /* Debug overlay: yellow block and red cross */
+        SDL_SetRenderDrawColor(g_renderer, 255, 255, 0, 160);
+        SDL_FRect rect = { 0.0f, 0.0f, 120.0f, 120.0f };
+        SDL_RenderFillRectF(g_renderer, &rect);
+        SDL_SetRenderDrawColor(g_renderer, 255, 0, 0, 255);
+        SDL_RenderDrawLineF(g_renderer, 0.0f, 0.0f, (float)g_window_width, (float)g_window_height);
+        SDL_RenderDrawLineF(g_renderer, (float)g_window_width, 0.0f, 0.0f, (float)g_window_height);
     } else {
         if (g_force_debug_overlay) {
             setup_ortho();
