@@ -487,6 +487,7 @@ static string? FindGraphicsLibrary()
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
     searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(Path.Combine(cwd, "build"));
     searchPaths.Add(cwd);
 
     string[] candidates;
