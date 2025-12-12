@@ -450,6 +450,42 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_foreach_with_index_variable()
+    {
+        var ir = Lower("""
+            global values: i32[4];
+            function run(): void {
+                foreach (let v, i in values) {
+                    values[i] = v;
+                }
+            }
+            """);
+
+        Assert.Contains("foreach.cond", ir);
+        Assert.Contains("foreach.latch", ir);
+        Assert.Contains("foreach.end", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_with_index_variable_on_struct_array()
+    {
+        var ir = Lower("""
+            struct Item { value: i32; }
+            global items: Item[10];
+            function run(): void {
+                foreach (let item, idx in items) {
+                    item.value = idx;
+                }
+            }
+            """);
+
+        Assert.Contains("foreach.cond", ir);
+        Assert.Contains("foreach.body", ir);
+        Assert.Contains("store i32", ir);
+    }
+
+    [Fact]
     public void Builds_descriptor_when_passing_global_array_argument()
     {
         var ir = Lower("""

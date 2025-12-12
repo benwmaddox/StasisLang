@@ -25,6 +25,7 @@ public sealed record ForeachStatementSyntax(
     Token ForeachKeyword,
     Token? LetKeyword,
     Token Iterator,
+    Token? IndexVariable,
     ExpressionSyntax Iterable,
     BlockStatementSyntax Body,
     bool BindByElement)

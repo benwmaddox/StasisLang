@@ -349,6 +349,14 @@ public sealed class SemanticAnalyzer
                     AddLocal(foreachScope, fes.Iterator.Text, SymbolKind.Local, iteratorType, fes.Iterator.Span);
                     EnsurePrimitiveLocal(iteratorType, fes.Iterator.Span);
                 }
+
+                // If an index variable is provided, add it to scope as i32
+                if (fes.IndexVariable is not null)
+                {
+                    var indexType = BuiltInTypes["i32"];
+                    AddLocal(foreachScope, fes.IndexVariable.Text, SymbolKind.Local, indexType, fes.IndexVariable.Span);
+                }
+
                 AnalyzeBlock(fes.Body, foreachScope);
                 break;
             case ReturnStatementSyntax rs:
