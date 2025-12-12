@@ -101,6 +101,7 @@ struct GameState {
     last_tick_ms: i32;
     frame_start_ms: i32;
     lighting_clock_ms: i32;
+    exit_reason: i32;
 
     rng_state: i32;
 }
@@ -273,6 +274,7 @@ function init_state(): void {
     state.paused = false;
     state.last_tick_ms = get_time_ms();
     state.frame_start_ms = state.last_tick_ms;
+    state.exit_reason = 0;
     state.resource_energy = 12;
     state.resource_data = 0;
     state.resource_plating = 8;
@@ -659,6 +661,7 @@ function render(): void {
 function handle_input(): void {
     if (is_key_down(KEY_ESCAPE)) {
         state.running = false;
+        state.exit_reason = 1;
     }
 }
 
@@ -729,6 +732,7 @@ function main(): i32 {
         state.frame_start_ms = get_time_ms();
         handle_input();
         if (should_quit()) {
+            state.exit_reason = 2;
             state.running = false;
         }
 
@@ -752,6 +756,9 @@ function main(): i32 {
             sleep_ms(sleep_for_ms);
         }
     }
+
+    print_int(8000 + state.exit_reason);
+    sleep_ms(250);
 
     return 0;
 }
