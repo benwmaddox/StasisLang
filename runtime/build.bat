@@ -57,6 +57,10 @@ echo Copying shared DLLs to StasisLang root for legacy runs...
 copy /Y "%CD%\bin\Release\*.dll" "%CD%\..\..\" >NUL 2>&1
 echo Copying shared DLLs next to builds...
 copy /Y "%CD%\bin\Release\*.dll" "%CD%\\bin\\Release" >NUL 2>&1
+if not exist "%CD%\\..\\..\\build" (
+    mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+)
+copy /Y "%CD%\\bin\\Release\\*.dll" "%CD%\\..\\..\\build" >NUL 2>&1
 
 echo.
 echo Copying static dependency libs to build\\Release for single-exe links...
@@ -74,6 +78,12 @@ if exist "%MANUAL_LIB_DIR%\\SDL2main.lib" (
 ) else (
     echo   warning: missing SDL2main.lib in %MANUAL_LIB_DIR%
 )
+echo Copying static graphics lib to repo root and build/ for auto-discovery...
+copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\.." >NUL 2>&1
+if not exist "%CD%\\..\\..\\build" (
+    mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+)
+copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
 echo.
 echo To run Asteroids demo with static runtime:
 echo   cd ..\..

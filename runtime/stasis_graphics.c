@@ -78,6 +78,23 @@ static void flush_lines(void) {
         SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
     }
 
+    /* Debug overlay: white quad + red cross to ensure pixels appear */
+    glBegin(GL_QUADS);
+    glColor4f(1.0f, 1.0f, 1.0f, 0.15f);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f((float)g_window_width, 0.0f);
+    glVertex2f((float)g_window_width, (float)g_window_height);
+    glVertex2f(0.0f, (float)g_window_height);
+    glEnd();
+
+    glBegin(GL_LINES);
+    glColor4f(1.0f, 0.0f, 0.0f, 0.8f);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f((float)g_window_width, (float)g_window_height);
+    glVertex2f((float)g_window_width, 0.0f);
+    glVertex2f(0.0f, (float)g_window_height);
+    glEnd();
+
     glBegin(GL_LINES);
     for (int i = 0; i < g_line_count; i++) {
         glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
