@@ -25,3 +25,6 @@ public sealed record EnumDeclarationSyntax(Token EnumKeyword, Token Name, IReadO
 
 public sealed record GlobalDeclarationSyntax(Token GlobalKeyword, Token Name, TypeSyntax Type, Token Semicolon)
     : DeclarationSyntax(new SourceSpan(GlobalKeyword.Span.Start, Semicolon.Span.End - GlobalKeyword.Span.Start));
+
+public sealed record ConstDeclarationSyntax(Token ConstKeyword, Token Name, TypeSyntax Type, ExpressionSyntax Initializer, Token Semicolon)
+    : DeclarationSyntax(new SourceSpan(ConstKeyword.Span.Start, Semicolon.Span.End - ConstKeyword.Span.Start));

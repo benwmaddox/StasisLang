@@ -1,0 +1,14 @@
+// Test that assigning to constants produces errors
+
+const PI: f32 = 3.14159;
+const MAX_COUNT: i32 = 100;
+
+function main(): i32 {
+    // Constants are immutable; verify we can read them.
+    let area_scale: f32 = PI * 2.0;
+    let max_ok: bool = MAX_COUNT == 100;
+    if (max_ok) {
+        return 0;
+    }
+    return 1;
+}

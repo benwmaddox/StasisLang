@@ -17,7 +17,9 @@ public sealed class LlvmTypeMapper
         {
             VoidTypeSymbol => LLVMTypeRef.Void,
             PrimitiveTypeSymbol p => MapPrimitive(p.PrimitiveName),
-            ArrayTypeSymbol a => LLVMTypeRef.CreateArray(Map(a.ElementType), (uint)a.Size),
+            ArrayTypeSymbol a => a.Size > 0
+                ? LLVMTypeRef.CreateArray(Map(a.ElementType), (uint)a.Size)
+                : LLVMTypeRef.CreatePointer(Map(a.ElementType), 0),
             NamedTypeSymbol => LLVMTypeRef.Int32, // treat struct/enums as indices into SoA storage
             _ => LLVMTypeRef.Int32
         };

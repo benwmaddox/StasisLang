@@ -11,8 +11,8 @@ global base_solution_ready: bool;
 global random_state: i32;
 
 function seed_puzzle(): void {
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         puzzle[i] = 0;
     }
 
@@ -30,8 +30,8 @@ function seed_puzzle(): void {
 }
 
 function reset_grid(): void {
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         grid[i] = puzzle[i];
         if (puzzle[i] == 0) {
             clues[i] = 0;
@@ -42,8 +42,8 @@ function reset_grid(): void {
 }
 
 function row_ok(r: i32, val: i32): bool {
-    let c: i32;
-    for c = 0; c < 9; c = c + 1 {
+    let c: i32 = 0;
+    for (c = 0; c < 9; c = c + 1) {
         if (grid[idx(r, c)] == val) {
             return false;
         }
@@ -53,8 +53,8 @@ function row_ok(r: i32, val: i32): bool {
 }
 
 function col_ok(c: i32, val: i32): bool {
-    let r: i32;
-    for r = 0; r < 9; r = r + 1 {
+    let r: i32 = 0;
+    for (r = 0; r < 9; r = r + 1) {
         if (grid[idx(r, c)] == val) {
             return false;
         }
@@ -64,14 +64,14 @@ function col_ok(c: i32, val: i32): bool {
 }
 
 function box_ok(r: i32, c: i32, val: i32): bool {
-    let br: i32;
-    let bc: i32;
-    let rr: i32;
-    let cc: i32;
+    let br: i32 = 0;
+    let bc: i32 = 0;
+    let rr: i32 = 0;
+    let cc: i32 = 0;
     br = r / 3 * 3;
     bc = c / 3 * 3;
-    for rr = 0; rr < 3; rr = rr + 1 {
-        for cc = 0; cc < 3; cc = cc + 1 {
+    for (rr = 0; rr < 3; rr = rr + 1) {
+        for (cc = 0; cc < 3; cc = cc + 1) {
             if (grid[idx(br + rr, bc + cc)] == val) {
                 return false;
             }
@@ -99,8 +99,8 @@ function solve_at(pos: i32): bool {
         return true;
     }
 
-    let r: i32;
-    let c: i32;
+    let r: i32 = 0;
+    let c: i32 = 0;
     r = pos / 9;
     c = pos - r * 9;
 
@@ -108,8 +108,8 @@ function solve_at(pos: i32): bool {
         return solve_at(pos + 1);
     }
 
-    let val: i32;
-    for val = 1; val < 10; val = val + 1 {
+    let val: i32 = 0;
+    for (val = 1; val < 10; val = val + 1) {
         if (can_place(r, c, val)) {
             grid[idx(r, c)] = val;
             if (solve_at(pos + 1)) {
@@ -143,8 +143,7 @@ test `sudoku solves seed`() : bool {
 
 test `random puzzle reproducible`() : bool {
     generate_random_puzzle(42);
-    let first: i32;
-    first = puzzle[0];
+    let first: i32 = puzzle[0];
     generate_random_puzzle(42);
     return first == puzzle[0];
 }
@@ -189,8 +188,7 @@ test `parse_move extracts row col val`() : bool {
     parse_row = 0;
     parse_col = 0;
     parse_val = 0;
-    let ok: bool;
-    ok = parse_move(5);
+    let ok: bool = parse_move(5);
     if (!ok) { return false; }
     if (!parse_row == 2) { return false; }
     if (!parse_col == 3) { return false; }
@@ -200,15 +198,14 @@ test `parse_move extracts row col val`() : bool {
 
 function print_board(): void {
     print_sep_line();
-    let r: i32;
-    let c: i32;
-    for r = 0; r < 9; r = r + 1 {
+    let r: i32 = 0;
+    let c: i32 = 0;
+    for (r = 0; r < 9; r = r + 1) {
         print_int(r + 1);
         print_char(32);
         print_char(124); // |
-        for c = 0; c < 9; c = c + 1 {
-            let p: i32;
-            p = idx(r, c);
+        for (c = 0; c < 9; c = c + 1) {
+            let p: i32 = idx(r, c);
             print_cell(grid[p], clues[p]);
             if (c == 2 || c == 5 || c == 8) {
                 print_char(124);
@@ -224,8 +221,8 @@ function print_board(): void {
 }
 
 function is_complete(): bool {
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         if (grid[i] == 0) {
             return false;
         }
@@ -245,14 +242,12 @@ function print_col_header(): void {
 }
 
 function play(): i32 {
-    let seed: i32;
-    seed = prompt_seed();
+    let seed: i32 = prompt_seed();
     generate_random_puzzle(seed);
 
-    let game_loop: i32;
-    for game_loop = 0; game_loop < 1; game_loop = game_loop {
-        let skip: bool;
-        skip = false;
+    let game_loop: i32 = 0;
+    for (game_loop = 0; game_loop < 1; game_loop = game_loop) {
+        let skip: bool = false;
 
         print_col_header();
         print_board();
@@ -262,8 +257,7 @@ function play(): i32 {
         }
 
         sudoku_print_prompt();
-        let line_len: i32;
-        line_len = read_line();
+        let line_len: i32 = read_line();
         if (line_len == 0) {
             return 0;
         }
@@ -271,15 +265,13 @@ function play(): i32 {
             return 0;
         }
 
-        let first_idx: i32;
-        first_idx = first_non_space_index(line_len);
+        let first_idx: i32 = first_non_space_index(line_len);
         if (!skip) {
             if (first_idx == -1) {
                 sudoku_print_parse_error();
                 skip = true;
             } else {
-                let ch: i32;
-                ch = input_buf[first_idx];
+                let ch: i32 = input_buf[first_idx];
                 if (ch < 48 || ch > 57) {
                     sudoku_print_parse_error();
                     skip = true;
@@ -287,8 +279,7 @@ function play(): i32 {
             }
         }
 
-        let parsed: bool;
-        parsed = false;
+        let parsed: bool = false;
         if (!skip) {
             parsed = parse_move(line_len);
             if (!parsed) {
@@ -297,9 +288,9 @@ function play(): i32 {
             }
         }
 
-        let r: i32;
-        let c: i32;
-        let v: i32;
+        let r: i32 = 0;
+        let c: i32 = 0;
+        let v: i32 = 0;
         if (!skip) {
             r = parse_row;
             c = parse_col;
@@ -308,8 +299,7 @@ function play(): i32 {
             r = 0; c = 0; v = 0;
         }
 
-        let bad: bool;
-        bad = false;
+        let bad: bool = false;
         if (!skip) {
             if (r < 1 || r > 9) { bad = true; }
             if (c < 1 || c > 9) { bad = true; }
@@ -321,12 +311,11 @@ function play(): i32 {
             }
         }
 
-        let rr: i32;
-        let cc: i32;
+        let rr: i32 = 0;
+        let cc: i32 = 0;
         rr = r - 1;
         cc = c - 1;
-        let pos: i32;
-        pos = idx(rr, cc);
+        let pos: i32 = idx(rr, cc);
         if (!skip) {
             if (clues[pos] == 1) {
                 sudoku_print_clue_error();
@@ -369,9 +358,9 @@ global parse_next: i32;
 global parse_tmp: i32;
 
 function read_line(): i32 {
-    let i: i32;
-    let ch: i32;
-    for i = 0; i < 128; i = i {
+    let i: i32 = 0;
+    let ch: i32 = 0;
+    for (i = 0; i < 128; i = i) {
         ch = read_char();
         if (ch == 0) {
             return i;
@@ -380,8 +369,7 @@ function read_line(): i32 {
             return i;
         }
         if (ch == 13) {
-            let next: i32;
-            next = read_char();
+            let next: i32 = read_char();
             return i;
         }
         if (i < 128) {
@@ -406,10 +394,9 @@ function is_space_or_bom(ch: i32): bool {
 }
 
 function first_non_space_index(len: i32): i32 {
-    let i: i32;
-    for i = 0; i < len; i = i + 1 {
-        let ch: i32;
-        ch = input_buf[i];
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        let ch: i32 = input_buf[i];
         if (!is_space_or_bom(ch)) {
             return i;
         }
@@ -418,10 +405,9 @@ function first_non_space_index(len: i32): i32 {
 }
 
 function line_is_quit(len: i32): bool {
-    let i: i32;
-    for i = 0; i < len; i = i + 1 {
-        let ch: i32;
-        ch = input_buf[i];
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        let ch: i32 = input_buf[i];
         if (is_space_or_bom(ch)) {
         } else {
             if (ch == 113 || ch == 81) { return true; }
@@ -432,8 +418,8 @@ function line_is_quit(len: i32): bool {
 }
 
 function skip_ws(len: i32, start: i32): void {
-    let k: i32;
-    for k = start; k < len; k = k + 1 {
+    let k: i32 = 0;
+    for (k = start; k < len; k = k + 1) {
         if (!is_space_or_bom(input_buf[k])) {
             parse_next = k;
             return;
@@ -444,14 +430,13 @@ function skip_ws(len: i32, start: i32): void {
 }
 
 function parse_int_token(len: i32, start: i32): bool {
-    let k: i32;
-    let has: bool;
-    let value: i32;
+    let k: i32 = 0;
+    let has: bool = false;
+    let value: i32 = 0;
     has = false;
     value = 0;
-    for k = start; k < len; k = k + 1 {
-        let ch: i32;
-        ch = input_buf[k];
+    for (k = start; k < len; k = k + 1) {
+        let ch: i32 = input_buf[k];
         if (ch < 48 || ch > 57) {
             parse_next = k;
             if (has) {
@@ -471,15 +456,13 @@ function parse_int_token(len: i32, start: i32): bool {
 }
 
 function parse_move(len: i32): bool {
-    let i: i32;
-    i = 0;
+    let i: i32 = 0;
 
     skip_ws(len, i);
     i = parse_next;
     if (!(i < len)) { return false; }
 
-    let ok: bool;
-    ok = parse_int_token(len, i);
+    let ok: bool = parse_int_token(len, i);
     if (!ok) { return false; }
     parse_row = parse_tmp;
     i = parse_next;
@@ -511,11 +494,9 @@ function parse_move(len: i32): bool {
 
 function prompt_seed(): i32 {
     print_string("Enter puzzle seed (blank for default): ");
-    let len: i32;
-    len = read_line();
+    let len: i32 = read_line();
     print_char(10);
-    let seed: i32;
-    seed = parse_seed_input(len);
+    let seed: i32 = parse_seed_input(len);
     if (seed == -1) {
         seed = time();
     }
@@ -526,14 +507,11 @@ function prompt_seed(): i32 {
 }
 
 function parse_seed_input(len: i32): i32 {
-    let i: i32;
-    let value: i32;
-    value = 0;
-    let has_digit: bool;
-    has_digit = false;
-    for i = 0; i < len; i = i + 1 {
-        let ch: i32;
-        ch = input_buf[i];
+    let i: i32 = 0;
+    let value: i32 = 0;
+    let has_digit: bool = false;
+    for (i = 0; i < len; i = i + 1) {
+        let ch: i32 = input_buf[i];
         if (ch < 48) {
             // skip
         } else {
@@ -554,8 +532,7 @@ function parse_seed_input(len: i32): i32 {
 
 function generate_random_puzzle(seed: i32): void {
     ensure_base_solution();
-    let normalized: i32;
-    normalized = seed;
+    let normalized: i32 = seed;
     if (normalized < 0) {
         normalized = -normalized;
     }
@@ -564,8 +541,7 @@ function generate_random_puzzle(seed: i32): void {
     }
     random_state = normalized;
     copy_base_to_working();
-    let shift: i32;
-    shift = ((normalized % 9) + 9) % 9;
+    let shift: i32 = ((normalized % 9) + 9) % 9;
     shift_solution_digits(shift);
     permute_rows();
     permute_columns();
@@ -584,8 +560,8 @@ function ensure_base_solution(): void {
         return;
     }
 
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         base_solution[i] = grid[i];
     }
 
@@ -593,8 +569,8 @@ function ensure_base_solution(): void {
 }
 
 function copy_base_to_working(): void {
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         working_solution[i] = base_solution[i];
     }
 }
@@ -604,10 +580,10 @@ function shift_solution_digits(shift: i32): void {
         return;
     }
 
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
-        let value: i32;
-        let shifted: i32;
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
+        let value: i32 = 0;
+        let shifted: i32 = 0;
         value = working_solution[i];
         shifted = (value - 1 + shift) % 9;
         if (shifted < 0) {
@@ -618,10 +594,10 @@ function shift_solution_digits(shift: i32): void {
 }
 
 function permute_rows(): void {
-    let band: i32;
-    for band = 0; band < 3; band = band + 1 {
-        let r1: i32;
-        let r2: i32;
+    let band: i32 = 0;
+    for (band = 0; band < 3; band = band + 1) {
+        let r1: i32 = 0;
+        let r2: i32 = 0;
         r1 = band * 3 + (next_random() % 3);
         r2 = band * 3 + (next_random() % 3);
         swap_rows(r1, r2);
@@ -633,11 +609,11 @@ function swap_rows(r1: i32, r2: i32): void {
         return;
     }
 
-    let c: i32;
-    for c = 0; c < 9; c = c + 1 {
-        let a: i32;
-        let b: i32;
-        let temp: i32;
+    let c: i32 = 0;
+    for (c = 0; c < 9; c = c + 1) {
+        let a: i32 = 0;
+        let b: i32 = 0;
+        let temp: i32 = 0;
         a = r1 * 9 + c;
         b = r2 * 9 + c;
         temp = working_solution[a];
@@ -647,10 +623,10 @@ function swap_rows(r1: i32, r2: i32): void {
 }
 
 function permute_columns(): void {
-    let band: i32;
-    for band = 0; band < 3; band = band + 1 {
-        let c1: i32;
-        let c2: i32;
+    let band: i32 = 0;
+    for (band = 0; band < 3; band = band + 1) {
+        let c1: i32 = 0;
+        let c2: i32 = 0;
         c1 = band * 3 + (next_random() % 3);
         c2 = band * 3 + (next_random() % 3);
         swap_columns(c1, c2);
@@ -662,11 +638,11 @@ function swap_columns(c1: i32, c2: i32): void {
         return;
     }
 
-    let r: i32;
-    for r = 0; r < 9; r = r + 1 {
-        let a: i32;
-        let b: i32;
-        let temp: i32;
+    let r: i32 = 0;
+    for (r = 0; r < 9; r = r + 1) {
+        let a: i32 = 0;
+        let b: i32 = 0;
+        let temp: i32 = 0;
         a = r * 9 + c1;
         b = r * 9 + c2;
         temp = working_solution[a];
@@ -676,12 +652,10 @@ function swap_columns(c1: i32, c2: i32): void {
 }
 
 function mask_solution(): void {
-    let kept: i32;
-    kept = 0;
-    let i: i32;
-    for i = 0; i < 81; i = i + 1 {
-        let keep: i32;
-        keep = next_random() % 100;
+    let kept: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
+        let keep: i32 = next_random() % 100;
         if (keep < 55) {
             puzzle[i] = working_solution[i];
             clues[i] = 1;
@@ -693,7 +667,7 @@ function mask_solution(): void {
     }
 
     if (kept < 36) {
-        for i = 0; i < 81 && kept < 36; i = i + 1 {
+        for (i = 0; i < 81 && kept < 36; i = i + 1) {
             if (puzzle[i] == 0) {
                 puzzle[i] = working_solution[i];
                 clues[i] = 1;
@@ -712,10 +686,9 @@ function next_random(): i32 {
 }
 
 function count_clues(): i32 {
-    let i: i32;
-    let total: i32;
-    total = 0;
-    for i = 0; i < 81; i = i + 1 {
+    let i: i32 = 0;
+    let total: i32 = 0;
+    for (i = 0; i < 81; i = i + 1) {
         if (clues[i] == 1) {
             total = total + 1;
         }

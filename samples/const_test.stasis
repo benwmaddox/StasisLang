@@ -1,0 +1,9 @@
+// Test constant declarations
+
+const PI: f32 = 3.14159;
+const MAX_COUNT: i32 = 100;
+const IS_ENABLED: bool = true;
+
+function main(): i32 {
+    return MAX_COUNT;
+}

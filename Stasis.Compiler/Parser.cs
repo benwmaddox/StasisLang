@@ -45,6 +45,7 @@ public sealed class Parser
             TokenKind.StructKeyword => ParseStruct(),
             TokenKind.EnumKeyword => ParseEnum(),
             TokenKind.GlobalKeyword => ParseGlobal(),
+            TokenKind.ConstKeyword => ParseConst(),
             TokenKind.ExportKeyword or TokenKind.FunctionKeyword => ParseFunction(),
             TokenKind.TestKeyword => ParseTest(),
             _ => UnexpectedTopLevel()
@@ -130,6 +131,18 @@ public sealed class Parser
         var type = ParseType();
         var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after global declaration.");
         return new GlobalDeclarationSyntax(globalKeyword, name, type, semicolon);
+    }
+
+    private ConstDeclarationSyntax ParseConst()
+    {
+        var constKeyword = Consume(TokenKind.ConstKeyword, "Expected 'const'.");
+        var name = Consume(TokenKind.Identifier, "Expected constant name.");
+        Consume(TokenKind.Colon, "Expected ':' before type.");
+        var type = ParseType();
+        Consume(TokenKind.Equal, "Expected '=' before constant initializer.");
+        var initializer = ParseExpression();
+        var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after constant declaration.");
+        return new ConstDeclarationSyntax(constKeyword, name, type, initializer, semicolon);
     }
 
     private FunctionDeclarationSyntax ParseFunction()
@@ -238,16 +251,25 @@ public sealed class Parser
             type = ParseType();
         }
 
+        Token? equals = null;
+        ExpressionSyntax? initializer = null;
+        if (Match(TokenKind.Equal))
+        {
+            equals = Previous;
+            initializer = ParseExpression();
+        }
+
         var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after variable declaration.");
-        return new VariableDeclarationSyntax(letKeyword, name, type, semicolon);
+        return new VariableDeclarationSyntax(letKeyword, name, type, equals, initializer, semicolon);
     }
 
     private IfStatementSyntax ParseIf()
     {
         var ifKeyword = Consume(TokenKind.IfKeyword, "Expected 'if'.");
-        Consume(TokenKind.LParen, "Expected '(' after 'if'.");
+        Consume(TokenKind.LParen, "Expected '('.");
         var condition = ParseExpression();
         Consume(TokenKind.RParen, "Expected ')' after condition.");
+
         var thenBlock = ParseBlock();
         BlockStatementSyntax? elseBlock = null;
         if (Match(TokenKind.ElseKeyword))
@@ -261,6 +283,8 @@ public sealed class Parser
     private ForStatementSyntax ParseFor()
     {
         var forKeyword = Consume(TokenKind.ForKeyword, "Expected 'for'.");
+        Consume(TokenKind.LParen, "Expected '('.");
+
         ExpressionSyntax? initializer = null;
         if (!Match(TokenKind.Semicolon))
         {
@@ -276,10 +300,12 @@ public sealed class Parser
         }
 
         ExpressionSyntax? step = null;
-        if (Current.Kind != TokenKind.LBrace)
+        if (Current.Kind != TokenKind.RParen)
         {
             step = ParseExpression();
         }
+
+        Consume(TokenKind.RParen, "Expected ')' after for header.");
 
         var body = ParseBlock();
         return new ForStatementSyntax(forKeyword, initializer, condition, step, body);
@@ -288,13 +314,23 @@ public sealed class Parser
     private ForeachStatementSyntax ParseForeach()
     {
         var foreachKeyword = Consume(TokenKind.ForeachKeyword, "Expected 'foreach'.");
-        Consume(TokenKind.LParen, "Expected '(' after 'foreach'.");
+        Consume(TokenKind.LParen, "Expected '('.");
+
+        Token? letKeyword = null;
+        if (Match(TokenKind.LetKeyword))
+        {
+            letKeyword = Previous;
+        }
+
         var iterator = Consume(TokenKind.Identifier, "Expected iterator name.");
         Consume(TokenKind.InKeyword, "Expected 'in'.");
         var iterable = ParseExpression();
+
         Consume(TokenKind.RParen, "Expected ')' after iterable.");
+
         var body = ParseBlock();
-        return new ForeachStatementSyntax(foreachKeyword, iterator, iterable, body);
+        var bindByElement = letKeyword is not null;
+        return new ForeachStatementSyntax(foreachKeyword, letKeyword, iterator, iterable, body, bindByElement);
     }
 
     private ReturnStatementSyntax ParseReturn()
@@ -523,7 +559,11 @@ public sealed class Parser
         if (Match(TokenKind.LBracket))
         {
             var lbracket = Previous;
-            var sizeToken = Consume(TokenKind.IntegerLiteral, "Expected array size.");
+            Token? sizeToken = null;
+            if (Current.Kind != TokenKind.RBracket)
+            {
+                sizeToken = Consume(TokenKind.IntegerLiteral, "Expected array size.");
+            }
             var rbracket = Consume(TokenKind.RBracket, "Expected ']'.");
             return new ArrayTypeSyntax(type, lbracket, sizeToken, rbracket);
         }

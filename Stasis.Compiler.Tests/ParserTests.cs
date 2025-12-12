@@ -56,16 +56,20 @@ public class ParserTests
     public void Reports_equal_in_let()
     {
         var source = """
-            let x = 1;
+            function f(): void {
+                let x = 1;
+            }
             """;
 
         var result = Parser.Parse(source);
 
-        Assert.NotEmpty(result.Diagnostics);
+        Assert.Empty(result.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
+        Assert.NotEmpty(sema.Diagnostics);
     }
 
     [Fact]
-    public void Parses_typed_let_without_initializer()
+    public void Parses_typed_let_without_initializer_still_parses()
     {
         var source = """
             function f(): void {
@@ -78,6 +82,8 @@ public class ParserTests
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
         Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body.Statements));
+        var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("must be initialized"));
     }
 
     [Fact]
@@ -157,7 +163,7 @@ public class ParserTests
     {
         var source = """
             function loop(): void {
-                for i = 0; i.<(10); i = i.+(1) {
+                for (i = 0; i.<(10); i = i.+(1)) {
                 }
             }
             """;
