@@ -45,6 +45,7 @@ static struct {
     float r, g, b, a;
 } g_lines[MAX_LINES];
 static int g_line_count = 0;
+static int g_debug_flush_frame = 0;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -60,6 +61,11 @@ static float screen_to_ndc_y(float y) {
 static void flush_lines(void) {
     if (g_line_count == 0) return;
 
+    /* Debug: log first few frames to confirm draw calls flow */
+    if (g_debug_flush_frame < 3) {
+        SDL_Log("flush_lines frame %d: count=%d", g_debug_flush_frame, g_line_count);
+    }
+
     glBegin(GL_LINES);
     for (int i = 0; i < g_line_count; i++) {
         glColor4f(g_lines[i].r, g_lines[i].g, g_lines[i].b, g_lines[i].a);
@@ -68,6 +74,7 @@ static void flush_lines(void) {
     }
     glEnd();
 
+    g_debug_flush_frame++;
     g_line_count = 0;
 }
 
@@ -210,6 +217,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     /* Request OpenGL 2.1 compatibility profile for immediate mode */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
@@ -251,9 +259,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     SDL_GL_SetSwapInterval(1);
 
     /* Setup OpenGL state */
+    glViewport(0, 0, width, height);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     glLineWidth(2.0f);
 
     g_window_width = width;
