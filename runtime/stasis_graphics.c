@@ -173,23 +173,6 @@ static void flush_lines(void) {
         }
     }
 
-    /* Debug overlay: white quad + red cross to ensure pixels appear */
-    glBegin(GL_QUADS);
-    glColor4f(1.0f, 1.0f, 1.0f, 0.15f);
-    glVertex2f(0.0f, 0.0f);
-    glVertex2f((float)g_window_width, 0.0f);
-    glVertex2f((float)g_window_width, (float)g_window_height);
-    glVertex2f(0.0f, (float)g_window_height);
-    glEnd();
-
-    glBegin(GL_LINES);
-    glColor4f(1.0f, 0.0f, 0.0f, 0.8f);
-    glVertex2f(0.0f, 0.0f);
-    glVertex2f((float)g_window_width, (float)g_window_height);
-    glVertex2f((float)g_window_width, 0.0f);
-    glVertex2f(0.0f, (float)g_window_height);
-    glEnd();
-
     /* Build vertex buffer */
     int vtx_count = g_line_count * 2;
     for (int i = 0; i < g_line_count; i++) {
@@ -305,7 +288,7 @@ static const char* kFallbackPostfxFrag =
 "uniform vec3 u_biolume_color;\n"
 "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
 "float noise(vec2 p){ vec2 i=floor(p); vec2 f=fract(p); float a=hash(i); float b=hash(i+vec2(1.0,0.0)); float c=hash(i+vec2(0.0,1.0)); float d=hash(i+vec2(1.0,1.0)); vec2 u=f*f*(3.0-2.0*f); return mix(a,b,u.x)+(c-a)*u.y*(1.0-u.x)+(d-b)*u.x*u.y; }\n"
-"void main(){ float depth=clamp(v_uv.y*u_depth_scale,0.0,1.0); float ripple=noise(v_uv*6.0+u_time*0.25); float wave=sin((v_uv.y*8.0)+(u_time*0.6)+ripple*u_surface_jitter); float c=0.5+0.5*wave; vec3 deep=vec3(0.02,0.08,0.12); vec3 mid=vec3(0.00,0.16,0.22); vec3 base=mix(deep,mid,depth); vec3 color=base+u_intensity*c*u_biolume_color; float atten=mix(1.0,0.25,depth); gl_FragColor=vec4(color*atten,0.45); }\n";
+"void main(){ float depth=clamp(v_uv.y*u_depth_scale,0.0,1.0); float ripple=noise(v_uv*6.0+u_time*0.25); float wave=sin((v_uv.y*8.0)+(u_time*0.6)+ripple*u_surface_jitter); float c=0.5+0.5*wave; vec3 deep=vec3(0.02,0.08,0.12); vec3 mid=vec3(0.00,0.16,0.22); vec3 base=mix(deep,mid,depth); vec3 color=base+u_intensity*c*u_biolume_color; float atten=mix(1.0,0.25,depth); gl_FragColor=vec4(color*atten,0.18); }\n";
 
 static void init_postfx_shader(void) {
     const char* fragSource = kFallbackPostfxFrag;
@@ -347,9 +330,28 @@ static void render_postfx(void) {
         return;
     }
 
+    /* Allow disabling via environment variable for debugging */
+    static int checked_env = 0;
+    static int env_disable = 0;
+    if (!checked_env) {
+        const char* val = SDL_getenv("STASIS_DISABLE_POSTFX");
+        env_disable = (val && strcmp(val, "0") != 0);
+        checked_env = 1;
+        if (env_disable) {
+            SDL_Log("Post-effects disabled via STASIS_DISABLE_POSTFX");
+        }
+    }
+    if (env_disable) {
+        return;
+    }
+
     if (!g_postfx_enabled || g_postfx_program == 0) {
         return;
     }
+
+    /* Ensure blending is enabled for the overlay effect */
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(g_postfx_program);
     if (g_postfx_time_loc >= 0) glUniform1f(g_postfx_time_loc, g_postfx_phase);
