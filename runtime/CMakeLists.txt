@@ -41,6 +41,12 @@ endfunction()
 if(STASIS_GRAPHICS_BUILD_SHARED)
     add_library(stasis_graphics SHARED)
     configure_stasis_target(stasis_graphics OFF)
+
+    # On Windows, use .def file for explicit exports
+    if(WIN32)
+        target_sources(stasis_graphics PRIVATE stasis_graphics.def)
+    endif()
+
     set_target_properties(stasis_graphics PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

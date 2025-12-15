@@ -1532,8 +1532,6 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
             free(pixels);
             return 0;
         }
-    } else if (should_run_test && should_skip_test) {
-        SDL_Log("STARTUP TEST: Skipped (STASIS_SKIP_RENDER_TEST set)");
     }
 
     glBindTexture(GL_TEXTURE_2D, g_sprite_atlas_tex);
