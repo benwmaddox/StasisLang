@@ -117,6 +117,33 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_array_length_property_to_constant()
+    {
+        var ir = Lower("""
+            global temps: i32[4];
+            function len(): i32 {
+                return temps.length;
+            }
+            """);
+
+        Assert.Contains("ret i32 4", ir);
+    }
+
+    [Fact]
+    public void Lowers_nested_array_length_from_struct_field()
+    {
+        var ir = Lower("""
+            struct GameState { values: f32[5]; }
+            global state: GameState;
+            function len(): i32 {
+                return state.values.length;
+            }
+            """);
+
+        Assert.Contains("ret i32 5", ir);
+    }
+
+    [Fact]
     public void Lowers_if_with_conditional_branches()
     {
         var ir = Lower("""
@@ -420,6 +447,42 @@ public class LoweringTests
         Assert.Contains("extractvalue { ptr, ptr, i32 }", ir);
         Assert.Contains("store i32 0", ir);
         Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_with_index_variable()
+    {
+        var ir = Lower("""
+            global values: i32[4];
+            function run(): void {
+                foreach (let v, i in values) {
+                    values[i] = v;
+                }
+            }
+            """);
+
+        Assert.Contains("foreach.cond", ir);
+        Assert.Contains("foreach.latch", ir);
+        Assert.Contains("foreach.end", ir);
+        Assert.Contains("getelementptr i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_foreach_with_index_variable_on_struct_array()
+    {
+        var ir = Lower("""
+            struct Item { value: i32; }
+            global items: Item[10];
+            function run(): void {
+                foreach (let item, idx in items) {
+                    item.value = idx;
+                }
+            }
+            """);
+
+        Assert.Contains("foreach.cond", ir);
+        Assert.Contains("foreach.body", ir);
+        Assert.Contains("store i32", ir);
     }
 
     [Fact]

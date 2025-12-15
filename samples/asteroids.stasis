@@ -27,7 +27,6 @@ const SCREEN_W: f32 = 800.0;
 const SCREEN_H: f32 = 600.0;
 
 // Limits (constants)
-const ASTEROID_CAP: i32 = 50;
 const MAX_BULLETS: i32 = 5;
 const BULLET_LIFETIME_MS: i32 = 1000;
 const SHIP_MAX_HP: i32 = 10;
@@ -89,7 +88,7 @@ struct LevelState {
 
 struct GameState {
     ship: Ship;
-    asteroids: Asteroid[50]; // capacity constant mirrored by ASTEROID_CAP
+    asteroids: Asteroid[50]; // fixed capacity; use asteroids.length
     bullets: Bullet[5];
     timers: Timers;
     level_state: LevelState;
@@ -137,6 +136,7 @@ function init_ship(): void {
 }
 
 function configure_level(level: i32): void {
+    let asteroid_cap: i32 = state.asteroids.length;
     state.level_state.level = level;
     state.timers.level_start_timer_ms = 0;
     state.level_state.next_level = level + 1;
@@ -156,19 +156,19 @@ function configure_level(level: i32): void {
     else {
         if ((level % 2) == 0) {
             // Even: bigger/slower
-        count = 4 + (level / 2);
-        if (count > ASTEROID_CAP) {
-            count = ASTEROID_CAP;
-        }
+            count = 4 + (level / 2);
+            if (count > asteroid_cap) {
+                count = asteroid_cap;
+            }
             size = 36.0;
             speed_min = 0.5;
             speed_range = 1.0; // 0.5..1.5
         } else {
             // Odd: more/smaller/faster
-        count = 7 + level;
-        if (count > ASTEROID_CAP) {
-            count = ASTEROID_CAP;
-        }
+            count = 7 + level;
+            if (count > asteroid_cap) {
+                count = asteroid_cap;
+            }
             size = 18.0;
             speed_min = 2.0;
             speed_range = 3.0; // 2..5
@@ -176,8 +176,7 @@ function configure_level(level: i32): void {
     }
 
     state.level_state.num_asteroids = count;
-    let i: i32 = 0;
-    for (i = 0; i < ASTEROID_CAP; i = i + 1) {
+    foreach (let asteroid, i in state.asteroids) {
         // Random spawn across the screen
         let spawn_x: f32 = rand_float(SCREEN_W);
         let spawn_y: f32 = rand_float(SCREEN_H);
@@ -189,17 +188,17 @@ function configure_level(level: i32): void {
         let vy: f32 = sin_fast(dir_angle) * speed;
 
         let active_now: bool = i < count;
-        state.asteroids[i].active = active_now;
+        asteroid.active = active_now;
         if (active_now) {
-            state.asteroids[i].size = size;
+            asteroid.size = size;
         } else {
-            state.asteroids[i].size = 0.0;
+            asteroid.size = 0.0;
         }
-        state.asteroids[i].x = spawn_x;
-        state.asteroids[i].y = spawn_y;
-        state.asteroids[i].vx = vx;
-        state.asteroids[i].vy = vy;
-        state.asteroids[i].touching_ship = false;
+        asteroid.x = spawn_x;
+        asteroid.y = spawn_y;
+        asteroid.vx = vx;
+        asteroid.vy = vy;
+        asteroid.touching_ship = false;
     }
 }
 
@@ -210,10 +209,9 @@ function init_bullets(): void {
 }
 
 function active_asteroid_count(): i32 {
-    let i: i32 = 0;
     let count: i32 = 0;
-    for (i = 0; i < ASTEROID_CAP; i = i + 1) {
-        if (state.asteroids[i].active) {
+    foreach (let asteroid in state.asteroids) {
+        if (asteroid.active) {
             count = count + 1;
         }
     }
@@ -289,26 +287,24 @@ function update_ship(dt: f32): void {
 }
 
 function update_asteroids(dt: f32): void {
-    let i: i32 = 0;
-    for (i = 0; i < ASTEROID_CAP; i = i + 1) {
-        if (state.asteroids[i].active) {
-            state.asteroids[i].x = state.asteroids[i].x + state.asteroids[i].vx * dt * 60.0;
-            state.asteroids[i].y = state.asteroids[i].y + state.asteroids[i].vy * dt * 60.0;
-            state.asteroids[i].x = wrap_position(state.asteroids[i].x, SCREEN_W);
-            state.asteroids[i].y = wrap_position(state.asteroids[i].y, SCREEN_H);
+    foreach (let asteroid in state.asteroids) {
+        if (asteroid.active) {
+            asteroid.x = asteroid.x + asteroid.vx * dt * 60.0;
+            asteroid.y = asteroid.y + asteroid.vy * dt * 60.0;
+            asteroid.x = wrap_position(asteroid.x, SCREEN_W);
+            asteroid.y = wrap_position(asteroid.y, SCREEN_H);
         }
     }
 }
 
 function fire_bullet(): void {
-    let i: i32 = 0;
-    for (i = 0; i < MAX_BULLETS; i = i + 1) {
-        if (state.bullets[i].life == 0) {
-            state.bullets[i].x = state.ship.x + cos_fast(state.ship.angle) * 15.0;
-            state.bullets[i].y = state.ship.y + sin_fast(state.ship.angle) * 15.0;
-            state.bullets[i].vx = cos_fast(state.ship.angle) * 300.0;
-            state.bullets[i].vy = sin_fast(state.ship.angle) * 300.0;
-            state.bullets[i].life = BULLET_LIFETIME_MS;
+    foreach (let bullet in state.bullets) {
+        if (bullet.life == 0) {
+            bullet.x = state.ship.x + cos_fast(state.ship.angle) * 15.0;
+            bullet.y = state.ship.y + sin_fast(state.ship.angle) * 15.0;
+            bullet.vx = cos_fast(state.ship.angle) * 300.0;
+            bullet.vy = sin_fast(state.ship.angle) * 300.0;
+            bullet.life = BULLET_LIFETIME_MS;
             return;
         }
     }
@@ -339,20 +335,18 @@ function abs_f32(x: f32): f32 {
 }
 
 function check_collisions(): void {
-    let j: i32 = 0;
-
     // Bullet-asteroid collisions
     foreach (let bullet in state.bullets) {
         if (bullet.life > 0) {
-            for (j = 0; j < ASTEROID_CAP; j = j + 1) {
-                if (state.asteroids[j].active) {
-                    let dx: f32 = bullet.x - state.asteroids[j].x;
-                    let dy: f32 = bullet.y - state.asteroids[j].y;
+            foreach (let asteroid in state.asteroids) {
+                if (asteroid.active) {
+                    let dx: f32 = bullet.x - asteroid.x;
+                    let dy: f32 = bullet.y - asteroid.y;
                     let dist_sq: f32 = dx * dx + dy * dy;
-                    let radius: f32 = state.asteroids[j].size;
+                    let radius: f32 = asteroid.size;
                     if (dist_sq < radius * radius) {
                         bullet.life = 0;
-                        state.asteroids[j].active = false;
+                        asteroid.active = false;
                     }
                 }
             }
@@ -362,23 +356,23 @@ function check_collisions(): void {
     // Ship-asteroid collisions
     if (state.ship.alive) {
         let ship_radius: f32 = 12.0;
-        for (j = 0; j < ASTEROID_CAP; j = j + 1) {
-            if (state.asteroids[j].active) {
-                let dx2: f32 = state.ship.x - state.asteroids[j].x;
-                let dy2: f32 = state.ship.y - state.asteroids[j].y;
+        foreach (let asteroid in state.asteroids) {
+            if (asteroid.active) {
+                let dx2: f32 = state.ship.x - asteroid.x;
+                let dy2: f32 = state.ship.y - asteroid.y;
                 let dist_sq2: f32 = dx2 * dx2 + dy2 * dy2;
-                let sum_r: f32 = ship_radius + state.asteroids[j].size;
+                let sum_r: f32 = ship_radius + asteroid.size;
                 if (dist_sq2 < sum_r * sum_r) {
-                    if (!state.asteroids[j].touching_ship) {
+                    if (!asteroid.touching_ship) {
                         state.ship.hp = state.ship.hp - 1;
-                        state.asteroids[j].touching_ship = true;
+                        asteroid.touching_ship = true;
                         if (state.ship.hp < 1) {
                             state.ship.hp = 0;
                             trigger_ship_death();
                         }
                     }
                 } else {
-                    state.asteroids[j].touching_ship = false;
+                    asteroid.touching_ship = false;
                 }
             }
         }
@@ -452,12 +446,11 @@ function draw_health_bar(): void {
 }
 
 function draw_asteroids(): void {
-    let i: i32 = 0;
-    for (i = 0; i < ASTEROID_CAP; i = i + 1) {
-        if (state.asteroids[i].active) {
-            let x: f32 = state.asteroids[i].x;
-            let y: f32 = state.asteroids[i].y;
-            let sz: f32 = state.asteroids[i].size;
+    foreach (let asteroid in state.asteroids) {
+        if (asteroid.active) {
+            let x: f32 = asteroid.x;
+            let y: f32 = asteroid.y;
+            let sz: f32 = asteroid.size;
 
             // Draw as simple octagon (8 sides)
             let j: i32 = 0;

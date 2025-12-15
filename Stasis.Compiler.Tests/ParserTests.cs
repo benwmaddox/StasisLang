@@ -192,4 +192,68 @@ public class ParserTests
         var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
         Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
     }
+
+    [Fact]
+    public void Parses_foreach_without_index()
+    {
+        var source = """
+            global values: i32[4];
+            function f(): void {
+                foreach (let v in values) {
+                }
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        Assert.Equal("v", foreachStmt.Iterator.Text);
+        Assert.Null(foreachStmt.IndexVariable);
+        Assert.True(foreachStmt.BindByElement);
+    }
+
+    [Fact]
+    public void Parses_foreach_with_index()
+    {
+        var source = """
+            global values: i32[4];
+            function f(): void {
+                foreach (let v, i in values) {
+                }
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        Assert.Equal("v", foreachStmt.Iterator.Text);
+        Assert.NotNull(foreachStmt.IndexVariable);
+        Assert.Equal("i", foreachStmt.IndexVariable.Text);
+        Assert.True(foreachStmt.BindByElement);
+    }
+
+    [Fact]
+    public void Parses_foreach_index_only()
+    {
+        var source = """
+            global values: i32[4];
+            function f(): void {
+                foreach (i in values) {
+                }
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        Assert.Equal("i", foreachStmt.Iterator.Text);
+        Assert.Null(foreachStmt.IndexVariable);
+        Assert.False(foreachStmt.BindByElement);
+    }
 }
