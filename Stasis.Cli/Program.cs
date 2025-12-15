@@ -167,9 +167,17 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     try
     {
         var source = File.ReadAllText(path);
+
+        // Auto-detect graphics usage if not explicitly enabled
+        if (!enableGraphics && DetectsGraphicsUsage(source))
+        {
+            enableGraphics = true;
+        }
+
         var parse = Parser.Parse(source);
         if (parse.Diagnostics.Count > 0)
         {
+            
             PrintDiagnostics(parse.Diagnostics, source, path);
             return 1;
         }
@@ -470,6 +478,33 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
     {
         // Best-effort; missing copies will surface as runtime load errors.
     }
+}
+
+static bool DetectsGraphicsUsage(string source)
+{
+    // Check if source code uses graphics functions
+    // These are the key graphics API functions that indicate graphics usage
+    string[] graphicsFunctions = {
+        "init_window",
+        "begin_frame",
+        "end_frame",
+        "draw_line",
+        "clear(",
+        "should_quit",
+        "is_key_down",
+        "get_mouse_x",
+        "get_mouse_y",
+        "is_mouse_down"
+    };
+
+    foreach (var func in graphicsFunctions)
+    {
+        if (source.Contains(func))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static string? FindGraphicsLibrary()
