@@ -20,7 +20,13 @@
       "Bash(cmd.exe /c \"cd /d C:\\code\\StasisLang\\runtime\\build && cmake --build . --config Release\")",
       "Bash(cmd.exe /c \"dir C:\\code\\StasisLang\\runtime\")",
       "Bash(powershell -Command \"cd C:/code/StasisLang/runtime/build; cmake --build . --config Release 2>&1\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(./stasis.bat build:*)",
+      "Bash(./stasis.bat release:*)",
+      "Bash(ls:*)",
+      "Bash(dumpbin:*)",
+      "Bash(timeout 5 dotnet run:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []

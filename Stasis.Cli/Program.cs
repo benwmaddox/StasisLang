@@ -385,6 +385,12 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         args.Add("-Wl,/ignore:4210");
         args.Add("-Wl,/STACK:8388608");
 
+        // Suppress CRT conflict warning when linking SDL2-static (built with /MT) with dynamic CRT
+        if (linkingStaticGraphics)
+        {
+            args.Add("-Wl,/NODEFAULTLIB:libcmt");
+        }
+
         // For release builds with optimization, strip debug info and enable aggressive dead code elimination
         if (!string.IsNullOrWhiteSpace(optLevel) && optLevel != "0")
         {
