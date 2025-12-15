@@ -273,7 +273,20 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                 }
             }
 
-            return RunProcess(exePath, string.Empty);
+            return RunProcess(exePath, string.Empty, psi =>
+            {
+                if (enableGraphics)
+                {
+                    var runTest = Environment.GetEnvironmentVariable("STASIS_RUN_RENDER_TEST");
+                    if (string.IsNullOrEmpty(runTest) || runTest == "0")
+                    {
+                        if (Environment.GetEnvironmentVariable("STASIS_SKIP_RENDER_TEST") is null)
+                        {
+                            psi.Environment["STASIS_SKIP_RENDER_TEST"] = "1";
+                        }
+                    }
+                }
+            });
         }
         finally
         {
@@ -518,7 +531,9 @@ static string? FindGraphicsLibrary()
     // Prefer workspace runtime outputs before falling back to cwd root
     var cwd = Directory.GetCurrentDirectory();
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
     searchPaths.Add(Path.Combine(cwd, "runtime"));
@@ -608,7 +623,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null)
 {
     var psi = new ProcessStartInfo
     {
@@ -616,6 +631,7 @@ static int RunProcess(string fileName, string arguments)
         Arguments = arguments,
         UseShellExecute = false
     };
+    configure?.Invoke(psi);
 
     using var proc = Process.Start(psi)!;
     proc.WaitForExit();
