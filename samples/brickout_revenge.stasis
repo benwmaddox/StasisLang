@@ -30,7 +30,7 @@ const SCREEN_H: f32 = 600.0;
 
 // Game constants
 const MAX_BRICKS: i32 = 50;
-const MAX_BALLS: i32 = 30;
+const MAX_BALLS: i32 = 900;
 const PADDLE_Y: f32 = 570.0;
 const PADDLE_WIDTH: f32 = 100.0;
 const PADDLE_HEIGHT: f32 = 10.0;
@@ -66,6 +66,7 @@ const PI: f32 = 3.14159;
 // Timing
 const TARGET_FPS: i32 = 60;
 const FRAME_TIME_MS: i32 = 16;
+const FRAME_TIME_HISTORY: i32 = 120;
 
 const JIGGLE_THRESHOLD: i32 = 10;
 const JIGGLE_DEGREES: f32 = 5.0;
@@ -123,11 +124,12 @@ struct Timers {
     frame_start: i32;
     ball_spawn_cd: i32;
     phase_timer: i32;
+    tick_time_ms: i32;
 }
 
 struct GameState {
     bricks: Brick[50];
-    balls: Ball[30];
+    balls: Ball[900];
     paddle: Paddle;
     cursor: Cursor;
     timers: Timers;
@@ -138,6 +140,8 @@ struct GameState {
     max_balls_wave: i32;
     rng_state: i32;
     running: i32;
+    frame_times: i32[120];
+    frame_time_index: i32;
 }
 
 global state: GameState;
@@ -250,12 +254,18 @@ function init_game(reset_progress: bool): void {
     state.timers.frame_start = 0;
     state.timers.ball_spawn_cd = 0;
     state.timers.phase_timer = 0;
+    state.timers.tick_time_ms = 0;
 
     // Game state
     // Start immediately in battle; no setup pause.
     state.phase = PHASE_BATTLE;
     state.balls_spawned = 0;
     state.running = 1;
+
+    // Initialize frame time tracking
+    // Note: Frame times will be filled with first actual measurement
+    // to provide accurate average from the start
+    state.frame_time_index = 0;
 
     if (reset_progress) {
         state.wave = 1;
@@ -265,52 +275,45 @@ function init_game(reset_progress: bool): void {
 }
 
 function setup_default_bricks(): void {
-    // Place a default formation of bricks for wave 1
+    // Stress test: Fill the top of the screen with bricks
     let brick_idx: i32 = 0;
-
-    // Row 1 - basic bricks
+    let row: i32 = 0;
     let col: i32 = 0;
-    for (col = 2; col < 9; col = col + 1) {
-        if (brick_idx < MAX_BRICKS) {
-            state.bricks[brick_idx].active = true;
-            state.bricks[brick_idx].x = grid_to_world_x(col);
-            state.bricks[brick_idx].y = grid_to_world_y(2);
-            state.bricks[brick_idx].hp = 1;
-            state.bricks[brick_idx].max_hp = 1;
-            state.bricks[brick_idx].brick_type = BRICK_BASIC;
-            state.bricks[brick_idx].attack_cd_ms = 0;
-            state.bricks[brick_idx].shot_fx_ms = 0;
-            brick_idx = brick_idx + 1;
-        }
-    }
 
-    // Row 2 - mixed
-    for (col = 3; col < 8; col = col + 1) {
-        if (brick_idx < MAX_BRICKS) {
-            state.bricks[brick_idx].active = true;
-            state.bricks[brick_idx].x = grid_to_world_x(col);
-            state.bricks[brick_idx].y = grid_to_world_y(3);
-            state.bricks[brick_idx].hp = 2;
-            state.bricks[brick_idx].max_hp = 2;
-            state.bricks[brick_idx].brick_type = BRICK_ARMORED;
-            state.bricks[brick_idx].attack_cd_ms = 0;
-            state.bricks[brick_idx].shot_fx_ms = 0;
-            brick_idx = brick_idx + 1;
-        }
-    }
+    // Fill 5 rows x 10 columns = 50 bricks (MAX_BRICKS)
+    for (row = 0; row < 5; row = row + 1) {
+        for (col = 0; col < 10; col = col + 1) {
+            if (brick_idx < MAX_BRICKS) {
+                state.bricks[brick_idx].active = true;
+                state.bricks[brick_idx].x = grid_to_world_x(col);
+                state.bricks[brick_idx].y = grid_to_world_y(row);
+                state.bricks[brick_idx].attack_cd_ms = 0;
+                state.bricks[brick_idx].shot_fx_ms = 0;
 
-    // Row 3 - reflector in center
-    for (col = 4; col < 7; col = col + 1) {
-        if (brick_idx < MAX_BRICKS) {
-            state.bricks[brick_idx].active = true;
-            state.bricks[brick_idx].x = grid_to_world_x(col);
-            state.bricks[brick_idx].y = grid_to_world_y(4);
-            state.bricks[brick_idx].hp = 1;
-            state.bricks[brick_idx].max_hp = 1;
-            state.bricks[brick_idx].brick_type = BRICK_REFLECTOR;
-            state.bricks[brick_idx].attack_cd_ms = 0;
-            state.bricks[brick_idx].shot_fx_ms = 0;
-            brick_idx = brick_idx + 1;
+                // Mix brick types for variety
+                let type_selector: i32 = (row + col) % 3;
+
+                // Stress test: bricks have 10-30 HP
+                let brick_hp: i32 = 10 + (next_rand() % 21);
+
+                if (type_selector == 0) {
+                    state.bricks[brick_idx].brick_type = BRICK_BASIC;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+                if (type_selector == 1) {
+                    state.bricks[brick_idx].brick_type = BRICK_ARMORED;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+                if (type_selector == 2) {
+                    state.bricks[brick_idx].brick_type = BRICK_REFLECTOR;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+
+                brick_idx = brick_idx + 1;
+            }
         }
     }
 }
@@ -402,7 +405,7 @@ function spawn_ball(): void {
             ball.vy = 0.0 - rand_range(speed_min, speed_max);
             ball.radius = BALL_RADIUS;
             ball.damage = 1 + (state.wave / 4);
-            ball.max_hp = 20 + (state.wave / 2);
+            ball.max_hp = (20 + (state.wave / 2)) * 10;
             ball.hp = ball.max_hp;
             state.balls_spawned = state.balls_spawned + 1;
             return;
@@ -566,14 +569,47 @@ function check_paddle_collisions(): void {
                         ball.bounce_streak = ball.bounce_streak + 1;
                         if (ball.bounce_streak >= JIGGLE_THRESHOLD) {
                             ball.bounce_streak = 0;
-                            let jiggle_rad: f32 = JIGGLE_DEGREES * (PI / 180.0);
-                            let angle: f32 = rand_range(0.0 - jiggle_rad, jiggle_rad);
-                            let c: f32 = cos_fast(angle);
-                            let s: f32 = sin_fast(angle);
-                            let old_vx: f32 = ball.vx;
-                            let old_vy: f32 = ball.vy;
-                            ball.vx = old_vx * c - old_vy * s;
-                            ball.vy = old_vx * s + old_vy * c;
+                            // Find first active brick and angle ball toward it (up to 15 degrees)
+                            let found_brick: bool = false;
+                            let brick_cx: f32 = 0.0;
+                            let brick_cy: f32 = 0.0;
+                            foreach (let brick in state.bricks) {
+                                if (brick.active) {
+                                    if (!found_brick) {
+                                        brick_cx = brick.x + brick.width / 2.0;
+                                        brick_cy = brick.y + brick.height / 2.0;
+                                        found_brick = true;
+                                    }
+                                }
+                            }
+
+                            if (found_brick) {
+                                // Calculate direction to brick
+                                let tx: f32 = brick_cx - bx;
+                                let ty: f32 = brick_cy - by;
+
+                                // Use cross product to determine which way to rotate
+                                // cross = vx * ty - vy * tx
+                                let cross: f32 = ball.vx * ty - ball.vy * tx;
+
+                                // Apply up to 15 degrees rotation toward the brick
+                                let max_adjustment: f32 = 15.0 * (PI / 180.0);
+                                let angle: f32 = 0.0;
+                                if (cross > 0.0) {
+                                    // Rotate counterclockwise
+                                    angle = max_adjustment;
+                                } else {
+                                    // Rotate clockwise
+                                    angle = 0.0 - max_adjustment;
+                                }
+
+                                let c: f32 = cos_fast(angle);
+                                let s: f32 = sin_fast(angle);
+                                let old_vx: f32 = ball.vx;
+                                let old_vy: f32 = ball.vy;
+                                ball.vx = old_vx * c - old_vy * s;
+                                ball.vy = old_vx * s + old_vy * c;
+                            }
                         }
                     }
                 }
@@ -583,21 +619,17 @@ function check_paddle_collisions(): void {
 }
 
 function compute_ball_spawn_cd_ms(): i32 {
-    let cd: i32 = 1500 - (state.wave * 80);
-    if (cd < 450) { cd = 450; }
-    return cd;
+    // Stress test: spawn a ball every second
+    return 1000;
 }
 
 function start_wave(): void {
     state.balls_spawned = 0;
     state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
 
-    // Spawn multiple balls immediately to make the start harder.
-    // Keep this <= max_balls_wave so the wave size is still respected.
-    if (state.max_balls_wave > 0) {
-        spawn_ball();
-    }
-    if (state.max_balls_wave > 1) {
+    // Stress test: spawn MAX_BALLS at the start
+    let i: i32 = 0;
+    for (i = 0; i < MAX_BALLS; i = i + 1) {
         spawn_ball();
     }
 }
@@ -687,13 +719,11 @@ function handle_setup_input(): void {
 // Update game logic
 function update_game(dt: f32, delta_ms: i32): void {
     if (state.phase == PHASE_BATTLE) {
-        // Spawn balls periodically
+        // Spawn balls periodically (stress test: no limit)
         state.timers.ball_spawn_cd = state.timers.ball_spawn_cd - delta_ms;
         if (state.timers.ball_spawn_cd < 0) {
-            if (state.balls_spawned < state.max_balls_wave) {
-                spawn_ball();
-                state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
-            }
+            spawn_ball();
+            state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
         }
 
         // Update physics
@@ -929,12 +959,63 @@ function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
     }
 }
 
+function compute_avg_frame_time(): f32 {
+    let sum: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < FRAME_TIME_HISTORY; i = i + 1) {
+        sum = sum + state.frame_times[i];
+    }
+    let sum_f: f32 = sum;
+    let count_f: f32 = FRAME_TIME_HISTORY;
+    return sum_f / count_f;
+}
+
+function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
+    // Draw a float with 1 decimal place (e.g., 3.5)
+    let int_part: i32 = value;
+    let int_part_f: f32 = int_part;
+    let decimal_f: f32 = (value - int_part_f) * 10.0;
+    let decimal_part: i32 = decimal_f;
+
+    // Draw integer part
+    draw_number(int_part, x, y, scale);
+
+    // Calculate width of integer part for positioning
+    let int_digits: i32 = 1;
+    if (int_part > 9) { int_digits = 2; }
+    if (int_part > 99) { int_digits = 3; }
+
+    let spacing: f32 = scale * 1.5;
+    let int_width: f32 = int_digits;
+    let decimal_x: f32 = x + int_width * spacing;
+
+    // Draw decimal point (small filled square)
+    let dot_size: f32 = scale * 0.2;
+    let dot_y: f32 = y + scale * 1.7;
+    draw_filled_rect(decimal_x, dot_y, dot_size, dot_size, 1.0, 1.0, 1.0, 1.0);
+
+    // Draw decimal digit
+    let digit_x: f32 = decimal_x + spacing * 0.3;
+    draw_digit(decimal_part, digit_x, y, scale);
+}
+
 function draw_ui(): void {
     // Score in top-left
     draw_number(state.score, 20.0, 10.0, 8.0);
 
     // Wave indicator in top-right
     draw_number(state.wave, SCREEN_W - 60.0, 10.0, 8.0);
+
+    // Average frame time in bottom-left (in milliseconds with 1 decimal)
+    let avg_time: f32 = compute_avg_frame_time();
+    draw_decimal_1(avg_time, 20.0, SCREEN_H - 30.0, 6.0);
+
+    // Debug: Active counts in bottom-right
+    let active_balls_count: i32 = count_active_balls();
+    let active_bricks_count: i32 = count_active_bricks();
+    draw_number(active_balls_count, SCREEN_W - 80.0, SCREEN_H - 50.0, 4.0);
+    draw_number(active_bricks_count, SCREEN_W - 80.0, SCREEN_H - 30.0, 4.0);
+
     if (state.phase == PHASE_LOSE) {
         // "LOSE" indicator
         draw_rect(SCREEN_W / 2.0 - 40.0, SCREEN_H / 2.0 - 20.0, 80.0, 40.0, 1.0, 0.3, 0.3, 1.0);
@@ -994,6 +1075,12 @@ function main(): i32 {
     state.timers.last_time = get_time_ms();
     state.running = 1;
 
+    // Initialize frame time buffer with baseline value
+    let init_i: i32 = 0;
+    for (init_i = 0; init_i < FRAME_TIME_HISTORY; init_i = init_i + 1) {
+        state.frame_times[init_i] = 1;
+    }
+
     let frame: i32 = 0;
     for (frame = 0; state.running == 1; frame = frame + 1) {
         state.timers.frame_start = get_time_ms();
@@ -1017,6 +1104,17 @@ function main(): i32 {
 
             update_game(dt, delta_ms);
             draw_frame();
+
+            // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
+            let frame_end: i32 = get_time_ms();
+            state.timers.tick_time_ms = frame_end - state.timers.frame_start;
+
+            // Store in circular buffer for averaging
+            state.frame_times[state.frame_time_index] = state.timers.tick_time_ms;
+            state.frame_time_index = state.frame_time_index + 1;
+            if (state.frame_time_index > (FRAME_TIME_HISTORY - 1)) {
+                state.frame_time_index = 0;
+            }
 
             end_frame();
             sync_frame_rate();
