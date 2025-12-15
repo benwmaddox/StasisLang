@@ -374,10 +374,11 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             // When linking static graphics, let clang pick CRT defaults to avoid duplicate ucrt linkage.
             args.Add("-lkernel32");
             args.Add("-lmsvcrt");
+            // legacy_stdio_definitions provides printf and related functions
+            args.Add("-llegacy_stdio_definitions");
             if (!linkingStaticGraphics)
             {
                 args.Add("-lucrt");
-                args.Add("-llegacy_stdio_definitions");
             }
         }
     }

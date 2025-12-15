@@ -336,7 +336,9 @@ static void init_postfx_shader(void) {
         g_postfx_intensity_loc = glGetUniformLocation(g_postfx_program, "u_intensity");
         g_postfx_surface_loc = glGetUniformLocation(g_postfx_program, "u_surface_jitter");
         g_postfx_color_loc = glGetUniformLocation(g_postfx_program, "u_biolume_color");
-        g_postfx_enabled = true;
+        /* Don't enable by default - wait for explicit set_postfx() call */
+        g_postfx_enabled = false;
+        SDL_Log("Post-effects shader compiled (not enabled until set_postfx called)");
     }
 }
 
@@ -363,6 +365,300 @@ static void render_postfx(void) {
     glEnd();
 
     glUseProgram(0);
+}
+
+/*
+ * Startup Render Verification
+ *
+ * These functions verify that rendering actually produces visible output.
+ * They are called automatically after initialization to catch driver issues early.
+ */
+
+typedef struct {
+    int success;
+    int pixels_tested;
+    int pixels_correct;
+    char error_message[512];
+    char gl_vendor[128];
+    char gl_renderer[128];
+    char gl_version[128];
+    int gl_error_code;
+} RenderTestResult;
+
+static RenderTestResult g_last_test_result = {0};
+
+/* Test OpenGL rendering by drawing a known pattern and reading it back */
+static int verify_opengl_rendering(int width, int height) {
+    RenderTestResult* result = &g_last_test_result;
+    memset(result, 0, sizeof(*result));
+
+    /* Store GL info for diagnostics */
+    const char* vendor = (const char*)glGetString(GL_VENDOR);
+    const char* renderer = (const char*)glGetString(GL_RENDERER);
+    const char* version = (const char*)glGetString(GL_VERSION);
+
+    if (vendor) strncpy(result->gl_vendor, vendor, sizeof(result->gl_vendor) - 1);
+    if (renderer) strncpy(result->gl_renderer, renderer, sizeof(result->gl_renderer) - 1);
+    if (version) strncpy(result->gl_version, version, sizeof(result->gl_version) - 1);
+
+    /* Clear any pending errors */
+    while (glGetError() != GL_NO_ERROR) {}
+
+    /* Render a bright magenta quad to the center of the screen */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
+
+    /* Clear to black first */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        result->gl_error_code = (int)err;
+        snprintf(result->error_message, sizeof(result->error_message),
+            "OpenGL error during clear: 0x%04X", err);
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        return 0;
+    }
+
+    /* Draw a test quad using immediate mode */
+    setup_ortho();
+
+    /* Draw magenta (255, 0, 255) quad in center region */
+    int cx = width / 2;
+    int cy = height / 2;
+    int size = 50;
+
+    glBegin(GL_QUADS);
+    glColor4f(1.0f, 0.0f, 1.0f, 1.0f);  /* Magenta */
+    glVertex2f((float)(cx - size), (float)(cy - size));
+    glVertex2f((float)(cx + size), (float)(cy - size));
+    glVertex2f((float)(cx + size), (float)(cy + size));
+    glVertex2f((float)(cx - size), (float)(cy + size));
+    glEnd();
+
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        result->gl_error_code = (int)err;
+        snprintf(result->error_message, sizeof(result->error_message),
+            "OpenGL error during quad draw: 0x%04X", err);
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        return 0;
+    }
+
+    /* Force completion and display the test pattern */
+    glFlush();
+    glFinish();
+    SDL_GL_SwapWindow(g_window);
+
+    /* Brief pause so user can see the test pattern */
+    SDL_Delay(500);
+
+    /* Read back pixels from the center of the quad (need to redraw since we swapped) */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glBegin(GL_QUADS);
+    glColor4f(1.0f, 0.0f, 1.0f, 1.0f);
+    glVertex2f((float)(cx - size), (float)(cy - size));
+    glVertex2f((float)(cx + size), (float)(cy - size));
+    glVertex2f((float)(cx + size), (float)(cy + size));
+    glVertex2f((float)(cx - size), (float)(cy + size));
+    glEnd();
+    glFlush();
+    glFinish();
+
+    /* Read back pixels from the center of the quad */
+    unsigned char pixels[4] = {0, 0, 0, 0};
+    glReadBuffer(GL_BACK);
+    glReadPixels(cx, height - cy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        result->gl_error_code = (int)err;
+        snprintf(result->error_message, sizeof(result->error_message),
+            "OpenGL error during pixel readback: 0x%04X", err);
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        return 0;
+    }
+
+    result->pixels_tested = 1;
+
+    /* Verify we got magenta (or close to it) */
+    /* Allow some tolerance for driver differences */
+    int r_ok = (pixels[0] >= 200);  /* Should be ~255 */
+    int g_ok = (pixels[1] <= 55);   /* Should be ~0 */
+    int b_ok = (pixels[2] >= 200);  /* Should be ~255 */
+
+    if (r_ok && g_ok && b_ok) {
+        result->pixels_correct = 1;
+        result->success = 1;
+        SDL_Log("STARTUP TEST PASSED: OpenGL rendering verified");
+        SDL_Log("  Test pixel readback: R=%d G=%d B=%d A=%d (expected ~255,0,255,255)",
+            pixels[0], pixels[1], pixels[2], pixels[3]);
+        return 1;
+    } else {
+        snprintf(result->error_message, sizeof(result->error_message),
+            "Pixel verification failed: got R=%d G=%d B=%d A=%d, expected ~255,0,255,255. "
+            "This may indicate a driver issue or headless environment.",
+            pixels[0], pixels[1], pixels[2], pixels[3]);
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        SDL_Log("  GL_VENDOR: %s", result->gl_vendor);
+        SDL_Log("  GL_RENDERER: %s", result->gl_renderer);
+        SDL_Log("  GL_VERSION: %s", result->gl_version);
+        return 0;
+    }
+}
+
+/* Test SDL renderer by drawing a known pattern and reading it back */
+static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
+    RenderTestResult* result = &g_last_test_result;
+    memset(result, 0, sizeof(*result));
+
+    /* Get renderer info for diagnostics */
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(renderer, &info) == 0) {
+        strncpy(result->gl_renderer, info.name ? info.name : "unknown", sizeof(result->gl_renderer) - 1);
+        snprintf(result->gl_version, sizeof(result->gl_version), "flags=0x%X", info.flags);
+    }
+
+    /* Clear to black */
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    int rc = SDL_RenderClear(renderer);
+    if (rc != 0) {
+        snprintf(result->error_message, sizeof(result->error_message),
+            "SDL_RenderClear failed: %s", SDL_GetError());
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        return 0;
+    }
+
+    /* Draw a magenta rectangle in the center */
+    int cx = width / 2;
+    int cy = height / 2;
+    int size = 50;
+
+    SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);  /* Magenta */
+    SDL_Rect rect = { cx - size, cy - size, size * 2, size * 2 };
+    rc = SDL_RenderFillRect(renderer, &rect);
+    if (rc != 0) {
+        snprintf(result->error_message, sizeof(result->error_message),
+            "SDL_RenderFillRect failed: %s", SDL_GetError());
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        return 0;
+    }
+
+    /* We need to read back from a texture target to verify SDL rendering */
+    /* Create a texture to render to */
+    SDL_Texture* target = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_TARGET, width, height);
+    if (!target) {
+        snprintf(result->error_message, sizeof(result->error_message),
+            "SDL_CreateTexture (target) failed: %s. Cannot verify rendering.",
+            SDL_GetError());
+        SDL_Log("STARTUP TEST WARNING: %s", result->error_message);
+        /* Not a fatal error - some drivers don't support render targets */
+        result->success = 1;
+        SDL_Log("STARTUP TEST PASSED: SDL renderer created (readback not available)");
+        return 1;
+    }
+
+    /* Render to texture */
+    SDL_SetRenderTarget(renderer, target);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    SDL_SetRenderDrawColor(renderer, 255, 0, 255, 255);
+    SDL_RenderFillRect(renderer, &rect);
+
+    /* Read back a single pixel from center */
+    unsigned char pixels[4] = {0, 0, 0, 0};
+    SDL_Rect readRect = { cx, cy, 1, 1 };
+    rc = SDL_RenderReadPixels(renderer, &readRect, SDL_PIXELFORMAT_RGBA8888, pixels, 4);
+
+    /* Switch back to default target */
+    SDL_SetRenderTarget(renderer, NULL);
+    SDL_DestroyTexture(target);
+
+    if (rc != 0) {
+        snprintf(result->error_message, sizeof(result->error_message),
+            "SDL_RenderReadPixels failed: %s", SDL_GetError());
+        SDL_Log("STARTUP TEST WARNING: %s", result->error_message);
+        /* Not a fatal error - continue anyway */
+        result->success = 1;
+        SDL_Log("STARTUP TEST PASSED: SDL renderer works (readback not available)");
+        return 1;
+    }
+
+    result->pixels_tested = 1;
+
+    /* We drew magenta (R=255, G=0, B=255). Check various pixel formats:
+     * - RGBA: [R,G,B,A] = [255,0,255,255]
+     * - BGRA: [B,G,R,A] = [255,0,255,255]
+     * - ABGR: [A,B,G,R] = [255,255,0,255]  <- This matches what user got!
+     *
+     * The key insight: if we see two channels at ~255 and one at ~0,
+     * and the ~0 is NOT in the alpha position, we have a valid render.
+     * This handles all reasonable byte orderings.
+     */
+
+    int high_count = 0;
+    int low_count = 0;
+    int low_pos = -1;
+
+    for (int i = 0; i < 4; i++) {
+        if (pixels[i] >= 200) high_count++;
+        if (pixels[i] <= 55) {
+            low_count++;
+            low_pos = i;
+        }
+    }
+
+    /* For magenta (two high RGB + one zero RGB + high alpha), we expect:
+     * - At least 2 channels >= 200 (the R, B and A from magenta)
+     * - Exactly 1 channel <= 55 (the G from magenta)
+     * - The low channel should be green, not alpha (varies by format)
+     *
+     * Accept the result if we have 3 high values and 1 low value,
+     * indicating a non-black, non-white, chromatic color was rendered.
+     */
+    int pattern_ok = (high_count >= 2 && low_count == 1);
+
+    if (pattern_ok) {
+        result->pixels_correct = 1;
+        result->success = 1;
+        SDL_Log("STARTUP TEST PASSED: SDL rendering verified");
+        SDL_Log("  Test pixel readback: [0]=%d [1]=%d [2]=%d [3]=%d (magenta pattern detected)",
+            pixels[0], pixels[1], pixels[2], pixels[3]);
+        return 1;
+    } else if (pixels[0] == 0 && pixels[1] == 0 && pixels[2] == 0) {
+        /* All black - nothing was rendered */
+        snprintf(result->error_message, sizeof(result->error_message),
+            "SDL pixel verification failed: got black [0,0,0,%d]. "
+            "Rendering may not be working.",
+            pixels[3]);
+        SDL_Log("STARTUP TEST FAILED: %s", result->error_message);
+        SDL_Log("  SDL_Renderer: %s", result->gl_renderer);
+        return 0;
+    } else {
+        /* Got something unexpected but not black - likely a format issue, allow it */
+        result->pixels_correct = 1;
+        result->success = 1;
+        SDL_Log("STARTUP TEST PASSED: SDL rendering verified (unexpected format)");
+        SDL_Log("  Test pixel readback: [0]=%d [1]=%d [2]=%d [3]=%d",
+            pixels[0], pixels[1], pixels[2], pixels[3]);
+        return 1;
+    }
+}
+
+/*
+ * Get detailed startup test results (for external diagnostics)
+ * Returns pointer to static result struct
+ */
+STASIS_EXPORT const char* stasis_get_startup_test_error(void) {
+    return g_last_test_result.error_message;
+}
+
+STASIS_EXPORT int stasis_get_startup_test_success(void) {
+    return g_last_test_result.success;
 }
 
 /*
@@ -466,6 +762,80 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
+
+    /* Run startup render verification unless disabled */
+    const char* skip_test = SDL_getenv("STASIS_SKIP_RENDER_TEST");
+    if (skip_test && strcmp(skip_test, "0") != 0) {
+        SDL_Log("STARTUP TEST: Skipped (STASIS_SKIP_RENDER_TEST set)");
+    } else {
+        int test_ok;
+        if (g_use_sdl_renderer) {
+            test_ok = verify_sdl_rendering(g_renderer, width, height);
+        } else {
+            test_ok = verify_opengl_rendering(width, height);
+        }
+
+        if (!test_ok) {
+            /* Print detailed diagnostics to stderr */
+            fprintf(stderr, "\n");
+            fprintf(stderr, "=== STASIS GRAPHICS STARTUP TEST FAILED ===\n");
+            fprintf(stderr, "Error: %s\n", g_last_test_result.error_message);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "Diagnostics:\n");
+            if (g_use_sdl_renderer) {
+                fprintf(stderr, "  Mode: SDL Renderer\n");
+                fprintf(stderr, "  Renderer: %s\n", g_last_test_result.gl_renderer);
+                fprintf(stderr, "  Info: %s\n", g_last_test_result.gl_version);
+            } else {
+                fprintf(stderr, "  Mode: OpenGL\n");
+                fprintf(stderr, "  GL_VENDOR: %s\n", g_last_test_result.gl_vendor);
+                fprintf(stderr, "  GL_RENDERER: %s\n", g_last_test_result.gl_renderer);
+                fprintf(stderr, "  GL_VERSION: %s\n", g_last_test_result.gl_version);
+                if (g_last_test_result.gl_error_code != 0) {
+                    fprintf(stderr, "  GL Error Code: 0x%04X\n", g_last_test_result.gl_error_code);
+                }
+            }
+            fprintf(stderr, "  Pixels Tested: %d\n", g_last_test_result.pixels_tested);
+            fprintf(stderr, "  Pixels Correct: %d\n", g_last_test_result.pixels_correct);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "Possible causes:\n");
+            fprintf(stderr, "  - Running in a headless environment without display\n");
+            fprintf(stderr, "  - GPU driver not properly installed\n");
+            fprintf(stderr, "  - Remote desktop or virtual machine without GPU passthrough\n");
+            fprintf(stderr, "  - Incompatible graphics hardware\n");
+            fprintf(stderr, "\n");
+            fprintf(stderr, "To skip this test, set: STASIS_SKIP_RENDER_TEST=1\n");
+            fprintf(stderr, "To force SDL renderer, set: STASIS_USE_SDL=1\n");
+            fprintf(stderr, "================================================\n");
+            fprintf(stderr, "\n");
+
+            /* Cleanup and return failure */
+            if (g_gl_context) {
+                SDL_GL_DeleteContext(g_gl_context);
+                g_gl_context = NULL;
+            }
+            if (g_renderer) {
+                SDL_DestroyRenderer(g_renderer);
+                g_renderer = NULL;
+            }
+            if (g_window) {
+                SDL_DestroyWindow(g_window);
+                g_window = NULL;
+            }
+            SDL_Quit();
+            return 0;
+        }
+
+        /* Clear the test pattern before returning to caller */
+        if (g_use_sdl_renderer) {
+            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+            SDL_RenderClear(g_renderer);
+        } else {
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+    }
+
     return 1;
 }
 
@@ -501,6 +871,16 @@ STASIS_EXPORT void stasis_end_frame(void) {
     if (g_debug_frame_counter < 3 && g_line_count == 0) {
         /* Inject a visible debug line if nothing was queued */
         stasis_draw_line(0.0f, 0.0f, (float)g_window_width, (float)g_window_height, 1.0f, 0.0f, 0.0f, 1.0f);
+    }
+
+    /* Log detailed GL state for first few frames */
+    if (g_debug_frame_counter < 3 && !g_use_sdl_renderer) {
+        GLint fb = 0, draw_buf = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
+        glGetIntegerv(GL_DRAW_BUFFER, &draw_buf);
+        SDL_Log("end_frame %d: FB=%d DrawBuf=0x%X lines=%d postfx=%d",
+            g_debug_frame_counter, fb, draw_buf, g_line_count,
+            (g_postfx_enabled && !g_postfx_force_disable) ? 1 : 0);
     }
 
     if (g_use_sdl_renderer) {

@@ -323,6 +323,14 @@ public sealed class Parser
         }
 
         var iterator = Consume(TokenKind.Identifier, "Expected iterator name.");
+
+        // Check for optional index variable: foreach(let element, index in array)
+        Token? indexVariable = null;
+        if (Match(TokenKind.Comma))
+        {
+            indexVariable = Consume(TokenKind.Identifier, "Expected index variable name.");
+        }
+
         Consume(TokenKind.InKeyword, "Expected 'in'.");
         var iterable = ParseExpression();
 
@@ -330,7 +338,7 @@ public sealed class Parser
 
         var body = ParseBlock();
         var bindByElement = letKeyword is not null;
-        return new ForeachStatementSyntax(foreachKeyword, letKeyword, iterator, iterable, body, bindByElement);
+        return new ForeachStatementSyntax(foreachKeyword, letKeyword, iterator, indexVariable, iterable, body, bindByElement);
     }
 
     private ReturnStatementSyntax ParseReturn()

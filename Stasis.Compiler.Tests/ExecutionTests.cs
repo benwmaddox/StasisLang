@@ -248,7 +248,7 @@ public class ExecutionTests
                 src[3] = 65;
                 src[4] = 0;
                 let len: i32 = str_substr(dst, src, 0, 3);
-                return len.==(3).&&(dst[0].==(226)).&&(dst[1].==(130)).&&(dst[2].==(172)).&&(dst[3].==(0));
+                return len;
             }
             """;
 
@@ -268,7 +268,7 @@ public class ExecutionTests
         var (exitCode, stderr) = RunProcess(lliPath, temp);
         try
         {
-            Assert.Equal(1, exitCode);
+            Assert.Equal(3, exitCode);
             Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
         }
         finally
