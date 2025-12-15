@@ -74,9 +74,9 @@ struct enum global function export test return let if else for foreach in
 
 ### Operators
 
-- Infix arithmetic/comparison: `+ - * / % < > ==` with TypeScript-style precedence.
+- Infix arithmetic/comparison: `+ - * / % < <= > >= == !=` with TypeScript-style precedence.
 - Compound assignment: `= += -= *= /= %=` 
-- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .>() .==()`
+- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .<=() .>() .>=() .==() .!=()`
 - Assignment expressions may appear only once per expression to keep the Pratt parser unambiguous; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
 
 ---

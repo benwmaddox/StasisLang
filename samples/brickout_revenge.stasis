@@ -10,6 +10,9 @@
 // - begin_frame(), end_frame(): bracket GPU work
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
+// - gfx_load_sprite(path: string) -> i32
+// - gfx_draw_sprite(handle: i32, x: f32, y: f32, sx: f32, sy: f32, rot: f32, r: f32, g: f32, b: f32, a: f32)
+// - gfx_poll_reload(handle: i32) -> bool
 // - is_key_down(scancode: i32) -> bool
 
 // SDL Scancodes
@@ -117,6 +120,11 @@ struct GameState {
 }
 
 global state: GameState;
+global spr_paddle: i32;
+global spr_ball: i32;
+global spr_brick_basic: i32;
+global spr_brick_armored: i32;
+global spr_brick_reflector: i32;
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -615,28 +623,33 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
 function draw_bricks(): void {
     foreach (let brick in state.bricks) {
         if (brick.active) {
-            let r: f32 = 1.0;
-            let g: f32 = 1.0;
-            let b: f32 = 1.0;
-
-            // Color by type
+            let h: i32 = spr_brick_basic;
             if (brick.brick_type == BRICK_BASIC) {
-                r = 1.0; g = 1.0; b = 1.0; // White
+                h = spr_brick_basic;
             }
             if (brick.brick_type == BRICK_ARMORED) {
-                r = 0.3; g = 0.5; b = 1.0; // Blue
+                h = spr_brick_armored;
             }
             if (brick.brick_type == BRICK_REFLECTOR) {
-                r = 1.0; g = 1.0; b = 0.3; // Yellow
+                h = spr_brick_reflector;
             }
 
-            draw_rect(brick.x, brick.y, brick.width, brick.height, r, g, b, 1.0);
+            let cx: f32 = brick.x + brick.width / 2.0;
+            let cy: f32 = brick.y + brick.height / 2.0;
+            let sx: f32 = brick.width / 64.0;
+            let sy: f32 = brick.height / 24.0;
+            if (h == 0) {
+                // Fallback: line rectangle when sprites are unavailable
+                draw_rect(brick.x, brick.y, brick.width, brick.height, 1.0, 1.0, 1.0, 1.0);
+            } else {
+                gfx_draw_sprite(h, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+            }
 
             // Draw HP indicator for armored
             if (brick.hp > 1) {
                 let hp_x: f32 = brick.x + brick.width / 2.0 - 5.0;
                 let hp_y: f32 = brick.y + brick.height / 2.0;
-                draw_line(hp_x, hp_y, hp_x + 10.0, hp_y, r, g, b, 1.0);
+                draw_line(hp_x, hp_y, hp_x + 10.0, hp_y, 1.0, 1.0, 1.0, 1.0);
             }
         }
     }
@@ -645,15 +658,26 @@ function draw_bricks(): void {
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            draw_circle(ball.x, ball.y, ball.radius, 1.0, 0.3, 1.0, 1.0); // Magenta
+            let scale: f32 = (ball.radius * 2.0) / 32.0;
+            if (spr_ball == 0) {
+                draw_circle(ball.x, ball.y, ball.radius, 1.0, 0.3, 1.0, 1.0);
+            } else {
+                gfx_draw_sprite(spr_ball, ball.x, ball.y, scale, scale, 0.0, 1.0, 1.0, 1.0, 1.0);
+            }
         }
     }
 }
 
 function draw_paddle(): void {
-    let px: f32 = state.paddle.x - state.paddle.width / 2.0;
-    let py: f32 = state.paddle.y - state.paddle.height / 2.0;
-    draw_filled_rect(px, py, state.paddle.width, state.paddle.height, 0.3, 1.0, 1.0, 1.0); // Cyan
+    let sx: f32 = state.paddle.width / 128.0;
+    let sy: f32 = state.paddle.height / 24.0;
+    if (spr_paddle == 0) {
+        let px: f32 = state.paddle.x - state.paddle.width / 2.0;
+        let py: f32 = state.paddle.y - state.paddle.height / 2.0;
+        draw_filled_rect(px, py, state.paddle.width, state.paddle.height, 0.3, 1.0, 1.0, 1.0);
+    } else {
+        gfx_draw_sprite(spr_paddle, state.paddle.x, state.paddle.y, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+    }
 }
 
 // 7-segment digit display (from asteroids)
@@ -749,6 +773,13 @@ function draw_ui(): void {
 }
 
 function draw_frame(): void {
+    // Hot reload during development (no flags for now)
+    if (spr_paddle == 0) { } else { gfx_poll_reload(spr_paddle); }
+    if (spr_ball == 0) { } else { gfx_poll_reload(spr_ball); }
+    if (spr_brick_basic == 0) { } else { gfx_poll_reload(spr_brick_basic); }
+    if (spr_brick_armored == 0) { } else { gfx_poll_reload(spr_brick_armored); }
+    if (spr_brick_reflector == 0) { } else { gfx_poll_reload(spr_brick_reflector); }
+
     draw_bricks();
     draw_balls();
     draw_paddle();
@@ -779,6 +810,12 @@ function main(): i32 {
     if (!init_ok) {
         return 1;
     }
+
+    spr_paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.stv");
+    spr_ball = gfx_load_sprite("assets_src/brickout-revenge/ball.stv");
+    spr_brick_basic = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.stv");
+    spr_brick_armored = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.stv");
+    spr_brick_reflector = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.stv");
 
     seed_rng(time());
     init_game();

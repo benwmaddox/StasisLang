@@ -10,6 +10,24 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdint.h>
+#if defined(_WIN32)
+#include <sys/types.h>
+#include <sys/stat.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
+    (void)userdata;
+    (void)category;
+    (void)priority;
+    if (!message) return;
+    fprintf(stderr, "%s\n", message);
+    fflush(stderr);
+}
 
 #if defined(STASIS_GRAPHICS_STATIC)
 #define STASIS_EXPORT
@@ -63,6 +81,50 @@ static GLuint g_line_vbo = 0;
 static GLuint g_line_vao = 0;
 static GLint g_line_pos_loc = -1;
 static GLint g_line_color_loc = -1;
+
+/* Sprite atlas + batching (baked from .stv sources) */
+#define MAX_SPRITES 256
+#define SPRITE_ATLAS_W 1024
+#define SPRITE_ATLAS_H 1024
+#define SPRITE_ATLAS_PAD 2
+#define MAX_SPRITE_VERTS (6 * 4096)
+
+typedef struct {
+    float x, y;
+    float u, v;
+    float r, g, b, a;
+} SpriteVertex;
+
+typedef struct {
+    char* path;
+    int w;
+    int h;
+    int atlas_x;
+    int atlas_y;
+    float u0, v0, u1, v1;
+    uint64_t mtime;
+    SDL_Texture* sdl_tex;
+    int used;
+} SpriteEntry;
+
+static SpriteEntry g_sprites[MAX_SPRITES];
+static int g_sprite_count = 0;
+
+static GLuint g_sprite_program = 0;
+static GLuint g_sprite_vbo = 0;
+static GLuint g_sprite_vao = 0;
+static GLint g_sprite_pos_loc = -1;
+static GLint g_sprite_uv_loc = -1;
+static GLint g_sprite_color_loc = -1;
+static GLint g_sprite_tex_loc = -1;
+
+static GLuint g_sprite_atlas_tex = 0;
+static int g_sprite_atlas_cursor_x = SPRITE_ATLAS_PAD;
+static int g_sprite_atlas_cursor_y = SPRITE_ATLAS_PAD;
+static int g_sprite_atlas_row_h = 0;
+
+static SpriteVertex g_sprite_vertices[MAX_SPRITE_VERTS];
+static int g_sprite_vert_count = 0;
 
 /* Convert screen coords to OpenGL NDC (-1 to 1) */
 static float screen_to_ndc_x(float x) {
@@ -271,6 +333,446 @@ static GLuint link_program(GLuint vs, GLuint fs) {
         return 0;
     }
     return prog;
+}
+
+static uint64_t get_file_mtime(const char* path) {
+#if defined(_WIN32)
+    struct _stat st;
+    if (_stat(path, &st) != 0) return 0;
+    return (uint64_t)st.st_mtime;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return (uint64_t)st.st_mtime;
+#endif
+}
+
+static char* stasis_strdup(const char* s) {
+    if (!s) return NULL;
+#if defined(_WIN32)
+    return _strdup(s);
+#else
+    return strdup(s);
+#endif
+}
+
+static int atlas_alloc(int w, int h, int* out_x, int* out_y) {
+    if (w <= 0 || h <= 0) return 0;
+    if (w + SPRITE_ATLAS_PAD * 2 > SPRITE_ATLAS_W) return 0;
+    if (h + SPRITE_ATLAS_PAD * 2 > SPRITE_ATLAS_H) return 0;
+
+    if (g_sprite_atlas_cursor_x + w + SPRITE_ATLAS_PAD > SPRITE_ATLAS_W) {
+        g_sprite_atlas_cursor_x = SPRITE_ATLAS_PAD;
+        g_sprite_atlas_cursor_y += g_sprite_atlas_row_h + SPRITE_ATLAS_PAD;
+        g_sprite_atlas_row_h = 0;
+    }
+
+    if (g_sprite_atlas_cursor_y + h + SPRITE_ATLAS_PAD > SPRITE_ATLAS_H) {
+        return 0;
+    }
+
+    *out_x = g_sprite_atlas_cursor_x;
+    *out_y = g_sprite_atlas_cursor_y;
+
+    g_sprite_atlas_cursor_x += w + SPRITE_ATLAS_PAD;
+    if (h > g_sprite_atlas_row_h) g_sprite_atlas_row_h = h;
+    return 1;
+}
+
+static void ensure_sprite_atlas(void) {
+    if (g_sprite_atlas_tex != 0) return;
+
+    glGenTextures(1, &g_sprite_atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, g_sprite_atlas_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SPRITE_ATLAS_W, SPRITE_ATLAS_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+static void ensure_sprite_program(void) {
+    if (g_sprite_program != 0) return;
+
+    const char* vs_src =
+        "#version 120\n"
+        "attribute vec2 a_pos;\n"
+        "attribute vec2 a_uv;\n"
+        "attribute vec4 a_color;\n"
+        "varying vec2 v_uv;\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_Position = vec4((a_pos.xy / vec2(%f,%f))*2.0 - 1.0, 0.0, 1.0); v_uv = a_uv; v_color = a_color; }\n";
+    const char* fs_src =
+        "#version 120\n"
+        "uniform sampler2D u_tex;\n"
+        "varying vec2 v_uv;\n"
+        "varying vec4 v_color;\n"
+        "void main(){ gl_FragColor = texture2D(u_tex, v_uv) * v_color; }\n";
+
+    char vs_buf[512];
+    snprintf(vs_buf, sizeof(vs_buf), vs_src, (float)g_window_width, (float)g_window_height);
+
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_buf);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return;
+    }
+
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glBindAttribLocation(prog, 0, "a_pos");
+    glBindAttribLocation(prog, 1, "a_uv");
+    glBindAttribLocation(prog, 2, "a_color");
+    glLinkProgram(prog);
+
+    GLint linked = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (linked != GL_TRUE) {
+        char log[512];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        SDL_Log("Sprite program link error: %s", log);
+        glDeleteProgram(prog);
+        return;
+    }
+
+    g_sprite_program = prog;
+    g_sprite_pos_loc = 0;
+    g_sprite_uv_loc = 1;
+    g_sprite_color_loc = 2;
+    g_sprite_tex_loc = glGetUniformLocation(g_sprite_program, "u_tex");
+
+    if (g_sprite_vao == 0) {
+        glGenVertexArrays(1, &g_sprite_vao);
+    }
+    if (g_sprite_vbo == 0) {
+        glGenBuffers(1, &g_sprite_vbo);
+    }
+}
+
+static void blend_px_premult(unsigned char* dst, int sr, int sg, int sb, int sa) {
+    int inv = 255 - sa;
+    dst[0] = (unsigned char)(sr + (dst[0] * inv) / 255);
+    dst[1] = (unsigned char)(sg + (dst[1] * inv) / 255);
+    dst[2] = (unsigned char)(sb + (dst[2] * inv) / 255);
+    dst[3] = (unsigned char)(sa + (dst[3] * inv) / 255);
+}
+
+static void draw_rect_rgba(unsigned char* buf, int w, int h, int x, int y, int rw, int rh, float r, float g, float b, float a) {
+    if (!buf) return;
+    if (rw <= 0 || rh <= 0) return;
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + rw;
+    int y1 = y + rh;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+
+    int sa = (int)(a * 255.0f + 0.5f);
+    if (sa <= 0) return;
+    if (sa > 255) sa = 255;
+    int sr = (int)(r * (float)sa + 0.5f);
+    int sg = (int)(g * (float)sa + 0.5f);
+    int sb = (int)(b * (float)sa + 0.5f);
+    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
+    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
+    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
+
+    for (int py = y0; py < y1; py++) {
+        unsigned char* row = buf + (py * w * 4);
+        for (int px = x0; px < x1; px++) {
+            blend_px_premult(row + px * 4, sr, sg, sb, sa);
+        }
+    }
+}
+
+static void draw_circle_rgba(unsigned char* buf, int w, int h, float cx, float cy, float radius, float r, float g, float b, float a) {
+    if (!buf) return;
+    if (radius <= 0.0f) return;
+
+    int sa = (int)(a * 255.0f + 0.5f);
+    if (sa <= 0) return;
+    if (sa > 255) sa = 255;
+    int sr = (int)(r * (float)sa + 0.5f);
+    int sg = (int)(g * (float)sa + 0.5f);
+    int sb = (int)(b * (float)sa + 0.5f);
+    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
+    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
+    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
+
+    float rr = radius * radius;
+    int x0 = (int)floorf(cx - radius - 1.0f);
+    int y0 = (int)floorf(cy - radius - 1.0f);
+    int x1 = (int)ceilf(cx + radius + 1.0f);
+    int y1 = (int)ceilf(cy + radius + 1.0f);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+
+    for (int py = y0; py < y1; py++) {
+        unsigned char* row = buf + (py * w * 4);
+        for (int px = x0; px < x1; px++) {
+            float fx = (float)px + 0.5f;
+            float fy = (float)py + 0.5f;
+            float dx = fx - cx;
+            float dy = fy - cy;
+            if (dx * dx + dy * dy <= rr) {
+                blend_px_premult(row + px * 4, sr, sg, sb, sa);
+            }
+        }
+    }
+}
+
+static float dist2_point_segment(float px, float py, float ax, float ay, float bx, float by) {
+    float abx = bx - ax;
+    float aby = by - ay;
+    float apx = px - ax;
+    float apy = py - ay;
+    float ab2 = abx * abx + aby * aby;
+    float t = 0.0f;
+    if (ab2 > 0.0f) {
+        t = (apx * abx + apy * aby) / ab2;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+    }
+    float cx = ax + abx * t;
+    float cy = ay + aby * t;
+    float dx = px - cx;
+    float dy = py - cy;
+    return dx * dx + dy * dy;
+}
+
+static void draw_line_rgba(unsigned char* buf, int w, int h, float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a) {
+    if (!buf) return;
+    if (thickness <= 0.0f) return;
+
+    int sa = (int)(a * 255.0f + 0.5f);
+    if (sa <= 0) return;
+    if (sa > 255) sa = 255;
+    int sr = (int)(r * (float)sa + 0.5f);
+    int sg = (int)(g * (float)sa + 0.5f);
+    int sb = (int)(b * (float)sa + 0.5f);
+    if (sr < 0) sr = 0; if (sr > 255) sr = 255;
+    if (sg < 0) sg = 0; if (sg > 255) sg = 255;
+    if (sb < 0) sb = 0; if (sb > 255) sb = 255;
+
+    float rad = thickness * 0.5f;
+    float rr = rad * rad;
+    float minx = fminf(x1, x2) - rad - 1.0f;
+    float miny = fminf(y1, y2) - rad - 1.0f;
+    float maxx = fmaxf(x1, x2) + rad + 1.0f;
+    float maxy = fmaxf(y1, y2) + rad + 1.0f;
+    int ix0 = (int)floorf(minx);
+    int iy0 = (int)floorf(miny);
+    int ix1 = (int)ceilf(maxx);
+    int iy1 = (int)ceilf(maxy);
+    if (ix0 < 0) ix0 = 0;
+    if (iy0 < 0) iy0 = 0;
+    if (ix1 > w) ix1 = w;
+    if (iy1 > h) iy1 = h;
+
+    for (int py = iy0; py < iy1; py++) {
+        unsigned char* row = buf + (py * w * 4);
+        for (int px = ix0; px < ix1; px++) {
+            float fx = (float)px + 0.5f;
+            float fy = (float)py + 0.5f;
+            float d2 = dist2_point_segment(fx, fy, x1, y1, x2, y2);
+            if (d2 <= rr) {
+                blend_px_premult(row + px * 4, sr, sg, sb, sa);
+            }
+        }
+    }
+}
+
+static void downsample_2x(unsigned char* out_buf, int out_w, int out_h, const unsigned char* in_buf, int in_w, int in_h) {
+    for (int y = 0; y < out_h; y++) {
+        for (int x = 0; x < out_w; x++) {
+            int sx = x * 2;
+            int sy = y * 2;
+            const unsigned char* p0 = in_buf + ((sy + 0) * in_w + (sx + 0)) * 4;
+            const unsigned char* p1 = in_buf + ((sy + 0) * in_w + (sx + 1)) * 4;
+            const unsigned char* p2 = in_buf + ((sy + 1) * in_w + (sx + 0)) * 4;
+            const unsigned char* p3 = in_buf + ((sy + 1) * in_w + (sx + 1)) * 4;
+            unsigned char* o = out_buf + (y * out_w + x) * 4;
+            o[0] = (unsigned char)(((int)p0[0] + (int)p1[0] + (int)p2[0] + (int)p3[0]) / 4);
+            o[1] = (unsigned char)(((int)p0[1] + (int)p1[1] + (int)p2[1] + (int)p3[1]) / 4);
+            o[2] = (unsigned char)(((int)p0[2] + (int)p1[2] + (int)p2[2] + (int)p3[2]) / 4);
+            o[3] = (unsigned char)(((int)p0[3] + (int)p1[3] + (int)p2[3] + (int)p3[3]) / 4);
+        }
+    }
+}
+
+static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint32_t)data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int bake_stv_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
+    *out_pixels = NULL;
+    *out_w = 0;
+    *out_h = 0;
+
+    char* text = read_text_file(path);
+    if (!text) return 0;
+
+    int w = 0, h = 0;
+    int saw_header = 0;
+    int ready = 0;
+    const int ss = 2;
+    int sw = 0;
+    int sh = 0;
+    unsigned char* sbuf = NULL;
+
+    float cr = 1.0f, cg = 1.0f, cb = 1.0f, ca = 1.0f;
+    for (char* p = text; *p; ) {
+        char* line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = 0; p++; }
+        while (*line == ' ' || *line == '\t' || *line == '\r') line++;
+        if (*line == 0 || *line == '#') continue;
+
+        if (!saw_header) {
+            if (strncmp(line, "stv 1", 5) != 0) {
+                free(text);
+                return 0;
+            }
+            saw_header = 1;
+            continue;
+        }
+
+        if (!ready) {
+            if (strncmp(line, "size ", 5) == 0) {
+                if (sscanf(line + 5, "%d %d", &w, &h) == 2 && w > 0 && h > 0) {
+                    sw = w * ss;
+                    sh = h * ss;
+                    sbuf = (unsigned char*)calloc((size_t)sw * (size_t)sh * 4, 1);
+                    if (!sbuf) {
+                        free(text);
+                        return 0;
+                    }
+                    ready = 1;
+                }
+            }
+            continue;
+        }
+
+        if (strncmp(line, "rgba ", 5) == 0) {
+            (void)sscanf(line + 5, "%f %f %f %f", &cr, &cg, &cb, &ca);
+            continue;
+        }
+        if (strncmp(line, "rect ", 5) == 0) {
+            float x, y, rw, rh;
+            if (sscanf(line + 5, "%f %f %f %f", &x, &y, &rw, &rh) == 4) {
+                draw_rect_rgba(sbuf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(rw * ss), (int)ceilf(rh * ss), cr, cg, cb, ca);
+            }
+            continue;
+        }
+        if (strncmp(line, "circle ", 7) == 0) {
+            float cx, cy, rad;
+            if (sscanf(line + 7, "%f %f %f", &cx, &cy, &rad) == 3) {
+                draw_circle_rgba(sbuf, sw, sh, cx * ss, cy * ss, rad * ss, cr, cg, cb, ca);
+            }
+            continue;
+        }
+        if (strncmp(line, "line ", 5) == 0) {
+            float x1, y1, x2, y2, t;
+            if (sscanf(line + 5, "%f %f %f %f %f", &x1, &y1, &x2, &y2, &t) == 5) {
+                draw_line_rgba(sbuf, sw, sh, x1 * ss, y1 * ss, x2 * ss, y2 * ss, t * ss, cr, cg, cb, ca);
+            }
+            continue;
+        }
+    }
+
+    if (!saw_header || !ready || w <= 0 || h <= 0 || !sbuf) {
+        if (sbuf) free(sbuf);
+        free(text);
+        return 0;
+    }
+
+    unsigned char* out = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
+    if (!out) {
+        free(sbuf);
+        free(text);
+        return 0;
+    }
+    downsample_2x(out, w, h, sbuf, sw, sh);
+    free(sbuf);
+    free(text);
+    *out_pixels = out;
+    *out_w = w;
+    *out_h = h;
+    return 1;
+}
+
+/*
+ * Debug helper: bake a .stv to RGBA on the CPU and return a deterministic 32-bit hash of the pixels.
+ * Returns 0 on error (and logs).
+ */
+STASIS_EXPORT int stasis_gfx_debug_bake_hash(const char* path) {
+    if (!path || !*path) return 0;
+    unsigned char* pixels = NULL;
+    int w = 0, h = 0;
+    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+        SDL_Log("gfx_debug_bake_hash: failed to bake %s", path);
+        return 0;
+    }
+    uint32_t h32 = fnv1a_32(pixels, (size_t)w * (size_t)h * 4u);
+    free(pixels);
+    return (int)h32;
+}
+
+static void flush_sprites(void) {
+    if (g_sprite_vert_count == 0) return;
+    ensure_sprite_program();
+    ensure_sprite_atlas();
+    if (g_sprite_program == 0 || g_sprite_atlas_tex == 0) {
+        g_sprite_vert_count = 0;
+        return;
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(g_sprite_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_sprite_atlas_tex);
+    if (g_sprite_tex_loc >= 0) glUniform1i(g_sprite_tex_loc, 0);
+
+    glBindVertexArray(g_sprite_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_sprite_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(SpriteVertex) * (size_t)g_sprite_vert_count, g_sprite_vertices, GL_DYNAMIC_DRAW);
+
+    glEnableVertexAttribArray((GLuint)g_sprite_pos_loc);
+    glVertexAttribPointer((GLuint)g_sprite_pos_loc, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, x));
+    glEnableVertexAttribArray((GLuint)g_sprite_uv_loc);
+    glVertexAttribPointer((GLuint)g_sprite_uv_loc, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, u));
+    glEnableVertexAttribArray((GLuint)g_sprite_color_loc);
+    glVertexAttribPointer((GLuint)g_sprite_color_loc, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVertex), (void*)offsetof(SpriteVertex, r));
+
+    glDrawArrays(GL_TRIANGLES, 0, g_sprite_vert_count);
+
+    glDisableVertexAttribArray((GLuint)g_sprite_pos_loc);
+    glDisableVertexAttribArray((GLuint)g_sprite_uv_loc);
+    glDisableVertexAttribArray((GLuint)g_sprite_color_loc);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    g_sprite_vert_count = 0;
 }
 
 static const char* kFallbackPostfxVert =
@@ -668,6 +1170,7 @@ STASIS_EXPORT int stasis_get_startup_test_success(void) {
  * Returns 1 on success, 0 on failure
  */
 STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
+    SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -901,6 +1404,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
         g_line_count = 0;
     } else {
         flush_lines();
+        flush_sprites();
         render_postfx();
         SDL_GL_SwapWindow(g_window);
     }
@@ -976,6 +1480,238 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
     g_line_count++;
 }
 
+static SpriteEntry* sprite_get(int handle) {
+    int idx = handle - 1;
+    if (idx < 0 || idx >= MAX_SPRITES) return NULL;
+    if (!g_sprites[idx].used) return NULL;
+    return &g_sprites[idx];
+}
+
+static int sprite_find_by_path(const char* path) {
+    for (int i = 0; i < MAX_SPRITES; i++) {
+        if (g_sprites[i].used && g_sprites[i].path && strcmp(g_sprites[i].path, path) == 0) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
+    unsigned char* pixels = NULL;
+    int w = 0, h = 0;
+    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+        SDL_Log("gfx_load_sprite: failed to bake %s", path);
+        return 0;
+    }
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer) {
+            free(pixels);
+            return 0;
+        }
+
+        /* SDL expects straight alpha; convert from premultiplied. */
+        for (int i = 0; i < w * h; i++) {
+            unsigned char* p = pixels + i * 4;
+            unsigned char a = p[3];
+            if (a == 0) {
+                p[0] = 0; p[1] = 0; p[2] = 0;
+                continue;
+            }
+            int r = p[0];
+            int g = p[1];
+            int b = p[2];
+            p[0] = (unsigned char)((r * 255 + (a / 2)) / a);
+            p[1] = (unsigned char)((g * 255 + (a / 2)) / a);
+            p[2] = (unsigned char)((b * 255 + (a / 2)) / a);
+        }
+
+        if (e->sdl_tex) {
+            SDL_DestroyTexture(e->sdl_tex);
+            e->sdl_tex = NULL;
+        }
+
+        SDL_Texture* tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+        if (!tex) {
+            SDL_Log("gfx_load_sprite: SDL_CreateTexture failed: %s", SDL_GetError());
+            free(pixels);
+            return 0;
+        }
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        if (SDL_UpdateTexture(tex, NULL, pixels, w * 4) != 0) {
+            SDL_Log("gfx_load_sprite: SDL_UpdateTexture failed: %s", SDL_GetError());
+            SDL_DestroyTexture(tex);
+            free(pixels);
+            return 0;
+        }
+
+        free(pixels);
+        e->w = w;
+        e->h = h;
+        e->sdl_tex = tex;
+        e->mtime = get_file_mtime(path);
+        return 1;
+    }
+
+    ensure_sprite_atlas();
+    if (g_sprite_atlas_tex == 0) {
+        free(pixels);
+        return 0;
+    }
+
+    int ax = 0, ay = 0;
+    if (allow_reuse_slot) {
+        ax = e->atlas_x;
+        ay = e->atlas_y;
+        if (w != e->w || h != e->h) {
+            SDL_Log("gfx_reload: size change not supported (%s %dx%d -> %dx%d)", path, e->w, e->h, w, h);
+            free(pixels);
+            return 0;
+        }
+    } else {
+        if (!atlas_alloc(w, h, &ax, &ay)) {
+            SDL_Log("gfx_load_sprite: atlas full for %s (%dx%d)", path, w, h);
+            free(pixels);
+            return 0;
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, g_sprite_atlas_tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, ax, ay, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    free(pixels);
+
+    e->w = w;
+    e->h = h;
+    e->atlas_x = ax;
+    e->atlas_y = ay;
+    e->u0 = (float)ax / (float)SPRITE_ATLAS_W;
+    e->v0 = (float)ay / (float)SPRITE_ATLAS_H;
+    e->u1 = (float)(ax + w) / (float)SPRITE_ATLAS_W;
+    e->v1 = (float)(ay + h) / (float)SPRITE_ATLAS_H;
+    e->mtime = get_file_mtime(path);
+    return 1;
+}
+
+/*
+ * Load and bake a sprite from a .stv file into the global atlas.
+ * Returns an integer handle (stable for the lifetime of the process).
+ */
+STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
+    if (!path || !*path) return 0;
+    if (!g_window) return 0;
+    if (!g_use_sdl_renderer && !g_gl_context) return 0;
+    if (g_use_sdl_renderer && !g_renderer) return 0;
+
+    int existing = sprite_find_by_path(path);
+    if (existing) return existing;
+
+    for (int i = 0; i < MAX_SPRITES; i++) {
+        if (!g_sprites[i].used) {
+            SpriteEntry* e = &g_sprites[i];
+            memset(e, 0, sizeof(*e));
+            e->path = stasis_strdup(path);
+            if (!e->path) return 0;
+            e->used = 1;
+            if (!sprite_build_into_entry(e, path, 0)) {
+                free(e->path);
+                memset(e, 0, sizeof(*e));
+                return 0;
+            }
+            g_sprite_count++;
+            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", path, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            return i + 1;
+        }
+    }
+
+    SDL_Log("gfx_load_sprite: MAX_SPRITES reached");
+    return 0;
+}
+
+/*
+ * Poll and reload a sprite if its source changed on disk.
+ * Returns 1 if reloaded, 0 otherwise.
+ */
+STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
+    SpriteEntry* e = sprite_get(handle);
+    if (!e || !e->path) return 0;
+    uint64_t mt = get_file_mtime(e->path);
+    if (!mt || mt <= e->mtime) return 0;
+    return sprite_build_into_entry(e, e->path, 1) ? 1 : 0;
+}
+
+/*
+ * Draw a baked sprite (centered) with scale, rotation (radians), and tint.
+ * Premultiplied alpha atlas is blended with GL_ONE, GL_ONE_MINUS_SRC_ALPHA.
+ */
+STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float sx, float sy, float rot,
+                                         float r, float g, float b, float a) {
+    SpriteEntry* e = sprite_get(handle);
+    if (!e) return;
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer || !e->sdl_tex) return;
+#if SDL_VERSION_ATLEAST(2,0,10)
+        SDL_FRect dst;
+        dst.w = (float)e->w * sx;
+        dst.h = (float)e->h * sy;
+        dst.x = x - dst.w * 0.5f;
+        dst.y = y - dst.h * 0.5f;
+        SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+        SDL_SetTextureColorMod(e->sdl_tex, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f));
+        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)(a * 255.0f));
+        SDL_RenderCopyExF(g_renderer, e->sdl_tex, NULL, &dst, (double)(rot * (180.0f / 3.14159265f)), &center, SDL_FLIP_NONE);
+#else
+        SDL_Rect dst;
+        dst.w = (int)((float)e->w * sx);
+        dst.h = (int)((float)e->h * sy);
+        dst.x = (int)(x - (float)dst.w * 0.5f);
+        dst.y = (int)(y - (float)dst.h * 0.5f);
+        SDL_Point center = { dst.w / 2, dst.h / 2 };
+        SDL_SetTextureColorMod(e->sdl_tex, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f));
+        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)(a * 255.0f));
+        SDL_RenderCopyEx(g_renderer, e->sdl_tex, NULL, &dst, (double)(rot * (180.0f / 3.14159265f)), &center, SDL_FLIP_NONE);
+#endif
+        return;
+    }
+
+    if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
+        flush_sprites();
+    }
+
+    float hw = (float)e->w * 0.5f * sx;
+    float hh = (float)e->h * 0.5f * sy;
+    float c = cosf(rot);
+    float s = sinf(rot);
+
+    float x0 = -hw, y0 = -hh;
+    float x1 = hw, y1 = hh;
+
+    float p0x = x + x0 * c - y0 * s;
+    float p0y = y + x0 * s + y0 * c;
+    float p1x = x + x1 * c - y0 * s;
+    float p1y = y + x1 * s + y0 * c;
+    float p2x = x + x1 * c - y1 * s;
+    float p2y = y + x1 * s + y1 * c;
+    float p3x = x + x0 * c - y1 * s;
+    float p3y = y + x0 * s + y1 * c;
+
+    float u0 = e->u0, v0 = e->v0, u1 = e->u1, v1 = e->v1;
+
+    SpriteVertex* v = &g_sprite_vertices[g_sprite_vert_count];
+    /* tri 1: 0,1,2 */
+    v[0] = (SpriteVertex){ p0x, p0y, u0, v0, r * a, g * a, b * a, a };
+    v[1] = (SpriteVertex){ p1x, p1y, u1, v0, r * a, g * a, b * a, a };
+    v[2] = (SpriteVertex){ p2x, p2y, u1, v1, r * a, g * a, b * a, a };
+    /* tri 2: 2,3,0 */
+    v[3] = (SpriteVertex){ p2x, p2y, u1, v1, r * a, g * a, b * a, a };
+    v[4] = (SpriteVertex){ p3x, p3y, u0, v1, r * a, g * a, b * a, a };
+    v[5] = (SpriteVertex){ p0x, p0y, u0, v0, r * a, g * a, b * a, a };
+    g_sprite_vert_count += 6;
+}
+
 /*
  * Check if a key is currently pressed
  * Uses SDL scancodes (SDL_SCANCODE_*)
@@ -1030,13 +1766,39 @@ STASIS_EXPORT int stasis_should_quit(void) {
  * Cleanup and shutdown
  */
 STASIS_EXPORT void stasis_shutdown(void) {
-    if (g_gl_context) {
-        SDL_GL_DeleteContext(g_gl_context);
-        g_gl_context = NULL;
-    }
     if (g_postfx_program) {
         glDeleteProgram(g_postfx_program);
         g_postfx_program = 0;
+    }
+    if (g_sprite_program) {
+        glDeleteProgram(g_sprite_program);
+        g_sprite_program = 0;
+    }
+    if (g_sprite_vbo) {
+        glDeleteBuffers(1, &g_sprite_vbo);
+        g_sprite_vbo = 0;
+    }
+    if (g_sprite_vao) {
+        glDeleteVertexArrays(1, &g_sprite_vao);
+        g_sprite_vao = 0;
+    }
+    if (g_sprite_atlas_tex) {
+        glDeleteTextures(1, &g_sprite_atlas_tex);
+        g_sprite_atlas_tex = 0;
+    }
+    for (int i = 0; i < MAX_SPRITES; i++) {
+        if (g_sprites[i].used) {
+            if (g_sprites[i].sdl_tex) {
+                SDL_DestroyTexture(g_sprites[i].sdl_tex);
+                g_sprites[i].sdl_tex = NULL;
+            }
+            if (g_sprites[i].path) free(g_sprites[i].path);
+            memset(&g_sprites[i], 0, sizeof(g_sprites[i]));
+        }
+    }
+    if (g_gl_context) {
+        SDL_GL_DeleteContext(g_gl_context);
+        g_gl_context = NULL;
     }
     if (g_window) {
         SDL_DestroyWindow(g_window);

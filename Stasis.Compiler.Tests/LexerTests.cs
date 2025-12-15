@@ -89,6 +89,42 @@ public class LexerTests
     }
 
     [Fact]
+    public void Lexes_comparison_tokens()
+    {
+        var input = "a!=b a<=b a>=b a==b a<b a>b !a";
+
+        var result = Lexer.Lex(input);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Equal(
+            new[]
+            {
+                TokenKind.Identifier,
+                TokenKind.BangEqual,
+                TokenKind.Identifier,
+                TokenKind.Identifier,
+                TokenKind.LessEqual,
+                TokenKind.Identifier,
+                TokenKind.Identifier,
+                TokenKind.GreaterEqual,
+                TokenKind.Identifier,
+                TokenKind.Identifier,
+                TokenKind.EqualEqual,
+                TokenKind.Identifier,
+                TokenKind.Identifier,
+                TokenKind.Less,
+                TokenKind.Identifier,
+                TokenKind.Identifier,
+                TokenKind.Greater,
+                TokenKind.Identifier,
+                TokenKind.Bang,
+                TokenKind.Identifier,
+                TokenKind.EndOfFile
+            },
+            result.Tokens.Select(t => t.Kind).ToArray());
+    }
+
+    [Fact]
     public void Lexes_literals()
     {
         var input = "\"text\" `case name` 123 4.56";

@@ -84,6 +84,10 @@ public sealed class SemanticAnalyzer
         AddSymbol("end_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("draw_line", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("set_postfx", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
@@ -513,7 +517,19 @@ public sealed class SemanticAnalyzer
     private void ValidateBinary(BinaryExpressionSyntax bin)
     {
         var kind = bin.OperatorToken.Kind;
-        if (kind is TokenKind.AmpAmp or TokenKind.PipePipe or TokenKind.Plus or TokenKind.Minus or TokenKind.Star or TokenKind.Slash or TokenKind.Percent or TokenKind.Less or TokenKind.Greater or TokenKind.EqualEqual)
+        if (kind is TokenKind.AmpAmp
+            or TokenKind.PipePipe
+            or TokenKind.Plus
+            or TokenKind.Minus
+            or TokenKind.Star
+            or TokenKind.Slash
+            or TokenKind.Percent
+            or TokenKind.Less
+            or TokenKind.LessEqual
+            or TokenKind.Greater
+            or TokenKind.GreaterEqual
+            or TokenKind.EqualEqual
+            or TokenKind.BangEqual)
         {
             return;
         }
