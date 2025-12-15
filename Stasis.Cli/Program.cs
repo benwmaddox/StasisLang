@@ -558,6 +558,7 @@ static string? FindGraphicsLibrary()
     string[] candidates;
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
+        // Keep static linking for now (DLL exports need debugging)
         candidates = new[]
         {
             "stasis_graphics_static.lib",
@@ -567,18 +568,20 @@ static string? FindGraphicsLibrary()
     }
     else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
     {
+        // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics_static.a",
-            "libstasis_graphics.dylib"
+            "libstasis_graphics.dylib",
+            "libstasis_graphics_static.a"
         };
     }
     else
     {
+        // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics_static.a",
-            "libstasis_graphics.so"
+            "libstasis_graphics.so",
+            "libstasis_graphics_static.a"
         };
     }
 
@@ -589,6 +592,16 @@ static string? FindGraphicsLibrary()
             var candidate = Path.Combine(dir, name);
             if (File.Exists(candidate))
             {
+                // On Windows, if we found a .dll, return the corresponding .lib for linking
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+                    Path.GetExtension(candidate).Equals(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    var importLib = Path.ChangeExtension(candidate, ".lib");
+                    if (File.Exists(importLib))
+                    {
+                        return importLib;
+                    }
+                }
                 return candidate;
             }
         }
