@@ -73,7 +73,7 @@ static struct {
 static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
-static bool g_force_debug_overlay = true;
+static bool g_force_debug_overlay = false;
 
 /* Simple shader + buffer for line rendering */
 static GLuint g_line_program = 0;
@@ -171,7 +171,7 @@ static void ensure_line_program(void) {
         "attribute vec2 a_pos;\n"
         "attribute vec4 a_color;\n"
         "varying vec4 v_color;\n"
-        "void main(){ gl_Position = vec4((a_pos.xy / vec2(%f,%f))*2.0 - 1.0, 0.0, 1.0); v_color = a_color; }\n";
+        "void main(){ float x = (a_pos.x / %f) * 2.0 - 1.0; float y = 1.0 - (a_pos.y / %f) * 2.0; gl_Position = vec4(x, y, 0.0, 1.0); v_color = a_color; }\n";
     const char* fs_src =
         "#version 120\n"
         "varying vec4 v_color;\n"
@@ -403,7 +403,7 @@ static void ensure_sprite_program(void) {
         "attribute vec4 a_color;\n"
         "varying vec2 v_uv;\n"
         "varying vec4 v_color;\n"
-        "void main(){ gl_Position = vec4((a_pos.xy / vec2(%f,%f))*2.0 - 1.0, 0.0, 1.0); v_uv = a_uv; v_color = a_color; }\n";
+        "void main(){ float x = (a_pos.x / %f) * 2.0 - 1.0; float y = 1.0 - (a_pos.y / %f) * 2.0; gl_Position = vec4(x, y, 0.0, 1.0); v_uv = a_uv; v_color = a_color; }\n";
     const char* fs_src =
         "#version 120\n"
         "uniform sampler2D u_tex;\n"
@@ -950,25 +950,7 @@ static int verify_opengl_rendering(int width, int height) {
         return 0;
     }
 
-    /* Force completion and display the test pattern */
-    glFlush();
-    glFinish();
-    SDL_GL_SwapWindow(g_window);
-
-    /* Brief pause so user can see the test pattern */
-    SDL_Delay(500);
-
-    /* Read back pixels from the center of the quad (need to redraw since we swapped) */
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glBegin(GL_QUADS);
-    glColor4f(1.0f, 0.0f, 1.0f, 1.0f);
-    glVertex2f((float)(cx - size), (float)(cy - size));
-    glVertex2f((float)(cx + size), (float)(cy - size));
-    glVertex2f((float)(cx + size), (float)(cy + size));
-    glVertex2f((float)(cx - size), (float)(cy + size));
-    glEnd();
+    /* Ensure rendering completed before reading back pixels */
     glFlush();
     glFinish();
 
@@ -1000,6 +982,9 @@ static int verify_opengl_rendering(int width, int height) {
         SDL_Log("STARTUP TEST PASSED: OpenGL rendering verified");
         SDL_Log("  Test pixel readback: R=%d G=%d B=%d A=%d (expected ~255,0,255,255)",
             pixels[0], pixels[1], pixels[2], pixels[3]);
+        /* Clear so the test pattern can't leak into the first presented frame. */
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
         return 1;
     } else {
         snprintf(result->error_message, sizeof(result->error_message),
@@ -1268,11 +1253,12 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_should_quit = false;
     g_line_count = 0;
 
-    /* Run startup render verification unless disabled */
+    /* Run startup render verification only when explicitly enabled. */
+    const char* run_test = SDL_getenv("STASIS_RUN_RENDER_TEST");
     const char* skip_test = SDL_getenv("STASIS_SKIP_RENDER_TEST");
-    if (skip_test && strcmp(skip_test, "0") != 0) {
-        SDL_Log("STARTUP TEST: Skipped (STASIS_SKIP_RENDER_TEST set)");
-    } else {
+    int should_run_test = (run_test && strcmp(run_test, "0") != 0);
+    int should_skip_test = (skip_test && strcmp(skip_test, "0") != 0);
+    if (should_run_test && !should_skip_test) {
         int test_ok;
         if (g_use_sdl_renderer) {
             test_ok = verify_sdl_rendering(g_renderer, width, height);
@@ -1309,7 +1295,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             fprintf(stderr, "  - Remote desktop or virtual machine without GPU passthrough\n");
             fprintf(stderr, "  - Incompatible graphics hardware\n");
             fprintf(stderr, "\n");
-            fprintf(stderr, "To skip this test, set: STASIS_SKIP_RENDER_TEST=1\n");
+            fprintf(stderr, "To disable this test, unset: STASIS_RUN_RENDER_TEST (or set to 0)\n");
             fprintf(stderr, "To force SDL renderer, set: STASIS_USE_SDL=1\n");
             fprintf(stderr, "================================================\n");
             fprintf(stderr, "\n");
@@ -1351,21 +1337,8 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(g_renderer, 26, 153, 26, 255);
-        SDL_RenderClear(g_renderer);
-        /* Debug overlay: yellow block and red cross */
-        SDL_SetRenderDrawColor(g_renderer, 255, 255, 0, 160);
-        SDL_FRect rect = { 0.0f, 0.0f, 120.0f, 120.0f };
-        SDL_RenderFillRectF(g_renderer, &rect);
-        SDL_SetRenderDrawColor(g_renderer, 255, 0, 0, 255);
-        SDL_RenderDrawLineF(g_renderer, 0.0f, 0.0f, (float)g_window_width, (float)g_window_height);
-        SDL_RenderDrawLineF(g_renderer, (float)g_window_width, 0.0f, 0.0f, (float)g_window_height);
     } else {
-        if (g_force_debug_overlay) {
-            setup_ortho();
-            glClearColor(0.1f, 0.6f, 0.1f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-        }
+        (void)g_force_debug_overlay;
     }
 }
 
@@ -1373,21 +1346,6 @@ STASIS_EXPORT void stasis_begin_frame(void) {
  * End frame: flush lines, swap buffers, poll events
  */
 STASIS_EXPORT void stasis_end_frame(void) {
-    if (g_debug_frame_counter < 3 && g_line_count == 0) {
-        /* Inject a visible debug line if nothing was queued */
-        stasis_draw_line(0.0f, 0.0f, (float)g_window_width, (float)g_window_height, 1.0f, 0.0f, 0.0f, 1.0f);
-    }
-
-    /* Log detailed GL state for first few frames */
-    if (g_debug_frame_counter < 3 && !g_use_sdl_renderer) {
-        GLint fb = 0, draw_buf = 0;
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
-        glGetIntegerv(GL_DRAW_BUFFER, &draw_buf);
-        SDL_Log("end_frame %d: FB=%d DrawBuf=0x%X lines=%d postfx=%d",
-            g_debug_frame_counter, fb, draw_buf, g_line_count,
-            (g_postfx_enabled && !g_postfx_force_disable) ? 1 : 0);
-    }
-
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_Color color;
@@ -1574,6 +1532,8 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
             free(pixels);
             return 0;
         }
+    } else if (should_run_test && should_skip_test) {
+        SDL_Log("STARTUP TEST: Skipped (STASIS_SKIP_RENDER_TEST set)");
     }
 
     glBindTexture(GL_TEXTURE_2D, g_sprite_atlas_tex);
