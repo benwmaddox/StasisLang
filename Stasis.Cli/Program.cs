@@ -385,6 +385,15 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         args.Add("-Wl,/ignore:4210");
         args.Add("-Wl,/STACK:8388608");
 
+        // For release builds with optimization, strip debug info and enable aggressive dead code elimination
+        if (!string.IsNullOrWhiteSpace(optLevel) && optLevel != "0")
+        {
+            args.Add("-Wl,/DEBUG:NONE");     // No debug info
+            args.Add("-Wl,/OPT:REF");        // Remove unreferenced functions/data
+            args.Add("-Wl,/OPT:ICF");        // Fold identical functions
+            args.Add("-Wl,/MERGE:.rdata=.text"); // Merge read-only sections
+        }
+
         var sdkRoot = GetLatestWindowsSdkLib();
         if (sdkRoot is not null)
         {
