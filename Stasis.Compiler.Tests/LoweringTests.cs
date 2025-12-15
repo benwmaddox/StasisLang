@@ -214,6 +214,24 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_integer_extended_comparisons_to_icmp()
+    {
+        var ir = Lower("""
+            function cmp(a: i32, b: i32): i32 {
+                let x: i32 = a != b;
+                let y: i32 = a <= b;
+                let z: i32 = a >= b;
+                return x + y + z;
+            }
+            """);
+
+        Assert.Contains("icmp ne", ir);
+        Assert.Contains("icmp sle", ir);
+        Assert.Contains("icmp sge", ir);
+        Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
     public void Lowers_float_comparisons_to_fcmp()
     {
         var ir = Lower("""
@@ -224,6 +242,36 @@ public class LoweringTests
 
         Assert.Contains("fcmp oeq", ir);
         Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
+    public void Lowers_float_extended_comparisons_to_fcmp()
+    {
+        var ir = Lower("""
+            function cmp(a: f32, b: f32): i32 {
+                let x: i32 = a != b;
+                let y: i32 = a <= b;
+                let z: i32 = a >= b;
+                return x + y + z;
+            }
+            """);
+
+        Assert.Contains("fcmp one", ir);
+        Assert.Contains("fcmp ole", ir);
+        Assert.Contains("fcmp oge", ir);
+        Assert.Contains("zext i1", ir);
+    }
+
+    [Fact]
+    public void Lowers_gfx_debug_bake_hash_call()
+    {
+        var ir = LowerWithDiagnostics("""
+            function demo(): i32 {
+                return gfx_debug_bake_hash("assets_src/brickout-revenge/paddle.stv");
+            }
+            """, allowSemanticDiagnostics: true, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false, HeadlessGraphics: false)).Ir;
+
+        Assert.Contains("stasis_gfx_debug_bake_hash", ir);
     }
 
     [Fact]

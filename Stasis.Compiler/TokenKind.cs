@@ -45,9 +45,12 @@ public enum TokenKind
     AmpAmp,
     PipePipe,
     Less,
+    LessEqual,
     Greater,
+    GreaterEqual,
     Equal,
     EqualEqual,
+    BangEqual,
     Colon,
     Bang,
 

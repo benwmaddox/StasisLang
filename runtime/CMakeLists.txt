@@ -25,6 +25,10 @@ function(configure_stasis_target target is_static)
         GLEW::GLEW
     )
 
+    if(NOT WIN32)
+        target_link_libraries(${target} PRIVATE m)
+    endif()
+
     if(WIN32)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()

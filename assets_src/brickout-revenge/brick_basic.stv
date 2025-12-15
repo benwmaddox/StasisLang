@@ -1,0 +1,18 @@
+stv 1
+size 64 24
+
+# Base fill
+rgba 0.95 0.40 0.18 1.0
+rect 2 2 60 20
+
+# Inner highlight
+rgba 1.0 1.0 1.0 0.22
+rect 4 4 56 6
+
+# Border
+rgba 0.15 0.10 0.10 0.55
+line 2 2 62 2 2
+line 2 22 62 22 2
+line 2 2 2 22 2
+line 62 2 62 22 2
+

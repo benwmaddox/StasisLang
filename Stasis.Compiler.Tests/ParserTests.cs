@@ -121,6 +121,30 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_infix_extended_comparisons()
+    {
+        var source = """
+            function ok(): void {
+                if (1 <= 2) { }
+                if (2 >= 1) { }
+                if (1 != 2) { }
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal(3, func.Body.Statements.Count);
+        var if1 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[0]);
+        var if2 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[1]);
+        var if3 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[2]);
+        Assert.Equal(TokenKind.LessEqual, Assert.IsType<BinaryExpressionSyntax>(if1.Condition).OperatorToken.Kind);
+        Assert.Equal(TokenKind.GreaterEqual, Assert.IsType<BinaryExpressionSyntax>(if2.Condition).OperatorToken.Kind);
+        Assert.Equal(TokenKind.BangEqual, Assert.IsType<BinaryExpressionSyntax>(if3.Condition).OperatorToken.Kind);
+    }
+
+    [Fact]
     public void Parses_compound_assignment()
     {
         var source = """

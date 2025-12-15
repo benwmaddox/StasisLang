@@ -448,10 +448,7 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
             }
 
             var dest = Path.Combine(targetDir, fileName);
-            if (!File.Exists(dest))
-            {
-                File.Copy(src, dest, overwrite: false);
-            }
+            File.Copy(src, dest, overwrite: true);
 
             var depDir = Path.GetDirectoryName(src);
             if (string.IsNullOrEmpty(depDir))
@@ -466,10 +463,7 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
                 if (File.Exists(depSrc))
                 {
                     var depDest = Path.Combine(targetDir, dep);
-                    if (!File.Exists(depDest))
-                    {
-                        File.Copy(depSrc, depDest, overwrite: false);
-                    }
+                    File.Copy(depSrc, depDest, overwrite: true);
                 }
             }
         }
@@ -490,6 +484,10 @@ static bool DetectsGraphicsUsage(string source)
         "end_frame",
         "draw_line",
         "clear(",
+        "gfx_load_sprite",
+        "gfx_draw_sprite",
+        "gfx_poll_reload",
+        "gfx_debug_bake_hash",
         "should_quit",
         "is_key_down",
         "get_mouse_x",
