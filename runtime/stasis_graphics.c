@@ -20,6 +20,10 @@
 #include <unistd.h>
 #endif
 
+/* stb_truetype for font rendering */
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
     (void)category;
@@ -1180,7 +1184,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_WINDOWPOS_CENTERED,
         width,
         height,
-        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN
+        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
 
     if (!g_window) {
@@ -1331,6 +1335,43 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 }
 
 /*
+ * Get current window dimensions
+ * Writes width and height to provided pointers
+ */
+STASIS_EXPORT void stasis_get_window_size(int* width, int* height) {
+    if (width) *width = g_window_width;
+    if (height) *height = g_window_height;
+}
+
+/*
+ * Set fullscreen mode
+ * fullscreen: 1 for fullscreen desktop, 0 for windowed
+ * Returns 1 on success, 0 on failure
+ */
+STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
+    if (!g_window) {
+        return 0;
+    }
+
+    Uint32 flags = fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
+    int result = SDL_SetWindowFullscreen(g_window, flags);
+
+    if (result == 0 && fullscreen) {
+        /* Update window dimensions to match fullscreen size */
+        SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+
+        if (!g_use_sdl_renderer) {
+            glViewport(0, 0, g_window_width, g_window_height);
+            setup_ortho();
+        } else {
+            SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+        }
+    }
+
+    return (result == 0) ? 1 : 0;
+}
+
+/*
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
@@ -1377,6 +1418,19 @@ STASIS_EXPORT void stasis_end_frame(void) {
             case SDL_KEYDOWN:
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
                     g_should_quit = true;
+                }
+                break;
+            case SDL_WINDOWEVENT:
+                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                    /* Update window dimensions when resized */
+                    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+
+                    if (!g_use_sdl_renderer) {
+                        glViewport(0, 0, g_window_width, g_window_height);
+                        setup_ortho();
+                    } else {
+                        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+                    }
                 }
                 break;
             default:
@@ -1764,4 +1818,257 @@ STASIS_EXPORT void stasis_shutdown(void) {
     }
     SDL_Quit();
     SDL_Log("Stasis graphics shutdown");
+}
+
+/* ===== DIRECTORY LISTING ===== */
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dirent.h>
+#endif
+
+/* List files in a directory
+ * Returns number of files found (up to max_count)
+ * out_paths: array of pointers to receive file paths
+ * max_count: maximum number of files to return
+ */
+STASIS_EXPORT int stasis_list_directory(const char* path, char** out_paths, int max_count, int path_buffer_size) {
+    if (!path || !out_paths || max_count <= 0) return 0;
+
+    int count = 0;
+
+#ifdef _WIN32
+    char search_path[512];
+    snprintf(search_path, sizeof(search_path), "%s\\*", path);
+
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_path, &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        SDL_Log("stasis_list_directory: failed to open %s", path);
+        return 0;
+    }
+
+    do {
+        /* Skip . and .. */
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0)
+            continue;
+
+        /* Copy filename to output buffer */
+        if (count < max_count) {
+            snprintf(out_paths[count], path_buffer_size, "%s", find_data.cFileName);
+            count++;
+        }
+    } while (FindNextFileA(hFind, &find_data) != 0 && count < max_count);
+
+    FindClose(hFind);
+#else
+    DIR* dir = opendir(path);
+    if (!dir) {
+        SDL_Log("stasis_list_directory: failed to open %s", path);
+        return 0;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL && count < max_count) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        /* Copy filename to output buffer */
+        snprintf(out_paths[count], path_buffer_size, "%s", entry->d_name);
+        count++;
+    }
+
+    closedir(dir);
+#endif
+
+    SDL_Log("stasis_list_directory: found %d files in %s", count, path);
+    return count;
+}
+
+/* ===== FONT RENDERING WITH STB_TRUETYPE ===== */
+
+#define MAX_FONTS 8
+#define FONT_ATLAS_SIZE 512
+#define FONT_FIRST_CHAR 32
+#define FONT_NUM_CHARS 95
+
+typedef struct {
+    bool active;
+    stbtt_fontinfo font_info;
+    unsigned char* ttf_buffer;
+    float scale;
+    int ascent, descent, line_gap;
+
+    /* Baked bitmap atlas */
+    GLuint atlas_texture;
+    stbtt_bakedchar char_data[FONT_NUM_CHARS];
+    int font_size;
+} StasisFont;
+
+static StasisFont g_fonts[MAX_FONTS];
+
+/* Load a TrueType font from disk */
+STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
+    if (!path || font_size <= 0) return 0;
+
+    /* Find free slot */
+    int slot = -1;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (!g_fonts[i].active) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1) {
+        SDL_Log("stasis_load_font: no free font slots");
+        return 0;
+    }
+
+    /* Read font file */
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        SDL_Log("stasis_load_font: failed to open %s", path);
+        return 0;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    unsigned char* ttf_buffer = (unsigned char*)malloc(size);
+    if (!ttf_buffer) {
+        fclose(f);
+        SDL_Log("stasis_load_font: malloc failed");
+        return 0;
+    }
+
+    fread(ttf_buffer, 1, size, f);
+    fclose(f);
+
+    /* Initialize font */
+    StasisFont* font = &g_fonts[slot];
+    if (!stbtt_InitFont(&font->font_info, ttf_buffer, 0)) {
+        free(ttf_buffer);
+        SDL_Log("stasis_load_font: stbtt_InitFont failed for %s", path);
+        return 0;
+    }
+
+    font->ttf_buffer = ttf_buffer;
+    font->font_size = font_size;
+    font->scale = stbtt_ScaleForPixelHeight(&font->font_info, (float)font_size);
+    stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
+
+    /* Bake font atlas */
+    unsigned char* atlas_bitmap = (unsigned char*)malloc(FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
+    if (!atlas_bitmap) {
+        free(ttf_buffer);
+        SDL_Log("stasis_load_font: atlas malloc failed");
+        return 0;
+    }
+
+    int result = stbtt_BakeFontBitmap(ttf_buffer, 0, (float)font_size,
+                                      atlas_bitmap, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                                      FONT_FIRST_CHAR, FONT_NUM_CHARS, font->char_data);
+
+    if (result <= 0) {
+        free(atlas_bitmap);
+        free(ttf_buffer);
+        SDL_Log("stasis_load_font: BakeFontBitmap failed");
+        return 0;
+    }
+
+    /* Upload to GPU */
+    glGenTextures(1, &font->atlas_texture);
+    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                 0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    free(atlas_bitmap);
+
+    font->active = true;
+    SDL_Log("stasis_load_font: loaded %s size=%d handle=%d", path, font_size, slot + 1);
+
+    return slot + 1; /* Return 1-based handle */
+}
+
+/* Draw text string using loaded font */
+STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y,
+                                    float r, float g, float b, float a) {
+    if (font_handle <= 0 || font_handle > MAX_FONTS) return;
+
+    StasisFont* font = &g_fonts[font_handle - 1];
+    if (!font->active || !text) return;
+
+    if (g_use_sdl_renderer) {
+        /* SDL renderer path - not implemented for fonts */
+        return;
+    }
+
+    /* OpenGL path */
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
+
+    /* Set color and modelview for text */
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glColor4f(r, g, b, a);
+
+    glBegin(GL_QUADS);
+
+    float pos_x = x;
+    float pos_y = y;
+
+    while (*text) {
+        int c = (unsigned char)*text;
+        if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
+            stbtt_aligned_quad quad;
+            stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 1);
+
+            glTexCoord2f(quad.s0, quad.t0); glVertex2f(quad.x0, quad.y0);
+            glTexCoord2f(quad.s1, quad.t0); glVertex2f(quad.x1, quad.y0);
+            glTexCoord2f(quad.s1, quad.t1); glVertex2f(quad.x1, quad.y1);
+            glTexCoord2f(quad.s0, quad.t1); glVertex2f(quad.x0, quad.y1);
+        }
+        text++;
+    }
+
+    glEnd();
+
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(1, 1, 1, 1);
+}
+
+/* Measure text width for layout */
+STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
+    if (font_handle <= 0 || font_handle > MAX_FONTS || !text) return 0.0f;
+
+    StasisFont* font = &g_fonts[font_handle - 1];
+    if (!font->active) return 0.0f;
+
+    float width = 0.0f;
+    float pos_x = 0.0f, pos_y = 0.0f;
+
+    while (*text) {
+        int c = (unsigned char)*text;
+        if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
+            stbtt_aligned_quad quad;
+            stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 1);
+        }
+        text++;
+    }
+
+    return pos_x;
 }

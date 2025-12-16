@@ -565,6 +565,27 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGetWindowSize(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_get_window_size");
+        var i32Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i32Ptr, i32Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_get_window_size", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSetFullscreen(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_set_fullscreen");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_set_fullscreen", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSetPostfx(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_set_postfx");
@@ -756,6 +777,11 @@ public sealed class ModuleLowerer
             "set_postfx",
             "is_key_down",
             "should_quit",
+            "get_window_size",
+            "set_fullscreen",
+            "load_font",
+            "draw_text",
+            "measure_text",
 
             // Standard Library: char_* module
             "char_is_digit",
@@ -1811,6 +1837,143 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisShouldQuit(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "should_quit.call");
+                    }
+                case "get_window_size":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("get_window_size expects two arguments (width variable, height variable).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        // Allocate stack space for the out parameters
+                        var widthPtr = builder.BuildAlloca(LLVMTypeRef.Int32, "width_ptr");
+                        var heightPtr = builder.BuildAlloca(LLVMTypeRef.Int32, "height_ptr");
+
+                        // Call the function
+                        var (fn, fnType) = GetOrDeclareStasisGetWindowSize(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, new[] { widthPtr, heightPtr }, "");
+
+                        // Load the results and store them to the variables
+                        var widthVal = builder.BuildLoad2(LLVMTypeRef.Int32, widthPtr, "width_val");
+                        var heightVal = builder.BuildLoad2(LLVMTypeRef.Int32, heightPtr, "height_val");
+
+                        // Store to the variables (args[0] and args[1] should be l-values)
+                        if (args[0] is IdentifierExpressionSyntax widthIdent)
+                        {
+                            var widthName = widthIdent.Identifier.Text;
+                            if (locals.ContainsKey(widthName))
+                            {
+                                var binding = locals[widthName];
+                                locals[widthName] = binding with { Value = widthVal, IsAddress = false };
+                            }
+                        }
+
+                        if (args[1] is IdentifierExpressionSyntax heightIdent)
+                        {
+                            var heightName = heightIdent.Identifier.Text;
+                            if (locals.ContainsKey(heightName))
+                            {
+                                var binding = locals[heightName];
+                                locals[heightName] = binding with { Value = heightVal, IsAddress = false };
+                            }
+                        }
+
+                        return ConstI32(0);
+                    }
+                case "set_fullscreen":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("set_fullscreen expects one argument (fullscreen: 0 or 1).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var fullscreen = LowerExpression(builder, args[0], locals);
+
+                        var (fn, fnType) = GetOrDeclareStasisSetFullscreen(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { fullscreen }, "set_fullscreen.call");
+                    }
+                case "load_font":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("load_font expects (path: string, size: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(1);
+
+                        var path = LowerExpression(builder, args[0], locals);
+                        var size = LowerExpression(builder, args[1], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_load_font");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), LLVMTypeRef.Int32 }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_load_font", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { path, size }, "load_font.call");
+                    }
+                case "draw_text":
+                    {
+                        if (args.Count != 8)
+                        {
+                            AddDiagnostic("draw_text expects (font_handle: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var fontHandle = LowerExpression(builder, args[0], locals);
+                        var text = LowerExpression(builder, args[1], locals);
+                        var x = LowerExpression(builder, args[2], locals);
+                        var y = LowerExpression(builder, args[3], locals);
+                        var r = LowerExpression(builder, args[4], locals);
+                        var g = LowerExpression(builder, args[5], locals);
+                        var b = LowerExpression(builder, args[6], locals);
+                        var a = LowerExpression(builder, args[7], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_draw_text");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[] { LLVMTypeRef.Int32, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                   LLVMTypeRef.Float, LLVMTypeRef.Float,
+                                   LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_draw_text", fnType);
+
+                        builder.BuildCall2(fnType, fn, new[] { fontHandle, text, x, y, r, g, b, a }, "");
+                        return ConstI32(0);
+                    }
+                case "measure_text":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("measure_text expects (font_handle: i32, text: string).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var fontHandle = LowerExpression(builder, args[0], locals);
+                        var text = LowerExpression(builder, args[1], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_measure_text");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float,
+                            new[] { LLVMTypeRef.Int32, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_measure_text", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { fontHandle, text }, "measure_text.call");
                     }
 
                 // ============================================================

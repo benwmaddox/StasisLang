@@ -90,7 +90,12 @@ public sealed class SemanticAnalyzer
         AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("get_window_size", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("set_fullscreen", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("set_postfx", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("load_font", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("draw_text", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("measure_text", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
 
         // ============================================================
         // Standard Library: char_* module (character/byte utilities)

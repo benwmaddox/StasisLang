@@ -27,7 +27,9 @@
       "Bash(dumpbin:*)",
       "Bash(timeout 5 dotnet run:*)",
       "Bash(timeout:*)",
-      "Bash(cmake --build:*)"
+      "Bash(cmake --build:*)",
+      "Bash(dotnet:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

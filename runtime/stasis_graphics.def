@@ -1,6 +1,8 @@
 LIBRARY stasis_graphics
 EXPORTS
     stasis_init_window
+    stasis_get_window_size
+    stasis_set_fullscreen
     stasis_should_quit
     stasis_begin_frame
     stasis_end_frame
@@ -16,3 +18,7 @@ EXPORTS
     stasis_gfx_draw_sprite
     stasis_gfx_poll_reload
     stasis_gfx_debug_bake_hash
+    stasis_load_font
+    stasis_draw_text
+    stasis_measure_text
+    stasis_list_directory
