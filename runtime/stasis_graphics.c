@@ -1828,6 +1828,46 @@ STASIS_EXPORT void stasis_shutdown(void) {
 #include <dirent.h>
 #endif
 
+#define STASIS_DIR_LIST_MAX_ENTRIES 256
+#define STASIS_DIR_LIST_NAME_LEN 260
+#define STASIS_UTF8_HEADER_SIZE 8
+#define STASIS_DIR_ENTRY_STRIDE (STASIS_UTF8_HEADER_SIZE + STASIS_DIR_LIST_NAME_LEN)
+
+static int count_utf8_codepoints(const unsigned char* data, int len)
+{
+    int count = 0;
+    int i = 0;
+    while (i < len) {
+        unsigned char c = data[i];
+        int advance = 1;
+        if ((c & 0x80) == 0x00) {
+            advance = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            advance = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            advance = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            advance = 4;
+        }
+        i += advance;
+        count++;
+    }
+    return count;
+}
+
+static void write_utf8_entry(unsigned char* entry_base, const char* src)
+{
+    int copy_len = 0;
+    while (copy_len < STASIS_DIR_LIST_NAME_LEN && src[copy_len] != '\0') {
+        entry_base[STASIS_UTF8_HEADER_SIZE + copy_len] = (unsigned char)src[copy_len];
+        copy_len++;
+    }
+    entry_base[STASIS_UTF8_HEADER_SIZE + copy_len] = 0;
+    int char_len = count_utf8_codepoints(&entry_base[STASIS_UTF8_HEADER_SIZE], copy_len);
+    *((int32_t*)(entry_base + 0)) = copy_len;
+    *((int32_t*)(entry_base + 4)) = char_len;
+}
+
 /* List files in a directory
  * Returns number of files found (up to max_count)
  * out_paths: array of pointers to receive file paths
@@ -1886,6 +1926,83 @@ STASIS_EXPORT int stasis_list_directory(const char* path, char** out_paths, int 
 
     SDL_Log("stasis_list_directory: found %d files in %s", count, path);
     return count;
+}
+
+STASIS_EXPORT int stasis_list_directory_struct(const char* path, unsigned char* names, int32_t* is_dir, int32_t* out_count) {
+    if (!path || !names || !is_dir || !out_count) {
+        return 0;
+    }
+
+    int count = 0;
+
+#ifdef _WIN32
+    char search_path[512];
+    snprintf(search_path, sizeof(search_path), "%s\\*", path);
+
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_path, &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        SDL_Log("stasis_list_directory_struct: failed to open %s", path);
+        *out_count = 0;
+        return 0;
+    }
+
+    do {
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0)
+            continue;
+
+        if (count >= STASIS_DIR_LIST_MAX_ENTRIES)
+            break;
+
+        unsigned char* entry_ptr = names + ((size_t)count * STASIS_DIR_ENTRY_STRIDE);
+        write_utf8_entry(entry_ptr, find_data.cFileName);
+        is_dir[count] = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+        count++;
+    } while (FindNextFileA(hFind, &find_data) != 0);
+
+    FindClose(hFind);
+#else
+    DIR* dir = opendir(path);
+    if (!dir) {
+        SDL_Log("stasis_list_directory_struct: failed to open %s", path);
+        *out_count = 0;
+        return 0;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL && count < STASIS_DIR_LIST_MAX_ENTRIES) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        bool entry_is_dir = false;
+        char entry_path[512];
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", path, entry->d_name);
+        struct stat st = {0};
+        if (stat(entry_path, &st) == 0) {
+            entry_is_dir = S_ISDIR(st.st_mode);
+        }
+
+        unsigned char* entry_ptr = names + ((size_t)count * STASIS_DIR_ENTRY_STRIDE);
+        write_utf8_entry(entry_ptr, entry->d_name);
+        is_dir[count] = entry_is_dir ? 1 : 0;
+        count++;
+    }
+
+    closedir(dir);
+#endif
+
+    *out_count = count;
+    return count;
+}
+
+STASIS_EXPORT void stasis_copy_dir_entry_name(const unsigned char* names, int32_t idx, unsigned char* out) {
+    if (!names || !out || idx < 0 || idx >= STASIS_DIR_LIST_MAX_ENTRIES) {
+        return;
+    }
+
+    size_t offset = (size_t)idx * STASIS_DIR_ENTRY_STRIDE;
+    memcpy(out, names + offset, STASIS_DIR_ENTRY_STRIDE);
 }
 
 /* ===== FONT RENDERING WITH STB_TRUETYPE ===== */

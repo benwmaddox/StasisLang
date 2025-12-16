@@ -22,3 +22,5 @@ EXPORTS
     stasis_draw_text
     stasis_measure_text
     stasis_list_directory
+    stasis_list_directory_struct
+    stasis_copy_dir_entry_name

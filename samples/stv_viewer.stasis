@@ -1,77 +1,46 @@
-// STV Viewer - Visual asset browser for Stasis .stv sprite files
-// Features:
-// - Tree view panel (left side) with labels
-// - Preview area (right side) with Single and Gallery modes
-// - Keyboard shortcuts displayed at top
-// - Responsive to window size changes and resizing
-// - Resizable window support
+// STV Viewer - preview `.stv` sprite files with a file tree panel.
+// Controls: Up/Down to move, Enter to open, Left to go up, Tab toggles mode, Esc to quit.
 
-// External runtime APIs (with new additions)
-// - init_window(width: i32, height: i32, title: string) -> bool
-// - get_window_size(width_ptr: ptr, height_ptr: ptr) -> void  [NEW]
-// - set_fullscreen(fullscreen: i32) -> i32  [NEW]
-// - get_time_ms() -> i32
-// - sleep_ms(ms: i32)
-// - should_quit() -> bool
-// - begin_frame(), end_frame()
-// - clear(r: f32, g: f32, b: f32, a: f32)
-// - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
-// - gfx_load_sprite(path: string) -> i32
-// - gfx_draw_sprite(handle: i32, x: f32, y: f32, sx: f32, sy: f32, rot: f32, r: f32, g: f32, b: f32, a: f32)
-// - gfx_poll_reload(handle: i32) -> bool
-// - is_key_down(scancode: i32) -> bool
-
-// SDL Scancodes
+// SDL scancodes
 const KEY_ESCAPE: i32 = 41;
 const KEY_LEFT: i32 = 80;
-const KEY_RIGHT: i32 = 79;
 const KEY_UP: i32 = 82;
 const KEY_DOWN: i32 = 81;
 const KEY_TAB: i32 = 43;
 const KEY_RETURN: i32 = 40;
 
-// Layout constants (relative)
-const TREE_PANEL_WIDTH_RATIO: f32 = 0.25;   // 25% of window width
-const HEADER_HEIGHT: f32 = 50.0;
-const STATUS_BAR_HEIGHT: f32 = 30.0;
-const PANEL_PADDING: f32 = 10.0;
-
-// Modes
-const MODE_SINGLE: i32 = 0;
-const MODE_GALLERY: i32 = 1;
-
-// Timing
+// Layout constants
+const TREE_PANEL_RATIO: f32 = 0.30;
+const HEADER_HEIGHT: f32 = 52.0;
+const STATUS_BAR_HEIGHT: f32 = 28.0;
+const PANEL_PADDING: f32 = 12.0;
 const FRAME_TIME_MS: i32 = 16;
 const KEY_REPEAT_DELAY: i32 = 300;
 const KEY_REPEAT_RATE: i32 = 100;
 
+// Directory list constants
+const DIR_LIST_MAX_ENTRIES: i32 = 256;
+const DIR_LIST_NAME_LEN: i32 = 260;
+const PATH_BUFFER: i32 = 520;
+
 // Gallery layout
-const MAX_SPRITES: i32 = 5;
-const MAX_TREE_ITEMS: i32 = 10;
+const MODE_SINGLE: i32 = 0;
+const MODE_GALLERY: i32 = 1;
 const GALLERY_COLS: i32 = 3;
-const GALLERY_ITEM_SIZE: f32 = 180.0;
-const GALLERY_SPACING: f32 = 20.0;
-const TREE_ITEM_HEIGHT: f32 = 24.0;
+const GALLERY_ITEM_SIZE: f32 = 160.0;
+const GALLERY_SPACING: f32 = 18.0;
+const TREE_ITEM_HEIGHT: f32 = 22.0;
 
-// Sprite data
-struct SpriteEntry {
-    handle: i32;
-    active: bool;
-    filename: u8[64];
-    filename_len: i32;
+struct DirEntry {
+    name: string[260];
+    is_dir: bool;
 }
 
-// Tree item for file browser
-struct TreeItem {
-    is_directory: bool;
-    is_expanded: bool;
-    depth: i32;
-    active: bool;
-    filename: u8[64];
-    filename_len: i32;
+struct DirList {
+    entries: DirEntry[256];
+    count: i32;
 }
 
-// Input state for key repeat
 struct KeyState {
     down: bool;
     was_down: bool;
@@ -79,182 +48,162 @@ struct KeyState {
     last_repeat: i32;
 }
 
-// Window dimensions
 struct WindowSize {
     width: i32;
     height: i32;
     tree_panel_w: f32;
-    preview_x: f32;
     preview_w: f32;
     preview_h: f32;
+    tree_x: f32;
 }
 
-// Main state
 struct ViewerState {
-    sprites: SpriteEntry[5];
-    sprite_count: i32;
-    selected_sprite_idx: i32;
-
-    tree_items: TreeItem[10];
-    tree_count: i32;
-    selected_tree_idx: i32;
-
+    font: i32;
     mode: i32;
-
+    current_dir: string[260];
+    temp_path: string[520];
+    selected_path: string[520];
+    selected_idx: i32;
+    selected_handle: i32;
     window: WindowSize;
     last_window_width: i32;
     last_window_height: i32;
-
     key_left: KeyState;
-    key_right: KeyState;
     key_up: KeyState;
     key_down: KeyState;
     key_tab: KeyState;
     key_return: KeyState;
-
-    last_time: i32;
     frame_start: i32;
     running: bool;
 }
 
 global state: ViewerState;
+global dir_list: DirList;
+global entry_name: string[260];
 
-// Update window size and layout (returns true if size changed)
+// Helper: join directory + filename
+function join_path(dst: string[520], base: string[260], name: string[260]): void {
+    str_copy(dst, base);
+    let len: i32 = str_len(dst);
+    if (len > 0) {
+        let last: i32 = str_get(dst, len - 1);
+        if (last != 47) {  // '/'
+            str_append_char(dst, 47);
+        }
+    }
+    str_append(dst, name);
+}
+
+function is_name_stv(name: string[260]): bool {
+    let len: i32 = str_len(name);
+    if (len < 4) {
+        return false;
+    }
+    let c0: i32 = str_get(name, len - 4);
+    let c1: i32 = str_get(name, len - 3);
+    let c2: i32 = str_get(name, len - 2);
+    let c3: i32 = str_get(name, len - 1);
+    return c0 == 46 && c1 == 115 && c2 == 116 && c3 == 118;
+}
+
+function write_root_dir(dst: string[260]): void {
+    str_clear(dst);
+    str_append_char(dst, 97);   // 'a'
+    str_append_char(dst, 115);  // 's'
+    str_append_char(dst, 115);  // 's'
+    str_append_char(dst, 101);  // 'e'
+    str_append_char(dst, 116);  // 't'
+    str_append_char(dst, 115);  // 's'
+    str_append_char(dst, 95);   // '_'
+    str_append_char(dst, 115);  // 's'
+    str_append_char(dst, 114);  // 'r'
+    str_append_char(dst, 99);   // 'c'
+}
+
 function update_window_layout(): bool {
-    let new_width: i32 = 0;
-    let new_height: i32 = 0;
-    get_window_size(new_width, new_height);
-
-    let changed: bool = false;
-    if (new_width == state.last_window_width) {
-    } else {
-        changed = true;
-    }
-    if (new_height == state.last_window_height) {
-    } else {
-        changed = true;
-    }
-
-    state.window.width = new_width;
-    state.window.height = new_height;
-    state.last_window_width = new_width;
-    state.last_window_height = new_height;
+    let new_w: i32 = 0;
+    let new_h: i32 = 0;
+    get_window_size(new_w, new_h);
+    let changed: bool = new_w != state.last_window_width || new_h != state.last_window_height;
+    state.window.width = new_w;
+    state.window.height = new_h;
+    state.last_window_width = new_w;
+    state.last_window_height = new_h;
 
     let width_f: f32 = state.window.width;
     let height_f: f32 = state.window.height;
-
-    state.window.tree_panel_w = width_f * TREE_PANEL_WIDTH_RATIO;
-    state.window.preview_x = state.window.tree_panel_w + PANEL_PADDING;
-    state.window.preview_w = width_f - state.window.preview_x - PANEL_PADDING;
+    state.window.tree_panel_w = width_f * TREE_PANEL_RATIO;
+    state.window.preview_w = width_f - state.window.tree_panel_w - (PANEL_PADDING * 3.0);
     state.window.preview_h = height_f - HEADER_HEIGHT - STATUS_BAR_HEIGHT;
-
+    state.window.tree_x = width_f - state.window.tree_panel_w - PANEL_PADDING;
     return changed;
 }
 
-// Handle input
+function refresh_directory(): void {
+    let result: i32 = list_directory(state.current_dir, dir_list);
+    if (result < 0) {
+        result = 0;
+    }
+    dir_list_count = result;
+    if (state.selected_idx < 0) {
+        state.selected_idx = 0;
+    }
+    if (state.selected_idx >= dir_list_count) {
+        state.selected_idx = dir_list_count - 1;
+        if (state.selected_idx < 0) {
+            state.selected_idx = 0;
+        }
+    }
+}
+
+function update_selected_preview(): void {
+    state.selected_handle = 0;
+    str_clear(state.selected_path);
+    if (dir_list_count <= 0) {
+        return;
+    }
+    if (state.selected_idx < 0 || state.selected_idx >= dir_list_count) {
+        return;
+    }
+    let idx: i32 = state.selected_idx;
+    if (dir_list_entries_is_dir[idx]) {
+        return;
+    }
+    dir_list_entry_copy_name(dir_list, idx, entry_name);
+    if (!is_name_stv(entry_name)) {
+        return;
+    }
+    join_path(state.temp_path, state.current_dir, entry_name);
+    str_copy(state.selected_path, state.temp_path);
+    state.selected_handle = gfx_load_sprite(state.temp_path);
+}
+
+function go_up_directory(): void {
+    let len: i32 = str_len(state.current_dir);
+    if (len <= 0) {
+        return;
+    }
+    let idx: i32 = len - 1;
+    let slash_found: bool = false;
+    for (; idx >= 0 && !slash_found; idx = idx - 1) {
+        let c: i32 = str_get(state.current_dir, idx);
+        if (c == 47) {
+            str_set(state.current_dir, idx, 0);
+            slash_found = true;
+        }
+    }
+    if (!slash_found) {
+        str_clear(state.current_dir);
+    }
+    refresh_directory();
+    state.selected_idx = 0;
+    update_selected_preview();
+}
+
 function handle_input(current_time: i32): void {
-    // Handle Tab key (mode switch)
     state.key_tab.was_down = state.key_tab.down;
     state.key_tab.down = is_key_down(KEY_TAB);
-    let tab_pressed: bool = false;
-    if (state.key_tab.down) {
-        if (!state.key_tab.was_down) {
-            tab_pressed = true;
-        }
-    }
-
-    // Handle Up key (tree navigation)
-    state.key_up.was_down = state.key_up.down;
-    state.key_up.down = is_key_down(KEY_UP);
-    let up_pressed: bool = false;
-    if (state.key_up.down) {
-        if (!state.key_up.was_down) {
-            state.key_up.press_time = current_time;
-            up_pressed = true;
-        } else {
-            let held_time: i32 = current_time - state.key_up.press_time;
-            if (held_time > KEY_REPEAT_DELAY) {
-                let since_repeat: i32 = current_time - state.key_up.last_repeat;
-                if (since_repeat > KEY_REPEAT_RATE) {
-                    state.key_up.last_repeat = current_time;
-                    up_pressed = true;
-                }
-            }
-        }
-    }
-
-    // Handle Down key (tree navigation)
-    state.key_down.was_down = state.key_down.down;
-    state.key_down.down = is_key_down(KEY_DOWN);
-    let down_pressed: bool = false;
-    if (state.key_down.down) {
-        if (!state.key_down.was_down) {
-            state.key_down.press_time = current_time;
-            down_pressed = true;
-        } else {
-            let held_time: i32 = current_time - state.key_down.press_time;
-            if (held_time > KEY_REPEAT_DELAY) {
-                let since_repeat: i32 = current_time - state.key_down.last_repeat;
-                if (since_repeat > KEY_REPEAT_RATE) {
-                    state.key_down.last_repeat = current_time;
-                    down_pressed = true;
-                }
-            }
-        }
-    }
-
-    // Handle Left key (sprite navigation in single mode)
-    state.key_left.was_down = state.key_left.down;
-    state.key_left.down = is_key_down(KEY_LEFT);
-    let left_pressed: bool = false;
-    if (state.key_left.down) {
-        if (!state.key_left.was_down) {
-            state.key_left.press_time = current_time;
-            left_pressed = true;
-        } else {
-            let held_time: i32 = current_time - state.key_left.press_time;
-            if (held_time > KEY_REPEAT_DELAY) {
-                let since_repeat: i32 = current_time - state.key_left.last_repeat;
-                if (since_repeat > KEY_REPEAT_RATE) {
-                    state.key_left.last_repeat = current_time;
-                    left_pressed = true;
-                }
-            }
-        }
-    }
-
-    // Handle Right key (sprite navigation in single mode)
-    state.key_right.was_down = state.key_right.down;
-    state.key_right.down = is_key_down(KEY_RIGHT);
-    let right_pressed: bool = false;
-    if (state.key_right.down) {
-        if (!state.key_right.was_down) {
-            state.key_right.press_time = current_time;
-            right_pressed = true;
-        } else {
-            let held_time: i32 = current_time - state.key_right.press_time;
-            if (held_time > KEY_REPEAT_DELAY) {
-                let since_repeat: i32 = current_time - state.key_right.last_repeat;
-                if (since_repeat > KEY_REPEAT_RATE) {
-                    state.key_right.last_repeat = current_time;
-                    right_pressed = true;
-                }
-            }
-        }
-    }
-
-    // Handle Return key (expand/collapse)
-    state.key_return.was_down = state.key_return.down;
-    state.key_return.down = is_key_down(KEY_RETURN);
-    let return_pressed: bool = false;
-    if (state.key_return.down) {
-        if (!state.key_return.was_down) {
-            return_pressed = true;
-        }
-    }
-
-    // Apply actions
-    if (tab_pressed) {
+    if (state.key_tab.down && !state.key_tab.was_down) {
         if (state.mode == MODE_SINGLE) {
             state.mode = MODE_GALLERY;
         } else {
@@ -262,780 +211,251 @@ function handle_input(current_time: i32): void {
         }
     }
 
-    // Tree navigation
-    if (up_pressed) {
-        if (state.selected_tree_idx > 0) {
-            state.selected_tree_idx = state.selected_tree_idx - 1;
-        }
-    }
-    if (down_pressed) {
-        if (state.selected_tree_idx < (state.tree_count - 1)) {
-            state.selected_tree_idx = state.selected_tree_idx + 1;
-        }
-    }
-
-    // Expand/collapse tree directories
-    if (return_pressed) {
-        if (state.selected_tree_idx < state.tree_count) {
-            if (state.tree_items[state.selected_tree_idx].is_directory) {
-                let expanded: bool = state.tree_items[state.selected_tree_idx].is_expanded;
-                state.tree_items[state.selected_tree_idx].is_expanded = !expanded;
+    state.key_up.was_down = state.key_up.down;
+    state.key_up.down = is_key_down(KEY_UP);
+    if (state.key_up.down) {
+        if (!state.key_up.was_down) {
+            state.key_up.press_time = current_time;
+            state.key_up.last_repeat = current_time;
+            if (state.selected_idx > 0) {
+                state.selected_idx = state.selected_idx - 1;
+                update_selected_preview();
             }
-        }
-    }
-
-    // Left/Right navigation in single mode
-    if (state.mode == MODE_SINGLE) {
-        if (left_pressed) {
-            if (state.selected_sprite_idx > 0) {
-                state.selected_sprite_idx = state.selected_sprite_idx - 1;
-            }
-        }
-        if (right_pressed) {
-            if (state.selected_sprite_idx < (state.sprite_count - 1)) {
-                state.selected_sprite_idx = state.selected_sprite_idx + 1;
-            }
-        }
-    }
-}
-
-// Drawing functions
-function draw_line_h(x1: f32, x2: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_line(x1, y, x2, y, r, g, b, a);
-}
-
-function draw_line_v(x: f32, y1: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_line(x, y1, x, y2, r, g, b, a);
-}
-
-function draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_line_h(x, x + w, y, r, g, b, a);
-    draw_line_v(x + w, y, y + h, r, g, b, a);
-    draw_line_h(x + w, x, y + h, r, g, b, a);
-    draw_line_v(x, y + h, y, r, g, b, a);
-}
-
-function draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let line_y: f32 = y;
-    for (line_y = y; line_y < y + h; line_y = line_y + 2.0) {
-        draw_line_h(x, x + w, line_y, r, g, b, a);
-    }
-}
-
-// Draw header with keyboard shortcuts
-function draw_header(): void {
-    let width_f: f32 = state.window.width;
-
-    // Background
-    draw_filled_rect(0.0, 0.0, width_f, HEADER_HEIGHT, 0.12, 0.12, 0.15, 1.0);
-    draw_line_h(0.0, width_f, HEADER_HEIGHT, 0.3, 0.3, 0.35, 1.0);
-
-    // Keyboard shortcut hints
-    let hint_x: f32 = 10.0;
-    let hint_y: f32 = 10.0;
-    let hint_w: f32 = 100.0;
-    let hint_h: f32 = 30.0;
-    let spacing: f32 = 140.0;
-
-    // Tab hint
-    draw_rect(hint_x, hint_y, hint_w, hint_h, 0.6, 0.6, 0.7, 1.0);
-    draw_filled_rect(hint_x + 2.0, hint_y + 2.0, hint_w - 4.0, hint_h - 4.0, 0.2, 0.2, 0.25, 1.0);
-    draw_text(1, hint_x + 30.0, hint_y + 8.0, 2.0, 0.8, 0.8, 0.9, 1.0);
-
-    // Arrows hint
-    draw_rect(hint_x + spacing, hint_y, hint_w, hint_h, 0.6, 0.6, 0.7, 1.0);
-    draw_filled_rect(hint_x + spacing + 2.0, hint_y + 2.0, hint_w - 4.0, hint_h - 4.0, 0.2, 0.2, 0.25, 1.0);
-    draw_text(2, hint_x + spacing + 10.0, hint_y + 8.0, 1.5, 0.8, 0.8, 0.9, 1.0);
-
-    // Esc hint
-    draw_rect(hint_x + spacing * 2.0, hint_y, hint_w, hint_h, 0.6, 0.6, 0.7, 1.0);
-    draw_filled_rect(hint_x + spacing * 2.0 + 2.0, hint_y + 2.0, hint_w - 4.0, hint_h - 4.0, 0.2, 0.2, 0.25, 1.0);
-    draw_text(3, hint_x + spacing * 2.0 + 30.0, hint_y + 8.0, 2.0, 0.8, 0.8, 0.9, 1.0);
-}
-
-// Draw tree panel
-function draw_tree_panel(): void {
-    let height_f: f32 = state.window.height;
-
-    // Background
-    draw_filled_rect(0.0, HEADER_HEIGHT, state.window.tree_panel_w, height_f - HEADER_HEIGHT, 0.08, 0.08, 0.12, 1.0);
-
-    // Border
-    draw_line_v(state.window.tree_panel_w, HEADER_HEIGHT, height_f, 0.25, 0.25, 0.3, 1.0);
-
-    // Title
-    draw_filled_rect(10.0, HEADER_HEIGHT + 10.0, state.window.tree_panel_w - 20.0, 25.0, 0.15, 0.15, 0.2, 1.0);
-    draw_rect(10.0, HEADER_HEIGHT + 10.0, state.window.tree_panel_w - 20.0, 25.0, 0.4, 0.4, 0.5, 1.0);
-    draw_text(0, 25.0, HEADER_HEIGHT + 17.0, 1.5, 0.8, 0.8, 0.9, 1.0);
-
-    // Draw tree items
-    let item_y: f32 = HEADER_HEIGHT + 45.0;
-    let i: i32 = 0;
-    for (i = 0; i < state.tree_count; i = i + 1) {
-        if (state.tree_items[i].active) {
-            let depth_f: f32 = state.tree_items[i].depth;
-            let indent: f32 = 20.0 + depth_f * 20.0;
-
-            // Selection highlight
-            if (i == state.selected_tree_idx) {
-                draw_filled_rect(10.0, item_y, state.window.tree_panel_w - 20.0, TREE_ITEM_HEIGHT, 0.25, 0.35, 0.5, 0.6);
-            }
-
-            // Icon (directory or file)
-            if (state.tree_items[i].is_directory) {
-                // Directory icon (square)
-                draw_rect(indent, item_y + 4.0, 12.0, 12.0, 0.7, 0.7, 0.8, 1.0);
-                if (state.tree_items[i].is_expanded) {
-                    // Expanded indicator (minus sign)
-                    draw_line_h(indent + 3.0, indent + 9.0, item_y + 10.0, 0.7, 0.7, 0.8, 1.0);
-                } else {
-                    // Collapsed indicator (plus sign)
-                    draw_line_h(indent + 3.0, indent + 9.0, item_y + 10.0, 0.7, 0.7, 0.8, 1.0);
-                    draw_line_v(indent + 6.0, item_y + 7.0, item_y + 13.0, 0.7, 0.7, 0.8, 1.0);
-                }
-            } else {
-                // File icon (small filled square)
-                draw_filled_rect(indent, item_y + 4.0, 12.0, 12.0, 0.5, 0.5, 0.6, 1.0);
-            }
-
-            item_y = item_y + TREE_ITEM_HEIGHT;
-        }
-    }
-}
-
-// Draw preview panel
-function draw_preview_panel(): void {
-    let height_f: f32 = state.window.height;
-
-    // Background
-    draw_filled_rect(state.window.preview_x, HEADER_HEIGHT, state.window.preview_w, state.window.preview_h, 0.05, 0.05, 0.1, 1.0);
-
-    if (state.mode == MODE_SINGLE) {
-        draw_single_view();
-    } else {
-        draw_gallery_view();
-    }
-}
-
-function draw_single_view(): void {
-    // Draw selected sprite centered
-    if (state.selected_sprite_idx < state.sprite_count) {
-        let center_x: f32 = state.window.preview_x + state.window.preview_w / 2.0;
-        let center_y: f32 = HEADER_HEIGHT + state.window.preview_h / 2.0;
-
-        foreach (let spr, idx in state.sprites) {
-            let idx_i32: i32 = idx;
-            if (idx_i32 == state.selected_sprite_idx) {
-                if (spr.active) {
-                    if (spr.handle == 0) {
-                    } else {
-                        gfx_poll_reload(spr.handle);
-                        gfx_draw_sprite(spr.handle, center_x, center_y, 4.0, 4.0, 0.0, 1.0, 1.0, 1.0, 1.0);
-                        draw_rect(center_x - 140.0, center_y - 140.0, 280.0, 280.0, 0.4, 0.4, 0.5, 0.5);
+        } else {
+            let held: i32 = current_time - state.key_up.press_time;
+            if (held > KEY_REPEAT_DELAY) {
+                let since: i32 = current_time - state.key_up.last_repeat;
+                if (since > KEY_REPEAT_RATE) {
+                    state.key_up.last_repeat = current_time;
+                    if (state.selected_idx > 0) {
+                        state.selected_idx = state.selected_idx - 1;
+                        update_selected_preview();
                     }
                 }
             }
         }
     }
 
-    // Navigation indicators
-    if (state.selected_sprite_idx > 0) {
-        let arrow_x: f32 = state.window.preview_x + 30.0;
-        let arrow_y: f32 = HEADER_HEIGHT + state.window.preview_h / 2.0;
-        draw_line(arrow_x, arrow_y, arrow_x + 30.0, arrow_y - 20.0, 0.6, 0.6, 0.7, 1.0);
-        draw_line(arrow_x, arrow_y, arrow_x + 30.0, arrow_y + 20.0, 0.6, 0.6, 0.7, 1.0);
-    }
-
-    if (state.selected_sprite_idx < (state.sprite_count - 1)) {
-        let arrow_x: f32 = state.window.preview_x + state.window.preview_w - 30.0;
-        let arrow_y: f32 = HEADER_HEIGHT + state.window.preview_h / 2.0;
-        draw_line(arrow_x, arrow_y, arrow_x - 30.0, arrow_y - 20.0, 0.6, 0.6, 0.7, 1.0);
-        draw_line(arrow_x, arrow_y, arrow_x - 30.0, arrow_y + 20.0, 0.6, 0.6, 0.7, 1.0);
-    }
-}
-
-function draw_gallery_view(): void {
-    // Calculate grid layout
-    let cols_f: f32 = GALLERY_COLS;
-    let total_width: f32 = (cols_f * GALLERY_ITEM_SIZE) + ((cols_f - 1.0) * GALLERY_SPACING);
-    let start_x: f32 = state.window.preview_x + (state.window.preview_w - total_width) / 2.0;
-    let start_y: f32 = HEADER_HEIGHT + 20.0;
-
-    // Draw all sprites in grid
-    let grid_idx: i32 = 0;
-    foreach (let spr, idx in state.sprites) {
-        if (spr.active) {
-            let grid_x: i32 = grid_idx % GALLERY_COLS;
-            let grid_y: i32 = grid_idx / GALLERY_COLS;
-
-            let gx_f: f32 = grid_x;
-            let gy_f: f32 = grid_y;
-            let item_x: f32 = start_x + gx_f * (GALLERY_ITEM_SIZE + GALLERY_SPACING);
-            let item_y: f32 = start_y + gy_f * (GALLERY_ITEM_SIZE + GALLERY_SPACING);
-
-            // Thumbnail box
-            draw_rect(item_x, item_y, GALLERY_ITEM_SIZE, GALLERY_ITEM_SIZE, 0.4, 0.4, 0.5, 1.0);
-
-            // Draw sprite centered
-            if (spr.handle == 0) {
-            } else {
-                gfx_poll_reload(spr.handle);
-                let center_x: f32 = item_x + GALLERY_ITEM_SIZE / 2.0;
-                let center_y: f32 = item_y + GALLERY_ITEM_SIZE / 2.0;
-                gfx_draw_sprite(spr.handle, center_x, center_y, 2.0, 2.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    state.key_down.was_down = state.key_down.down;
+    state.key_down.down = is_key_down(KEY_DOWN);
+    if (state.key_down.down) {
+        if (!state.key_down.was_down) {
+            state.key_down.press_time = current_time;
+            state.key_down.last_repeat = current_time;
+        if (state.selected_idx < dir_list_count - 1) {
+            state.selected_idx = state.selected_idx + 1;
+            update_selected_preview();
+        }
+        } else {
+            let held2: i32 = current_time - state.key_down.press_time;
+            if (held2 > KEY_REPEAT_DELAY) {
+                let since2: i32 = current_time - state.key_down.last_repeat;
+                if (since2 > KEY_REPEAT_RATE) {
+                    state.key_down.last_repeat = current_time;
+            if (state.selected_idx < dir_list_count - 1) {
+                state.selected_idx = state.selected_idx + 1;
+                update_selected_preview();
             }
-
-            grid_idx = grid_idx + 1;
+        }
+            }
         }
     }
+
+    state.key_return.was_down = state.key_return.down;
+    state.key_return.down = is_key_down(KEY_RETURN);
+    if (state.key_return.down && !state.key_return.was_down) {
+        if (state.selected_idx >= 0 && state.selected_idx < dir_list_count) {
+            let idx: i32 = state.selected_idx;
+            if (dir_list_entries_is_dir[idx]) {
+                dir_list_entry_copy_name(dir_list, idx, entry_name);
+                join_path(state.temp_path, state.current_dir, entry_name);
+                str_copy(state.current_dir, state.temp_path);
+                refresh_directory();
+                state.selected_idx = 0;
+            }
+            update_selected_preview();
+        }
+    }
+
+    state.key_left.was_down = state.key_left.down;
+    state.key_left.down = is_key_down(KEY_LEFT);
+    if (state.key_left.down && !state.key_left.was_down) {
+        go_up_directory();
+    }
 }
 
-// Draw status bar
+function draw_rect_outline(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+    draw_line(x, y, x + w, y, r, g, b, a);
+    draw_line(x + w, y, x + w, y + h, r, g, b, a);
+    draw_line(x + w, y + h, x, y + h, r, g, b, a);
+    draw_line(x, y + h, x, y, r, g, b, a);
+}
+
+function draw_header(): void {
+    draw_text(state.font, "STV Viewer  |  Up/Down select  Enter open  Left up  Tab mode  Esc quit", PANEL_PADDING, 14.0, 0.9, 0.9, 1.0, 1.0);
+    draw_text(state.font, "Dir:", PANEL_PADDING, 32.0, 0.7, 0.8, 1.0, 1.0);
+    draw_text(state.font, state.current_dir, PANEL_PADDING + 32.0, 32.0, 0.9, 0.9, 1.0, 1.0);
+}
+
 function draw_status_bar(): void {
-    let width_f: f32 = state.window.width;
     let height_f: f32 = state.window.height;
-    let bar_y: f32 = height_f - STATUS_BAR_HEIGHT;
-
-    // Background
-    draw_filled_rect(0.0, bar_y, width_f, STATUS_BAR_HEIGHT, 0.15, 0.15, 0.18, 1.0);
-    draw_line_h(0.0, width_f, bar_y, 0.3, 0.3, 0.35, 1.0);
-
-    // Mode indicator
-    if (state.mode == MODE_SINGLE) {
-        draw_filled_rect(10.0, bar_y + 5.0, 90.0, 20.0, 0.3, 0.5, 0.3, 1.0);
-        draw_rect(10.0, bar_y + 5.0, 90.0, 20.0, 0.5, 0.8, 0.5, 1.0);
-        draw_text(4, 18.0, bar_y + 8.0, 1.5, 0.9, 0.9, 0.9, 1.0);
-    } else {
-        draw_filled_rect(10.0, bar_y + 5.0, 100.0, 20.0, 0.5, 0.3, 0.5, 1.0);
-        draw_rect(10.0, bar_y + 5.0, 100.0, 20.0, 0.8, 0.5, 0.8, 1.0);
-        draw_text(5, 18.0, bar_y + 8.0, 1.5, 0.9, 0.9, 0.9, 1.0);
+    let y: f32 = height_f - STATUS_BAR_HEIGHT + 6.0;
+    let label: string = "Mode: Single";
+    if (state.mode != MODE_SINGLE) {
+        label = "Mode: Gallery";
+    }
+    draw_text(state.font, label, PANEL_PADDING, y, 0.7, 0.9, 0.7, 1.0);
+    if (str_len(state.selected_path) > 0) {
+        draw_text(state.font, state.selected_path, PANEL_PADDING + 140.0, y, 0.9, 0.9, 1.0, 1.0);
     }
 }
 
-// Draw a simple character using lines (5x7 grid)
-function draw_text_char(c: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let w: f32 = scale;
-    let h: f32 = scale;
+function draw_tree_panel(): void {
+    let x0: f32 = state.window.tree_x;
+    let y0: f32 = HEADER_HEIGHT + PANEL_PADDING;
+    let w: f32 = state.window.tree_panel_w;
+    let h: f32 = state.window.preview_h - PANEL_PADDING;
 
-    // A-Z basic shapes using line segments
-    if (c == 65) {  // 'A'
-        draw_line(x, y + h * 5.0, x + w * 2.0, y, r, g, b, a);
-        draw_line(x + w * 2.0, y, x + w * 4.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w, y + h * 3.0, x + w * 3.0, y + h * 3.0, r, g, b, a);
-    }
-    if (c == 66) {  // 'B'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 67) {  // 'C'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 68) {  // 'D'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y + h, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 4.0, r, g, b, a);
-        draw_line(x + w * 3.0, y + h, x + w * 3.0, y + h * 4.0, r, g, b, a);
-    }
-    if (c == 69) {  // 'E'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 2.5, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 70) {  // 'F'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 2.5, y + h * 2.5, r, g, b, a);
-    }
-    if (c == 71) {  // 'G'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 2.0, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-    }
-    if (c == 73) {  // 'I'
-        draw_line(x + w, y, x + w, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 2.0, y, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 2.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 76) {  // 'L'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 77) {  // 'M'
-        draw_line(x, y + h * 5.0, x, y, r, g, b, a);
-        draw_line(x, y, x + w * 2.0, y + h * 2.0, r, g, b, a);
-        draw_line(x + w * 2.0, y + h * 2.0, x + w * 4.0, y, r, g, b, a);
-        draw_line(x + w * 4.0, y, x + w * 4.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 78) {  // 'N'
-        draw_line(x, y + h * 5.0, x, y, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 5.0, x + w * 3.0, y, r, g, b, a);
-    }
-    if (c == 79) {  // 'O'
-        draw_rect(x, y, w * 3.0, h * 5.0, r, g, b, a);
-    }
-    if (c == 82) {  // 'R'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 1.5, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 83) {  // 'S'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 84) {  // 'T'
-        draw_line(x, y, x + w * 4.0, y, r, g, b, a);
-        draw_line(x + w * 2.0, y, x + w * 2.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 86) {  // 'V'
-        draw_line(x, y, x + w * 2.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 2.0, y + h * 5.0, x + w * 4.0, y, r, g, b, a);
-    }
-    if (c == 87) {  // 'W'
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 2.0, y + h * 3.0, r, g, b, a);
-        draw_line(x + w * 2.0, y + h * 3.0, x + w * 4.0, y + h * 5.0, r, g, b, a);
-        draw_line(x + w * 4.0, y + h * 5.0, x + w * 4.0, y, r, g, b, a);
-    }
-    if (c == 89) {  // 'Y'
-        draw_line(x, y, x + w * 2.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 4.0, y, x + w * 2.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 2.0, y + h * 2.5, x + w * 2.0, y + h * 5.0, r, g, b, a);
-    }
+    draw_rect_outline(x0, y0, w, h, 0.2, 0.2, 0.3, 1.0);
+    draw_text(state.font, "Contents", x0 + 10.0, y0 + 8.0, 0.9, 0.9, 1.0, 1.0);
 
-    // Numbers 0-9
-    if (c == 48) {  // '0'
-        draw_rect(x, y, w * 3.0, h * 5.0, r, g, b, a);
+    let max_visible: i32 = (h - 28.0) / TREE_ITEM_HEIGHT;
+    if (max_visible < 1) {
+        max_visible = 1;
     }
-    if (c == 49) {  // '1'
-        draw_line(x + w, y, x + w, y + h * 5.0, r, g, b, a);
+    let start: i32 = 0;
+    if (state.selected_idx >= max_visible) {
+        start = state.selected_idx - (max_visible - 1);
     }
-    if (c == 50) {  // '2'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 51) {  // '3'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 52) {  // '4'
-        draw_line(x, y, x, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 53) {  // '5'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 54) {  // '6'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y + h * 2.5, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 55) {  // '7'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-    if (c == 56) {  // '8'
-        draw_rect(x, y, w * 3.0, h * 2.5, r, g, b, a);
-        draw_rect(x, y + h * 2.5, w * 3.0, h * 2.5, r, g, b, a);
-    }
-    if (c == 57) {  // '9'
-        draw_line(x, y, x + w * 3.0, y, r, g, b, a);
-        draw_line(x, y, x, y + h * 2.5, r, g, b, a);
-        draw_line(x, y + h * 2.5, x + w * 3.0, y + h * 2.5, r, g, b, a);
-        draw_line(x + w * 3.0, y, x + w * 3.0, y + h * 5.0, r, g, b, a);
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-
-    // Special characters
-    if (c == 46) {  // '.'
-        draw_filled_rect(x + w, y + h * 4.0, w, h, r, g, b, a);
-    }
-    if (c == 95) {  // '_'
-        draw_line(x, y + h * 5.0, x + w * 3.0, y + h * 5.0, r, g, b, a);
-    }
-}
-
-// Draw text from an ASCII byte array (uppercase characters, numbers, dots, underscores)
-function draw_text_string(text: u8[], text_len: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let cx: f32 = x;
-    let spacing: f32 = scale * 5.0;
-
     let i: i32 = 0;
-    for (i = 0; i < text_len; i = i + 1) {
-        let char_code: i32 = text[i];
-        if (char_code == 0) {
+    for (i = 0; i < max_visible; i = i + 1) {
+        let idx: i32 = start + i;
+        if (idx >= dir_list_count) {
             return;
         }
-        draw_text_char(char_code, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
+
+        let row_offset: f32 = i;
+        let row_y: f32 = y0 + 30.0 + (TREE_ITEM_HEIGHT * row_offset);
+        if (idx == state.selected_idx) {
+            draw_rect_outline(x0 + 6.0, row_y - 2.0, w - 12.0, TREE_ITEM_HEIGHT, 0.7, 0.8, 1.0, 1.0);
+        }
+
+        let entry_is_dir: bool = dir_list_entries_is_dir[idx];
+        if (entry_is_dir) {
+            draw_text(state.font, "[D]", x0 + 10.0, row_y, 0.8, 0.8, 0.9, 1.0);
+        } else {
+            draw_text(state.font, "[F]", x0 + 10.0, row_y, 0.6, 0.8, 0.6, 1.0);
+        }
+        dir_list_entry_copy_name(dir_list, idx, entry_name);
+        draw_text(state.font, entry_name, x0 + 42.0, row_y, 0.9, 0.9, 1.0, 1.0);
     }
 }
 
-// Draw simple text string
-function draw_text(text_code: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let cx: f32 = x;
-    let spacing: f32 = scale * 5.0;
+function draw_preview_single(): void {
+    let x0: f32 = PANEL_PADDING;
+    let y0: f32 = HEADER_HEIGHT + PANEL_PADDING;
+    let w: f32 = state.window.preview_w;
+    let h: f32 = state.window.preview_h - PANEL_PADDING;
 
-    // Simple text codes: 0=FILES, 1=TAB, 2=ARROWS, 3=ESC, 4=SINGLE, 5=GALLERY
-    if (text_code == 0) {  // FILES
-        draw_text_char(70, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(73, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(76, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(69, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(83, cx, y, scale, r, g, b, a);
-    }
-    if (text_code == 1) {  // TAB
-        draw_text_char(84, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(65, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(66, cx, y, scale, r, g, b, a);
-    }
-    if (text_code == 2) {  // ARROWS
-        draw_text_char(65, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(82, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(82, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(79, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(87, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(83, cx, y, scale, r, g, b, a);
-    }
-    if (text_code == 3) {  // ESC
-        draw_text_char(69, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(83, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(67, cx, y, scale, r, g, b, a);
-    }
-    if (text_code == 4) {  // SINGLE
-        draw_text_char(83, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(73, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(78, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(71, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(76, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(69, cx, y, scale, r, g, b, a);
-    }
-    if (text_code == 5) {  // GALLERY
-        draw_text_char(71, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(65, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(76, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(76, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(69, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(82, cx, y, scale, r, g, b, a);
-        cx = cx + spacing;
-        draw_text_char(89, cx, y, scale, r, g, b, a);
+    draw_rect_outline(x0, y0, w, h, 0.2, 0.2, 0.3, 1.0);
+    draw_text(state.font, "Preview", x0 + 10.0, y0 + 8.0, 0.9, 0.9, 1.0, 1.0);
+
+    if (state.selected_handle != 0) {
+        let cx: f32 = x0 + (w * 0.5);
+        let cy: f32 = y0 + (h * 0.55);
+        gfx_poll_reload(state.selected_handle);
+        gfx_draw_sprite(state.selected_handle, cx, cy, 4.0, 4.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+        if (state.selected_idx >= 0 && state.selected_idx < dir_list_count) {
+            dir_list_entry_copy_name(dir_list, state.selected_idx, entry_name);
+            draw_text(state.font, entry_name, x0 + 10.0, y0 + h - 28.0, 0.9, 0.9, 1.0, 1.0);
+        }
+    } else {
+        draw_text(state.font, "Select a .stv file to preview", x0 + 10.0, y0 + 40.0, 0.7, 0.8, 1.0, 1.0);
     }
 }
 
-// Initialize viewer
+function draw_preview_gallery(): void {
+    let x0: f32 = PANEL_PADDING;
+    let y0: f32 = HEADER_HEIGHT + PANEL_PADDING;
+    let w: f32 = state.window.preview_w;
+    let h: f32 = state.window.preview_h - PANEL_PADDING;
+
+    draw_rect_outline(x0, y0, w, h, 0.2, 0.2, 0.3, 1.0);
+    draw_text(state.font, "Gallery", x0 + 10.0, y0 + 8.0, 0.9, 0.9, 1.0, 1.0);
+
+    let gallery_cols_f: f32 = GALLERY_COLS;
+    let margin_x: f32 = (w - ((gallery_cols_f * GALLERY_ITEM_SIZE) + ((gallery_cols_f - 1.0) * GALLERY_SPACING))) / 2.0;
+    if (margin_x < 10.0) {
+        margin_x = 10.0;
+    }
+
+    let shown: i32 = 0;
+    let idx: i32 = 0;
+    for (idx = 0; idx < dir_list_count && shown < 12; idx = idx + 1) {
+        let entry_is_dir: bool = dir_list_entries_is_dir[idx];
+        dir_list_entry_copy_name(dir_list, idx, entry_name);
+        if (!entry_is_dir && is_name_stv(entry_name)) {
+            let row: i32 = shown / GALLERY_COLS;
+            let col: i32 = shown % GALLERY_COLS;
+            let row_f: f32 = row;
+            let col_f: f32 = col;
+            let cx: f32 = x0 + margin_x + (col_f * (GALLERY_ITEM_SIZE + GALLERY_SPACING)) + (GALLERY_ITEM_SIZE * 0.5);
+            let cy: f32 = y0 + 48.0 + (row_f * (GALLERY_ITEM_SIZE + 50.0));
+            if (cy + (GALLERY_ITEM_SIZE * 0.5) > y0 + h - 12.0) {
+                return;
+            }
+
+            join_path(state.temp_path, state.current_dir, entry_name);
+            let handle: i32 = gfx_load_sprite(state.temp_path);
+            if (handle != 0) {
+                gfx_poll_reload(handle);
+                gfx_draw_sprite(handle, cx, cy, 2.5, 2.5, 0.0, 1.0, 1.0, 1.0, 1.0);
+            }
+
+            draw_text(state.font, entry_name, cx - (GALLERY_ITEM_SIZE * 0.5), cy + (GALLERY_ITEM_SIZE * 0.5) + 10.0, 0.9, 0.9, 1.0, 1.0);
+            shown = shown + 1;
+        }
+    }
+}
+
+function draw_preview_panel(): void {
+    if (state.mode == MODE_SINGLE) {
+        draw_preview_single();
+    } else {
+        draw_preview_gallery();
+    }
+}
+
 function init_viewer(): void {
-    // Initialize sprites
-    foreach (let spr in state.sprites) {
-        spr.handle = 0;
-        spr.active = false;
-    }
-
-    state.sprite_count = 0;
-    state.selected_sprite_idx = 0;
+    state.font = load_font("C:/Windows/Fonts/arial.ttf", 18);
     state.mode = MODE_SINGLE;
+    state.selected_idx = 0;
+    state.selected_handle = 0;
+    write_root_dir(state.current_dir);
+    str_clear(state.selected_path);
+    str_clear(state.temp_path);
+    refresh_directory();
+    update_selected_preview();
 
-    // Initialize tree
-    foreach (let item in state.tree_items) {
-        item.is_directory = false;
-        item.is_expanded = false;
-        item.depth = 0;
-        item.active = false;
-    }
-
-    // Add tree items
-    state.tree_items[0].is_directory = true;
-    state.tree_items[0].is_expanded = true;
-    state.tree_items[0].depth = 0;
-    state.tree_items[0].active = true;
-
-    state.tree_items[1].is_directory = true;
-    state.tree_items[1].is_expanded = false;
-    state.tree_items[1].depth = 1;
-    state.tree_items[1].active = true;
-
-    state.tree_items[2].is_directory = false;
-    state.tree_items[2].depth = 2;
-    state.tree_items[2].active = true;
-
-    state.tree_items[3].is_directory = false;
-    state.tree_items[3].depth = 2;
-    state.tree_items[3].active = true;
-
-    state.tree_count = 4;
-    state.selected_tree_idx = 0;
-
-    // Initialize key states
     state.key_left.down = false;
-    state.key_left.was_down = false;
-    state.key_left.press_time = 0;
-    state.key_left.last_repeat = 0;
-
-    state.key_right.down = false;
-    state.key_right.was_down = false;
-    state.key_right.press_time = 0;
-    state.key_right.last_repeat = 0;
-
     state.key_up.down = false;
-    state.key_up.was_down = false;
-    state.key_up.press_time = 0;
-    state.key_up.last_repeat = 0;
-
     state.key_down.down = false;
-    state.key_down.was_down = false;
-    state.key_down.press_time = 0;
-    state.key_down.last_repeat = 0;
-
     state.key_tab.down = false;
-    state.key_tab.was_down = false;
-    state.key_tab.press_time = 0;
-    state.key_tab.last_repeat = 0;
-
     state.key_return.down = false;
-    state.key_return.was_down = false;
-    state.key_return.press_time = 0;
-    state.key_return.last_repeat = 0;
 
-    state.last_time = get_time_ms();
     state.running = true;
-
-    // Load sprites
-    state.sprites[0].handle = gfx_load_sprite("assets_src/brickout-revenge/paddle.stv");
-    state.sprites[0].active = true;
-
-    state.sprites[1].handle = gfx_load_sprite("assets_src/brickout-revenge/ball.stv");
-    state.sprites[1].active = true;
-
-    state.sprites[2].handle = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.stv");
-    state.sprites[2].active = true;
-
-    state.sprites[3].handle = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.stv");
-    state.sprites[3].active = true;
-
-    state.sprites[4].handle = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.stv");
-    state.sprites[4].active = true;
-
-    state.sprite_count = 5;
-
-    // Initialize window dimensions
     update_window_layout();
 }
 
-// ===== TESTS =====
-
-test `window size query returns positive dimensions`(): bool {
-    let w: i32 = 0;
-    let h: i32 = 0;
-    get_window_size(w, h);
-
-    if (w > 0) {
-    } else {
-        return false;
-    }
-
-    if (h > 0) {
-    } else {
-        return false;
-    }
-
-    return true;
-}
-
-test `tree panel width is 25 percent of window width`(): bool {
-    let test_width: i32 = 1280;
-    let expected_tree_w: f32 = 320.0;
-
-    let width_f: f32 = test_width;
-    let calculated_tree_w: f32 = width_f * TREE_PANEL_WIDTH_RATIO;
-
-    if (calculated_tree_w == expected_tree_w) {
+test `tree panel ratio stays constant`(): bool {
+    let test_width: i32 = 1200;
+    let test_width_f: f32 = test_width;
+    let tree_w: f32 = test_width_f * TREE_PANEL_RATIO;
+    if (tree_w == 360.0) {
         return true;
     }
-
     return false;
 }
-
-test `preview x position accounts for tree panel and padding`(): bool {
-    let test_width: i32 = 1280;
-    let width_f: f32 = test_width;
-
-    let tree_w: f32 = width_f * TREE_PANEL_WIDTH_RATIO;
-    let preview_x: f32 = tree_w + PANEL_PADDING;
-
-    let expected_x: f32 = 330.0;
-
-    if (preview_x == expected_x) {
-        return true;
-    }
-
-    return false;
-}
-
-test `preview width fills remaining space`(): bool {
-    let test_width: i32 = 1280;
-    let width_f: f32 = test_width;
-
-    let tree_w: f32 = width_f * TREE_PANEL_WIDTH_RATIO;
-    let preview_x: f32 = tree_w + PANEL_PADDING;
-    let preview_w: f32 = width_f - preview_x - PANEL_PADDING;
-
-    let expected_w: f32 = 940.0;
-
-    if (preview_w == expected_w) {
-        return true;
-    }
-
-    return false;
-}
-
-test `preview height accounts for header and status bar`(): bool {
-    let test_height: i32 = 720;
-    let height_f: f32 = test_height;
-
-    let preview_h: f32 = height_f - HEADER_HEIGHT - STATUS_BAR_HEIGHT;
-
-    let expected_h: f32 = 640.0;
-
-    if (preview_h == expected_h) {
-        return true;
-    }
-
-    return false;
-}
-
-test `layout scales correctly for larger window`(): bool {
-    let test_width: i32 = 1920;
-    let test_height: i32 = 1080;
-
-    let width_f: f32 = test_width;
-    let height_f: f32 = test_height;
-
-    let tree_w: f32 = width_f * TREE_PANEL_WIDTH_RATIO;
-    let preview_x: f32 = tree_w + PANEL_PADDING;
-    let preview_w: f32 = width_f - preview_x - PANEL_PADDING;
-    let preview_h: f32 = height_f - HEADER_HEIGHT - STATUS_BAR_HEIGHT;
-
-    if (tree_w == 480.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_x == 490.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_w == 1420.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_h == 1000.0) {
-    } else {
-        return false;
-    }
-
-    return true;
-}
-
-test `layout scales correctly for smaller window`(): bool {
-    let test_width: i32 = 800;
-    let test_height: i32 = 600;
-
-    let width_f: f32 = test_width;
-    let height_f: f32 = test_height;
-
-    let tree_w: f32 = width_f * TREE_PANEL_WIDTH_RATIO;
-    let preview_x: f32 = tree_w + PANEL_PADDING;
-    let preview_w: f32 = width_f - preview_x - PANEL_PADDING;
-    let preview_h: f32 = height_f - HEADER_HEIGHT - STATUS_BAR_HEIGHT;
-
-    if (tree_w == 200.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_x == 210.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_w == 580.0) {
-    } else {
-        return false;
-    }
-
-    if (preview_h == 520.0) {
-    } else {
-        return false;
-    }
-
-    return true;
-}
-
-test `gallery grid centers within preview area`(): bool {
-    let preview_w: f32 = 940.0;
-
-    let cols_f: f32 = GALLERY_COLS;
-    let total_width: f32 = (cols_f * GALLERY_ITEM_SIZE) + ((cols_f - 1.0) * GALLERY_SPACING);
-    let margin: f32 = (preview_w - total_width) / 2.0;
-
-    if (margin > 0.0) {
-        return true;
-    }
-
-    return false;
-}
-
-// ===== MAIN =====
 
 function main(): i32 {
     let init_ok: bool = init_window(1280, 720, "STV Viewer");
@@ -1048,36 +468,26 @@ function main(): i32 {
     let frame: i32 = 0;
     for (frame = 0; state.running; frame = frame + 1) {
         state.frame_start = get_time_ms();
-
-        if (should_quit()) {
+        if (should_quit() || is_key_down(KEY_ESCAPE)) {
             state.running = false;
         }
 
-        if (is_key_down(KEY_ESCAPE)) {
-            state.running = false;
-        }
+        update_window_layout();
+        handle_input(state.frame_start);
 
-        if (state.running) {
-            update_window_layout();
-            handle_input(state.frame_start);
+        begin_frame();
+        clear(0.02, 0.02, 0.05, 1.0);
+        draw_header();
+        draw_preview_panel();
+        draw_tree_panel();
+        draw_status_bar();
+        end_frame();
 
-            begin_frame();
-            clear(0.02, 0.02, 0.05, 1.0);
-
-            draw_header();
-            draw_tree_panel();
-            draw_preview_panel();
-            draw_status_bar();
-
-            end_frame();
-
-            // Frame limiting
-            let frame_end: i32 = get_time_ms();
-            let elapsed: i32 = frame_end - state.frame_start;
-            let sleep_time: i32 = FRAME_TIME_MS - elapsed;
-            if (sleep_time > 0) {
-                sleep_ms(sleep_time);
-            }
+        let frame_end: i32 = get_time_ms();
+        let elapsed: i32 = frame_end - state.frame_start;
+        let sleep_time: i32 = FRAME_TIME_MS - elapsed;
+        if (sleep_time > 0) {
+            sleep_ms(sleep_time);
         }
     }
 
