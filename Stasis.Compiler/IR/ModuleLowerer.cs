@@ -116,9 +116,23 @@ public sealed class ModuleLowerer
                         foreach (var nestedField in nestedStruct.Fields)
                         {
                             var nestedFieldType = ResolveType(nestedField.Type, symbols);
-                            var llvmElem = builder.TypeMapper.Map(nestedFieldType);
                             var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
-                            builder.DefineGlobalArray(nestedName, llvmElem, count);
+
+                            // Special handling for string array fields in nested structs
+                            if (nestedFieldType is ArrayTypeSymbol arrType &&
+                                arrType.ElementType is PrimitiveTypeSymbol prim &&
+                                prim.PrimitiveName == "string")
+                            {
+                                // Each entry in the outer array contains a string buffer: [count x [strSize+8 x i8]]
+                                var stringSize = arrType.Size + 8;  // UTF-8 header + data
+                                var stringBufferType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)stringSize);
+                                builder.DefineGlobalArray(nestedName, stringBufferType, count);
+                            }
+                            else
+                            {
+                                var llvmElem = builder.TypeMapper.Map(nestedFieldType);
+                                builder.DefineGlobalArray(nestedName, llvmElem, count);
+                            }
                         }
                         break;
                     }
