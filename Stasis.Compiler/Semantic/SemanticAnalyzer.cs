@@ -96,6 +96,9 @@ public sealed class SemanticAnalyzer
         AddSymbol("load_font", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("draw_text", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("measure_text", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("list_directory", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("dir_list_entry_is_dir", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("dir_list_entry_copy_name", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
         // ============================================================
         // Standard Library: char_* module (character/byte utilities)
@@ -195,6 +198,7 @@ public sealed class SemanticAnalyzer
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Global, type, decl.Name.Span);
             EnsureGlobalType(type, decl.Type.Span);
+            RegisterFlattenedStructGlobals(decl.Name.Text, decl.Type);
         }
     }
 
@@ -649,6 +653,69 @@ public sealed class SemanticAnalyzer
                 _diagnostics.Add(new Diagnostic("Struct array fields must declare a positive length.", field.Type.Span));
             }
         }
+    }
+
+    private void RegisterFlattenedStructGlobals(string baseName, TypeSyntax typeSyntax)
+    {
+        if (typeSyntax is NamedTypeSyntax named && _structs.TryGetValue(named.Name, out var structDecl))
+        {
+            RegisterFlattenedFields(baseName, structDecl, 1);
+            return;
+        }
+
+        if (typeSyntax is ArrayTypeSyntax array && array.ElementType is NamedTypeSyntax element && _structs.TryGetValue(element.Name, out var nestedStruct))
+        {
+            var count = ParseArraySize(array);
+            RegisterFlattenedFields(baseName, nestedStruct, count);
+        }
+    }
+
+    private void RegisterFlattenedFields(string baseName, StructDeclarationSyntax structDecl, int multiplier)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            RegisterFlattenedField(baseName, field, multiplier);
+        }
+    }
+
+    private void RegisterFlattenedField(string prefix, StructFieldSyntax field, int multiplier)
+    {
+        var symbolName = $"{prefix}_{field.Identifier.Text}";
+
+        if (field.Type is ArrayTypeSyntax array && array.ElementType is NamedTypeSyntax nestedNamed && _structs.TryGetValue(nestedNamed.Name, out var nestedStruct))
+        {
+            var count = ParseArraySize(array);
+            RegisterFlattenedFields(symbolName, nestedStruct, count * multiplier);
+            return;
+        }
+
+        if (field.Type is NamedTypeSyntax named && _structs.TryGetValue(named.Name, out var innerStruct))
+        {
+            RegisterFlattenedFields(symbolName, innerStruct, multiplier);
+            return;
+        }
+
+        var fieldType = ResolveType(field.Type);
+        if (fieldType is null)
+        {
+            return;
+        }
+        if (multiplier > 1)
+        {
+            fieldType = new ArrayTypeSymbol(fieldType, multiplier);
+        }
+
+        AddSymbol(symbolName, SymbolKind.Global, fieldType, field.Identifier.Span);
+    }
+
+    private static int ParseArraySize(ArrayTypeSyntax array)
+    {
+        if (array.SizeToken is not null && int.TryParse(array.SizeToken.Text, out var size) && size > 0)
+        {
+            return size;
+        }
+
+        return 1;
     }
 
     private void AddSymbol(string name, SymbolKind kind, TypeSymbol? type, SourceSpan span)
