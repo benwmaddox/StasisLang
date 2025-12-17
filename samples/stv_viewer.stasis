@@ -311,44 +311,27 @@ function draw_status_bar(): void {
 }
 
 function draw_tree_panel(): void {
+    print_string("draw_tree_panel: start\n");
     let x0: f32 = state.window.tree_x;
     let y0: f32 = HEADER_HEIGHT + PANEL_PADDING;
     let w: f32 = state.window.tree_panel_w;
     let h: f32 = state.window.preview_h - PANEL_PADDING;
+    print_string("draw_tree_panel: after locals\n");
 
     draw_rect_outline(x0, y0, w, h, 0.2, 0.2, 0.3, 1.0);
+    print_string("draw_tree_panel: after rect\n");
     draw_text(state.font, "Contents", x0 + 10.0, y0 + 8.0, 0.9, 0.9, 1.0, 1.0);
+    print_string("draw_tree_panel: after text\n");
 
     let max_visible: i32 = (h - 28.0) / TREE_ITEM_HEIGHT;
     if (max_visible < 1) {
         max_visible = 1;
     }
-    let start: i32 = 0;
-    if (state.selected_idx >= max_visible) {
-        start = state.selected_idx - (max_visible - 1);
-    }
-    let i: i32 = 0;
-    for (i = 0; i < max_visible; i = i + 1) {
-        let idx: i32 = start + i;
-        if (idx >= dir_list_count) {
-            return;
-        }
+    print_string("draw_tree_panel: calculated max_visible\n");
 
-        let row_offset: f32 = i;
-        let row_y: f32 = y0 + 30.0 + (TREE_ITEM_HEIGHT * row_offset);
-        if (idx == state.selected_idx) {
-            draw_rect_outline(x0 + 6.0, row_y - 2.0, w - 12.0, TREE_ITEM_HEIGHT, 0.7, 0.8, 1.0, 1.0);
-        }
-
-        let entry_is_dir: bool = dir_list_entries_is_dir[idx];
-        if (entry_is_dir) {
-            draw_text(state.font, "[D]", x0 + 10.0, row_y, 0.8, 0.8, 0.9, 1.0);
-        } else {
-            draw_text(state.font, "[F]", x0 + 10.0, row_y, 0.6, 0.8, 0.6, 1.0);
-        }
-        dir_list_entry_copy_name(dir_list, idx, entry_name);
-        draw_text(state.font, entry_name, x0 + 42.0, row_y, 0.9, 0.9, 1.0, 1.0);
-    }
+    print_string("draw_tree_panel: about to access dir_list_entries_name[0]\n");
+    draw_text(state.font, dir_list_entries_name[0], x0 + 42.0, y0 + 30.0, 0.9, 0.9, 1.0, 1.0);
+    print_string("draw_tree_panel: drew entry name\n");
 }
 
 function draw_preview_single(): void {
@@ -427,24 +410,35 @@ function draw_preview_panel(): void {
 }
 
 function init_viewer(): void {
+    print_string("  1. Loading font...\n");
     state.font = load_font("C:/Windows/Fonts/arial.ttf", 18);
+    print_string("  2. Setting mode...\n");
     state.mode = MODE_SINGLE;
     state.selected_idx = 0;
     state.selected_handle = 0;
+    print_string("  3. Writing root dir...\n");
     write_root_dir(state.current_dir);
+    print_string("  4. Clearing paths...\n");
     str_clear(state.selected_path);
+    print_string("  5. Clearing temp_path...\n");
     str_clear(state.temp_path);
+    print_string("  6. Calling refresh_directory...\n");
     refresh_directory();
+    print_string("  7. Calling update_selected_preview...\n");
     update_selected_preview();
 
+    print_string("  8. Setting key states...\n");
     state.key_left.down = false;
     state.key_up.down = false;
     state.key_down.down = false;
     state.key_tab.down = false;
     state.key_return.down = false;
 
+    print_string("  9. Setting running flag...\n");
     state.running = true;
+    print_string("  10. Updating window layout...\n");
     update_window_layout();
+    print_string("  11. init_viewer complete\n");
 }
 
 test `tree panel ratio stays constant`(): bool {
@@ -458,38 +452,53 @@ test `tree panel ratio stays constant`(): bool {
 }
 
 function main(): i32 {
+    print_string("=== STV Viewer Starting ===\n");
     let init_ok: bool = init_window(1280, 720, "STV Viewer");
     if (!init_ok) {
+        print_string("Failed to init window\n");
         return 1;
     }
+    print_string("Window initialized\n");
 
+    print_string("Calling init_viewer...\n");
     init_viewer();
+    print_string("init_viewer returned\n");
 
-    let frame: i32 = 0;
-    for (frame = 0; state.running; frame = frame + 1) {
-        state.frame_start = get_time_ms();
-        if (should_quit() || is_key_down(KEY_ESCAPE)) {
-            state.running = false;
-        }
+    print_string("Testing draw functions...\n");
+    begin_frame();
+    clear(0.02, 0.02, 0.05, 1.0);
 
-        update_window_layout();
-        handle_input(state.frame_start);
+    print_string("Testing draw_tree_panel alone...\n");
+    draw_tree_panel();
+    print_string("Completed draw_tree_panel\n");
 
-        begin_frame();
-        clear(0.02, 0.02, 0.05, 1.0);
-        draw_header();
-        draw_preview_panel();
-        draw_tree_panel();
-        draw_status_bar();
-        end_frame();
+    end_frame();
+    print_string("All drawing completed\n");
 
-        let frame_end: i32 = get_time_ms();
-        let elapsed: i32 = frame_end - state.frame_start;
-        let sleep_time: i32 = FRAME_TIME_MS - elapsed;
-        if (sleep_time > 0) {
-            sleep_ms(sleep_time);
-        }
-    }
+    return 0;
 
+    print_string("Executing one iteration\n");
+    state.frame_start = get_time_ms();
+
+    print_string("Before update_window_layout\n");
+    update_window_layout();
+    print_string("Before handle_input\n");
+    handle_input(state.frame_start);
+
+    print_string("Before begin_frame\n");
+    begin_frame();
+    clear(0.02, 0.02, 0.05, 1.0);
+    print_string("Before draw_header\n");
+    draw_header();
+    print_string("Before draw_preview_panel\n");
+    draw_preview_panel();
+    print_string("Before draw_tree_panel\n");
+    draw_tree_panel();
+    print_string("Before draw_status_bar\n");
+    draw_status_bar();
+    print_string("Before end_frame\n");
+    end_frame();
+
+    print_string("Done with one iteration\n");
     return 0;
 }
