@@ -41,6 +41,7 @@ public class DocumentManager
         // Parsing
         var parseResult = Parser.Parse(doc.Content);
         doc.ParseResult = parseResult;
+        doc.SymbolIndex = SymbolIndex.Build(parseResult.CompilationUnit);
 
         // Semantic Analysis
         if (!parseResult.Diagnostics.Any())
@@ -63,6 +64,7 @@ public class DocumentManager
             allDiags.AddRange(lexResult.Diagnostics);
             allDiags.AddRange(parseResult.Diagnostics);
             doc.AllDiagnostics = allDiags;
+            doc.SemanticResult = null;
         }
     }
 

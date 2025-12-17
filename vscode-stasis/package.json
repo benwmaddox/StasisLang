@@ -1,0 +1,55 @@
+{
+  "name": "stasis",
+  "displayName": "Stasis",
+  "description": "Stasis language support (syntax + LSP).",
+  "version": "0.0.1",
+  "publisher": "stasislang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:stasis"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "stasis",
+        "aliases": [
+          "Stasis",
+          "stasis"
+        ],
+        "extensions": [
+          ".stasis"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stasis",
+        "scopeName": "source.stasis",
+        "path": "./syntaxes/stasis.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.3",
+    "@vscode/vsce": "^3.2.1"
+  }
+}
+
