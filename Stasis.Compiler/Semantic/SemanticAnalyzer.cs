@@ -183,7 +183,15 @@ public sealed class SemanticAnalyzer
                     ValidateStructFields(s);
                     break;
                 case EnumDeclarationSyntax e:
-                    AddSymbol(e.Name.Text, SymbolKind.Enum, new NamedTypeSymbol(e.Name.Text), e.Name.Span);
+                    var enumType = new NamedTypeSymbol(e.Name.Text);
+                    AddSymbol(e.Name.Text, SymbolKind.Enum, enumType, e.Name.Span);
+                    // Add each enum member as a constant with the enum type (not i32)
+                    for (int i = 0; i < e.Members.Count; i++)
+                    {
+                        var member = e.Members[i];
+                        var memberName = $"{e.Name.Text}.{member.Identifier.Text}";
+                        AddSymbol(memberName, SymbolKind.Const, enumType, member.Identifier.Span);
+                    }
                     break;
             }
         }
@@ -386,15 +394,17 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeVariableDeclaration(VariableDeclarationSyntax v, Dictionary<string, Symbol> scope)
     {
+        TypeSymbol? varType = null;
+
         if (v.Type is null)
         {
             _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
         }
         else
         {
-            var type = ResolveType(v.Type);
-            AddLocal(scope, v.Name.Text, SymbolKind.Local, type, v.Name.Span);
-            EnsurePrimitiveLocal(type, v.Name.Span);
+            varType = ResolveType(v.Type);
+            AddLocal(scope, v.Name.Text, SymbolKind.Local, varType, v.Name.Span);
+            EnsurePrimitiveLocal(varType, v.Name.Span);
         }
 
         if (v.Initializer is null)
@@ -404,6 +414,12 @@ public sealed class SemanticAnalyzer
         else
         {
             AnalyzeExpression(v.Initializer, scope);
+            // Type check: ensure initializer type matches variable type
+            var initType = ResolveExpressionType(v.Initializer, scope);
+            if (varType is not null && initType is not null && !AreTypesCompatible(varType, initType))
+            {
+                _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(initType)}' to variable of type '{FormatType(varType)}'.", v.Initializer.Span));
+            }
         }
     }
 
@@ -423,6 +439,23 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(u.Operand, scope);
                 break;
             case MemberAccessExpressionSyntax m:
+                // Check if this is an enum member access (e.g., State.Idle)
+                if (m.Receiver is IdentifierExpressionSyntax idExpr)
+                {
+                    var enumName = idExpr.Identifier.Text;
+                    if (_symbols.TryGetValue(enumName, out var enumSymbol) && enumSymbol.Kind == SymbolKind.Enum)
+                    {
+                        // This is an enum member access - verify the member exists
+                        var memberName = $"{enumName}.{m.Member.Text}";
+                        if (!_symbols.ContainsKey(memberName))
+                        {
+                            _diagnostics.Add(new Diagnostic($"Enum '{enumName}' does not have a member named '{m.Member.Text}'.", m.Member.Span));
+                        }
+                        // Don't recursively analyze the receiver since it's just the enum type name
+                        return;
+                    }
+                }
+                // Not an enum member access - regular struct field access
                 AnalyzeExpression(m.Receiver, scope);
                 break;
             case ArrayAccessExpressionSyntax a:
@@ -450,11 +483,18 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(assign.Right, scope);
                 ValidateAssignment(assign.Left, assign.OperatorToken);
                 ValidateSingleAssignment(assign);
+                // Type check: ensure right side type matches left side type
+                var leftType = ResolveExpressionType(assign.Left, scope);
+                var rightType = ResolveExpressionType(assign.Right, scope);
+                if (leftType is not null && rightType is not null && !AreTypesCompatible(leftType, rightType))
+                {
+                    _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(rightType)}' to target of type '{FormatType(leftType)}'.", assign.Right.Span));
+                }
                 break;
             case BinaryExpressionSyntax bin:
                 AnalyzeExpression(bin.Left, scope);
                 AnalyzeExpression(bin.Right, scope);
-                ValidateBinary(bin);
+                ValidateBinary(bin, scope);
                 break;
         }
     }
@@ -523,7 +563,7 @@ public sealed class SemanticAnalyzer
         }
     }
 
-    private void ValidateBinary(BinaryExpressionSyntax bin)
+    private void ValidateBinary(BinaryExpressionSyntax bin, IReadOnlyDictionary<string, Symbol> scope)
     {
         var kind = bin.OperatorToken.Kind;
         if (kind is TokenKind.AmpAmp
@@ -540,6 +580,32 @@ public sealed class SemanticAnalyzer
             or TokenKind.EqualEqual
             or TokenKind.BangEqual)
         {
+            // For comparison operators, check type compatibility
+            if (kind is TokenKind.EqualEqual or TokenKind.BangEqual
+                or TokenKind.Less or TokenKind.LessEqual
+                or TokenKind.Greater or TokenKind.GreaterEqual)
+            {
+                var leftType = ResolveExpressionType(bin.Left, scope);
+                var rightType = ResolveExpressionType(bin.Right, scope);
+
+                // Check if either side is an enum type
+                if (leftType is NamedTypeSymbol leftNamed && _symbols.TryGetValue(leftNamed.TypeName, out var leftSymbol) && leftSymbol.Kind == SymbolKind.Enum)
+                {
+                    // Left is an enum - right must be the same enum type
+                    if (rightType is not NamedTypeSymbol rightNamed || !string.Equals(leftNamed.TypeName, rightNamed.TypeName, StringComparison.Ordinal))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot compare enum '{leftNamed.TypeName}' with type '{FormatType(rightType ?? new PrimitiveTypeSymbol("unknown"))}'.", bin.Right.Span));
+                    }
+                }
+                else if (rightType is NamedTypeSymbol rightNamed && _symbols.TryGetValue(rightNamed.TypeName, out var rightSymbol) && rightSymbol.Kind == SymbolKind.Enum)
+                {
+                    // Right is an enum - left must be the same enum type
+                    if (leftType is not NamedTypeSymbol leftNamed2 || !string.Equals(rightNamed.TypeName, leftNamed2.TypeName, StringComparison.Ordinal))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot compare type '{FormatType(leftType ?? new PrimitiveTypeSymbol("unknown"))}' with enum '{rightNamed.TypeName}'.", bin.Left.Span));
+                    }
+                }
+            }
             return;
         }
 
@@ -738,5 +804,116 @@ public sealed class SemanticAnalyzer
         }
 
         scope[name] = new Symbol(name, kind, type);
+    }
+
+    private TypeSymbol? ResolveExpressionType(ExpressionSyntax expr, IReadOnlyDictionary<string, Symbol> scope)
+    {
+        switch (expr)
+        {
+            case LiteralExpressionSyntax lit:
+                return lit.Literal.Kind switch
+                {
+                    TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                    TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
+                    TokenKind.StringLiteral => new PrimitiveTypeSymbol("string"),
+                    TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
+                    _ => null
+                };
+            case IdentifierExpressionSyntax id:
+                if (scope.TryGetValue(id.Identifier.Text, out var localSym))
+                {
+                    return localSym.Type;
+                }
+                if (_symbols.TryGetValue(id.Identifier.Text, out var globalSym))
+                {
+                    return globalSym.Type;
+                }
+                return null;
+            case MemberAccessExpressionSyntax member:
+                // Check if this is an enum member access (e.g., State.Idle)
+                if (member.Receiver is IdentifierExpressionSyntax enumId &&
+                    _symbols.TryGetValue(enumId.Identifier.Text, out var enumSymbol) &&
+                    enumSymbol.Kind == SymbolKind.Enum)
+                {
+                    // Return the enum type, not i32
+                    var memberName = $"{enumId.Identifier.Text}.{member.Member.Text}";
+                    if (_symbols.TryGetValue(memberName, out var memberSymbol))
+                    {
+                        return memberSymbol.Type;
+                    }
+                }
+                // For struct field access, would need more complex type resolution
+                return null;
+            case BinaryExpressionSyntax bin when bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual
+                or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual:
+                // Comparison operators return bool
+                return new PrimitiveTypeSymbol("bool");
+            case BinaryExpressionSyntax:
+                // Arithmetic operators - would need proper type inference
+                return new PrimitiveTypeSymbol("i32");
+            default:
+                return null;
+        }
+    }
+
+    private bool AreTypesCompatible(TypeSymbol target, TypeSymbol source)
+    {
+        // Exact type match
+        if (target.GetType() == source.GetType())
+        {
+            if (target is PrimitiveTypeSymbol targetPrim && source is PrimitiveTypeSymbol sourcePrim)
+            {
+                // Allow implicit conversions between numeric primitives
+                if (IsNumericType(targetPrim.PrimitiveName) && IsNumericType(sourcePrim.PrimitiveName))
+                {
+                    return true;
+                }
+                return string.Equals(targetPrim.PrimitiveName, sourcePrim.PrimitiveName, StringComparison.Ordinal);
+            }
+            if (target is NamedTypeSymbol targetNamed && source is NamedTypeSymbol sourceNamed)
+            {
+                // Enums and structs must have exact type match
+                return string.Equals(targetNamed.TypeName, sourceNamed.TypeName, StringComparison.Ordinal);
+            }
+        }
+
+        // Check if target is an enum - enums are NOT compatible with any primitive types
+        if (target is NamedTypeSymbol targetEnum && _symbols.TryGetValue(targetEnum.TypeName, out var targetSym) && targetSym.Kind == SymbolKind.Enum)
+        {
+            // Enums can only be assigned from the same enum type (checked above)
+            return false;
+        }
+
+        // Check if source is an enum - enum values can NOT be assigned to non-enum types
+        if (source is NamedTypeSymbol sourceEnum && _symbols.TryGetValue(sourceEnum.TypeName, out var sourceSym) && sourceSym.Kind == SymbolKind.Enum)
+        {
+            // Enum values can only be assigned to the same enum type (checked above)
+            return false;
+        }
+
+        // Allow i32 -> struct reference (index-based storage)
+        if (target is NamedTypeSymbol && source is PrimitiveTypeSymbol sourcePrim2 && sourcePrim2.PrimitiveName == "i32")
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsNumericType(string typeName)
+    {
+        return typeName is "i32" or "u8" or "u16" or "u32" or "f32" or "f64" or "bool";
+    }
+
+    private string FormatType(TypeSymbol type)
+    {
+        return type switch
+        {
+            PrimitiveTypeSymbol prim => prim.PrimitiveName,
+            NamedTypeSymbol named => named.TypeName,
+            ArrayTypeSymbol arr => $"{FormatType(arr.ElementType)}[{arr.Size}]",
+            VoidTypeSymbol => "void",
+            _ => "unknown"
+        };
     }
 }

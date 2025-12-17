@@ -171,4 +171,200 @@ public class SemanticTests
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Undefined identifier 'hp'"));
     }
 
+    [Fact]
+    public void Allows_enum_declaration()
+    {
+        var source = """
+            enum State { Idle, Jump, Run }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+        Assert.Contains("State", sema.Symbols.Keys);
+        Assert.Equal(SymbolKind.Enum, sema.Symbols["State"].Kind);
+    }
+
+    [Fact]
+    public void Adds_enum_members_as_constants()
+    {
+        var source = """
+            enum State { Idle, Jump, Run }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+        Assert.Contains("State.Idle", sema.Symbols.Keys);
+        Assert.Contains("State.Jump", sema.Symbols.Keys);
+        Assert.Contains("State.Run", sema.Symbols.Keys);
+        Assert.Equal(SymbolKind.Const, sema.Symbols["State.Idle"].Kind);
+    }
+
+    [Fact]
+    public void Allows_enum_member_access()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function check_state(): State {
+                let x: State = State.Idle;
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_invalid_enum_member()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function check_invalid(): State {
+                return State.Invalid;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("does not have a member named 'Invalid'"));
+    }
+
+    [Fact]
+    public void Allows_enum_comparison()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function compare_state(state: State): bool {
+                return state == State.Idle;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Allows_enum_variable()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function use_enum(): void {
+                let state: State = State.Idle;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_integer_assignment_to_enum()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function bad_assignment(): void {
+                let state: State = 0;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Cannot assign") || d.Message.Contains("type mismatch"));
+    }
+
+    [Fact]
+    public void Flags_wrong_enum_type_assignment()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            enum Direction { North, South }
+            function wrong_enum(): void {
+                let state: State = Direction.North;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Cannot assign") || d.Message.Contains("type mismatch"));
+    }
+
+    [Fact]
+    public void Allows_enum_to_enum_assignment()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function reassign(): void {
+                let state: State = State.Idle;
+                state = State.Jump;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Allows_enum_comparison_with_member()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function check(state: State): bool {
+                return state == State.Idle;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_enum_comparison_with_integer()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function bad_compare(state: State): bool {
+                return state == 0;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Cannot compare"));
+    }
+
+    [Fact]
+    public void Flags_enum_comparison_with_different_enum()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            enum Direction { North, South }
+            function wrong_compare(state: State, dir: Direction): bool {
+                return state == dir;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Cannot compare"));
+    }
+
 }
