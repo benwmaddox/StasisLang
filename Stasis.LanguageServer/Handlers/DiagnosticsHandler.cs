@@ -110,39 +110,13 @@ public class DidChangeTextDocumentDiagnosticsHandler : DidChangeTextDocumentHand
             {
                 // Apply range-based change (convert to offsets and apply)
                 var range = change.Range;
-                var start = PositionToOffset(content, range.Start);
-                var end = PositionToOffset(content, range.End);
+                var start = TextPositionConverter.PositionToOffset(content, range.Start);
+                var end = TextPositionConverter.PositionToOffset(content, range.End);
                 content = content.Substring(0, start) + change.Text + content.Substring(end);
             }
         }
 
         return content;
-    }
-
-    private static int PositionToOffset(string content, Position position)
-    {
-        int offset = 0;
-        int currentLine = 0;
-        int currentChar = 0;
-
-        foreach (var ch in content)
-        {
-            if (currentLine == position.Line && currentChar == position.Character)
-                return offset;
-
-            offset++;
-            if (ch == '\n')
-            {
-                currentLine++;
-                currentChar = 0;
-            }
-            else
-            {
-                currentChar++;
-            }
-        }
-
-        return offset;
     }
 }
 

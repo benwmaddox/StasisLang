@@ -1,5 +1,6 @@
 namespace Stasis.LanguageServer.Tests;
 
+using MediatR;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Workspace;
 using Stasis.Compiler;
@@ -38,6 +39,11 @@ public class DiagnosticsPublisherTests
     {
         // Arrange
         var serverMock = new Mock<ILanguageServerFacade>();
+        PublishDiagnosticsParams? sent = null;
+        serverMock
+            .Setup(s => s.SendNotification(It.IsAny<IRequest>()))
+            .Callback<IRequest>(p => sent = (PublishDiagnosticsParams)p);
+
         var publisher = new DiagnosticsPublisher(serverMock.Object);
 
         var diagnostic = new CompilerDiagnostic("Test error", new CompilerSourceSpan(0, 5));
@@ -52,7 +58,10 @@ public class DiagnosticsPublisherTests
         publisher.PublishDiagnostics("file:///test.stasis", doc);
 
         // Assert
-        serverMock.Verify(s => s.SendNotification(It.IsAny<PublishDiagnosticsParams>()), Times.Once);
+        Assert.NotNull(sent);
+        var diag = Assert.Single(sent!.Diagnostics);
+        Assert.Equal(new Position(0, 0), diag.Range.Start);
+        Assert.Equal(new Position(0, 5), diag.Range.End);
     }
 
     [Fact]
@@ -143,5 +152,35 @@ public class DiagnosticsPublisherTests
 
         // Assert - verify that the notification was sent
         serverMock.Verify(s => s.SendNotification(It.IsAny<PublishDiagnosticsParams>()), Times.Once);
+    }
+
+    [Fact]
+    public void PublishDiagnostics_OffsetToPosition_TreatsCrLfAsSingleNewline()
+    {
+        // Arrange
+        var serverMock = new Mock<ILanguageServerFacade>();
+        PublishDiagnosticsParams? sent = null;
+        serverMock
+            .Setup(s => s.SendNotification(It.IsAny<IRequest>()))
+            .Callback<IRequest>(p => sent = (PublishDiagnosticsParams)p);
+
+        var publisher = new DiagnosticsPublisher(serverMock.Object);
+        var content = "a\r\nb";
+        var diagnostic = new CompilerDiagnostic("Test", new CompilerSourceSpan(3, 1)); // "b"
+
+        var doc = new DocumentState
+        {
+            Content = content,
+            AllDiagnostics = new List<CompilerDiagnostic> { diagnostic }
+        };
+
+        // Act
+        publisher.PublishDiagnostics("file:///test.stasis", doc);
+
+        // Assert
+        Assert.NotNull(sent);
+        var diag = Assert.Single(sent!.Diagnostics);
+        Assert.Equal(new Position(1, 0), diag.Range.Start);
+        Assert.Equal(new Position(1, 1), diag.Range.End);
     }
 }
