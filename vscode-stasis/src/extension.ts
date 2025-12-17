@@ -33,10 +33,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
-  context.subscriptions.push(client.start());
+  void client.start();
+  context.subscriptions.push({
+    dispose: () => {
+      void client?.stop();
+    },
+  });
 }
 
 export async function deactivate(): Promise<void> {
   await client?.stop();
 }
-
