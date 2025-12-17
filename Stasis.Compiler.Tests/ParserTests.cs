@@ -280,4 +280,58 @@ public class ParserTests
         Assert.Null(foreachStmt.IndexVariable);
         Assert.False(foreachStmt.BindByElement);
     }
+
+    [Fact]
+    public void Parses_enum_declaration()
+    {
+        var source = """
+            enum State { Idle, Jump, Run, Fall }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var enumDecl = Assert.IsType<EnumDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal("State", enumDecl.Name.Text);
+        Assert.Equal(4, enumDecl.Members.Count);
+        Assert.Equal("Idle", enumDecl.Members[0].Identifier.Text);
+        Assert.Equal("Jump", enumDecl.Members[1].Identifier.Text);
+        Assert.Equal("Run", enumDecl.Members[2].Identifier.Text);
+        Assert.Equal("Fall", enumDecl.Members[3].Identifier.Text);
+    }
+
+    [Fact]
+    public void Parses_enum_with_trailing_comma()
+    {
+        var source = """
+            enum Direction { North, South, East, West, }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var enumDecl = Assert.IsType<EnumDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal(4, enumDecl.Members.Count);
+    }
+
+    [Fact]
+    public void Parses_enum_member_access()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function get_state(): i32 {
+                return State.Idle;
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
+        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body.Statements));
+        var memberAccess = Assert.IsType<MemberAccessExpressionSyntax>(ret.Expression);
+        var receiver = Assert.IsType<IdentifierExpressionSyntax>(memberAccess.Receiver);
+        Assert.Equal("State", receiver.Identifier.Text);
+        Assert.Equal("Idle", memberAccess.Member.Text);
+    }
 }

@@ -770,6 +770,7 @@ public sealed class ModuleLowerer
         private readonly Dictionary<string, GlobalLayout> _globalLayouts;
         private readonly List<Diagnostic> _diagnostics;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+        private Dictionary<string, EnumDeclarationSyntax> _enums = new(StringComparer.Ordinal);
         private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
@@ -882,6 +883,9 @@ public sealed class ModuleLowerer
             _structs = compilationUnit.Declarations
                 .OfType<StructDeclarationSyntax>()
                 .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+            _enums = compilationUnit.Declarations
+                .OfType<EnumDeclarationSyntax>()
+                .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
             _functions = compilationUnit.Declarations
                 .OfType<FunctionDeclarationSyntax>()
                 .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
@@ -1078,6 +1082,26 @@ public sealed class ModuleLowerer
                     }
 
                     AddDiagnostic("'.length' is only available on fixed-size arrays.", member.Span);
+                    return ConstI32(0);
+                case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumIdExpr && _enums.ContainsKey(enumIdExpr.Identifier.Text):
+                    // Enum member access (e.g., State.Idle)
+                    var enumDecl = _enums[enumIdExpr.Identifier.Text];
+                    var memberIndex = -1;
+                    for (int i = 0; i < enumDecl.Members.Count; i++)
+                    {
+                        if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        {
+                            memberIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (memberIndex >= 0)
+                    {
+                        return ConstI32(memberIndex);
+                    }
+
+                    AddDiagnostic($"Enum '{enumIdExpr.Identifier.Text}' does not have a member '{member.Member.Text}'.", member.Span);
                     return ConstI32(0);
                 case MemberAccessExpressionSyntax member:
                     return LowerMemberAccess(builder, member, locals);
