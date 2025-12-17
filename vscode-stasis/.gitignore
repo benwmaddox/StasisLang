@@ -1,5 +1,6 @@
 node_modules/
 out/
+.vscode-test/
 *.vsix
 npm-debug.log*
 package-lock.json
@@ -7,4 +8,3 @@ package-lock.json
 # Published language server artifacts (copied here during dev/publish)
 server/*
 !server/.gitkeep
-

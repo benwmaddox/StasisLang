@@ -8,7 +8,9 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "--disable-extensions"
+        "--disable-extensions",
+        "--user-data-dir=${workspaceFolder}/.vscode-test/user-data",
+        "--extensions-dir=${workspaceFolder}/.vscode-test/extensions"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"
@@ -22,7 +24,9 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "--disable-extensions"
+        "--disable-extensions",
+        "--user-data-dir=${workspaceFolder}/.vscode-test/user-data",
+        "--extensions-dir=${workspaceFolder}/.vscode-test/extensions"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"
