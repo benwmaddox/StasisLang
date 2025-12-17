@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Stasis.Compiler.Tests", "St
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Stasis.Cli", "Stasis.Cli\Stasis.Cli.csproj", "{AE7EF5F5-94E1-4387-9D0A-0FD0383F8DC8}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Stasis.LanguageServer", "Stasis.LanguageServer\Stasis.LanguageServer.csproj", "{316BD985-0B56-4A63-B414-E14CF98F5787}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{AE7EF5F5-94E1-4387-9D0A-0FD0383F8DC8}.Release|x64.Build.0 = Release|Any CPU
 		{AE7EF5F5-94E1-4387-9D0A-0FD0383F8DC8}.Release|x86.ActiveCfg = Release|Any CPU
 		{AE7EF5F5-94E1-4387-9D0A-0FD0383F8DC8}.Release|x86.Build.0 = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|x64.Build.0 = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Debug|x86.Build.0 = Debug|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|Any CPU.Build.0 = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|x64.ActiveCfg = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|x64.Build.0 = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|x86.ActiveCfg = Release|Any CPU
+		{316BD985-0B56-4A63-B414-E14CF98F5787}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
