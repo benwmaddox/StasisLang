@@ -12,9 +12,17 @@ using CompilerSourceSpan = Stasis.Compiler.SourceSpan;
 /// </summary>
 public class DiagnosticsPublisher
 {
-    private readonly ILanguageServerFacade _languageServer;
+    private ILanguageServerFacade? _languageServer;
 
-    public DiagnosticsPublisher(ILanguageServerFacade languageServer)
+    public DiagnosticsPublisher(ILanguageServerFacade? languageServer = null)
+    {
+        _languageServer = languageServer;
+    }
+
+    /// <summary>
+    /// Sets the language server facade after it's initialized.
+    /// </summary>
+    public void SetLanguageServer(ILanguageServerFacade languageServer)
     {
         _languageServer = languageServer;
     }
@@ -24,6 +32,9 @@ public class DiagnosticsPublisher
     /// </summary>
     public void PublishDiagnostics(string uri, DocumentState document)
     {
+        if (_languageServer == null)
+            return;
+
         var diagnostics = new List<Diagnostic>();
 
         foreach (var diag in document.AllDiagnostics)
@@ -50,6 +61,9 @@ public class DiagnosticsPublisher
     /// </summary>
     public void ClearDiagnostics(string uri)
     {
+        if (_languageServer == null)
+            return;
+
         _languageServer.SendNotification(new PublishDiagnosticsParams
         {
             Uri = new Uri(uri),
