@@ -103,8 +103,17 @@ public sealed class Lexer
 
                     break;
                 case '!':
-                    Advance();
-                    AddToken(TokenKind.Bang, "!", 1);
+                    if (Peek == '=')
+                    {
+                        Advance();
+                        Advance();
+                        AddToken(TokenKind.BangEqual, "!=", 2);
+                    }
+                    else
+                    {
+                        Advance();
+                        AddToken(TokenKind.Bang, "!", 1);
+                    }
                     break;
                 case '+':
                     LexPlus(start);
@@ -122,12 +131,30 @@ public sealed class Lexer
                     LexPercent(start);
                     break;
                 case '<':
-                    Advance();
-                    AddToken(TokenKind.Less, "<", 1);
+                    if (Peek == '=')
+                    {
+                        Advance();
+                        Advance();
+                        AddToken(TokenKind.LessEqual, "<=", 2);
+                    }
+                    else
+                    {
+                        Advance();
+                        AddToken(TokenKind.Less, "<", 1);
+                    }
                     break;
                 case '>':
-                    Advance();
-                    AddToken(TokenKind.Greater, ">", 1);
+                    if (Peek == '=')
+                    {
+                        Advance();
+                        Advance();
+                        AddToken(TokenKind.GreaterEqual, ">=", 2);
+                    }
+                    else
+                    {
+                        Advance();
+                        AddToken(TokenKind.Greater, ">", 1);
+                    }
                     break;
                 case ':':
                     Advance();

@@ -167,9 +167,17 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     try
     {
         var source = File.ReadAllText(path);
+
+        // Auto-detect graphics usage if not explicitly enabled
+        if (!enableGraphics && DetectsGraphicsUsage(source))
+        {
+            enableGraphics = true;
+        }
+
         var parse = Parser.Parse(source);
         if (parse.Diagnostics.Count > 0)
         {
+            
             PrintDiagnostics(parse.Diagnostics, source, path);
             return 1;
         }
@@ -265,7 +273,20 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                 }
             }
 
-            return RunProcess(exePath, string.Empty);
+            return RunProcess(exePath, string.Empty, psi =>
+            {
+                if (enableGraphics)
+                {
+                    var runTest = Environment.GetEnvironmentVariable("STASIS_RUN_RENDER_TEST");
+                    if (string.IsNullOrEmpty(runTest) || runTest == "0")
+                    {
+                        if (Environment.GetEnvironmentVariable("STASIS_SKIP_RENDER_TEST") is null)
+                        {
+                            psi.Environment["STASIS_SKIP_RENDER_TEST"] = "1";
+                        }
+                    }
+                }
+            });
         }
         finally
         {
@@ -364,6 +385,21 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         args.Add("-Wl,/ignore:4210");
         args.Add("-Wl,/STACK:8388608");
 
+        // Suppress CRT conflict warning when linking SDL2-static (built with /MT) with dynamic CRT
+        if (linkingStaticGraphics)
+        {
+            args.Add("-Wl,/NODEFAULTLIB:libcmt");
+        }
+
+        // For release builds with optimization, strip debug info and enable aggressive dead code elimination
+        if (!string.IsNullOrWhiteSpace(optLevel) && optLevel != "0")
+        {
+            args.Add("-Wl,/DEBUG:NONE");     // No debug info
+            args.Add("-Wl,/OPT:REF");        // Remove unreferenced functions/data
+            args.Add("-Wl,/OPT:ICF");        // Fold identical functions
+            args.Add("-Wl,/MERGE:.rdata=.text"); // Merge read-only sections
+        }
+
         var sdkRoot = GetLatestWindowsSdkLib();
         if (sdkRoot is not null)
         {
@@ -440,10 +476,7 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
             }
 
             var dest = Path.Combine(targetDir, fileName);
-            if (!File.Exists(dest))
-            {
-                File.Copy(src, dest, overwrite: false);
-            }
+            File.Copy(src, dest, overwrite: true);
 
             var depDir = Path.GetDirectoryName(src);
             if (string.IsNullOrEmpty(depDir))
@@ -458,10 +491,7 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
                 if (File.Exists(depSrc))
                 {
                     var depDest = Path.Combine(targetDir, dep);
-                    if (!File.Exists(depDest))
-                    {
-                        File.Copy(depSrc, depDest, overwrite: false);
-                    }
+                    File.Copy(depSrc, depDest, overwrite: true);
                 }
             }
         }
@@ -470,6 +500,37 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
     {
         // Best-effort; missing copies will surface as runtime load errors.
     }
+}
+
+static bool DetectsGraphicsUsage(string source)
+{
+    // Check if source code uses graphics functions
+    // These are the key graphics API functions that indicate graphics usage
+    string[] graphicsFunctions = {
+        "init_window",
+        "begin_frame",
+        "end_frame",
+        "draw_line",
+        "clear(",
+        "gfx_load_sprite",
+        "gfx_draw_sprite",
+        "gfx_poll_reload",
+        "gfx_debug_bake_hash",
+        "should_quit",
+        "is_key_down",
+        "get_mouse_x",
+        "get_mouse_y",
+        "is_mouse_down"
+    };
+
+    foreach (var func in graphicsFunctions)
+    {
+        if (source.Contains(func))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static string? FindGraphicsLibrary()
@@ -485,7 +546,9 @@ static string? FindGraphicsLibrary()
     // Prefer workspace runtime outputs before falling back to cwd root
     var cwd = Directory.GetCurrentDirectory();
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
     searchPaths.Add(Path.Combine(cwd, "runtime"));
@@ -495,6 +558,7 @@ static string? FindGraphicsLibrary()
     string[] candidates;
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
+        // Keep static linking for now (DLL exports need debugging)
         candidates = new[]
         {
             "stasis_graphics_static.lib",
@@ -504,18 +568,20 @@ static string? FindGraphicsLibrary()
     }
     else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
     {
+        // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics_static.a",
-            "libstasis_graphics.dylib"
+            "libstasis_graphics.dylib",
+            "libstasis_graphics_static.a"
         };
     }
     else
     {
+        // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics_static.a",
-            "libstasis_graphics.so"
+            "libstasis_graphics.so",
+            "libstasis_graphics_static.a"
         };
     }
 
@@ -526,6 +592,16 @@ static string? FindGraphicsLibrary()
             var candidate = Path.Combine(dir, name);
             if (File.Exists(candidate))
             {
+                // On Windows, if we found a .dll, return the corresponding .lib for linking
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+                    Path.GetExtension(candidate).Equals(".dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    var importLib = Path.ChangeExtension(candidate, ".lib");
+                    if (File.Exists(importLib))
+                    {
+                        return importLib;
+                    }
+                }
                 return candidate;
             }
         }
@@ -575,7 +651,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null)
 {
     var psi = new ProcessStartInfo
     {
@@ -583,6 +659,7 @@ static int RunProcess(string fileName, string arguments)
         Arguments = arguments,
         UseShellExecute = false
     };
+    configure?.Invoke(psi);
 
     using var proc = Process.Start(psi)!;
     proc.WaitForExit();

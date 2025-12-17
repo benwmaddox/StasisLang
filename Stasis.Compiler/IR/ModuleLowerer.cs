@@ -67,11 +67,21 @@ public sealed class ModuleLowerer
                 case ArrayTypeSyntax array:
                     {
                         var elementType = ResolveType(array.ElementType, symbols);
-                        var llvmElem = builder.TypeMapper.Map(elementType);
                         var length = globalLayout is null
                             ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
                             : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
-                        builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
+
+                        // Special handling for string arrays: use UTF-8 byte buffer
+                        if (elementType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                        {
+                            // Fixed-size string: 8-byte header + data bytes
+                            builder.DefineGlobalArray(global.Name.Text, LLVMTypeRef.Int8, length + 8);
+                        }
+                        else
+                        {
+                            var llvmElem = builder.TypeMapper.Map(elementType);
+                            builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
+                        }
                         break;
                     }
                 case NamedTypeSyntax namedType when structs.TryGetValue(namedType.Name, out var structInstance):
@@ -106,9 +116,23 @@ public sealed class ModuleLowerer
                         foreach (var nestedField in nestedStruct.Fields)
                         {
                             var nestedFieldType = ResolveType(nestedField.Type, symbols);
-                            var llvmElem = builder.TypeMapper.Map(nestedFieldType);
                             var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
-                            builder.DefineGlobalArray(nestedName, llvmElem, count);
+
+                            // Special handling for string array fields in nested structs
+                            if (nestedFieldType is ArrayTypeSymbol arrType &&
+                                arrType.ElementType is PrimitiveTypeSymbol prim &&
+                                prim.PrimitiveName == "string")
+                            {
+                                // Each entry in the outer array contains a string buffer: [count x [strSize+8 x i8]]
+                                var stringSize = arrType.Size + 8;  // UTF-8 header + data
+                                var stringBufferType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)stringSize);
+                                builder.DefineGlobalArray(nestedName, stringBufferType, count);
+                            }
+                            else
+                            {
+                                var llvmElem = builder.TypeMapper.Map(nestedFieldType);
+                                builder.DefineGlobalArray(nestedName, llvmElem, count);
+                            }
                         }
                         break;
                     }
@@ -116,9 +140,19 @@ public sealed class ModuleLowerer
                     {
                         // Primitive array
                         var elemType = ResolveType(arrayType.ElementType, symbols);
-                        var llvmElem = builder.TypeMapper.Map(elemType);
                         var count = ParseArrayLength(arrayType.SizeToken?.Text ?? string.Empty);
-                        builder.DefineGlobalArray(fieldName, llvmElem, count);
+
+                        // Special handling for string arrays: use UTF-8 byte buffer
+                        if (elemType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                        {
+                            // Fixed-size string: 8-byte header + data bytes
+                            builder.DefineGlobalArray(fieldName, LLVMTypeRef.Int8, count + 8);
+                        }
+                        else
+                        {
+                            var llvmElem = builder.TypeMapper.Map(elemType);
+                            builder.DefineGlobalArray(fieldName, llvmElem, count);
+                        }
                         break;
                     }
                 case NamedTypeSyntax namedField when structs.TryGetValue(namedField.Name, out var nestedStructDecl):
@@ -471,6 +505,60 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxLoadSprite(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_load_sprite");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_load_sprite", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDrawSprite(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_draw_sprite");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[]
+        {
+            LLVMTypeRef.Int32, // handle
+            LLVMTypeRef.Float, // x
+            LLVMTypeRef.Float, // y
+            LLVMTypeRef.Float, // sx
+            LLVMTypeRef.Float, // sy
+            LLVMTypeRef.Float, // rot
+            LLVMTypeRef.Float, // r
+            LLVMTypeRef.Float, // g
+            LLVMTypeRef.Float, // b
+            LLVMTypeRef.Float  // a
+        }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_draw_sprite", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxPollReload(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_poll_reload");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_poll_reload", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugBakeHash(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_bake_hash");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_debug_bake_hash", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisIsKeyDown(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_is_key_down");
@@ -508,6 +596,27 @@ public sealed class ModuleLowerer
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_should_quit", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGetWindowSize(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_get_window_size");
+        var i32Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i32Ptr, i32Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_get_window_size", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSetFullscreen(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_set_fullscreen");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_set_fullscreen", fnType);
         return (fn, fnType);
     }
 
@@ -661,6 +770,7 @@ public sealed class ModuleLowerer
         private readonly Dictionary<string, GlobalLayout> _globalLayouts;
         private readonly List<Diagnostic> _diagnostics;
         private Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+        private Dictionary<string, EnumDeclarationSyntax> _enums = new(StringComparer.Ordinal);
         private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
@@ -695,9 +805,21 @@ public sealed class ModuleLowerer
             "end_frame",
             "clear",
             "draw_line",
+            "gfx_load_sprite",
+            "gfx_draw_sprite",
+            "gfx_poll_reload",
+            "gfx_debug_bake_hash",
             "set_postfx",
             "is_key_down",
             "should_quit",
+            "get_window_size",
+            "set_fullscreen",
+            "load_font",
+            "draw_text",
+            "measure_text",
+            "list_directory",
+            "dir_list_entry_is_dir",
+            "dir_list_entry_copy_name",
 
             // Standard Library: char_* module
             "char_is_digit",
@@ -715,34 +837,35 @@ public sealed class ModuleLowerer
             "char_to_hex",
             "char_from_hex",
 
-            // Standard Library: str_* module
-            "str_len",
-            "str_is_empty",
-            "str_get",
-            "str_set",
-            "str_eq",
-            "str_cmp",
-            "str_starts_with",
-            "str_ends_with",
-            "str_find",
-            "str_find_char",
-            "str_find_last_char",
-            "str_contains",
-            "str_clear",
-            "str_copy",
-            "str_append",
-            "str_append_char",
-            "str_substr",
-            "str_trim_start",
-            "str_trim_end",
-            "str_trim",
-            "str_to_upper",
-            "str_to_lower",
-            "str_from_i32",
-            "str_from_f32",
-            "str_to_i32",
-            "str_to_f32"
-        };
+        // Standard Library: str_* module
+        "str_len",
+        "str_is_empty",
+        "str_get",
+        "str_set",
+        "str_eq",
+        "str_cmp",
+        "str_starts_with",
+        "str_ends_with",
+        "str_find",
+        "str_find_char",
+        "str_find_last_char",
+        "str_contains",
+        "str_clear",
+        "str_copy",
+        "str_append",
+        "str_append_char",
+        "str_substr",
+        "str_trim_start",
+        "str_trim_end",
+        "str_trim",
+        "str_to_upper",
+        "str_to_lower",
+        "str_from_i32",
+        "str_from_f32",
+        "str_to_i32",
+        "str_to_f32"
+    };
+        private const int DirEntryStride = 268;
         private int _blockId;
         private readonly bool _headlessGraphics;
 
@@ -760,6 +883,9 @@ public sealed class ModuleLowerer
             _structs = compilationUnit.Declarations
                 .OfType<StructDeclarationSyntax>()
                 .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
+            _enums = compilationUnit.Declarations
+                .OfType<EnumDeclarationSyntax>()
+                .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
             _functions = compilationUnit.Declarations
                 .OfType<FunctionDeclarationSyntax>()
                 .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
@@ -956,6 +1082,26 @@ public sealed class ModuleLowerer
                     }
 
                     AddDiagnostic("'.length' is only available on fixed-size arrays.", member.Span);
+                    return ConstI32(0);
+                case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumIdExpr && _enums.ContainsKey(enumIdExpr.Identifier.Text):
+                    // Enum member access (e.g., State.Idle)
+                    var enumDecl = _enums[enumIdExpr.Identifier.Text];
+                    var memberIndex = -1;
+                    for (int i = 0; i < enumDecl.Members.Count; i++)
+                    {
+                        if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        {
+                            memberIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (memberIndex >= 0)
+                    {
+                        return ConstI32(memberIndex);
+                    }
+
+                    AddDiagnostic($"Enum '{enumIdExpr.Identifier.Text}' does not have a member '{member.Member.Text}'.", member.Span);
                     return ConstI32(0);
                 case MemberAccessExpressionSyntax member:
                     return LowerMemberAccess(builder, member, locals);
@@ -1611,6 +1757,71 @@ public sealed class ModuleLowerer
                         builder.BuildCall2(fnType, fn, loweredArgs, "");
                         return ConstI32(0);
                     }
+                case "gfx_load_sprite":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("gfx_load_sprite expects a path string.", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(1);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxLoadSprite(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { path }, "gfx_load_sprite.call");
+                    }
+                case "gfx_draw_sprite":
+                    {
+                        if (args.Count != 10)
+                        {
+                            AddDiagnostic("gfx_draw_sprite expects (handle,x,y,sx,sy,rot,r,g,b,a).", span);
+                            return ConstI32(0);
+                        }
+
+                        var loweredArgs = args.Select(arg => LowerExpression(builder, arg, locals)).ToArray();
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDrawSprite(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, loweredArgs, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_poll_reload":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("gfx_poll_reload expects a sprite handle.", span);
+                            return ConstI32(0);
+                        }
+
+                        var handle = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxPollReload(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { handle }, "gfx_poll_reload.call");
+                    }
+                case "gfx_debug_bake_hash":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("gfx_debug_bake_hash expects a path string.", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDebugBakeHash(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { path }, "gfx_debug_bake_hash.call");
+                    }
                 case "set_postfx":
                     {
                         if (args.Count != 6)
@@ -1688,6 +1899,247 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisShouldQuit(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "should_quit.call");
+                    }
+                case "get_window_size":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("get_window_size expects two arguments (width variable, height variable).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        // Allocate stack space for the out parameters
+                        var widthPtr = builder.BuildAlloca(LLVMTypeRef.Int32, "width_ptr");
+                        var heightPtr = builder.BuildAlloca(LLVMTypeRef.Int32, "height_ptr");
+
+                        // Call the function
+                        var (fn, fnType) = GetOrDeclareStasisGetWindowSize(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, new[] { widthPtr, heightPtr }, "");
+
+                        // Load the results and store them to the variables
+                        var widthVal = builder.BuildLoad2(LLVMTypeRef.Int32, widthPtr, "width_val");
+                        var heightVal = builder.BuildLoad2(LLVMTypeRef.Int32, heightPtr, "height_val");
+
+                        // Store to the variables (args[0] and args[1] should be l-values)
+                        if (args[0] is IdentifierExpressionSyntax widthIdent)
+                        {
+                            var widthName = widthIdent.Identifier.Text;
+                            if (locals.ContainsKey(widthName))
+                            {
+                                var binding = locals[widthName];
+                                locals[widthName] = binding with { Value = widthVal, IsAddress = false };
+                            }
+                        }
+
+                        if (args[1] is IdentifierExpressionSyntax heightIdent)
+                        {
+                            var heightName = heightIdent.Identifier.Text;
+                            if (locals.ContainsKey(heightName))
+                            {
+                                var binding = locals[heightName];
+                                locals[heightName] = binding with { Value = heightVal, IsAddress = false };
+                            }
+                        }
+
+                        return ConstI32(0);
+                    }
+                case "set_fullscreen":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("set_fullscreen expects one argument (fullscreen: 0 or 1).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var fullscreen = LowerExpression(builder, args[0], locals);
+
+                        var (fn, fnType) = GetOrDeclareStasisSetFullscreen(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { fullscreen }, "set_fullscreen.call");
+                    }
+                case "load_font":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("load_font expects (path: string, size: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(1);
+
+                        var path = LowerExpression(builder, args[0], locals);
+                        var size = LowerExpression(builder, args[1], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_load_font");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), LLVMTypeRef.Int32 }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_load_font", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { path, size }, "load_font.call");
+                    }
+                case "draw_text":
+                    {
+                        if (args.Count != 8)
+                        {
+                            AddDiagnostic("draw_text expects (font_handle: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var fontHandle = LowerExpression(builder, args[0], locals);
+                        var text = LowerExpression(builder, args[1], locals);
+                        var x = LowerExpression(builder, args[2], locals);
+                        var y = LowerExpression(builder, args[3], locals);
+                        var r = LowerExpression(builder, args[4], locals);
+                        var g = LowerExpression(builder, args[5], locals);
+                        var b = LowerExpression(builder, args[6], locals);
+                        var a = LowerExpression(builder, args[7], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_draw_text");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[] { LLVMTypeRef.Int32, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                   LLVMTypeRef.Float, LLVMTypeRef.Float,
+                                   LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float, LLVMTypeRef.Float }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_draw_text", fnType);
+
+                        builder.BuildCall2(fnType, fn, new[] { fontHandle, text, x, y, r, g, b, a }, "");
+                        return ConstI32(0);
+                    }
+                case "measure_text":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("measure_text expects (font_handle: i32, text: string).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var fontHandle = LowerExpression(builder, args[0], locals);
+                        var text = LowerExpression(builder, args[1], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_measure_text");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float,
+                            new[] { LLVMTypeRef.Int32, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_measure_text", fnType);
+
+                            return builder.BuildCall2(fnType, fn, new[] { fontHandle, text }, "measure_text.call");
+                    }
+                case "dir_list_entry_is_dir":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("dir_list_entry_is_dir expects (dir_list: DirList, idx: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[1], locals);
+                        if (!TryLowerDirListArgument(builder, args[0], locals, out _, out var flagsPtr, out _))
+                        {
+                            AddDiagnostic("dir_list_entry_is_dir requires a DirList with entries, is_dir, and count fields.", span);
+                            return ConstI32(0);
+                        }
+
+                        var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int32, flagsPtr, new[] { idx }, "dir_list_entry_is_dir.ptr");
+                        var flag = builder.BuildLoad2(LLVMTypeRef.Int32, elemPtr, "dir_list_entry_is_dir.load");
+                        var isDir = builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, flag, ConstI32(0), "dir_list_entry_is_dir.cmp");
+                        return BuildBoolResult(builder, isDir);
+                    }
+                case "dir_list_entry_copy_name":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("dir_list_entry_copy_name expects (dir_list: DirList, idx: i32, dst: string).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[1], locals);
+                        var dst = LowerCStringPointer(builder, args[2], locals);
+                        if (!TryLowerDirListArgument(builder, args[0], locals, out var namesPtr, out _, out _))
+                        {
+                            AddDiagnostic("dir_list_entry_copy_name requires a DirList with entries, is_dir, and count fields.", span);
+                            return ConstI32(0);
+                        }
+
+                        var stride = ConstI32(DirEntryStride);
+                        var offset = builder.BuildMul(idx, stride, "dir_list_entry_copy_name.offset");
+                        var srcPtr = builder.BuildGEP2(LLVMTypeRef.Int8, namesPtr, new[] { offset }, "dir_list_entry_copy_name.ptr");
+
+                        var function = builder.InsertBlock.Parent;
+                        var condBlock = AppendBlock(function, "dir_list_entry_copy.cond");
+                        var loopBlock = AppendBlock(function, "dir_list_entry_copy.loop");
+                        var exitBlock = AppendBlock(function, "dir_list_entry_copy.exit");
+
+                        var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "dir_list_entry_copy.idx");
+                        builder.BuildStore(ConstI32(0), idxAlloca);
+                        builder.BuildBr(condBlock);
+
+                        builder.PositionAtEnd(condBlock);
+                        var currentIdx = builder.BuildLoad2(LLVMTypeRef.Int32, idxAlloca, "dir_list_entry_copy.idx.load");
+                        var loopCond = builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, currentIdx, ConstI32(DirEntryStride), "dir_list_entry_copy.cond");
+                        builder.BuildCondBr(loopCond, loopBlock, exitBlock);
+
+                        builder.PositionAtEnd(loopBlock);
+                        var srcElem = builder.BuildGEP2(LLVMTypeRef.Int8, srcPtr, new[] { currentIdx }, "dir_list_entry_copy.src.elem");
+                        var dstElem = builder.BuildGEP2(LLVMTypeRef.Int8, dst, new[] { currentIdx }, "dir_list_entry_copy.dst.elem");
+                        var byteVal = builder.BuildLoad2(LLVMTypeRef.Int8, srcElem, "dir_list_entry_copy.load");
+                        builder.BuildStore(byteVal, dstElem);
+                        var nextIdx = builder.BuildAdd(currentIdx, ConstI32(1), "dir_list_entry_copy.next");
+                        builder.BuildStore(nextIdx, idxAlloca);
+                        builder.BuildBr(condBlock);
+
+                        builder.PositionAtEnd(exitBlock);
+                        return ConstI32(0);
+                    }
+                case "list_directory":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("list_directory expects (path: string, dir_list: DirList).", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        if (path.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("list_directory requires a string path.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (!TryLowerDirListArgument(builder, args[1], locals, out var namesPtr, out var flagsPtr, out var countPtr))
+                        {
+                            AddDiagnostic("list_directory requires a DirList with entries, is_dir, and count fields.", span);
+                            return ConstI32(0);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_list_directory_struct");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),  // path
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),  // names
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), // is_dir
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0)  // out_count
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_list_directory_struct", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { path, namesPtr, flagsPtr, countPtr }, "list_directory.call");
                     }
 
                 // ============================================================
@@ -2491,6 +2943,14 @@ public sealed class ModuleLowerer
                 // Check for local array binding
                 if (locals.TryGetValue(id.Identifier.Text, out var local) && local.IsAddress)
                 {
+                    // If this is an array descriptor (fat pointer), extract the pointer field
+                    if (local.IsArrayDescriptor)
+                    {
+                        var descriptorPtr = local.Value;  // Pointer to { ptr, i32 } on stack
+                        var ptrFieldPtr = builder.BuildStructGEP2(local.Type, descriptorPtr, 0, $"{id.Identifier.Text}.ptr_field");
+                        var arrayPtr = builder.BuildLoad2(LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), ptrFieldPtr, $"{id.Identifier.Text}.ptr");
+                        return arrayPtr;
+                    }
                     return local.Value;
                 }
             }
@@ -2515,6 +2975,20 @@ public sealed class ModuleLowerer
                 }
             }
             return default;
+        }
+
+        private LLVMValueRef LowerCStringPointer(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals)
+        {
+            var arrayPtr = LowerArrayPointer(builder, expr, locals);
+            if (arrayPtr.Handle != IntPtr.Zero)
+            {
+                return arrayPtr;
+            }
+
+            var value = LowerExpression(builder, expr, locals);
+            return value.TypeOf.Kind == LLVMTypeKind.LLVMPointerTypeKind
+                ? value
+                : LLVMValueRef.CreateConstNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0));
         }
 
         private static LLVMValueRef ConstI8(int value) =>
@@ -2572,10 +3046,16 @@ public sealed class ModuleLowerer
                 "%" => builder.BuildSRem(lhs, rhs, "remtmp"),
                 "<" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLT, lhs, rhs, "flt")),
                 "<" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, lhs, rhs, "ilt")),
+                "<=" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLE, lhs, rhs, "fle")),
+                "<=" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, lhs, rhs, "ile")),
                 ">" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGT, lhs, rhs, "fgt")),
                 ">" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, lhs, rhs, "igt")),
+                ">=" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOGE, lhs, rhs, "fge")),
+                ">=" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, lhs, rhs, "ige")),
                 "==" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, lhs, rhs, "feq")),
                 "==" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, lhs, rhs, "ieq")),
+                "!=" when isFloat => BuildBoolResult(builder, builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, lhs, rhs, "fne")),
+                "!=" => BuildBoolResult(builder, builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, lhs, rhs, "ine")),
                 _ => UnsupportedOperator(span, lhs)
             };
         }
@@ -2784,6 +3264,26 @@ public sealed class ModuleLowerer
                         if (field is not null)
                         {
                             var fieldType = ResolveType(field.Type, _symbols);
+
+                            // For array fields, return a pointer to the array instead of loading it
+                            if (fieldType is ArrayTypeSymbol arrayType)
+                            {
+                                // Special handling for string arrays
+                                if (arrayType.ElementType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                                {
+                                    // String array: [N+8 x i8] - return pointer to first element
+                                    var llvmArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)(arrayType.Size + 8));
+                                    return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedName}.ptr");
+                                }
+                                else
+                                {
+                                    // Other arrays - return pointer to first element
+                                    var elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                                    var llvmArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, arrayType.Size));
+                                    return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedName}.ptr");
+                                }
+                            }
+
                             var llvmType = _moduleBuilder.TypeMapper.Map(fieldType);
                             return builder.BuildLoad2(llvmType, global, flattenedName);
                         }
@@ -3024,6 +3524,92 @@ public sealed class ModuleLowerer
 
             var structCandidate = $"{structDecl.Name.Text}_{fieldName}";
             return structCandidate;
+        }
+
+        private bool TryLowerDirListArgument(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals, out LLVMValueRef namesPtr, out LLVMValueRef flagsPtr, out LLVMValueRef countPtr)
+        {
+            namesPtr = default;
+            flagsPtr = default;
+            countPtr = default;
+
+            var exprType = ResolveExpressionType(expr);
+            if (exprType is not NamedTypeSymbol named || !_structs.TryGetValue(named.TypeName, out var dirListStruct) || !string.Equals(dirListStruct.Name.Text, "DirList", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!TryResolveStructBaseName(expr, out var baseName))
+            {
+                return false;
+            }
+
+            if (!_structs.TryGetValue("DirEntry", out var dirEntryStruct))
+            {
+                return false;
+            }
+
+            var nameField = dirEntryStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "name", StringComparison.Ordinal));
+            var isDirField = dirEntryStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "is_dir", StringComparison.Ordinal));
+            var countField = dirListStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "count", StringComparison.Ordinal));
+            if (nameField is null || isDirField is null || countField is null)
+            {
+                return false;
+            }
+
+            var entriesBase = $"{baseName}_entries";
+            var nameGlobal = $"{entriesBase}_name";
+            var isDirGlobal = $"{entriesBase}_is_dir";
+            var countGlobal = $"{baseName}_count";
+
+            var nameType = ResolveType(nameField.Type, _symbols);
+            var nameLlvm = _moduleBuilder.TypeMapper.Map(nameType);
+            var nameGlobalValue = _moduleBuilder.Module.GetNamedGlobal(nameGlobal);
+            if (nameGlobalValue.Handle == IntPtr.Zero)
+            {
+                return false;
+            }
+            var namePtr = builder.BuildGEP2(nameLlvm, nameGlobalValue, new[] { ConstI32(0), ConstI32(0) }, $"{nameGlobal}.ptr");
+            namesPtr = builder.BuildBitCast(namePtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), $"{nameGlobal}.i8ptr");
+
+            var isDirType = ResolveType(isDirField.Type, _symbols);
+            var isDirLlvm = _moduleBuilder.TypeMapper.Map(isDirType);
+            var isDirGlobalValue = _moduleBuilder.Module.GetNamedGlobal(isDirGlobal);
+            if (isDirGlobalValue.Handle == IntPtr.Zero)
+            {
+                return false;
+            }
+            var isDirPtr = builder.BuildGEP2(isDirLlvm, isDirGlobalValue, new[] { ConstI32(0), ConstI32(0) }, $"{isDirGlobal}.ptr");
+            flagsPtr = builder.BuildBitCast(isDirPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), $"{isDirGlobal}.i32ptr");
+
+            var countGlobalValue = _moduleBuilder.Module.GetNamedGlobal(countGlobal);
+            if (countGlobalValue.Handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            countPtr = countGlobalValue;
+            return true;
+        }
+
+        private bool TryResolveStructBaseName(ExpressionSyntax expr, out string baseName)
+        {
+            baseName = string.Empty;
+            switch (expr)
+            {
+                case IdentifierExpressionSyntax id:
+                    baseName = TryResolveGlobalName(id.Identifier.Text);
+                    return !string.IsNullOrEmpty(baseName);
+                case MemberAccessExpressionSyntax member:
+                    var flattened = BuildFlattenedMemberPath(member);
+                    if (!string.IsNullOrEmpty(flattened))
+                    {
+                        baseName = flattened;
+                        return true;
+                    }
+                    break;
+            }
+
+            return false;
         }
 
         private LLVMValueRef ConstBool(bool value) =>
@@ -3522,6 +4108,9 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
 
         private LLVMValueRef ConstI32(int value) =>
             LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
+
+        private LLVMValueRef ConstI64(long value) =>
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)value, true);
 
         /// <summary>
         /// Converts a value to the target type if needed (e.g., i32 -> f32 or f32 -> i32).
