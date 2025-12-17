@@ -121,6 +121,30 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_infix_extended_comparisons()
+    {
+        var source = """
+            function ok(): void {
+                if (1 <= 2) { }
+                if (2 >= 1) { }
+                if (1 != 2) { }
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal(3, func.Body.Statements.Count);
+        var if1 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[0]);
+        var if2 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[1]);
+        var if3 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[2]);
+        Assert.Equal(TokenKind.LessEqual, Assert.IsType<BinaryExpressionSyntax>(if1.Condition).OperatorToken.Kind);
+        Assert.Equal(TokenKind.GreaterEqual, Assert.IsType<BinaryExpressionSyntax>(if2.Condition).OperatorToken.Kind);
+        Assert.Equal(TokenKind.BangEqual, Assert.IsType<BinaryExpressionSyntax>(if3.Condition).OperatorToken.Kind);
+    }
+
+    [Fact]
     public void Parses_compound_assignment()
     {
         var source = """
@@ -255,5 +279,59 @@ public class ParserTests
         Assert.Equal("i", foreachStmt.Iterator.Text);
         Assert.Null(foreachStmt.IndexVariable);
         Assert.False(foreachStmt.BindByElement);
+    }
+
+    [Fact]
+    public void Parses_enum_declaration()
+    {
+        var source = """
+            enum State { Idle, Jump, Run, Fall }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var enumDecl = Assert.IsType<EnumDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal("State", enumDecl.Name.Text);
+        Assert.Equal(4, enumDecl.Members.Count);
+        Assert.Equal("Idle", enumDecl.Members[0].Identifier.Text);
+        Assert.Equal("Jump", enumDecl.Members[1].Identifier.Text);
+        Assert.Equal("Run", enumDecl.Members[2].Identifier.Text);
+        Assert.Equal("Fall", enumDecl.Members[3].Identifier.Text);
+    }
+
+    [Fact]
+    public void Parses_enum_with_trailing_comma()
+    {
+        var source = """
+            enum Direction { North, South, East, West, }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var enumDecl = Assert.IsType<EnumDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal(4, enumDecl.Members.Count);
+    }
+
+    [Fact]
+    public void Parses_enum_member_access()
+    {
+        var source = """
+            enum State { Idle, Jump }
+            function get_state(): i32 {
+                return State.Idle;
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
+        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body.Statements));
+        var memberAccess = Assert.IsType<MemberAccessExpressionSyntax>(ret.Expression);
+        var receiver = Assert.IsType<IdentifierExpressionSyntax>(memberAccess.Receiver);
+        Assert.Equal("State", receiver.Identifier.Text);
+        Assert.Equal("Idle", memberAccess.Member.Text);
     }
 }

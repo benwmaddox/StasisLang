@@ -1,0 +1,26 @@
+LIBRARY stasis_graphics
+EXPORTS
+    stasis_init_window
+    stasis_get_window_size
+    stasis_set_fullscreen
+    stasis_should_quit
+    stasis_begin_frame
+    stasis_end_frame
+    stasis_clear
+    stasis_draw_line
+    stasis_is_key_down
+    stasis_get_time_ms
+    stasis_sleep_ms
+    stasis_get_startup_test_error
+    stasis_get_startup_test_success
+    stasis_set_postfx
+    stasis_gfx_load_sprite
+    stasis_gfx_draw_sprite
+    stasis_gfx_poll_reload
+    stasis_gfx_debug_bake_hash
+    stasis_load_font
+    stasis_draw_text
+    stasis_measure_text
+    stasis_list_directory
+    stasis_list_directory_struct
+    stasis_copy_dir_entry_name

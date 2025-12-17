@@ -57,6 +57,10 @@ The library exports these functions for Stasis programs:
 | `stasis_end_frame()` | Render queued lines, swap buffers |
 | `stasis_clear(r, g, b, a)` | Clear screen with color |
 | `stasis_draw_line(x1, y1, x2, y2, r, g, b, a)` | Queue a line for rendering |
+| `stasis_gfx_load_sprite(path)` | Load and bake `.stv` sprite into an atlas; returns handle |
+| `stasis_gfx_draw_sprite(handle, x, y, sx, sy, rot, r, g, b, a)` | Draw baked sprite (centered) with scale/rotation/tint |
+| `stasis_gfx_poll_reload(handle)` | Hot reload baked sprite if source file changed |
+| `stasis_gfx_debug_bake_hash(path)` | Debug: bake `.stv` on CPU and return a pixel hash |
 | `stasis_is_key_down(scancode)` | Check if key is pressed |
 | `stasis_get_time_ms()` | Get time in milliseconds |
 | `stasis_sleep_ms(ms)` | Sleep for milliseconds |

@@ -74,9 +74,9 @@ struct enum global function export test return let if else for foreach in
 
 ### Operators
 
-- Infix arithmetic/comparison: `+ - * / % < > ==` with TypeScript-style precedence.
+- Infix arithmetic/comparison: `+ - * / % < <= > >= == !=` with TypeScript-style precedence.
 - Compound assignment: `= += -= *= /= %=` 
-- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .>() .==()`
+- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .<=() .>() .>=() .==() .!=()`
 - Assignment expressions may appear only once per expression to keep the Pratt parser unambiguous; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
 
 ---
@@ -142,10 +142,48 @@ struct Player { ... }
 ### Enum Types
 
 ```
-enum State { Idle, Jump, Run, ... }
+enum State { Idle, Jump, Run, Fall }
 ```
 
-Enums are lowered to integers (`u32` by default).
+Enums are **type-safe** named types that lower to integers (`i32`) at runtime. Enum members are automatically assigned sequential integer values starting from 0:
+
+```
+State.Idle → 0
+State.Jump → 1
+State.Run → 2
+State.Fall → 3
+```
+
+**Enum semantics:**
+- Members are accessed via dot notation: `EnumName.MemberName`
+- Members are implicitly assigned values 0, 1, 2, ... in declaration order
+- The first member (value 0) is the default value for uninitialized enum variables
+- Each enum member becomes a compile-time constant in the symbol table
+
+**Type safety:**
+- Enum variables must be declared with the enum type: `let state: State = State.Idle;`
+- Enums are NOT compatible with integer types - you cannot assign an integer to an enum variable
+- Enums are NOT compatible with other enum types - you cannot assign `Direction.North` to a `State` variable
+- Comparisons between enums and integers are not allowed
+- Comparisons between different enum types are not allowed
+- Only enum members of the same type can be assigned or compared
+
+Example:
+```stasis
+enum State { Idle, Jump, Run }
+
+function update(): void {
+    let state: State = State.Idle;  // ✓ Correct
+    state = State.Jump;              // ✓ Correct
+
+    if (state == State.Idle) {       // ✓ Correct
+        state = State.Run;
+    }
+
+    // let x: State = 0;              // ✗ Error: cannot assign i32 to State
+    // if (state == 0) {              // ✗ Error: cannot compare State with i32
+}
+```
 
 ---
 

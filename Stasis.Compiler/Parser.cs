@@ -486,8 +486,8 @@ public sealed class Parser
             TokenKind.Equal or TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual => 1,
             TokenKind.PipePipe => 2,
             TokenKind.AmpAmp => 3,
-            TokenKind.EqualEqual => 4,
-            TokenKind.Less or TokenKind.Greater => 5,
+            TokenKind.EqualEqual or TokenKind.BangEqual => 4,
+            TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual => 5,
             TokenKind.Plus or TokenKind.Minus => 6,
             TokenKind.Star or TokenKind.Slash or TokenKind.Percent => 7,
             _ => -1
@@ -586,8 +586,11 @@ public sealed class Parser
         or TokenKind.Slash
         or TokenKind.Percent
         or TokenKind.Less
+        or TokenKind.LessEqual
         or TokenKind.Greater
-        or TokenKind.EqualEqual;
+        or TokenKind.GreaterEqual
+        or TokenKind.EqualEqual
+        or TokenKind.BangEqual;
 
     private Token Consume(TokenKind kind, string message)
     {
