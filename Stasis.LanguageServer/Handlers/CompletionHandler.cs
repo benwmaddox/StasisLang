@@ -25,7 +25,7 @@ public class CompletionHandler : CompletionHandlerBase
         if (doc?.ParseResult == null || doc.SymbolIndex == null)
             return Task.FromResult(new CompletionList());
 
-        var offset = PositionToOffset(doc.Content, request.Position);
+        var offset = TextPositionConverter.PositionToOffset(doc.Content, request.Position);
         if (!TryGetMemberAccessReceiver(doc.Content, offset, out var receiverName))
         {
             return Task.FromResult(new CompletionList());
@@ -231,34 +231,6 @@ public class CompletionHandler : CompletionHandlerBase
             ArrayTypeSyntax arr when arr.ElementType is NamedTypeSyntax element => element.Name,
             _ => null
         };
-
-    private static int PositionToOffset(string content, Position position)
-    {
-        int offset = 0;
-        int currentLine = 0;
-        int currentChar = 0;
-
-        foreach (var ch in content)
-        {
-            if (currentLine == position.Line && currentChar == position.Character)
-            {
-                return offset;
-            }
-
-            offset++;
-            if (ch == '\n')
-            {
-                currentLine++;
-                currentChar = 0;
-            }
-            else
-            {
-                currentChar++;
-            }
-        }
-
-        return offset;
-    }
 
     private static bool TryGetMemberAccessReceiver(string content, int cursorOffset, out string receiverName)
     {

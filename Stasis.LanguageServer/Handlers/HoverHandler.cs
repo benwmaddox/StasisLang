@@ -27,7 +27,7 @@ public class HoverHandler : HoverHandlerBase
         if (doc?.SemanticResult == null || doc.ParseResult == null)
             return Task.FromResult<Hover?>(null);
 
-        var offset = PositionToOffset(doc.Content, request.Position);
+        var offset = TextPositionConverter.PositionToOffset(doc.Content, request.Position);
         var node = FindNodeAtPosition(doc.ParseResult.CompilationUnit, offset);
 
         if (node == null)
@@ -40,46 +40,6 @@ public class HoverHandler : HoverHandlerBase
     protected override HoverRegistrationOptions CreateRegistrationOptions(HoverCapability? capability, ClientCapabilities clientCapabilities)
     {
         return new HoverRegistrationOptions();
-    }
-
-    private static int PositionToOffset(string content, Position position)
-    {
-        int offset = 0;
-        int currentLine = 0;
-
-        foreach (var ch in content)
-        {
-            if (currentLine == position.Line)
-            {
-                if (offset - GetLineStart(content, currentLine) == position.Character)
-                    return offset;
-            }
-
-            offset++;
-            if (ch == '\n')
-                currentLine++;
-        }
-
-        return offset;
-    }
-
-    private static int GetLineStart(string content, int line)
-    {
-        int offset = 0;
-        int currentLine = 0;
-
-        foreach (var ch in content)
-        {
-            if (currentLine == line)
-                return offset;
-
-            if (ch == '\n')
-                currentLine++;
-
-            offset++;
-        }
-
-        return offset;
     }
 
     /// <summary>

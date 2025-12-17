@@ -76,37 +76,13 @@ public class DiagnosticsPublisher
     /// </summary>
     private static Range SourceSpanToRange(string content, CompilerSourceSpan span)
     {
-        var (startLine, startChar) = OffsetToPosition(content, span.Start);
-        var (endLine, endChar) = OffsetToPosition(content, span.Start + span.Length);
+        var start = TextPositionConverter.OffsetToPosition(content, span.Start);
+        var end = TextPositionConverter.OffsetToPosition(content, span.Start + span.Length);
 
         return new Range
         {
-            Start = new Position(startLine, startChar),
-            End = new Position(endLine, endChar)
+            Start = start,
+            End = end
         };
-    }
-
-    /// <summary>
-    /// Converts a byte offset in the document to a (line, character) position.
-    /// </summary>
-    private static (int line, int character) OffsetToPosition(string text, int offset)
-    {
-        int line = 0;
-        int character = 0;
-
-        for (int i = 0; i < offset && i < text.Length; i++)
-        {
-            if (text[i] == '\n')
-            {
-                line++;
-                character = 0;
-            }
-            else
-            {
-                character++;
-            }
-        }
-
-        return (line, character);
     }
 }
