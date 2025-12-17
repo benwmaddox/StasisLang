@@ -7,6 +7,26 @@ using Xunit;
 
 public class CompletionHandlerTests
 {
+    private static Position PositionAt(string content, int offset)
+    {
+        int line = 0;
+        int character = 0;
+        for (int i = 0; i < offset && i < content.Length; i++)
+        {
+            if (content[i] == '\n')
+            {
+                line++;
+                character = 0;
+            }
+            else
+            {
+                character++;
+            }
+        }
+
+        return new Position(line, character);
+    }
+
     [Fact]
     public async Task HandleAsync_ReturnsEmptyListForNonExistentDocument()
     {
@@ -83,8 +103,80 @@ public class CompletionHandlerTests
 
         // Assert
         Assert.NotNull(result);
-        // Current stub returns empty list - no completions yet
         Assert.Empty(result.Items ?? new Container<CompletionItem>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersEnumMembersAfterDot()
+    {
+        // Arrange
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+enum State { Idle, Jump }
+function main() {
+  let x: State = State.Idle;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var dotOffset = content.IndexOf("State.Idle", StringComparison.Ordinal) + "State.".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, dotOffset)
+        };
+
+        // Act
+        var result = await handler.Handle(request, CancellationToken.None);
+
+        // Assert
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("Idle", labels);
+        Assert.Contains("Jump", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersStructFieldsAfterDot()
+    {
+        // Arrange
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct Player {
+  hp: i32;
+  name: string;
+}
+
+function main() {
+  let p: Player;
+  p.hp;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var dotOffset = content.IndexOf("p.hp", StringComparison.Ordinal) + "p.".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, dotOffset)
+        };
+
+        // Act
+        var result = await handler.Handle(request, CancellationToken.None);
+
+        // Assert
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("hp", labels);
+        Assert.Contains("name", labels);
     }
 
     [Fact]
