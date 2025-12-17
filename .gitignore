@@ -14,6 +14,8 @@ TestResults/
 _ReSharper.Caches/
 .DS_Store
 .vscode/
+!vscode-stasis/.vscode/
+!vscode-stasis/.vscode/**
 .config/dotnet-tools.json.lock
 .claude/settings.local.json
 
