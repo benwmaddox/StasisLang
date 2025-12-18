@@ -74,6 +74,201 @@ public class CraneliftBackendConfirmationTests
         Assert.DoesNotContain("TODO:", ir);
     }
 
+    [Fact]
+    public void ReadInt_UsesStackSlot()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                let x: i32 = read_int();
+                return x;
+            }
+            """);
+
+        Assert.Contains("stack_slot.i32", ir);
+        Assert.Contains("call %scanf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void ReadChar_UsesStackSlot()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                let x: i32 = read_char();
+                return x;
+            }
+            """);
+
+        Assert.Contains("stack_slot.i32", ir);
+        Assert.Contains("call %scanf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void PrintString_UsesPrintfStr()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                print_string("hello");
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %printf3", ir);
+        Assert.Contains("global str_", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void Time_UsesTruncationFromI64()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                let t: i32 = time();
+                return t;
+            }
+            """);
+
+        Assert.Contains("call %time", ir);
+        Assert.Contains("ireduce.i32", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void GetTimeMs_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                return get_time_ms();
+            }
+            """);
+
+        Assert.Contains("call %stasis_get_time_ms", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void SleepMs_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                sleep_ms(5);
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %stasis_sleep_ms", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void PrintInt_UsesPrintf()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                print_int(123);
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %printf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void PrintChar_UsesPrintf()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                print_char(65);
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %printf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StrLen_UsesStrlen()
+    {
+        var ir = CompileCraneliftIr("""
+            global buf: u8[8];
+            function main(): i32 {
+                return str_len(buf);
+            }
+            """);
+
+        Assert.Contains("call %strlen", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StrEq_UsesStrcmp()
+    {
+        var ir = CompileCraneliftIr("""
+            global a: u8[8];
+            global b: u8[8];
+            function main(): i32 {
+                return str_eq(a, b);
+            }
+            """);
+
+        Assert.Contains("call %strcmp", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StrFind_UsesStrstr()
+    {
+        var ir = CompileCraneliftIr("""
+            global a: u8[8];
+            global b: u8[8];
+            function main(): i32 {
+                return str_find(a, b);
+            }
+            """);
+
+        Assert.Contains("call %strstr", ir);
+        Assert.Contains("select", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StrSubstr_UsesMemcpyAndAbort()
+    {
+        var ir = CompileCraneliftIr("""
+            global dst: u8[8];
+            global src: u8[8];
+            function main(): i32 {
+                return str_substr(dst, src, 0, 4);
+            }
+            """);
+
+        Assert.Contains("call %memcpy", ir);
+        Assert.Contains("call %abort", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void TestHarness_EmitsRunTestsEntry()
+    {
+        var ir = CompileCraneliftIr("""
+            function add(a: i32, b: i32): i32 {
+                return a + b;
+            }
+
+            test `addition works`(): bool {
+                return add(2, 3) == 5;
+            }
+            """, includeTests: true);
+
+        Assert.Contains("function %run_tests()", ir);
+        Assert.Contains("call %printf3", ir);
+        Assert.Contains("call %printf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
     private static string CompileCraneliftIr(string source, bool includeTests = false)
     {
         var parse = Parser.Parse(source);
@@ -96,4 +291,3 @@ public class CraneliftBackendConfirmationTests
         return result.Ir;
     }
 }
-

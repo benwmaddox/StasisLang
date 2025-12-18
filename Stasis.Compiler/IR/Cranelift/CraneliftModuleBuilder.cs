@@ -13,10 +13,14 @@ public sealed class CraneliftModuleBuilder : IDisposable
 {
     private readonly string _moduleName;
     private readonly StringBuilder _globals = new();
+    private readonly StringBuilder _externals = new();
     private readonly StringBuilder _functions = new();
     private readonly List<string> _functionNames = new();
+    private readonly HashSet<string> _externalFunctions = new();
+    private readonly Dictionary<string, CraneliftTypeMapper.ClifType> _globalTypes = new();
+    private readonly Dictionary<string, string> _stringLiterals = new(); // maps literal value -> global name
     private readonly CraneliftTypeMapper _typeMapper = new();
-    private int _globalCounter;
+    private int _stringLiteralCounter;
 
     public CraneliftModuleBuilder(string moduleName)
     {
@@ -24,15 +28,72 @@ public sealed class CraneliftModuleBuilder : IDisposable
     }
 
     public CraneliftTypeMapper TypeMapper => _typeMapper;
+    public IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> GlobalTypes => _globalTypes;
+    public IReadOnlySet<string> ExternalFunctions => _externalFunctions;
+    public IReadOnlyDictionary<string, string> StringLiterals => _stringLiterals;
 
     /// <summary>
-    /// Defines a global data section.
+    /// Defines a global variable.
     /// </summary>
-    public void DefineGlobalData(string name, int size)
+    public void DefineGlobal(string name, CraneliftTypeMapper.ClifType type)
     {
-        _globals.AppendLine($"; Global: {name} ({size} bytes)");
-        _globals.AppendLine($"gv{_globalCounter} = symbol colocated u0:{_globalCounter} ; {name}");
-        _globalCounter++;
+        _globalTypes[name] = type;
+        _globals.AppendLine($"global {name}: {FormatType(type)}");
+    }
+
+    /// <summary>
+    /// Defines a global array with the given element count.
+    /// </summary>
+    public void DefineGlobalArray(string name, CraneliftTypeMapper.ClifType elementType, int length)
+    {
+        _globalTypes[name] = elementType;
+        _globals.AppendLine($"global {name}: {FormatType(elementType)}[{length}]");
+    }
+
+    /// <summary>
+    /// Declares an external function (imported from C runtime).
+    /// </summary>
+    public void DeclareExternal(string name, CraneliftTypeMapper.ClifType returnType, params CraneliftTypeMapper.ClifType[] paramTypes)
+    {
+        if (_externalFunctions.Contains(name))
+        {
+            return;
+        }
+        _externalFunctions.Add(name);
+        var paramStr = string.Join(", ", paramTypes.Select(FormatType));
+        var retStr = FormatReturnType(returnType);
+        _externals.AppendLine($"external {name}({paramStr}){retStr} windows_fastcall");
+    }
+
+    /// <summary>
+    /// Defines a string literal as global data.
+    /// Returns the global name for this string literal.
+    /// </summary>
+    public string DefineStringLiteral(string value)
+    {
+        if (_stringLiterals.TryGetValue(value, out var existingName))
+        {
+            return existingName;
+        }
+
+        var globalName = $"str_{_stringLiteralCounter++}";
+        _stringLiterals[value] = globalName;
+
+        // For now, store as i64 (pointer type)
+        // TODO: Actually emit string data bytes
+        _globalTypes[globalName] = CraneliftTypeMapper.ClifType.I64;
+        _globals.AppendLine($"global {globalName}: i64 ; \"{EscapeString(value)}\"");
+
+        return globalName;
+    }
+
+    private static string EscapeString(string s)
+    {
+        return s.Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\n", "\\n")
+                .Replace("\r", "\\r")
+                .Replace("\t", "\\t");
     }
 
     /// <summary>
@@ -91,6 +152,13 @@ public sealed class CraneliftModuleBuilder : IDisposable
         {
             sb.AppendLine("; === Globals ===");
             sb.Append(_globals);
+            sb.AppendLine();
+        }
+
+        if (_externals.Length > 0)
+        {
+            sb.AppendLine("; === External Functions ===");
+            sb.Append(_externals);
             sb.AppendLine();
         }
 

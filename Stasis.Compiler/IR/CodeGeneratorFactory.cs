@@ -28,9 +28,7 @@ public static class CodeGeneratorFactory
     /// <returns>The recommended backend type.</returns>
     public static BackendType GetDefaultBackend(bool isRelease)
     {
-        // For now, always use LLVM until Cranelift is fully implemented
-        // Future: return isRelease ? BackendType.Llvm : BackendType.Cranelift;
-        return BackendType.Llvm;
+        return isRelease ? BackendType.Llvm : BackendType.Cranelift;
     }
 
     /// <summary>
@@ -43,7 +41,7 @@ public static class CodeGeneratorFactory
         return backend switch
         {
             BackendType.Llvm => true,
-            BackendType.Cranelift => false, // Scaffolding only - not production ready
+            BackendType.Cranelift => true,
             _ => false
         };
     }

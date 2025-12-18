@@ -7,11 +7,11 @@ use clap::Parser;
 use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_codegen::ir::{types, AbiParam, Function, Inst, InstBuilder, Signature};
+use cranelift_codegen::ir::{types, AbiParam, Function, Inst, InstBuilder, Signature, GlobalValue, StackSlotData, StackSlotKind};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::{default_libcall_names, Linkage, Module, DataDescription};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
@@ -63,9 +63,46 @@ fn main() -> Result<()>
 
     let parsed = parse_stasis_clif(&clif).context("failed to parse stasis CLIF")?;
 
-    // First declare all functions so intra-module calls can resolve.
+    // First declare all globals.
+    let mut data_ids = std::collections::HashMap::new();
+    for g in &parsed.globals
+    {
+        let id = module
+            .declare_data(&g.name, Linkage::Export, true, false)
+            .with_context(|| format!("declare_data failed for {}", g.name))?;
+        data_ids.insert(g.name.clone(), id);
+
+        // Define the global with appropriate initialization.
+        let mut data_desc = DataDescription::new();
+        match &g.init_data
+        {
+            GlobalInitData::Zero => {
+                data_desc.define_zeroinit(g.size_bytes);
+            }
+            GlobalInitData::String(bytes) => {
+                data_desc.define(bytes.clone().into_boxed_slice());
+            }
+        }
+        module
+            .define_data(id, &data_desc)
+            .with_context(|| format!("define_data failed for {}", g.name))?;
+    }
+
+    // Declare external functions (imports from C runtime).
     let mut function_ids = std::collections::HashMap::new();
-    for f in &parsed
+    for ext in &parsed.externals
+    {
+        // Alias printf_str to printf (workaround for variadic printf)
+        let link_name = if ext.name == "printf_str" || ext.name == "printf3" { "printf" } else { &ext.name };
+
+        let id = module
+            .declare_function(link_name, Linkage::Import, &ext.signature)
+            .with_context(|| format!("declare external function failed for {}", ext.name))?;
+        function_ids.insert(ext.name.clone(), id);
+    }
+
+    // Then declare all functions so intra-module calls can resolve.
+    for f in &parsed.functions
     {
         let id = module
             .declare_function(&f.name, Linkage::Export, &f.signature)
@@ -73,11 +110,11 @@ fn main() -> Result<()>
         function_ids.insert(f.name.clone(), id);
     }
 
-    // Then define each function body.
-    for f in parsed
+    // Finally define each function body.
+    for f in parsed.functions
     {
         let mut context = module.make_context();
-        context.func = build_function_ir(&mut module, &function_ids, &f)
+        context.func = build_function_ir(&mut module, &function_ids, &data_ids, &f)
             .with_context(|| format!("failed to build IR for {}", f.name))?;
         let id = *function_ids.get(&f.name).context("missing function id")?;
         module
@@ -112,6 +149,37 @@ fn build_flags(opt_level: &str) -> Result<settings::Flags>
 }
 
 #[derive(Clone)]
+struct ParsedModule
+{
+    globals: Vec<ParsedGlobal>,
+    externals: Vec<ParsedExternal>,
+    functions: Vec<ParsedFunction>,
+}
+
+#[derive(Clone)]
+struct ParsedGlobal
+{
+    name: String,
+    ty: cranelift_codegen::ir::Type,
+    init_data: GlobalInitData,
+    size_bytes: usize,
+}
+
+#[derive(Clone)]
+enum GlobalInitData
+{
+    Zero,
+    String(Vec<u8>), // Null-terminated string bytes
+}
+
+#[derive(Clone)]
+struct ParsedExternal
+{
+    name: String,
+    signature: Signature,
+}
+
+#[derive(Clone)]
 struct ParsedFunction
 {
     name: String,
@@ -127,8 +195,10 @@ struct ParsedBlock
     instructions: Vec<String>,
 }
 
-fn parse_stasis_clif(input: &str) -> Result<Vec<ParsedFunction>>
+fn parse_stasis_clif(input: &str) -> Result<ParsedModule>
 {
+    let mut globals = Vec::new();
+    let mut externals = Vec::new();
     let mut funcs = Vec::new();
     let mut lines = input.lines().enumerate().peekable();
 
@@ -138,6 +208,26 @@ fn parse_stasis_clif(input: &str) -> Result<Vec<ParsedFunction>>
         if line.is_empty() || line.starts_with(';')
         {
             lines.next();
+            continue;
+        }
+
+        // Parse global declarations: "global gv0: i32" or "global str_0: i64 ; "string data""
+        if line.starts_with("global ")
+        {
+            lines.next();
+            let (name, ty, init_data, size_bytes) = parse_global_decl(line)
+                .with_context(|| format!("failed to parse global declaration: {line}"))?;
+            globals.push(ParsedGlobal { name, ty, init_data, size_bytes });
+            continue;
+        }
+
+        // Parse external function declarations: "external printf(i64) -> i32 windows_fastcall"
+        if line.starts_with("external ")
+        {
+            lines.next();
+            let (name, signature) = parse_external_decl(line)
+                .with_context(|| format!("failed to parse external declaration: {line}"))?;
+            externals.push(ParsedExternal { name, signature });
             continue;
         }
 
@@ -180,7 +270,117 @@ fn parse_stasis_clif(input: &str) -> Result<Vec<ParsedFunction>>
         bail!("no functions found in input");
     }
 
-    Ok(funcs)
+    Ok(ParsedModule { globals, externals, functions: funcs })
+}
+
+fn parse_global_decl(line: &str) -> Result<(String, cranelift_codegen::ir::Type, GlobalInitData, usize)>
+{
+    // Example: "global gv0: i32"
+    // Or: "global str_0: i64 ; "Hello\n""
+    // Or: "global numbers: i32[5]"
+    let rest = line.strip_prefix("global ").context("missing 'global ' prefix")?;
+
+    // Check for string literal comment
+    if let Some((decl_part, comment_part)) = rest.split_once(';')
+    {
+        let (name, ty_str) = decl_part.split_once(':').context("missing ':' in global decl")?;
+        let name = name.trim().to_string();
+        let (ty, _) = parse_type_with_count(ty_str.trim())?;
+
+        // Parse string literal from comment
+        let comment = comment_part.trim();
+        if let Some(string_data) = parse_string_literal_comment(comment)
+        {
+            let size_bytes = string_data.len();
+            return Ok((name, ty, GlobalInitData::String(string_data), size_bytes));
+        }
+    }
+
+    // No comment or no string literal - parse as regular global
+    let (name, ty_str) = rest.split_once(':').context("missing ':' in global decl")?;
+    let name = name.trim().to_string();
+    let (ty, count) = parse_type_with_count(ty_str.trim())?;
+    let size_bytes = ty.bytes() as usize * count;
+    Ok((name, ty, GlobalInitData::Zero, size_bytes))
+}
+
+fn parse_string_literal_comment(comment: &str) -> Option<Vec<u8>>
+{
+    // Comment format: "string data" or just "string data"
+    // Find quoted string
+    let start = comment.find('"')?;
+    let rest = &comment[start + 1..];
+    let end = rest.find('"')?;
+    let quoted = &rest[..end];
+
+    // Unescape and convert to bytes
+    let mut bytes = Vec::new();
+    let mut chars = quoted.chars();
+    while let Some(ch) = chars.next()
+    {
+        if ch == '\\' {
+            match chars.next()? {
+                'n' => bytes.push(b'\n'),
+                'r' => bytes.push(b'\r'),
+                't' => bytes.push(b'\t'),
+                '\\' => bytes.push(b'\\'),
+                '"' => bytes.push(b'"'),
+                '0' => bytes.push(b'\0'),
+                c => {
+                    // Unknown escape, keep literal
+                    bytes.push(b'\\');
+                    bytes.push(c as u8);
+                }
+            }
+        } else {
+            bytes.push(ch as u8);
+        }
+    }
+
+    // Add null terminator for C strings
+    bytes.push(0);
+
+    Some(bytes)
+}
+
+fn parse_external_decl(line: &str) -> Result<(String, Signature)>
+{
+    // Example: "external printf(i64) -> i32 windows_fastcall"
+    // Strip "external " prefix
+    let rest = line.strip_prefix("external ").context("missing 'external ' prefix")?;
+
+    // Parse similar to function header but without the % prefix and without { }
+    let open = rest.find('(').context("missing '(' in external decl")?;
+    let close = rest.find(')').context("missing ')' in external decl")?;
+    if close < open
+    {
+        bail!("invalid external decl parens");
+    }
+
+    let name = rest[..open].trim().to_string();
+    let param_str = rest[open + 1..close].trim();
+    let after = rest[close + 1..].trim();
+
+    let mut sig = Signature::new(CallConv::WindowsFastcall);
+
+    if !param_str.is_empty()
+    {
+        for ty in param_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
+        {
+            sig.params.push(AbiParam::new(parse_type(ty)?));
+        }
+    }
+
+    // Parse optional "-> <ret>" before calling convention token.
+    if after.starts_with("->")
+    {
+        let after = after.strip_prefix("->").unwrap().trim();
+        let mut parts = after.split_whitespace();
+        let ret_ty = parts.next().context("missing return type after '->'")?;
+        sig.returns.push(AbiParam::new(parse_type(ret_ty)?));
+    }
+
+    Ok((name, sig))
 }
 
 fn parse_function_header(line: &str) -> Result<(String, Signature)>
@@ -332,6 +532,25 @@ fn parse_type(s: &str) -> Result<cranelift_codegen::ir::Type>
     })
 }
 
+fn parse_type_with_count(s: &str) -> Result<(cranelift_codegen::ir::Type, usize)>
+{
+    if let Some(open) = s.find('[')
+    {
+        let close = s.rfind(']').context("missing ']' in array type")?;
+        if close < open
+        {
+            bail!("invalid array type");
+        }
+        let base = s[..open].trim();
+        let count_str = s[open + 1..close].trim();
+        let count = count_str.parse::<usize>().context("invalid array length")?;
+        let ty = parse_type(base)?;
+        return Ok((ty, count));
+    }
+
+    Ok((parse_type(s)?, 1))
+}
+
 fn parse_value_id(s: &str) -> Result<u32>
 {
     let s = s.strip_prefix('v').context("expected value like v0")?;
@@ -341,6 +560,7 @@ fn parse_value_id(s: &str) -> Result<u32>
 fn build_function_ir(
     module: &mut ObjectModule,
     function_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
+    data_ids: &std::collections::HashMap<String, cranelift_module::DataId>,
     parsed: &ParsedFunction,
 ) -> Result<Function>
 {
@@ -353,6 +573,7 @@ fn build_function_ir(
         let mut blocks = std::collections::HashMap::<String, cranelift_codegen::ir::Block>::new();
         let mut values = std::collections::HashMap::<u32, cranelift_codegen::ir::Value>::new();
         let mut func_refs = std::collections::HashMap::<String, cranelift_codegen::ir::FuncRef>::new();
+        let mut global_values = std::collections::HashMap::<String, GlobalValue>::new();
 
         for b in &parsed.blocks
         {
@@ -386,7 +607,7 @@ fn build_function_ir(
 
             for inst_line in &b.instructions
             {
-                emit_inst(module, function_ids, &mut builder, &blocks, &mut values, &mut func_refs, inst_line)
+                emit_inst(module, function_ids, data_ids, &mut builder, &blocks, &mut values, &mut func_refs, &mut global_values, inst_line)
                     .with_context(|| format!("in {}: {inst_line}", parsed.name))?;
             }
         }
@@ -401,10 +622,12 @@ fn build_function_ir(
 fn emit_inst(
     module: &mut ObjectModule,
     function_ids: &std::collections::HashMap<String, cranelift_module::FuncId>,
+    data_ids: &std::collections::HashMap<String, cranelift_module::DataId>,
     builder: &mut FunctionBuilder,
     blocks: &std::collections::HashMap<String, cranelift_codegen::ir::Block>,
     values: &mut std::collections::HashMap<u32, cranelift_codegen::ir::Value>,
     func_refs: &mut std::collections::HashMap<String, cranelift_codegen::ir::FuncRef>,
+    global_values: &mut std::collections::HashMap<String, GlobalValue>,
     line: &str,
 ) -> Result<()>
 {
@@ -446,6 +669,45 @@ fn emit_inst(
         return Ok(());
     }
 
+    if let Some(rest) = line.strip_prefix("call %")
+    {
+        // call %foo(v0, v1)
+        let open = rest.find('(').context("missing '(' in call")?;
+        let close = rest.rfind(')').context("missing ')' in call")?;
+        let callee = rest[..open].trim();
+        let args_str = rest[open + 1..close].trim();
+        let mut arg_vals = Vec::new();
+        if !args_str.is_empty()
+        {
+            for a in args_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
+            {
+                let v = *values.get(&parse_value_id(a)?).context("unknown call arg")?;
+                arg_vals.push(v);
+            }
+        }
+
+        let callee_id = *function_ids.get(callee).with_context(|| format!("unknown callee {callee}"))?;
+        let func_ref = *func_refs.entry(callee.to_string()).or_insert_with(|| module.declare_func_in_func(callee_id, builder.func));
+        builder.ins().call(func_ref, &arg_vals);
+        return Ok(());
+    }
+
+    // store <value>, <addr>
+    if let Some(rest) = line.strip_prefix("store ")
+    {
+        let parts: Vec<_> = rest.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 2
+        {
+            bail!("invalid store syntax (expected: store vN, vM)");
+        }
+        let val_id = parse_value_id(parts[0])?;
+        let addr_id = parse_value_id(parts[1])?;
+        let val = *values.get(&val_id).context("unknown store value")?;
+        let addr = *values.get(&addr_id).context("unknown store address")?;
+        builder.ins().store(cranelift_codegen::ir::MemFlags::new(), val, addr, 0);
+        return Ok(());
+    }
+
     // vN = ...
     let (dst, rhs) = line.split_once('=').context("expected assignment")?;
     let dst_id = parse_value_id(dst.trim())?;
@@ -455,6 +717,20 @@ fn emit_inst(
     {
         let imm = rest.trim().parse::<i64>().context("invalid iconst.i32 immediate")?;
         let v = builder.ins().iconst(types::I32, imm);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+    if let Some(rest) = rhs.strip_prefix("iconst.i8 ")
+    {
+        let imm = rest.trim().parse::<i64>().context("invalid iconst.i8 immediate")?;
+        let v = builder.ins().iconst(types::I8, imm);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+    if let Some(rest) = rhs.strip_prefix("iconst.i16 ")
+    {
+        let imm = rest.trim().parse::<i64>().context("invalid iconst.i16 immediate")?;
+        let v = builder.ins().iconst(types::I16, imm);
         values.insert(dst_id, v);
         return Ok(());
     }
@@ -470,6 +746,49 @@ fn emit_inst(
     {
         let src = *values.get(&parse_value_id(rest.trim())?).context("unknown bint source")?;
         let v = builder.ins().uextend(types::I32, src);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    if let Some(rest) = rhs.strip_prefix("ireduce.")
+    {
+        let ty_str = rest.split_whitespace().next().context("missing ireduce type")?;
+        let value_str = rest[ty_str.len()..].trim();
+        let src = *values.get(&parse_value_id(value_str)?).context("unknown ireduce source")?;
+        let ty = parse_type(ty_str)?;
+        let v = builder.ins().ireduce(ty, src);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    if let Some(rest) = rhs.strip_prefix("uextend.i32 ")
+    {
+        let src = *values.get(&parse_value_id(rest.trim())?).context("unknown uextend source")?;
+        let v = builder.ins().uextend(types::I32, src);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    if let Some(rest) = rhs.strip_prefix("select ")
+    {
+        let parts: Vec<_> = rest.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 3
+        {
+            bail!("invalid select syntax");
+        }
+        let cond = *values.get(&parse_value_id(parts[0])?).context("unknown select cond")?;
+        let a = *values.get(&parse_value_id(parts[1])?).context("unknown select true")?;
+        let b = *values.get(&parse_value_id(parts[2])?).context("unknown select false")?;
+        let v = builder.ins().select(cond, a, b);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    // sextend.i64 <value>
+    if let Some(rest) = rhs.strip_prefix("sextend.i64 ")
+    {
+        let src = *values.get(&parse_value_id(rest.trim())?).context("unknown sextend source")?;
+        let v = builder.ins().sextend(types::I64, src);
         values.insert(dst_id, v);
         return Ok(());
     }
@@ -556,6 +875,48 @@ fn emit_inst(
         }
         values.insert(dst_id, results[0]);
         return Ok(());
+    }
+
+    if let Some(rest) = rhs.strip_prefix("stack_slot.")
+    {
+        let ty_str = rest.trim();
+        let ty = parse_type(ty_str)?;
+        let size = ty.bytes() as u32;
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, size));
+        let addr = builder.ins().stack_addr(types::I64, slot, 0);
+        values.insert(dst_id, addr);
+        return Ok(());
+    }
+
+    // global_value <global_name>
+    if let Some(rest) = rhs.strip_prefix("global_value ")
+    {
+        let global_name = rest.trim();
+        let data_id = *data_ids.get(global_name).with_context(|| format!("unknown global {global_name}"))?;
+        let gv = *global_values.entry(global_name.to_string()).or_insert_with(|| {
+            module.declare_data_in_func(data_id, builder.func)
+        });
+        let addr = builder.ins().global_value(types::I64, gv);
+        values.insert(dst_id, addr);
+        return Ok(());
+    }
+
+    // load.i32 <addr>
+    // load.i64 <addr>
+    // load.f32 <addr>
+    // load.f64 <addr>
+    for ty_str in ["i8", "i16", "i32", "i64", "f32", "f64"]
+    {
+        let prefix = format!("load.{} ", ty_str);
+        if let Some(rest) = rhs.strip_prefix(&prefix)
+        {
+            let addr_id = parse_value_id(rest.trim())?;
+            let addr = *values.get(&addr_id).context("unknown load address")?;
+            let ty = parse_type(ty_str)?;
+            let v = builder.ins().load(ty, cranelift_codegen::ir::MemFlags::new(), addr, 0);
+            values.insert(dst_id, v);
+            return Ok(());
+        }
     }
 
     bail!("unsupported instruction: {rhs}")

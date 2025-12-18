@@ -151,7 +151,7 @@ public class CliSnapshotTests
     [Fact]
     public Task EmitIr_Basic()
     {
-        var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--emit-ir");
+        var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--emit-ir", "--backend", "llvm");
         var result = new
         {
             ExitCode = exitCode,
@@ -192,7 +192,7 @@ public class CliSnapshotTests
     [Fact]
     public Task EmitIr_Tests()
     {
-        var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--emit-ir");
+        var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--emit-ir", "--backend", "llvm");
         var result = new
         {
             ExitCode = exitCode,
@@ -200,6 +200,37 @@ public class CliSnapshotTests
             Stderr = ScrubOutput(stderr)
         };
         return Verifier.Verify(result).UseDirectory("Snapshots");
+    }
+
+    [Fact]
+    public Task EmitIr_Tests_DefaultBackend_Cranelift()
+    {
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, """
+            function add(a: i32, b: i32): i32 {
+                return a + b;
+            }
+
+            test `addition works`(): bool {
+                return add(2, 3) == 5;
+            }
+            """);
+
+        try
+        {
+            var (exitCode, stdout, stderr) = RunCli("test", temp, "--emit-ir");
+            var result = new
+            {
+                ExitCode = exitCode,
+                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
+                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+            };
+            return Verifier.Verify(result).UseDirectory("Snapshots");
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
     }
 
     [Fact]
@@ -242,7 +273,7 @@ public class CliSnapshotTests
             return Task.CompletedTask;
         }
 
-        var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"));
+        var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--backend", "llvm");
         var result = new
         {
             ExitCode = exitCode,
@@ -261,7 +292,7 @@ public class CliSnapshotTests
             return Task.CompletedTask;
         }
 
-        var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"));
+        var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--backend", "llvm");
         var result = new
         {
             ExitCode = exitCode,
@@ -274,7 +305,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Error_FileNotFound()
     {
-        var (exitCode, stdout, stderr) = RunCli("run", "nonexistent.stasis");
+        var (exitCode, stdout, stderr) = RunCli("run", "nonexistent.stasis", "--backend", "llvm");
         var result = new
         {
             ExitCode = exitCode,
@@ -293,7 +324,7 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("run", temp);
+            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "llvm");
             var result = new
             {
                 ExitCode = exitCode,
