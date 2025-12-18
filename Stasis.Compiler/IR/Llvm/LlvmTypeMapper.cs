@@ -1,7 +1,7 @@
 using LLVMSharp.Interop;
 using Stasis.Compiler.Semantic;
 
-namespace Stasis.Compiler.IR;
+namespace Stasis.Compiler.IR.Llvm;
 
 public sealed class LlvmTypeMapper
 {
