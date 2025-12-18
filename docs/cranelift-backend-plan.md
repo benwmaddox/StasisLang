@@ -527,6 +527,47 @@ Source (.stasis)
 - External symbol naming and import libraries must match the Windows COFF toolchain expectations.
 - `test` mode currently uses `/entry:run_tests` on Windows; for Cranelift we may need a small CRT-aware entry stub for reliability.
 
+**Current status (2025-12-18):**
+
+- Implemented AOT tool: `tools/cranelift-aot` (Rust) compiles the current Stasis Cranelift output into a COFF `.obj` using Cranelift.
+- Implemented CLI wiring (Windows only): `stasis run/build --backend cranelift` now does CLIF -> `.obj` -> `clang` link -> `.exe` (no WASM, no Cranelift JIT).
+- Basic end-to-end works: `samples/basic.stasis` runs under Cranelift backend and returns the expected exit code.
+- Calling convention set to Windows-friendly in emitted CLIF (`windows_fastcall`).
+
+**Limitations (known gaps):**
+
+- The C# "Cranelift backend" still emits a simplified CLIF-like text (not full Cranelift IR via API).
+- The Rust AOT tool only supports the subset of instructions currently emitted (enough for simple arithmetic/control-flow/calls).
+- Cranelift `test` mode is not runnable yet (CLI forces `--emit-ir` for `test` with Cranelift).
+- Built-ins, globals/SoA memory, and graphics runtime calls are not implemented in the Cranelift pipeline yet.
+- Windows link warns about CRT conflicts in some configurations (`LNK4098`); this should be cleaned up as the link flags stabilize.
+
+**How to build/run (Windows x64):**
+
+1. Build the AOT tool: `cd tools/cranelift-aot && cargo build --release`
+2. Run a sample: `dotnet run --project Stasis.Cli -- run samples/basic.stasis --backend cranelift`
+3. Optional: set `STASIS_CRANELIFT_AOT` to point at `stasis-cranelift-aot.exe` if discovery fails.
+
+**Next steps (to reach parity with LLVM path):**
+
+1. Make the IR boundary robust:
+   - Replace CLIF parsing with a stable serialized IR (or construct Cranelift IR directly in Rust from a structured input).
+   - Add a small version header/handshake so CLI/compiler/tool agree on format.
+2. Implement memory + globals:
+   - Emit global storage and loads/stores matching `LayoutPlanner` and SoA rules.
+   - Add array/struct access lowering (SoA) and verify deterministic layouts.
+3. Implement built-ins:
+   - Start with `print_int`, `print_string`, `read_int`, `read_char`, `time/get_time_ms/sleep_ms`.
+   - Ensure symbol naming and signatures match what the runtime/linker expects on Windows.
+4. Graphics integration:
+   - Emit calls to `stasis_*` exported functions and link `stasis_graphics.lib` similarly to LLVM.
+5. Test harness execution:
+   - Implement `run_tests` entry for Cranelift (either generate a CRT-friendly entrypoint stub or adjust linking strategy).
+   - Add Windows-only tests that compile/link/run on both backends.
+6. Benchmarks and polish:
+   - Track compile time vs LLVM and add a reproducible benchmark harness.
+   - Remove/resolve CRT link warnings and document required toolchain components.
+
 ### Phase 3: Feature Parity (Week 5-8)
 
 **Goals:**
