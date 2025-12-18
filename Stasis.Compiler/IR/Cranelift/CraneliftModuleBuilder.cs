@@ -43,7 +43,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _functionNames.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
         var retStr = FormatReturnType(returnType);
-        _functions.AppendLine($"function %{name}({paramStr}){retStr} system_v {{");
+        _functions.AppendLine($"function %{name}({paramStr}){retStr} windows_fastcall {{");
         _functions.AppendLine($"block0:");
         _functions.AppendLine($"    ; TODO: function body");
         if (returnType != CraneliftTypeMapper.ClifType.Void)
@@ -71,7 +71,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _functionNames.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
         var retStr = FormatReturnType(returnType);
-        _functions.AppendLine($"function %{name}({paramStr}){retStr} system_v {{");
+        _functions.AppendLine($"function %{name}({paramStr}){retStr} windows_fastcall {{");
         _functions.Append(body);
         _functions.AppendLine($"}}");
         _functions.AppendLine();

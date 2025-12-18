@@ -479,27 +479,53 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 - Clean separation between frontend and LLVM backend
 - No breaking changes to CLI or tests
 
-### Phase 2: Cranelift Scaffolding (Week 3-4)
+### Phase 2: Native Cranelift (Windows x64) (Week 3-4)
 
-**Goals:**
+**Goal:** Produce a native Windows x64 executable with no WASM runtime, as close as possible to the existing LLVM `clang` link path (including the C graphics runtime wrapper).
 
-- Set up Cranelift native library integration
-- Implement basic code generation
+**Approach (AOT):**
+
+```
+Source (.stasis)
+  -> Lexer/Parser/Semantics/Layout (C#)
+  -> Cranelift lowering (C#)
+  -> tools/cranelift-aot (Rust): Cranelift -> COFF .obj (x86_64-pc-windows-msvc)
+  -> clang/lld-link: .obj + CRT + runtime libs -> .exe
+```
+
+**Key constraints:**
+
+- Windows x64 only initially (`x86_64-pc-windows-msvc`).
+- No WASM: executable must be a normal `.exe` produced by linking a `.obj`.
+- Graphics integration uses the same runtime library (`stasis_graphics.lib`) as the LLVM backend.
 
 **Tasks:**
 
-1. Research Cranelift C bindings or wasmtime-dotnet
-2. Create native library loader for Cranelift
-3. Implement `CraneliftModuleBuilder`
-4. Implement `CraneliftTypeMapper`
-5. Create `CraneliftCodeGenerator` skeleton
-6. Add `--backend` flag to CLI
-7. Compile "hello world" with Cranelift
+1. Implement `tools/cranelift-aot` (Rust):
+   - Input: a lowered representation (short-term: CLIF text; longer-term: stable serialized IR).
+   - Output: COFF `.obj` with correct relocations and exported symbols.
+2. Ensure correct Windows ABI:
+   - Functions intended to be called by the CRT must use Windows x64 calling convention.
+   - CLIF must use `windows_fastcall` (not `system_v`) when targeting Windows.
+3. Wire `Stasis.Cli`:
+   - `stasis build/run --backend=cranelift` should no longer force `--emit-ir`.
+   - For `build`/`run`, call `tools/cranelift-aot` to produce `.obj`, then link with `clang` like LLVM.
+4. Start with a minimal runnable subset:
+   - `main(): i32` programs with arithmetic/control-flow and calls within the module.
+   - No built-ins and no globals at first; then add them incrementally.
+5. Add smoke tests:
+   - A Windows-only test that compiles `samples/basic.stasis` with Cranelift, links an `.exe`, runs it, and asserts exit code.
 
 **Deliverables:**
 
-- Cranelift produces working binary for simple programs
-- CLI can select backend
+- `stasis run samples/basic.stasis --backend=cranelift` runs and returns the expected exit code.
+- `stasis build samples/basic.stasis --backend=cranelift` emits a runnable `.exe` (Windows x64).
+
+**Risks / gotchas:**
+
+- Calling convention mismatch (`system_v` vs `windows_fastcall`) can cause runtime crashes even if linking succeeds.
+- External symbol naming and import libraries must match the Windows COFF toolchain expectations.
+- `test` mode currently uses `/entry:run_tests` on Windows; for Cranelift we may need a small CRT-aware entry stub for reliability.
 
 ### Phase 3: Feature Parity (Week 5-8)
 

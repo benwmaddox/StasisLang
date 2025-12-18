@@ -140,10 +140,15 @@ var backend = selectedBackend ?? CodeGeneratorFactory.GetDefaultBackend(mode == 
 // Warn if Cranelift is selected (experimental)
 if (backend == BackendType.Cranelift)
 {
-    Console.Error.WriteLine("warning: Cranelift backend is experimental and generates IR only (not executable code).");
-    if (!emitIrOnly)
+    Console.Error.WriteLine("warning: Cranelift backend is experimental.");
+    if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift cannot produce executable code yet.");
+        Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift native output is only implemented for Windows x64 currently.");
+        emitIrOnly = true;
+    }
+    else if (mode == "test" && !emitIrOnly)
+    {
+        Console.Error.WriteLine("warning: forcing --emit-ir mode for `test` since Cranelift test harness execution is not implemented yet.");
         emitIrOnly = true;
     }
 }
@@ -192,6 +197,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
+    var tempObj = string.Empty;
+    var tempClif = string.Empty;
 
     try
     {
@@ -226,7 +233,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
         if (backend == BackendType.Cranelift)
         {
-            // Use Cranelift backend via ICodeGenerator interface
+            // Use Cranelift backend via ICodeGenerator interface (CLIF for now).
             var options = new CodeGenerationOptions(
                 ModuleName: moduleName,
                 IncludeTests: includeTests,
@@ -273,6 +280,41 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return lowerDiagnostics.Count > 0 ? 1 : 0;
         }
 
+        if (backend == BackendType.Cranelift)
+        {
+            // Native Cranelift (Windows x64) path: CLIF -> .obj -> clang link -> exe.
+            if (!OperatingSystem.IsWindows())
+            {
+                Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
+                return 1;
+            }
+
+            if (!TryFindCraneliftAot(out var aotTool))
+            {
+                Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+                return 1;
+            }
+
+            tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+            tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
+            File.WriteAllText(tempClif, ir);
+
+            var aotExit = RunProcess(aotTool, $"--input \"{tempClif}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+            if (aotExit != 0)
+            {
+                return aotExit;
+            }
+
+            if (mode == "build" || mode == "release")
+            {
+                var outPath = outputPath ?? BuildDefaultOutputPath(path);
+                return BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            }
+
+            return ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+        }
+
+        // LLVM path: emit .ll and run via lli/clang.
         tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
         File.WriteAllText(tempLl, ir);
 
@@ -292,10 +334,249 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         {
             File.Delete(tempLl);
         }
+        if (!string.IsNullOrEmpty(tempObj) && File.Exists(tempObj))
+        {
+            File.Delete(tempObj);
+        }
+        if (!string.IsNullOrEmpty(tempClif) && File.Exists(tempClif))
+        {
+            File.Delete(tempClif);
+        }
 
         fileStopwatch.Stop();
         Console.WriteLine($"Total time={fileStopwatch.ElapsedMilliseconds}ms");
     }
+}
+
+static int ExecuteObject(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.exe");
+    try
+    {
+        var args = BuildClangArgsForObject(objPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
+        var exit = RunProcess(clang, args);
+        if (exit != 0)
+        {
+            return exit;
+        }
+
+        if (enableGraphics)
+        {
+            var exeDir = Path.GetDirectoryName(exePath);
+            if (!string.IsNullOrEmpty(exeDir))
+            {
+                CopyGraphicsRuntimeDependencies(exeDir, graphicsLibPath);
+            }
+        }
+
+        return RunProcess(exePath, string.Empty, psi =>
+        {
+            if (enableGraphics)
+            {
+                var runTest = Environment.GetEnvironmentVariable("STASIS_RUN_RENDER_TEST");
+                if (string.IsNullOrEmpty(runTest) || runTest == "0")
+                {
+                    if (Environment.GetEnvironmentVariable("STASIS_SKIP_RENDER_TEST") is null)
+                    {
+                        psi.Environment["STASIS_SKIP_RENDER_TEST"] = "1";
+                    }
+                }
+            }
+        });
+    }
+    finally
+    {
+        if (File.Exists(exePath))
+        {
+            File.Delete(exePath);
+        }
+    }
+}
+
+static int BuildExecutableFromObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
+{
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: build requires clang in PATH.");
+        return 1;
+    }
+
+    var outDir = Path.GetDirectoryName(outputPath);
+    if (!string.IsNullOrEmpty(outDir))
+    {
+        Directory.CreateDirectory(outDir);
+    }
+
+    var args = BuildClangArgsForObject(objPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    var exit = RunProcess(clang, args);
+    if (exit != 0)
+    {
+        return exit;
+    }
+
+    if (enableGraphics)
+    {
+        var exeDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(exeDir))
+        {
+            CopyGraphicsRuntimeDependencies(exeDir, graphicsLibPath);
+        }
+    }
+
+    Console.WriteLine($"built: {outputPath}");
+    return 0;
+}
+
+static string BuildClangArgsForObject(string objPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
+{
+    // Link .obj into a normal executable (use CRT defaults).
+    var args = new List<string> { $"\"{objPath}\"", "-o", $"\"{exePath}\"" };
+
+    if (!string.IsNullOrWhiteSpace(optLevel))
+    {
+        args.Add($"-O{optLevel}");
+    }
+
+    if (enableLto)
+    {
+        args.Add("-flto");
+        args.Add("-fuse-ld=lld");
+        args.Add("-Wl,/nodefaultlib:libucrt");
+    }
+
+    // Reuse the existing link setup logic (libs, graphics runtime, Windows SDK libs).
+    // This intentionally mirrors BuildClangArgs as closely as possible.
+    var linkingStaticGraphics = false;
+    if (enableGraphics)
+    {
+        var libPath = graphicsLibPath ?? FindGraphicsLibrary();
+        if (!string.IsNullOrEmpty(libPath))
+        {
+            var libFile = Path.GetFileName(libPath);
+            var isStaticLib = libFile != null && libFile.Contains("static", StringComparison.OrdinalIgnoreCase);
+            if (isStaticLib)
+            {
+                linkingStaticGraphics = true;
+            }
+
+            args.Add($"\"{libPath}\"");
+
+            if (isStaticLib)
+            {
+                args.Add("-lSDL2main");
+                args.Add("-lSDL2-static");
+                args.Add("-lglew32");
+                args.Add("-lopengl32");
+                args.Add("-luser32");
+                args.Add("-lgdi32");
+                args.Add("-limm32");
+                args.Add("-lshell32");
+                args.Add("-lsetupapi");
+                args.Add("-lwinmm");
+                args.Add("-lversion");
+                args.Add("-lole32");
+                args.Add("-loleaut32");
+                args.Add("-ladvapi32");
+                args.Add("-lcfgmgr32");
+                args.Add("-lbcrypt");
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine("warning: --graphics specified but stasis_graphics library not found. Build runtime/stasis_graphics.c first.");
+        }
+    }
+
+    if (isTest)
+    {
+        args.Add("-Wl,/entry:run_tests");
+    }
+
+    args.Add("-Wl,/subsystem:console");
+    args.Add("-Wl,/ignore:4210");
+    args.Add("-Wl,/STACK:8388608");
+
+    if (linkingStaticGraphics)
+    {
+        args.Add("-Wl,/NODEFAULTLIB:libcmt");
+    }
+
+    var sdkRoot = GetLatestWindowsSdkLib();
+    if (sdkRoot is not null)
+    {
+        var ucrt = Path.Combine(sdkRoot, "ucrt", "x64");
+        var um = Path.Combine(sdkRoot, "um", "x64");
+        args.Add($"-L\"{ucrt}\"");
+        args.Add($"-L\"{um}\"");
+        args.Add("-lkernel32");
+        args.Add("-lmsvcrt");
+        args.Add("-llegacy_stdio_definitions");
+        if (!linkingStaticGraphics)
+        {
+            args.Add("-lucrt");
+        }
+    }
+
+    return string.Join(" ", args);
+}
+
+static bool TryFindCraneliftAot(out string path)
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_AOT");
+    if (!string.IsNullOrEmpty(env) && File.Exists(env))
+    {
+        path = env;
+        return true;
+    }
+
+    var repoRoot = FindRepoRoot();
+    if (!string.IsNullOrEmpty(repoRoot))
+    {
+        var exeName = OperatingSystem.IsWindows() ? "stasis-cranelift-aot.exe" : "stasis-cranelift-aot";
+        var release = Path.Combine(repoRoot, "tools", "cranelift-aot", "target", "release", exeName);
+        if (File.Exists(release))
+        {
+            path = release;
+            return true;
+        }
+
+        var debug = Path.Combine(repoRoot, "tools", "cranelift-aot", "target", "debug", exeName);
+        if (File.Exists(debug))
+        {
+            path = debug;
+            return true;
+        }
+    }
+
+    return TryFindTool("stasis-cranelift-aot", out path);
+}
+
+static string? FindRepoRoot()
+{
+    var current = Directory.GetCurrentDirectory();
+    while (!string.IsNullOrEmpty(current))
+    {
+        if (File.Exists(Path.Combine(current, "Stasis.sln")))
+        {
+            return current;
+        }
+
+        var parent = Directory.GetParent(current)?.FullName;
+        if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+        {
+            break;
+        }
+
+        current = parent;
+    }
+
+    return null;
 }
 
 static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
