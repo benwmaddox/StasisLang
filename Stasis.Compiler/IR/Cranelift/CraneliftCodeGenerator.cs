@@ -52,8 +52,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             // Emit globals
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
-            // Emit function signatures
-            EmitFunctionSignatures(compilationUnit, semanticResult.Symbols, builder, options.IncludeTests);
+            // Emit functions with bodies
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, options.IncludeTests);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -90,15 +90,17 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         }
     }
 
-    private static void EmitFunctionSignatures(
+    private static void EmitFunctions(
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
         CraneliftModuleBuilder builder,
+        List<Diagnostic> diagnostics,
         bool includeTests)
     {
         var typeMapper = builder.TypeMapper;
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, diagnostics);
 
-        // Emit regular functions
+        // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             if (!symbols.TryGetValue(func.Name.Text, out var symbol))
@@ -114,7 +116,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                     : CraneliftTypeMapper.ClifType.I32)
                 .ToArray();
 
-            builder.DefineFunction(func.Name.Text, returnType, paramTypes);
+            // Generate function body
+            var body = functionBuilder.BuildFunctionBody(func, symbol);
+            builder.DefineFunctionWithBody(func.Name.Text, returnType, paramTypes, body);
         }
 
         // Emit test functions if requested
@@ -123,7 +127,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
             {
                 var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
-                builder.DefineFunction(testFuncName, CraneliftTypeMapper.ClifType.I32);
+                var body = functionBuilder.BuildTestBody(test);
+                builder.DefineFunctionWithBody(testFuncName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body);
             }
         }
     }
