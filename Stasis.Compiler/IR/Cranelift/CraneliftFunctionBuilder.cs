@@ -17,8 +17,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly Layout.LayoutPlan _layoutPlan;
-    private readonly Dictionary<string, int> _locals = new();
-    private readonly Dictionary<string, int> _parameters = new();
+    private readonly Dictionary<string, LocalSlot> _locals = new();
     private int _valueCounter;
     private int _blockCounter;
     private readonly List<Diagnostic> _diagnostics;
@@ -50,20 +49,25 @@ public sealed class CraneliftFunctionBuilder
     {
         _instructions.Clear();
         _locals.Clear();
-        _parameters.Clear();
         _blockCounter = 0;
 
-        // Set up parameters - value counter starts after parameters
-        for (int i = 0; i < function.Parameters.Count; i++)
-        {
-            var param = function.Parameters[i];
-            _parameters[param.Name.Text] = i;
-        }
         _valueCounter = function.Parameters.Count;
 
         // Create entry block with parameters
         var entryBlock = NewBlock();
         _instructions.AppendLine($"{entryBlock}({FormatBlockParams(function.Parameters)}):");
+
+        // Materialize parameters into stack slots for stable references across control flow.
+        for (int i = 0; i < function.Parameters.Count; i++)
+        {
+            var param = function.Parameters[i];
+            var paramType = ResolveType(param.Type);
+            var clifType = NormalizeLocalStorageType(_typeMapper.Map(paramType));
+            var addr = NewValue();
+            _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
+            _instructions.AppendLine($"    store v{i}, {addr}");
+            _locals[param.Name.Text] = new LocalSlot(addr, clifType);
+        }
 
         // Lower the function body
         LowerBlock(function.Body);
@@ -94,7 +98,6 @@ public sealed class CraneliftFunctionBuilder
     {
         _instructions.Clear();
         _locals.Clear();
-        _parameters.Clear();
         _valueCounter = 0;
         _blockCounter = 0;
 
@@ -152,11 +155,19 @@ public sealed class CraneliftFunctionBuilder
     private void LowerVariableDeclaration(VariableDeclarationSyntax varDecl)
     {
         var varName = varDecl.Name.Text;
+        var varType = varDecl.Type is not null
+            ? ResolveType(varDecl.Type)
+            : new PrimitiveTypeSymbol("i32");
+        var clifType = NormalizeLocalStorageType(_typeMapper.Map(varType));
+
+        var addr = NewValue();
+        _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
+        _locals[varName] = new LocalSlot(addr, clifType);
 
         if (varDecl.Initializer != null)
         {
             var initValue = LowerExpression(varDecl.Initializer);
-            _locals[varName] = _valueCounter - 1;
+            _instructions.AppendLine($"    store {initValue}, {addr}");
             _instructions.AppendLine($"    ; let {varName} = {initValue}");
         }
         else
@@ -164,7 +175,7 @@ public sealed class CraneliftFunctionBuilder
             // Uninitialized variable - default to 0
             var val = NewValue();
             _instructions.AppendLine($"    {val} = iconst.i32 0 ; let {varName}");
-            _locals[varName] = _valueCounter - 1;
+            _instructions.AppendLine($"    store {val}, {addr}");
         }
     }
 
@@ -340,16 +351,12 @@ public sealed class CraneliftFunctionBuilder
     {
         var name = id.Identifier.Text;
 
-        // Check parameters first
-        if (_parameters.TryGetValue(name, out var paramIndex))
+        // Check locals/parameters (stored in stack slots)
+        if (_locals.TryGetValue(name, out var local))
         {
-            return $"v{paramIndex}";
-        }
-
-        // Check locals
-        if (_locals.TryGetValue(name, out var localIndex))
-        {
-            return $"v{localIndex}";
+            var val = NewValue();
+            _instructions.AppendLine($"    {val} = load.{FormatType(local.Type)} {local.Address}");
+            return val;
         }
 
         // Must be a global - emit a load
@@ -1227,10 +1234,9 @@ public sealed class CraneliftFunctionBuilder
         if (assign.Left is IdentifierExpressionSyntax id)
         {
             var name = id.Identifier.Text;
-            if (_locals.ContainsKey(name) || _parameters.ContainsKey(name))
+            if (_locals.TryGetValue(name, out var local))
             {
-                // Update local/parameter reference (SSA: create new value)
-                _locals[name] = _valueCounter - 1;
+                _instructions.AppendLine($"    store {value}, {local.Address}");
             }
             else if (_globalTypes.TryGetValue(name, out _))
             {
@@ -1318,7 +1324,7 @@ public sealed class CraneliftFunctionBuilder
         var index = LowerExpression(array.Index);
 
         // Check if it's a global, parameter, or local
-        if (_parameters.ContainsKey(arrayName) || _locals.ContainsKey(arrayName))
+        if (_locals.ContainsKey(arrayName))
         {
             // Local/parameter array - TODO: need local array support
             var err = NewValue();
@@ -1521,7 +1527,7 @@ public sealed class CraneliftFunctionBuilder
         var index = LowerExpression(array.Index);
 
         // Check if it's a global, parameter, or local
-        if (_parameters.ContainsKey(arrayName) || _locals.ContainsKey(arrayName))
+        if (_locals.ContainsKey(arrayName))
         {
             // Local/parameter array - TODO: need local array support
             _instructions.AppendLine($"    ; TODO: local array store");
@@ -1765,7 +1771,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (receiver is IdentifierExpressionSyntax id)
         {
-            if (_locals.ContainsKey(id.Identifier.Text) || _parameters.ContainsKey(id.Identifier.Text))
+            if (_locals.ContainsKey(id.Identifier.Text))
             {
                 return false;
             }
@@ -1825,15 +1831,22 @@ public sealed class CraneliftFunctionBuilder
         for (int i = 0; i < parameters.Count; i++)
         {
             var param = parameters[i];
-            var type = "i32"; // Default to i32
-            if (_symbols.TryGetValue(param.Name.Text, out var symbol) && symbol.Type != null)
-            {
-                type = FormatType(_typeMapper.Map(symbol.Type));
-            }
+            var typeSymbol = ResolveType(param.Type);
+            var type = FormatType(NormalizeLocalStorageType(_typeMapper.Map(typeSymbol)));
             parts.Add($"v{i}: {type}");
         }
         return string.Join(", ", parts);
     }
+
+    private static CraneliftTypeMapper.ClifType NormalizeLocalStorageType(CraneliftTypeMapper.ClifType type) =>
+        type switch
+        {
+            CraneliftTypeMapper.ClifType.I8 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.I16 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.B1 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.R64 => CraneliftTypeMapper.ClifType.I64,
+            _ => type
+        };
 
     private static string FormatType(CraneliftTypeMapper.ClifType type) =>
         type switch
@@ -1857,6 +1870,8 @@ public sealed class CraneliftFunctionBuilder
         var lastStmt = block.Statements[^1];
         return lastStmt is ReturnStatementSyntax;
     }
+
+    private sealed record LocalSlot(string Address, CraneliftTypeMapper.ClifType Type);
 
     private static string UnescapeString(string text)
     {
