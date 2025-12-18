@@ -46,7 +46,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _functions.AppendLine($"function %{name}({paramStr}){retStr} system_v {{");
         _functions.AppendLine($"block0:");
         _functions.AppendLine($"    ; TODO: function body");
-        if (returnType != CraneliftTypeMapper.ClifType.I32 || true) // Always need return value for i32
+        if (returnType != CraneliftTypeMapper.ClifType.Void)
         {
             _functions.AppendLine($"    v0 = iconst.i32 0");
             _functions.AppendLine($"    return v0");
@@ -111,6 +111,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
     private static string FormatType(CraneliftTypeMapper.ClifType type) =>
         type switch
         {
+            CraneliftTypeMapper.ClifType.Void => "void",
             CraneliftTypeMapper.ClifType.I8 => "i8",
             CraneliftTypeMapper.ClifType.I16 => "i16",
             CraneliftTypeMapper.ClifType.I32 => "i32",
@@ -124,6 +125,8 @@ public sealed class CraneliftModuleBuilder : IDisposable
 
     private static string FormatReturnType(CraneliftTypeMapper.ClifType type)
     {
+        if (type == CraneliftTypeMapper.ClifType.Void)
+            return string.Empty;
         if (type == CraneliftTypeMapper.ClifType.I32)
             return " -> i32";
         return $" -> {FormatType(type)}";

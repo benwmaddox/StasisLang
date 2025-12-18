@@ -13,6 +13,7 @@ public sealed class CraneliftTypeMapper
     /// </summary>
     public enum ClifType
     {
+        Void,
         I8,
         I16,
         I32,
@@ -29,7 +30,7 @@ public sealed class CraneliftTypeMapper
     public ClifType Map(TypeSymbol type) =>
         type switch
         {
-            VoidTypeSymbol => throw new InvalidOperationException("Cannot map void to Cranelift type"),
+            VoidTypeSymbol => ClifType.Void,
             PrimitiveTypeSymbol p => MapPrimitive(p.PrimitiveName),
             ArrayTypeSymbol => ClifType.R64, // Arrays are pointers
             NamedTypeSymbol => ClifType.I32, // Struct/enum indices
@@ -42,6 +43,7 @@ public sealed class CraneliftTypeMapper
     public static int GetTypeSize(ClifType type) =>
         type switch
         {
+            ClifType.Void => 0,
             ClifType.I8 or ClifType.B1 => 1,
             ClifType.I16 => 2,
             ClifType.I32 => 4,
@@ -61,7 +63,7 @@ public sealed class CraneliftTypeMapper
             "f32" => ClifType.F32,
             "f64" => ClifType.F64,
             "string" => ClifType.R64, // String is a pointer
-            "void" => throw new InvalidOperationException("Cannot map void to Cranelift type"),
+            "void" => ClifType.Void,
             _ => ClifType.I32
         };
 }
