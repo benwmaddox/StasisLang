@@ -172,17 +172,18 @@ public sealed class CraneliftFunctionBuilder
     private void LowerIf(IfStatementSyntax ifStmt)
     {
         var condVal = LowerExpression(ifStmt.Condition);
+        var condBool = CoerceI32ToB1(condVal);
         var thenBlock = NewBlock();
         var elseBlock = ifStmt.ElseBlock != null ? NewBlock() : null;
         var mergeBlock = NewBlock();
 
         if (elseBlock != null)
         {
-            _instructions.AppendLine($"    brif {condVal}, {thenBlock}, {elseBlock}");
+            _instructions.AppendLine($"    brif {condBool}, {thenBlock}, {elseBlock}");
         }
         else
         {
-            _instructions.AppendLine($"    brif {condVal}, {thenBlock}, {mergeBlock}");
+            _instructions.AppendLine($"    brif {condBool}, {thenBlock}, {mergeBlock}");
         }
 
         // Then block
@@ -227,7 +228,8 @@ public sealed class CraneliftFunctionBuilder
         if (forStmt.Condition != null)
         {
             var condVal = LowerExpression(forStmt.Condition);
-            _instructions.AppendLine($"    brif {condVal}, {bodyBlock}, {endBlock}");
+            var condBool = CoerceI32ToB1(condVal);
+            _instructions.AppendLine($"    brif {condBool}, {bodyBlock}, {endBlock}");
         }
         else
         {
@@ -335,7 +337,6 @@ public sealed class CraneliftFunctionBuilder
     {
         var left = LowerExpression(bin.Left);
         var right = LowerExpression(bin.Right);
-        var result = NewValue();
 
         var op = bin.OperatorToken.Kind switch
         {
@@ -358,39 +359,48 @@ public sealed class CraneliftFunctionBuilder
         if (op.StartsWith("icmp"))
         {
             var cmpOp = op.Replace("icmp ", "");
-            _instructions.AppendLine($"    {result} = icmp {cmpOp} {left}, {right}");
-        }
-        else
-        {
-            _instructions.AppendLine($"    {result} = {op} {left}, {right}");
+            var cmp = NewValue();
+            _instructions.AppendLine($"    {cmp} = icmp {cmpOp} {left}, {right}");
+
+            // Stasis represents bool as i32, so convert b1 -> i32.
+            var result = NewValue();
+            _instructions.AppendLine($"    {result} = bint.i32 {cmp}");
+            return result;
         }
 
-        return result;
+        var nonCmp = NewValue();
+        _instructions.AppendLine($"    {nonCmp} = {op} {left}, {right}");
+        return nonCmp;
     }
 
     private string LowerUnary(UnaryExpressionSyntax unary)
     {
         var operand = LowerExpression(unary.Operand);
-        var result = NewValue();
 
         if (unary.OperatorToken.Kind == TokenKind.Minus)
         {
+            var result = NewValue();
             var zero = NewValue();
             _instructions.AppendLine($"    {zero} = iconst.i32 0");
             _instructions.AppendLine($"    {result} = isub {zero}, {operand}");
+            return result;
         }
-        else if (unary.OperatorToken.Kind == TokenKind.Bang)
+        if (unary.OperatorToken.Kind == TokenKind.Bang)
         {
+            var cmp = NewValue();
             var zero = NewValue();
             _instructions.AppendLine($"    {zero} = iconst.i32 0");
-            _instructions.AppendLine($"    {result} = icmp eq {operand}, {zero}");
-        }
-        else
-        {
-            _instructions.AppendLine($"    {result} = {operand} ; TODO: unary {unary.OperatorToken.Kind}");
+            _instructions.AppendLine($"    {cmp} = icmp eq {operand}, {zero}");
+
+            // Stasis represents bool as i32, so convert b1 -> i32.
+            var result = NewValue();
+            _instructions.AppendLine($"    {result} = bint.i32 {cmp}");
+            return result;
         }
 
-        return result;
+        var fallback = NewValue();
+        _instructions.AppendLine($"    {fallback} = {operand} ; TODO: unary {unary.OperatorToken.Kind}");
+        return fallback;
     }
 
     private string LowerCall(CallExpressionSyntax call)
@@ -477,6 +487,14 @@ public sealed class CraneliftFunctionBuilder
 
     private string NewValue() => $"v{_valueCounter++}";
     private string NewBlock() => $"block{_blockCounter++}";
+    private string CoerceI32ToB1(string value)
+    {
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
+        var cmp = NewValue();
+        _instructions.AppendLine($"    {cmp} = icmp ne {value}, {zero}");
+        return cmp;
+    }
 
     private string FormatBlockParams(IReadOnlyList<ParameterSyntax> parameters)
     {
