@@ -882,7 +882,16 @@ fn emit_inst(
         let ty_str = rest.trim();
         let ty = parse_type(ty_str)?;
         let size = ty.bytes() as u32;
-        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, size));
+        let align_shift = match size
+        {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            16 => 4,
+            _ => 0,
+        };
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, align_shift));
         let addr = builder.ins().stack_addr(types::I64, slot, 0);
         values.insert(dst_id, addr);
         return Ok(());

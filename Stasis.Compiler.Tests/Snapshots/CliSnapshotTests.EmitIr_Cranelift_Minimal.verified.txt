@@ -6,11 +6,14 @@
 ; === Functions ===
 function %main() -> i32 windows_fastcall {
 block0():
-    v0 = iconst.i32 2
-    v1 = iconst.i32 3
-    v2 = iadd v0, v1
-    ; let x = v2
-    return v2
+    v0 = stack_slot.i32
+    v1 = iconst.i32 2
+    v2 = iconst.i32 3
+    v3 = iadd v1, v2
+    store v3, v0
+    ; let x = v3
+    v4 = load.i32 v0
+    return v4
 },
   Stderr: warning: Cranelift backend is experimental.
 }
