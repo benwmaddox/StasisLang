@@ -36,17 +36,43 @@ public sealed class CraneliftModuleBuilder : IDisposable
     }
 
     /// <summary>
-    /// Defines a function signature.
+    /// Defines a function signature (stub without body).
     /// </summary>
     public void DefineFunction(string name, CraneliftTypeMapper.ClifType returnType, params CraneliftTypeMapper.ClifType[] paramTypes)
     {
         _functionNames.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
-        var retStr = returnType == CraneliftTypeMapper.ClifType.I32 ? " -> i32" : FormatReturnType(returnType);
+        var retStr = FormatReturnType(returnType);
         _functions.AppendLine($"function %{name}({paramStr}){retStr} system_v {{");
         _functions.AppendLine($"block0:");
         _functions.AppendLine($"    ; TODO: function body");
-        _functions.AppendLine($"    return");
+        if (returnType != CraneliftTypeMapper.ClifType.I32 || true) // Always need return value for i32
+        {
+            _functions.AppendLine($"    v0 = iconst.i32 0");
+            _functions.AppendLine($"    return v0");
+        }
+        else
+        {
+            _functions.AppendLine($"    return");
+        }
+        _functions.AppendLine($"}}");
+        _functions.AppendLine();
+    }
+
+    /// <summary>
+    /// Defines a function with a complete body.
+    /// </summary>
+    public void DefineFunctionWithBody(
+        string name,
+        CraneliftTypeMapper.ClifType returnType,
+        CraneliftTypeMapper.ClifType[] paramTypes,
+        string body)
+    {
+        _functionNames.Add(name);
+        var paramStr = string.Join(", ", paramTypes.Select(FormatType));
+        var retStr = FormatReturnType(returnType);
+        _functions.AppendLine($"function %{name}({paramStr}){retStr} system_v {{");
+        _functions.Append(body);
         _functions.AppendLine($"}}");
         _functions.AppendLine();
     }
