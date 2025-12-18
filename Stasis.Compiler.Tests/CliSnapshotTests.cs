@@ -7,6 +7,8 @@ namespace Stasis.Compiler.Tests;
 public class CliSnapshotTests
 {
     private const string CliProject = "Stasis.Cli";
+    private static readonly object CliBuildLock = new();
+    private static string? BuiltCliConfiguration;
 
     private static string GetRepoRoot()
     {
@@ -40,6 +42,8 @@ public class CliSnapshotTests
         var root = GetRepoRoot();
         var cliProj = Path.Combine(root, CliProject, $"{CliProject}.csproj");
         var config = GetBuildConfiguration();
+
+        EnsureCliBuilt(cliProj, root, config);
 
         var psi = new ProcessStartInfo
         {
@@ -76,6 +80,38 @@ public class CliSnapshotTests
         process.WaitForExit();
 
         return (process.ExitCode, stdout.ToString().TrimEnd(), stderr.ToString().TrimEnd());
+    }
+
+    private static void EnsureCliBuilt(string cliProj, string root, string configuration)
+    {
+        lock (CliBuildLock)
+        {
+            if (string.Equals(BuiltCliConfiguration, configuration, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = $"build --nologo --configuration {configuration} \"{cliProj}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = root
+            };
+
+            using var process = Process.Start(psi)!;
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+            {
+                var stdout = process.StandardOutput.ReadToEnd();
+                var stderr = process.StandardError.ReadToEnd();
+                throw new InvalidOperationException($"Failed to build CLI ({process.ExitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
+            }
+
+            BuiltCliConfiguration = configuration;
+        }
     }
 
     private static string ScrubOutput(string output)
@@ -126,6 +162,34 @@ public class CliSnapshotTests
     }
 
     [Fact]
+    public Task EmitIr_Cranelift_Minimal()
+    {
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, """
+            function main(): i32 {
+                let x: i32 = 2 + 3;
+                return x;
+            }
+            """);
+
+        try
+        {
+            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "cranelift");
+            var result = new
+            {
+                ExitCode = exitCode,
+                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
+                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+            };
+            return Verifier.Verify(result).UseDirectory("Snapshots");
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    [Fact]
     public Task EmitIr_Tests()
     {
         var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--emit-ir");
@@ -136,6 +200,37 @@ public class CliSnapshotTests
             Stderr = ScrubOutput(stderr)
         };
         return Verifier.Verify(result).UseDirectory("Snapshots");
+    }
+
+    [Fact]
+    public Task EmitIr_Cranelift_WithTests_Minimal()
+    {
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, """
+            function add(a: i32, b: i32): i32 {
+                return a + b;
+            }
+
+            test `addition works`(): bool {
+                return add(2, 3) == 5;
+            }
+            """);
+
+        try
+        {
+            var (exitCode, stdout, stderr) = RunCli("test", temp, "--backend", "cranelift");
+            var result = new
+            {
+                ExitCode = exitCode,
+                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
+                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+            };
+            return Verifier.Verify(result).UseDirectory("Snapshots");
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
     }
 
     [Fact]
