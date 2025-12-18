@@ -29,6 +29,7 @@ string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
 string? graphicsLibPath = null;
+BackendType? selectedBackend = null;
 
 while (cliArgs.Count > 0)
 {
@@ -82,6 +83,20 @@ while (cliArgs.Count > 0)
             graphicsLibPath = cliArgs.Dequeue();
             enableGraphics = true;
             break;
+        case "--backend" when cliArgs.Count > 0:
+            var backendArg = cliArgs.Dequeue().ToLowerInvariant();
+            selectedBackend = backendArg switch
+            {
+                "llvm" => BackendType.Llvm,
+                "cranelift" => BackendType.Cranelift,
+                _ => null
+            };
+            if (selectedBackend is null)
+            {
+                Console.Error.WriteLine($"error: invalid --backend '{backendArg}'. Use 'llvm' or 'cranelift'.");
+                Environment.Exit(1);
+            }
+            break;
         case "--help":
             PrintUsage();
             return;
@@ -117,6 +132,20 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
 {
     Console.Error.WriteLine($"error: invalid --opt-level '{optLevel}'. Use 0,1,2,3,s,z.");
     Environment.Exit(1);
+}
+
+// Set default backend based on mode if not explicitly specified
+var backend = selectedBackend ?? CodeGeneratorFactory.GetDefaultBackend(mode == "release");
+
+// Warn if Cranelift is selected (experimental)
+if (backend == BackendType.Cranelift)
+{
+    Console.Error.WriteLine("warning: Cranelift backend is experimental and generates IR only (not executable code).");
+    if (!emitIrOnly)
+    {
+        Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift cannot produce executable code yet.");
+        emitIrOnly = true;
+    }
 }
 
 if (!File.Exists(path) && !Directory.Exists(path))
@@ -156,10 +185,10 @@ if (runAllInDirectory && mode == "test")
     Environment.Exit(overallExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock = true)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var tempLl = string.Empty;
@@ -190,37 +219,62 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        var lowerer = new ModuleLowerer();
-        var lowerOptions = enableGraphics
-            ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
-            : (includeTests ? LowerOptions.Default : LowerOptions.Production);
-        LowerResult lower;
-        if (useLowerLock)
+
+        // Generate code using selected backend
+        string ir;
+        IReadOnlyList<Diagnostic> lowerDiagnostics;
+
+        if (backend == BackendType.Cranelift)
         {
-            lock (LlvmLock.Lower)
-            {
-                lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
-            }
+            // Use Cranelift backend via ICodeGenerator interface
+            var options = new CodeGenerationOptions(
+                ModuleName: moduleName,
+                IncludeTests: includeTests,
+                EmitTestHarness: includeTests,
+                HeadlessGraphics: !enableGraphics);
+
+            using var generator = CodeGeneratorFactory.Create(backend, moduleName);
+            var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+            ir = result.Ir;
+            lowerDiagnostics = result.Diagnostics;
         }
         else
         {
-            lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
+            // Use LLVM backend via ModuleLowerer (existing path)
+            var lowerer = new ModuleLowerer();
+            var lowerOptions = enableGraphics
+                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
+                : (includeTests ? LowerOptions.Default : LowerOptions.Production);
+            LowerResult lower;
+            if (useLowerLock)
+            {
+                lock (LlvmLock.Lower)
+                {
+                    lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
+                }
+            }
+            else
+            {
+                lower = lowerer.LowerToIr(parse.CompilationUnit, sema, layout, moduleName, lowerOptions);
+            }
+            ir = lower.Ir;
+            lowerDiagnostics = lower.Diagnostics;
         }
-        if (lower.Diagnostics.Count > 0)
+        if (lowerDiagnostics.Count > 0)
         {
-            PrintDiagnostics(lower.Diagnostics, source, path);
-            Console.WriteLine(lower.Ir);
+            PrintDiagnostics(lowerDiagnostics, source, path);
+            Console.WriteLine(ir);
             return 1;
         }
 
         if (emitIrOnly)
         {
-            Console.WriteLine(lower.Ir);
-            return lower.Diagnostics.Count > 0 ? 1 : 0;
+            Console.WriteLine(ir);
+            return lowerDiagnostics.Count > 0 ? 1 : 0;
         }
 
         tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
-        File.WriteAllText(tempLl, lower.Ir);
+        File.WriteAllText(tempLl, ir);
 
         if (mode == "build" || mode == "release")
         {
@@ -714,13 +768,14 @@ static string BuildDefaultOutputPath(string sourcePath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
+    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
+    Console.WriteLine("Backend: use --backend to select code generation backend. 'llvm' (default) for optimized builds, 'cranelift' for fast debug builds (experimental).");
 }
 
 static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock = true, int lowerDegree = 1) =>
