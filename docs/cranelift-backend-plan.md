@@ -107,6 +107,8 @@ stasis run --backend=llvm ...         # Force LLVM for run
 stasis test --backend=both ...        # Run tests on both backends
 ```
 
+Defaults fall back to LLVM when the Cranelift AOT tool is unavailable (or on non-Windows), unless `--backend=cranelift` is explicitly set.
+
 ### 2.3 Code Organization
 
 ```
@@ -529,18 +531,35 @@ Source (.stasis)
 
 **Current status (2025-12-18):**
 
-- Implemented AOT tool: `tools/cranelift-aot` (Rust) compiles the current Stasis Cranelift output into a COFF `.obj` using Cranelift.
-- Implemented CLI wiring (Windows only): `stasis run/build --backend cranelift` now does CLIF -> `.obj` -> `clang` link -> `.exe` (no WASM, no Cranelift JIT).
-- Basic end-to-end works: `samples/basic.stasis` runs under Cranelift backend and returns the expected exit code.
-- Calling convention set to Windows-friendly in emitted CLIF (`windows_fastcall`).
+✅ **Phase 2 Complete - Basic Native Execution Works:**
+- Implemented AOT tool: `tools/cranelift-aot` (Rust) compiles CLIF text to COFF `.obj` using Cranelift.
+- CLI wiring (Windows only): `stasis run/build --backend cranelift` does CLIF → `.obj` → `clang` link → `.exe`.
+- End-to-end execution: `samples/basic.stasis` runs and returns correct exit code.
+- Calling convention: `windows_fastcall` for Windows x64 compatibility.
 
-**Limitations (known gaps):**
+**Working Language Features (~20-30% parity with LLVM):**
+- ✅ Arithmetic operations (+, -, *, /, %)
+- ✅ Comparison operations (<, <=, >, >=, ==, !=)
+- ✅ Logical operations (&&, ||, !)
+- ✅ Control flow (if/else, for loops, return)
+- ✅ Function calls (intra-module)
+- ✅ Local variables and reassignment (SSA-based)
+- ✅ Function parameters
+- ✅ Integer/float/boolean literals
+- ✅ Test harness (run_tests entry point + PASS/FAIL summary)
 
-- The C# "Cranelift backend" still emits a simplified CLIF-like text (not full Cranelift IR via API).
-- The Rust AOT tool only supports the subset of instructions currently emitted (enough for simple arithmetic/control-flow/calls).
-- Cranelift `test` mode is not runnable yet (CLI forces `--emit-ir` for `test` with Cranelift).
-- Built-ins, globals/SoA memory, and graphics runtime calls are not implemented in the Cranelift pipeline yet.
-- Windows link warns about CRT conflicts in some configurations (`LNK4098`); this should be cleaned up as the link flags stabilize.
+**Remaining Gaps (blocking full parity):**
+- ❌ **Array allocation/initialization** - Arrays require explicit allocation/initialization work
+- ❌ **Remaining built-ins** - Math + advanced string helpers (trim/case/num conversions)
+- ❌ **Graphics integration** - SDL2/OpenGL runtime calls not wired up
+- ❌ **Foreach loops** - Not lowered in Cranelift yet
+- ❌ **Test-time reporting** - Harness lacks elapsed time printing
+
+**Architecture Quality:**
+- Clean separation: CraneliftCodeGenerator, CraneliftModuleBuilder, CraneliftFunctionBuilder, CraneliftTypeMapper
+- SSA value tracking works correctly
+- CLIF text generation is readable and debuggable
+- AOT tool is extensible (just needs more instruction support)
 
 **How to build/run (Windows x64):**
 
@@ -548,25 +567,71 @@ Source (.stasis)
 2. Run a sample: `dotnet run --project Stasis.Cli -- run samples/basic.stasis --backend cranelift`
 3. Optional: set `STASIS_CRANELIFT_AOT` to point at `stasis-cranelift-aot.exe` if discovery fails.
 
-**Next steps (to reach parity with LLVM path):**
+**Next steps (Roadmap to Full Execution - Phase 2.5):**
 
-1. Make the IR boundary robust:
-   - Replace CLIF parsing with a stable serialized IR (or construct Cranelift IR directly in Rust from a structured input).
-   - Add a small version header/handshake so CLI/compiler/tool agree on format.
-2. Implement memory + globals:
-   - Emit global storage and loads/stores matching `LayoutPlanner` and SoA rules.
-   - Add array/struct access lowering (SoA) and verify deterministic layouts.
-3. Implement built-ins:
-   - Start with `print_int`, `print_string`, `read_int`, `read_char`, `time/get_time_ms/sleep_ms`.
-   - Ensure symbol naming and signatures match what the runtime/linker expects on Windows.
-4. Graphics integration:
-   - Emit calls to `stasis_*` exported functions and link `stasis_graphics.lib` similarly to LLVM.
-5. Test harness execution:
-   - Implement `run_tests` entry for Cranelift (either generate a CRT-friendly entrypoint stub or adjust linking strategy).
-   - Add Windows-only tests that compile/link/run on both backends.
-6. Benchmarks and polish:
-   - Track compile time vs LLVM and add a reproducible benchmark harness.
-   - Remove/resolve CRT link warnings and document required toolchain components.
+**Priority 1: Memory & Global Variables (Week 1)**
+- [x] Add `global_value` instruction support to AOT tool
+- [x] Add `load` and `store` instruction support to AOT tool
+- [x] Implement global variable declarations with proper memory allocation
+- [x] Wire up global variable loads in CraneliftFunctionBuilder (replace TODO at line 332)
+- [x] Wire up global variable stores in CraneliftFunctionBuilder (replace TODO at line 449)
+- [ ] Test: Global variable read/write in samples/basic.stasis
+
+**Priority 2: Built-in Functions (Week 1-2)**
+- [x] Add external function declaration support in CraneliftModuleBuilder
+- [x] Implement `print_int` built-in (critical for debugging)
+- [x] Implement `print_string` built-in (requires string literal support)
+- [x] Implement `read_int` built-in (stack slot + scanf)
+- [x] Implement `read_char` built-in (stack slot + scanf)
+- [x] Implement time functions: `get_time_ms`, `sleep_ms`, `time`
+- [ ] Test: Sample program that prints and reads values
+
+**Priority 3: String Support (Week 2)**
+- [x] Implement string literal storage (global data section)
+- [x] Wire up string literal loads in CraneliftFunctionBuilder (replace TODO at line 308)
+- [x] Implement basic string built-ins (strlen, strcmp, strcpy, strncmp, strcat, strchr, strrchr, strstr)
+- [x] Implement advanced string built-in `str_substr`
+- [ ] Implement remaining advanced string built-ins (trim, case transform, numeric conversions)
+- [ ] Test: Hello world with string printing
+
+**Priority 4: Arrays & SoA Layout (Week 2-3)**
+- [ ] Study LayoutPlanner output format and SoA transformation
+- [x] Implement array access with SoA offset calculation (replace TODO at line 483)
+- [x] Implement array length property (replace TODO at line 467)
+- [ ] Add array allocation and initialization
+- [ ] Test: Fibonacci with array storage
+
+**Priority 5: Struct Member Access (Week 3)**
+- [x] Implement struct field access with SoA transformation (replace TODO at line 472)
+- [ ] Add nested struct/array access support
+- [ ] Test: Struct creation and field access
+
+**Priority 6: Test Harness (Week 3)**
+- [x] Generate `run_tests` entry point function
+- [x] Implement test result collection and reporting (PASS/FAIL + summary counts)
+- [ ] Add test-time reporting to Cranelift harness
+- [x] Remove `--emit-ir` forcing in CLI for test mode
+- [x] Route `stasis test --all` through the Cranelift harness when using the Cranelift backend
+- [ ] Test: `stasis test samples/fib_tests.stasis --backend cranelift`
+
+**Priority 7: Advanced Features (Week 4)**
+- [ ] Graphics integration (SDL2/OpenGL calls)
+- [ ] Remaining math built-ins (sin, cos, sqrt, etc.)
+- [ ] Foreach loop support (currently only for loops work)
+- [ ] Compound assignment to complex l-values
+
+**Priority 8: Polish & Optimization (Week 4)**
+- [ ] Resolve CRT link warnings (LNK4098)
+- [ ] Add compilation time benchmarks
+- [ ] Improve error diagnostics for Cranelift-specific issues
+- [ ] Make IR boundary more robust (consider binary format vs CLIF text)
+
+**Definition of "Full Execution":**
+After Priority 1-6 are complete, the Cranelift backend should be able to:
+- Run all basic samples (basic.stasis, fib_tests.stasis, operators.stasis)
+- Execute test harnesses with `stasis test`
+- Support programs with globals, arrays, structs, and built-in I/O
+- Achieve ~70-80% feature parity with LLVM (excluding graphics/advanced math)
 
 ### Phase 3: Feature Parity (Week 5-8)
 
@@ -600,8 +665,8 @@ Source (.stasis)
 
 **Tasks:**
 
-1. Set Cranelift as default for `run`, `test`, `build`
-2. Set LLVM as default for `release`
+1. ✅ Set Cranelift as default for `run`, `test`, `build` (fallback to LLVM when Cranelift AOT is unavailable)
+2. ✅ Set LLVM as default for `release`
 3. Implement `--backend=both` for testing
 4. Add compilation time metrics
 5. Update documentation

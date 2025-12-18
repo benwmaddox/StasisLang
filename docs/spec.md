@@ -5,7 +5,7 @@ Got you, Ben. Here is a **complete, consolidated, detailed Stasis Language Speci
 - Infix arithmetic/comparison with TypeScript-style precedence; compound assignment supported
 - Only one assignment operator may appear in an expression (no chaining).
 - AoS → SoA translation model
-- LLVM as backend
+- LLVM and Cranelift backends
 - Static memory rules
 - Modules, functions, tests, globals
 - Compiler phases
@@ -26,7 +26,7 @@ _A statically-allocated, AoS-syntax / SoA-storage, operator-method-based languag
 
 # **1. Overview**
 
-Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly and LLVM IR**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** for IR construction and emission.
+Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly, LLVM IR, and Cranelift CLIF**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** and a Cranelift AOT path for IR construction and emission.
 
 The core design pillars are:
 
@@ -41,7 +41,7 @@ The core design pillars are:
   ```
 
 - **AoS source structure → SoA target memory**
-- **LLVM and WASM compatibility**
+- **LLVM, Cranelift, and WASM compatibility**
 - **Analyzable effects** (reads vs writes can be statically determined)
 - **Deterministic layout** — struct offsets, array bounds known at compile time
 - **Direct opcode functions** for arithmetic and memory operations
@@ -577,6 +577,7 @@ function damage(e: Enemy, amt: u8): void {
 | Function signatures first pass | ✔            |
 | Tree shaking                   | ✔            |
 | LLVM backend                   | ✔            |
+| Cranelift backend (debug)      | ✔ (experimental) |
 | WASM backend                   | ✔            |
 | Deterministic behavior         | ✔            |
 | Suitable for parallel analysis | ✔            |

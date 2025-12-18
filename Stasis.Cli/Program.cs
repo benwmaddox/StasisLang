@@ -136,6 +136,11 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
 
 // Set default backend based on mode if not explicitly specified
 var backend = selectedBackend ?? CodeGeneratorFactory.GetDefaultBackend(mode == "release");
+if (backend == BackendType.Cranelift && selectedBackend is null && !CanUseCranelift(emitIrOnly))
+{
+    Console.Error.WriteLine("warning: Cranelift backend unavailable; defaulting to LLVM.");
+    backend = BackendType.Llvm;
+}
 
 // Warn if Cranelift is selected (experimental)
 if (backend == BackendType.Cranelift)
@@ -144,11 +149,6 @@ if (backend == BackendType.Cranelift)
     if (!OperatingSystem.IsWindows())
     {
         Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift native output is only implemented for Windows x64 currently.");
-        emitIrOnly = true;
-    }
-    else if (mode == "test" && !emitIrOnly)
-    {
-        Console.Error.WriteLine("warning: forcing --emit-ir mode for `test` since Cranelift test harness execution is not implemented yet.");
         emitIrOnly = true;
     }
 }
@@ -186,7 +186,7 @@ if (runAllInDirectory && mode == "test")
         Environment.Exit(1);
     }
 
-    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend);
     Environment.Exit(overallExit);
 }
 
@@ -555,6 +555,26 @@ static bool TryFindCraneliftAot(out string path)
     }
 
     return TryFindTool("stasis-cranelift-aot", out path);
+}
+
+static bool CanUseCranelift(bool emitIrOnly)
+{
+    if (emitIrOnly)
+    {
+        return true;
+    }
+
+    if (!OperatingSystem.IsWindows())
+    {
+        return false;
+    }
+
+    if (!TryFindCraneliftAot(out _))
+    {
+        return false;
+    }
+
+    return TryFindTool("clang", out _);
 }
 
 static string? FindRepoRoot()
@@ -1056,13 +1076,13 @@ static void PrintUsage()
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
-    Console.WriteLine("Backend: use --backend to select code generation backend. 'llvm' (default) for optimized builds, 'cranelift' for fast debug builds (experimental).");
+    Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock = true, int lowerDegree = 1) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, useLowerLock, lowerDegree).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useLowerLock, int lowerDegree)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -1074,7 +1094,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
         await gate.WaitAsync();
         try
         {
-            var prep = PrepareForLower(file, emitIrOnly);
+            var prep = PrepareForLower(file, emitIrOnly, backend);
             if (prep.Prepared is not null)
             {
                 await prepChannel.Writer.WriteAsync(prep.Prepared);
@@ -1095,7 +1115,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
-            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, enableGraphics, useLowerLock);
+            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, enableGraphics, backend, useLowerLock);
             await resultChannel.Writer.WriteAsync(result);
         }
     })).ToArray();
@@ -1117,7 +1137,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     return exitCode;
 }
 
-static PrepareResult PrepareForLower(string path, bool emitIrOnly)
+static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType backend)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
@@ -1130,14 +1150,14 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly)
 
         if (parse.Diagnostics.Count > 0 || (!hasTests && !emitIrOnly))
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
         }
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
@@ -1150,43 +1170,69 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly)
     }
 }
 
-static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, bool useLowerLock)
+static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
-    string? tempLl = null;
+    string? tempArtifact = null;
     string? irForOutput = null;
 
     try
     {
-        var lowerer = new ModuleLowerer();
-        var lowerOptions = enableGraphics
-            ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
-            : (includeTests ? LowerOptions.Default : LowerOptions.Production);
-        LowerResult lower;
-        if (useLowerLock)
+        if (backend == BackendType.Cranelift)
         {
-            lock (LlvmLock.Lower)
+            var options = new CodeGenerationOptions(
+                ModuleName: moduleName,
+                IncludeTests: includeTests,
+                EmitTestHarness: includeTests,
+                HeadlessGraphics: !enableGraphics);
+
+            using var generator = CodeGeneratorFactory.Create(backend, moduleName);
+            var result = generator.Generate(prep.CompilationUnit, prep.Sema, prep.Layout, options);
+            diagnostics.AddRange(result.Diagnostics);
+            irForOutput = emitIrOnly || result.Diagnostics.Count > 0 ? result.Ir : null;
+
+            if (emitIrOnly || result.Diagnostics.Count > 0)
             {
-                lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
             }
+
+            tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+            File.WriteAllText(tempArtifact, result.Ir);
+
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
         }
         else
         {
-            lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
+            var lowerer = new ModuleLowerer();
+            var lowerOptions = enableGraphics
+                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
+                : (includeTests ? LowerOptions.Default : LowerOptions.Production);
+            LowerResult lower;
+            if (useLowerLock)
+            {
+                lock (LlvmLock.Lower)
+                {
+                    lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
+                }
+            }
+            else
+            {
+                lower = lowerer.LowerToIr(prep.CompilationUnit, prep.Sema, prep.Layout, moduleName, lowerOptions);
+            }
+            diagnostics.AddRange(lower.Diagnostics);
+            irForOutput = emitIrOnly || lower.Diagnostics.Count > 0 ? lower.Ir : null;
+
+            if (emitIrOnly || lower.Diagnostics.Count > 0)
+            {
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+            }
+
+            tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+            File.WriteAllText(tempArtifact, lower.Ir);
+
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
         }
-        diagnostics.AddRange(lower.Diagnostics);
-        irForOutput = emitIrOnly || lower.Diagnostics.Count > 0 ? lower.Ir : null;
-
-        if (emitIrOnly || lower.Diagnostics.Count > 0)
-        {
-            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, tempLl, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
-        }
-
-        tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
-        File.WriteAllText(tempLl, lower.Ir);
-
-        return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, tempLl, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
     }
     finally
     {
@@ -1222,22 +1268,56 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
         return 0;
     }
 
-    if (!result.HasTests || string.IsNullOrEmpty(result.LlPath))
+    if (!result.HasTests || string.IsNullOrEmpty(result.ArtifactPath))
     {
         return 0;
     }
 
     Console.WriteLine($"=== {result.FilePath} ===");
-    var executeExit = Execute("test", result.LlPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    var executeExit = 1;
+    if (result.Backend == BackendType.Cranelift)
+    {
+        if (!TryFindCraneliftAot(out var aotTool))
+        {
+            Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+        }
+        else
+        {
+            var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
+            try
+            {
+                var aotExit = RunProcess(aotTool, $"--input \"{result.ArtifactPath}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+                if (aotExit != 0)
+                {
+                    executeExit = aotExit;
+                }
+                else
+                {
+                    executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempObj))
+                {
+                    File.Delete(tempObj);
+                }
+            }
+        }
+    }
+    else
+    {
+        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    }
     testStopwatch.Stop();
     var total = result.CompileMilliseconds + testStopwatch.ElapsedMilliseconds;
     Console.WriteLine($"Total time={total}ms");
 
     try
     {
-        if (File.Exists(result.LlPath))
+        if (File.Exists(result.ArtifactPath))
         {
-            File.Delete(result.LlPath);
+            File.Delete(result.ArtifactPath);
         }
     }
     catch
@@ -1310,7 +1390,8 @@ sealed record CompileResult(
     string FilePath,
     string Source,
     bool HasTests,
-    string? LlPath,
+    BackendType Backend,
+    string? ArtifactPath,
     string? IrForOutput,
     List<Diagnostic> Diagnostics,
     bool EmitIrOnly,

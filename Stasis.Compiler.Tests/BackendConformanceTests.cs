@@ -292,6 +292,200 @@ function get_false(): bool {
         Assert.NotEmpty(result.Ir);
     }
 
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void NestedStructMemberAccess_UsesFlattenedGlobal(BackendType backend)
+    {
+        var source = @"
+struct Weapon {
+    x: i32;
+}
+
+struct Ship {
+    weapon: Weapon;
+}
+
+struct State {
+    ship: Ship;
+}
+
+global state: State;
+
+function main(): i32 {
+    state.ship.weapon.x = 42;
+    return state.ship.weapon.x;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Llvm)
+        {
+            Assert.Contains("@state_ship_weapon_x", result.Ir);
+            Assert.Contains("store i32 42, ptr @state_ship_weapon_x", result.Ir);
+            Assert.Contains("load i32, ptr @state_ship_weapon_x", result.Ir);
+        }
+        else
+        {
+            Assert.Contains("global state_ship_weapon_x", result.Ir);
+            Assert.Contains("global_value state_ship_weapon_x", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+    }
+
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void ReadChar_CompilesOnBothBackends(BackendType backend)
+    {
+        var source = @"
+function main(): i32 {
+    let x: i32 = read_char();
+    return x;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Llvm)
+        {
+            Assert.Contains("scanf", result.Ir);
+        }
+        else
+        {
+            Assert.Contains("stack_slot.i32", result.Ir);
+            Assert.Contains("call %scanf", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+    }
+
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void PrintString_CompilesOnBothBackends(BackendType backend)
+    {
+        var source = @"
+function main(): i32 {
+    print_string(""hello"");
+    return 0;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Cranelift)
+        {
+            Assert.Contains("call %printf3", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+    }
+
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void TimeBuiltins_CompileOnBothBackends(BackendType backend)
+    {
+        var source = @"
+function main(): i32 {
+    let t: i32 = time();
+    let ms: i32 = get_time_ms();
+    sleep_ms(1);
+    return t + ms;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Llvm)
+        {
+            Assert.Contains("@time", result.Ir);
+            Assert.True(result.Ir.Contains("@stasis_get_time_ms") || result.Ir.Contains("@clock"),
+                "LLVM IR should call stasis_get_time_ms or clock for get_time_ms.");
+        }
+        else
+        {
+            Assert.Contains("call %time", result.Ir);
+            Assert.Contains("call %stasis_get_time_ms", result.Ir);
+            Assert.Contains("call %stasis_sleep_ms", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+    }
+
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void PrintIntAndChar_CompileOnBothBackends(BackendType backend)
+    {
+        var source = @"
+function main(): i32 {
+    print_int(7);
+    print_char(65);
+    return 0;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Cranelift)
+        {
+            Assert.Contains("call %printf", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+    }
+
+    [Theory]
+    [InlineData(BackendType.Llvm)]
+    [InlineData(BackendType.Cranelift)]
+    public void StringBuiltins_CompileOnBothBackends(BackendType backend)
+    {
+        var source = @"
+global a: u8[16];
+global b: u8[16];
+global dst: u8[16];
+
+function main(): i32 {
+    str_clear(a);
+    str_set(a, 0, 65);
+    str_set(a, 1, 0);
+    let len: i32 = str_len(a);
+    let eq: i32 = str_eq(a, b);
+    let idx: i32 = str_find(a, b);
+    let sub: i32 = str_substr(dst, a, 0, 1);
+    return len + eq + idx + sub;
+}
+";
+        var result = CompileWithBackend(source, backend);
+
+        Assert.True(result.Success, $"Backend {backend} failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        if (backend == BackendType.Cranelift)
+        {
+            Assert.Contains("call %strlen", result.Ir);
+            Assert.Contains("call %strcmp", result.Ir);
+            Assert.Contains("call %strstr", result.Ir);
+            Assert.Contains("call %memcpy", result.Ir);
+            Assert.Contains("call %abort", result.Ir);
+            Assert.DoesNotContain("TODO:", result.Ir);
+        }
+        else
+        {
+            Assert.Contains("memcpy", result.Ir);
+            Assert.Contains("abort", result.Ir);
+        }
+    }
+
     [Fact]
     public void BothBackends_GenerateIrForSameSource()
     {
