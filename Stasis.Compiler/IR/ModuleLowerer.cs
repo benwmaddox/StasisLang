@@ -7,6 +7,7 @@ using Stasis.Compiler;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using Stasis.Compiler.IR.Llvm;
 using System.Collections.Generic;
 
 namespace Stasis.Compiler.IR;
