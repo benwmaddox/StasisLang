@@ -174,7 +174,7 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "cranelift");
+            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "cranelift", "--emit-ir");
             var result = new
             {
                 ExitCode = exitCode,
@@ -218,7 +218,7 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("test", temp, "--backend", "cranelift");
+            var (exitCode, stdout, stderr) = RunCli("test", temp, "--backend", "cranelift", "--emit-ir");
             var result = new
             {
                 ExitCode = exitCode,
