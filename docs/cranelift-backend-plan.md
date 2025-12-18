@@ -6,10 +6,10 @@ This document outlines the strategy for adding Cranelift as a second code genera
 
 **Goal**: Add Cranelift as a fast-compilation backend for development/debug builds while retaining LLVM for optimized release builds.
 
-| Build Mode | Backend | Optimization | Use Case |
-|------------|---------|--------------|----------|
-| Debug/Dev  | Cranelift | Minimal | Fast iteration, debugging |
-| Release    | LLVM | -O3 -flto | Production, max performance |
+| Build Mode | Backend   | Optimization | Use Case                    |
+| ---------- | --------- | ------------ | --------------------------- |
+| Debug/Dev  | Cranelift | Minimal      | Fast iteration, debugging   |
+| Release    | LLVM      | -O3 -flto    | Production, max performance |
 
 ---
 
@@ -64,13 +64,13 @@ Source (.stasis)
 
 ### Why Cranelift?
 
-| Aspect | LLVM | Cranelift |
-|--------|------|-----------|
-| Compilation speed | Slow (heavyweight) | Fast (designed for JIT) |
-| Code quality | Excellent | Good (not as optimized) |
-| Dependencies | Native library (LLVMSharp) | Pure Rust (C# bindings available) |
-| Setup complexity | High | Lower |
-| Debug builds | Overkill | Perfect fit |
+| Aspect            | LLVM                       | Cranelift                         |
+| ----------------- | -------------------------- | --------------------------------- |
+| Compilation speed | Slow (heavyweight)         | Fast (designed for JIT)           |
+| Code quality      | Excellent                  | Good (not as optimized)           |
+| Dependencies      | Native library (LLVMSharp) | Pure Rust (C# bindings available) |
+| Setup complexity  | High                       | Lower                             |
+| Debug builds      | Overkill                   | Perfect fit                       |
 
 ---
 
@@ -246,6 +246,7 @@ public static class CodeGeneratorFactory
 ### 4.1 Cranelift Overview
 
 Cranelift is a code generator designed for:
+
 - Fast compilation (JIT-friendly)
 - Reasonable code quality
 - Portability (written in Rust)
@@ -253,21 +254,26 @@ Cranelift is a code generator designed for:
 ### 4.2 C# Bindings
 
 **Option A: cranelift-jit-sys (FFI)**
+
 - Use P/Invoke to call Cranelift from C#
 - Requires native library distribution
 - Most mature approach
 
 **Option B: wasmtime-dotnet**
+
 - Wasmtime includes Cranelift internally
 - Compile Stasis → Wasm → Native via Wasmtime
 - Simpler but indirect
 
 **Option C: Custom Rust wrapper**
+
 - Create thin Rust wrapper exposing C API
 - Full control over Cranelift features
 - More maintenance burden
 
 **Recommended: Option A (cranelift-jit-sys FFI)**
+
+Decision: Use Option A
 
 ### 4.3 Native Library Distribution
 
@@ -280,6 +286,7 @@ Stasis.Compiler/
 ```
 
 Add to `Stasis.Compiler.csproj`:
+
 ```xml
 <ItemGroup>
   <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes" />
@@ -299,6 +306,7 @@ block0:
 ```
 
 Key Cranelift concepts:
+
 - `Module` - compilation unit
 - `FunctionBuilder` - builds function IR
 - `Block` - basic block
@@ -308,18 +316,18 @@ Key Cranelift concepts:
 ### 4.5 Type Mapping
 
 | Stasis Type | Cranelift Type |
-|-------------|----------------|
-| bool | i8 |
-| u8 | i8 |
-| u16 | i16 |
-| u32 | i32 |
-| i32 | i32 |
-| f32 | f32 |
-| f64 | f64 |
-| string | i64 (pointer) |
-| void | - |
-| array | i64 (pointer) |
-| struct ref | i32 (index) |
+| ----------- | -------------- |
+| bool        | i8             |
+| u8          | i8             |
+| u16         | i16            |
+| u32         | i32            |
+| i32         | i32            |
+| f32         | f32            |
+| f64         | f64            |
+| string      | i64 (pointer)  |
+| void        | -              |
+| array       | i64 (pointer)  |
+| struct ref  | i32 (index)    |
 
 ---
 
@@ -354,19 +362,22 @@ public void ArithmeticOperations_ProduceSameResults(BackendType backend)
 All features must work identically on both backends:
 
 **Primitives & Literals**
+
 - [ ] Integer types (u8, u16, u32, i32)
 - [ ] Float types (f32, f64)
 - [ ] Boolean type
 - [ ] String literals
 
 **Operators**
-- [ ] Arithmetic: +, -, *, /, %
+
+- [ ] Arithmetic: +, -, \*, /, %
 - [ ] Comparison: <, <=, >, >=, ==, !=
 - [ ] Logical: &&, ||, !
-- [ ] Assignment: =, +=, -=, *=, /=, %=
+- [ ] Assignment: =, +=, -=, \*=, /=, %=
 - [ ] Unary: -, !
 
 **Control Flow**
+
 - [ ] If/else statements
 - [ ] For loops (C-style)
 - [ ] Foreach loops (with element/index)
@@ -374,6 +385,7 @@ All features must work identically on both backends:
 - [ ] Early returns
 
 **Data Structures**
+
 - [ ] Structs (SoA transformation)
 - [ ] Enums (type-safe)
 - [ ] Fixed-size arrays
@@ -383,6 +395,7 @@ All features must work identically on both backends:
 - [ ] Array indexing
 
 **Functions**
+
 - [ ] Function declarations
 - [ ] Function calls
 - [ ] Parameters
@@ -391,6 +404,7 @@ All features must work identically on both backends:
 - [ ] Test functions
 
 **Built-in Functions**
+
 - [ ] I/O: print_string, print, print_int, read_char, read_int
 - [ ] Math: sin, cos, sin_fast, cos_fast
 - [ ] Time: time, get_time_ms, sleep_ms
@@ -398,6 +412,7 @@ All features must work identically on both backends:
 - [ ] Character utilities (15+ functions)
 
 **Advanced Features**
+
 - [ ] Member access (dot notation)
 - [ ] Array length property
 - [ ] Method-style operators (.+, .-, etc.)
@@ -445,10 +460,12 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 ### Phase 1: Backend Abstraction (Week 1-2)
 
 **Goals:**
+
 - Extract backend interface from existing LLVM code
 - No functional changes to compilation
 
 **Tasks:**
+
 1. Create `ICodeGenerator` interface
 2. Create `ITypeMapper<T>` interface
 3. Create `IFunctionEmitter` interface
@@ -458,16 +475,19 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 7. Ensure all existing tests pass
 
 **Deliverables:**
+
 - Clean separation between frontend and LLVM backend
 - No breaking changes to CLI or tests
 
 ### Phase 2: Cranelift Scaffolding (Week 3-4)
 
 **Goals:**
+
 - Set up Cranelift native library integration
 - Implement basic code generation
 
 **Tasks:**
+
 1. Research Cranelift C bindings or wasmtime-dotnet
 2. Create native library loader for Cranelift
 3. Implement `CraneliftModuleBuilder`
@@ -477,16 +497,19 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 7. Compile "hello world" with Cranelift
 
 **Deliverables:**
+
 - Cranelift produces working binary for simple programs
 - CLI can select backend
 
 ### Phase 3: Feature Parity (Week 5-8)
 
 **Goals:**
+
 - Implement all language features in Cranelift
 - Full test coverage on both backends
 
 **Tasks:**
+
 1. Implement arithmetic operations
 2. Implement comparison and logical operations
 3. Implement control flow (if/else, for, foreach)
@@ -497,16 +520,19 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 8. Create conformance test suite
 
 **Deliverables:**
+
 - All existing samples compile with Cranelift
 - Backend conformance tests passing
 
 ### Phase 4: Build Mode Integration (Week 9-10)
 
 **Goals:**
+
 - Automatic backend selection based on build mode
 - Polish CLI experience
 
 **Tasks:**
+
 1. Set Cranelift as default for `run`, `test`, `build`
 2. Set LLVM as default for `release`
 3. Implement `--backend=both` for testing
@@ -515,16 +541,19 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 6. Performance benchmarks
 
 **Deliverables:**
+
 - Transparent backend selection
 - Updated docs and README
 
 ### Phase 5: Optimization & Polish (Week 11-12)
 
 **Goals:**
+
 - Performance optimization
 - Edge case handling
 
 **Tasks:**
+
 1. Profile and optimize Cranelift compilation speed
 2. Handle edge cases (large functions, complex SoA)
 3. Improve error messages for backend-specific issues
@@ -532,6 +561,7 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 5. Release preparation
 
 **Deliverables:**
+
 - Production-ready dual-backend compiler
 - Complete documentation
 
@@ -539,13 +569,13 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 
 ## 7. Risk Assessment
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| Cranelift C# bindings immature | Medium | High | Evaluate wasmtime-dotnet as fallback |
-| SoA transformation complexity | Medium | Medium | Reuse existing layout logic |
-| Built-in function compatibility | Low | Medium | Implement same signatures |
-| Performance regression | Low | Low | Benchmark early and often |
-| Platform support gaps | Medium | Medium | Start with Windows, expand |
+| Risk                            | Likelihood | Impact | Mitigation                           |
+| ------------------------------- | ---------- | ------ | ------------------------------------ |
+| Cranelift C# bindings immature  | Medium     | High   | Evaluate wasmtime-dotnet as fallback |
+| SoA transformation complexity   | Medium     | Medium | Reuse existing layout logic          |
+| Built-in function compatibility | Low        | Medium | Implement same signatures            |
+| Performance regression          | Low        | Low    | Benchmark early and often            |
+| Platform support gaps           | Medium     | Medium | Start with Windows, expand           |
 
 ---
 
@@ -582,10 +612,15 @@ public void ExecutionTime_Llvm() => Execute(source, BackendType.Llvm);
 ## 10. Open Questions
 
 1. **Cranelift binding approach**: FFI vs Wasmtime vs custom wrapper?
+   Answer: Custom wrapper, like used for llvm backend
 2. **Debug info format**: DWARF support in Cranelift?
+   Answer: no
 3. **Graphics runtime**: Same linking approach for both backends?
+   Answer: yes
 4. **JIT mode**: Should Cranelift support runtime compilation?
+   Answer: No
 5. **Cross-compilation**: Target different platforms?
+   Answer: Eventually, not yet.
 
 ---
 
@@ -622,6 +657,7 @@ fn codegen_add() {
 ## Appendix B: LLVM vs Cranelift IR Comparison
 
 **Stasis Source:**
+
 ```stasis
 function add(a: i32, b: i32): i32 {
     return a + b;
@@ -629,6 +665,7 @@ function add(a: i32, b: i32): i32 {
 ```
 
 **LLVM IR:**
+
 ```llvm
 define i32 @add(i32 %a, i32 %b) {
 entry:
@@ -638,6 +675,7 @@ entry:
 ```
 
 **Cranelift IR (CLIF):**
+
 ```clif
 function %add(i32, i32) -> i32 system_v {
 block0(v0: i32, v1: i32):
@@ -650,6 +688,6 @@ block0(v0: i32, v1: i32):
 
 ## Revision History
 
-| Date | Version | Author | Changes |
-|------|---------|--------|---------|
-| 2024-12-18 | 1.0 | Claude | Initial plan |
+| Date       | Version | Author | Changes      |
+| ---------- | ------- | ------ | ------------ |
+| 2024-12-18 | 1.0     | Claude | Initial plan |
