@@ -1,12 +1,12 @@
 global ascii_src: ascii[8];
 global utf8_dst: utf8[8];
 
-test `to_utf8 copies ascii`(): bool {
+test `from_ascii copies ascii`(): bool {
     ascii_src[0] = 72;
     ascii_src[1] = 105;
     ascii_src[2] = 0;
 
-    to_utf8(utf8_dst, ascii_src, utf8_dst.length);
+    from_ascii(utf8_dst, ascii_src, utf8_dst.length);
 
     return str_len(utf8_dst) == 2
         && str_get(utf8_dst, 0) == 72

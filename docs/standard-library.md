@@ -212,7 +212,7 @@ str_sanitize_utf8(s: utf8[]): i32               // Replace invalid sequences wit
 ### Conversion (Explicit Only)
 
 ```stasis
-to_utf8(dst: utf8[], src: ascii[], dst_max: i32): i32  // Copy ASCII bytes into UTF-8 buffer, return byte length
+from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32  // Copy ASCII bytes into UTF-8 buffer, return byte length
 ```
 
 ---
