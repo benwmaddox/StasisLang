@@ -8,8 +8,9 @@ use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_codegen::ir::{types, AbiParam, Function, Inst, InstBuilder, Signature, GlobalValue, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
 use cranelift_codegen::isa::CallConv;
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module, DataDescription};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -741,6 +742,32 @@ fn emit_inst(
         return Ok(());
     }
 
+    if let Some(rest) = rhs.strip_prefix("f32const ")
+    {
+        let imm = rest.trim().parse::<f32>().context("invalid f32const immediate")?;
+        let v = builder.ins().f32const(Ieee32::with_float(imm));
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+    if let Some(rest) = rhs.strip_prefix("f64const ")
+    {
+        let imm = rest.trim().parse::<f64>().context("invalid f64const immediate")?;
+        let v = builder.ins().f64const(Ieee64::with_float(imm));
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    if let Some(rest) = rhs.strip_prefix("fcvt_from_sint.")
+    {
+        let ty_str = rest.split_whitespace().next().context("missing fcvt type")?;
+        let value_str = rest[ty_str.len()..].trim();
+        let src = *values.get(&parse_value_id(value_str)?).context("unknown fcvt source")?;
+        let ty = parse_type(ty_str)?;
+        let v = builder.ins().fcvt_from_sint(ty, src);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
     if let Some(rest) = rhs.strip_prefix("bint.i32 ")
     {
         let src = *values.get(&parse_value_id(rest.trim())?).context("unknown bint source")?;
@@ -820,7 +847,35 @@ fn emit_inst(
         return Ok(());
     }
 
-    for op in ["iadd", "isub", "imul", "sdiv", "srem"]
+    if let Some(rest) = rhs.strip_prefix("fcmp ")
+    {
+        // fcmp lt v0, v1
+        let mut parts = rest.split_whitespace();
+        let cc = parts.next().context("missing fcmp condition")?;
+        let remaining = parts.collect::<Vec<_>>().join(" ");
+        let ops: Vec<_> = remaining.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if ops.len() != 2
+        {
+            bail!("invalid fcmp operands");
+        }
+        let a = *values.get(&parse_value_id(ops[0])?).context("unknown fcmp lhs")?;
+        let b = *values.get(&parse_value_id(ops[1])?).context("unknown fcmp rhs")?;
+        let cc = match cc
+        {
+            "eq" => FloatCC::Equal,
+            "ne" => FloatCC::NotEqual,
+            "lt" => FloatCC::LessThan,
+            "le" => FloatCC::LessThanOrEqual,
+            "gt" => FloatCC::GreaterThan,
+            "ge" => FloatCC::GreaterThanOrEqual,
+            other => bail!("unsupported fcmp condition: {other}"),
+        };
+        let v = builder.ins().fcmp(cc, a, b);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
+    for op in ["iadd", "isub", "imul", "sdiv", "srem", "band", "bor", "fadd", "fsub", "fmul", "fdiv"]
     {
         if let Some(rest) = rhs.strip_prefix(op)
         {
@@ -839,6 +894,12 @@ fn emit_inst(
                 "imul" => builder.ins().imul(a, c),
                 "sdiv" => builder.ins().sdiv(a, c),
                 "srem" => builder.ins().srem(a, c),
+                "band" => builder.ins().band(a, c),
+                "bor" => builder.ins().bor(a, c),
+                "fadd" => builder.ins().fadd(a, c),
+                "fsub" => builder.ins().fsub(a, c),
+                "fmul" => builder.ins().fmul(a, c),
+                "fdiv" => builder.ins().fdiv(a, c),
                 _ => unreachable!(),
             };
 

@@ -30,4 +30,14 @@ powershell -NoProfile -Command ^
   "Write-Host ('Cranelift total ms=' + ($buildMs + $craneliftMs));"
 if errorlevel 1 exit /b 1
 
+set AOT_CLI=%CD%\build\aot\Stasis.Cli.exe
+powershell -NoProfile -Command ^
+  "$env:STASIS_SUPPRESS_WARNINGS='1';" ^
+  "$env:STASIS_CRANELIFT_AOT='%STASIS_CRANELIFT_AOT%';" ^
+  "$aot = '%AOT_CLI%';" ^
+  "if (!(Test-Path $aot)) { Write-Error 'AOT CLI not found. Run build.bat first.'; exit 1 }" ^
+  "$timing = Measure-Command { & $aot test samples\\forloop_tests.stasis --backend cranelift | Out-Host };" ^
+  "Write-Host ('Cranelift forloop_tests AOT ms=' + [math]::Round($timing.TotalMilliseconds, 0));"
+if errorlevel 1 exit /b 1
+
 endlocal
