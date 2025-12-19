@@ -631,7 +631,15 @@ fn emit_inst(
     line: &str,
 ) -> Result<()>
 {
-    let line = line.trim();
+    let mut line = line.trim();
+    if let Some((code, _)) = line.split_once(';')
+    {
+        line = code.trim();
+    }
+    if line.is_empty()
+    {
+        return Ok(());
+    }
 
     if line == "return"
     {
