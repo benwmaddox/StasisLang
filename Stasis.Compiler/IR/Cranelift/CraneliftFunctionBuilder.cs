@@ -14,9 +14,11 @@ public sealed class CraneliftFunctionBuilder
     private readonly CraneliftTypeMapper _typeMapper;
     private readonly IReadOnlyDictionary<string, Symbol> _symbols;
     private readonly IReadOnlyDictionary<string, StructDeclarationSyntax> _structs;
+    private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly Layout.LayoutPlan _layoutPlan;
+    private readonly IReadOnlyDictionary<string, ConstValue> _consts;
     private readonly Dictionary<string, LocalSlot> _locals = new();
     private readonly Dictionary<string, TypeSymbol> _localTypes = new();
     private int _valueCounter;
@@ -27,17 +29,21 @@ public sealed class CraneliftFunctionBuilder
         CraneliftTypeMapper typeMapper,
         IReadOnlyDictionary<string, Symbol> symbols,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
         IReadOnlyDictionary<string, string> stringLiterals,
         Layout.LayoutPlan layoutPlan,
+        IReadOnlyDictionary<string, ConstValue> consts,
         List<Diagnostic> diagnostics)
     {
         _typeMapper = typeMapper;
         _symbols = symbols;
         _structs = structs;
+        _enums = enums;
         _globalTypes = globalTypes;
         _stringLiterals = stringLiterals;
         _layoutPlan = layoutPlan;
+        _consts = consts;
         _diagnostics = diagnostics;
     }
 
@@ -366,6 +372,11 @@ public sealed class CraneliftFunctionBuilder
             return val;
         }
 
+        if (_consts.TryGetValue(name, out var constValue))
+        {
+            return EmitConstValue(constValue);
+        }
+
         // Must be a global - emit a load
         if (_globalTypes.TryGetValue(name, out var globalType))
         {
@@ -498,13 +509,22 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
+        var argList = string.Join(", ", args);
+        if (IsVoidFunction(funcName))
+        {
+            _instructions.AppendLine($"    call %{funcName}({argList})");
+            return ZeroI32();
+        }
+
         // Then create result value
         var result = NewValue();
-        var argList = string.Join(", ", args);
         _instructions.AppendLine($"    {result} = call %{funcName}({argList})");
 
         return result;
     }
+
+    private bool IsVoidFunction(string name) =>
+        _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
 
     private bool IsBuiltinFunction(string name)
     {
@@ -518,6 +538,27 @@ public sealed class CraneliftFunctionBuilder
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
+            "sin" => true,
+            "cos" => true,
+            "sin_fast" => true,
+            "cos_fast" => true,
+            "init_window" => true,
+            "begin_frame" => true,
+            "end_frame" => true,
+            "clear" => true,
+            "draw_line" => true,
+            "gfx_load_sprite" => true,
+            "gfx_draw_sprite" => true,
+            "gfx_poll_reload" => true,
+            "gfx_debug_bake_hash" => true,
+            "is_key_down" => true,
+            "should_quit" => true,
+            "get_window_size" => true,
+            "set_fullscreen" => true,
+            "set_postfx" => true,
+            "load_font" => true,
+            "draw_text" => true,
+            "measure_text" => true,
             "str_len" => true,
             "str_is_empty" => true,
             "str_get" => true,
@@ -559,6 +600,48 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGetTimeMs(arguments);
             case "sleep_ms":
                 return LowerSleepMs(arguments);
+            case "sin":
+                return LowerSinCos(arguments, isSin: true);
+            case "cos":
+                return LowerSinCos(arguments, isSin: false);
+            case "sin_fast":
+                return LowerSinCos(arguments, isSin: true);
+            case "cos_fast":
+                return LowerSinCos(arguments, isSin: false);
+            case "init_window":
+                return LowerInitWindow(arguments);
+            case "begin_frame":
+                return LowerBeginFrame(arguments);
+            case "end_frame":
+                return LowerEndFrame(arguments);
+            case "clear":
+                return LowerClear(arguments);
+            case "draw_line":
+                return LowerDrawLine(arguments);
+            case "gfx_load_sprite":
+                return LowerGfxLoadSprite(arguments);
+            case "gfx_draw_sprite":
+                return LowerGfxDrawSprite(arguments);
+            case "gfx_poll_reload":
+                return LowerGfxPollReload(arguments);
+            case "gfx_debug_bake_hash":
+                return LowerGfxDebugBakeHash(arguments);
+            case "is_key_down":
+                return LowerIsKeyDown(arguments);
+            case "should_quit":
+                return LowerShouldQuit(arguments);
+            case "get_window_size":
+                return LowerGetWindowSize(arguments);
+            case "set_fullscreen":
+                return LowerSetFullscreen(arguments);
+            case "set_postfx":
+                return LowerSetPostfx(arguments);
+            case "load_font":
+                return LowerLoadFont(arguments);
+            case "draw_text":
+                return LowerDrawText(arguments);
+            case "measure_text":
+                return LowerMeasureText(arguments);
             case "str_len":
                 return LowerStrLen(arguments);
             case "str_is_empty":
@@ -790,6 +873,111 @@ public sealed class CraneliftFunctionBuilder
         var result = NewValue();
         _instructions.AppendLine($"    {result} = iconst.i32 0");
         return result;
+    }
+
+    private string LowerSinCos(IReadOnlyList<ExpressionSyntax> arguments, bool isSin)
+    {
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic("sin/cos expects a single f32 argument.", new SourceSpan(0, 0)));
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f32const 0.0");
+            return zero;
+        }
+
+        var arg = LowerExpression(arguments[0]);
+        var result = NewValue();
+        var callee = isSin ? "sinf" : "cosf";
+        _instructions.AppendLine($"    {result} = call %{callee}({arg})");
+        return result;
+    }
+
+    private string LowerInitWindow(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_init_window", "init_window expects (width: i32, height: i32, title: string).", arguments, 3);
+
+    private string LowerBeginFrame(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_begin_frame", "begin_frame expects no arguments.", arguments, 0);
+
+    private string LowerEndFrame(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_end_frame", "end_frame expects no arguments.", arguments, 0);
+
+    private string LowerClear(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_clear", "clear expects (r: f32, g: f32, b: f32, a: f32).", arguments, 4);
+
+    private string LowerDrawLine(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_draw_line", "draw_line expects 8 arguments (x1,y1,x2,y2,r,g,b,a).", arguments, 8);
+
+    private string LowerGfxLoadSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_load_sprite", "gfx_load_sprite expects (path: string).", arguments, 1);
+
+    private string LowerGfxDrawSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_draw_sprite", "gfx_draw_sprite expects (handle,x,y,sx,sy,rot,r,g,b,a).", arguments, 10);
+
+    private string LowerGfxPollReload(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_poll_reload", "gfx_poll_reload expects (handle: i32).", arguments, 1);
+
+    private string LowerGfxDebugBakeHash(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_debug_bake_hash", "gfx_debug_bake_hash expects (path: string).", arguments, 1);
+
+    private string LowerIsKeyDown(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_is_key_down", "is_key_down expects (scancode: i32).", arguments, 1);
+
+    private string LowerShouldQuit(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_should_quit", "should_quit expects no arguments.", arguments, 0);
+
+    private string LowerGetWindowSize(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_get_window_size", "get_window_size expects (width_ptr: i32*, height_ptr: i32*).", arguments, 2);
+
+    private string LowerSetFullscreen(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_set_fullscreen", "set_fullscreen expects (enabled: i32).", arguments, 1);
+
+    private string LowerSetPostfx(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_set_postfx", "set_postfx expects (strength, phase, speed, r, g, b).", arguments, 6);
+
+    private string LowerLoadFont(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_load_font", "load_font expects (path: string, size: i32).", arguments, 2);
+
+    private string LowerDrawText(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_draw_text", "draw_text expects (font_handle, text, x, y, r, g, b, a).", arguments, 8);
+
+    private string LowerMeasureText(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_measure_text", "measure_text expects (font_handle, text).", arguments, 2);
+
+    private string LowerExternalCallValue(string externalName, string errorMessage, IReadOnlyList<ExpressionSyntax> arguments, int expectedArgs)
+    {
+        if (arguments.Count != expectedArgs)
+        {
+            _diagnostics.Add(new Diagnostic(errorMessage, new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        var args = new List<string>(expectedArgs);
+        for (int i = 0; i < expectedArgs; i++)
+        {
+            args.Add(LowerExpression(arguments[i]));
+        }
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %{externalName}({string.Join(", ", args)})");
+        return result;
+    }
+
+    private string LowerExternalCallVoid(string externalName, string errorMessage, IReadOnlyList<ExpressionSyntax> arguments, int expectedArgs)
+    {
+        if (arguments.Count != expectedArgs)
+        {
+            _diagnostics.Add(new Diagnostic(errorMessage, new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        var args = new List<string>(expectedArgs);
+        for (int i = 0; i < expectedArgs; i++)
+        {
+            args.Add(LowerExpression(arguments[i]));
+        }
+
+        _instructions.AppendLine($"    call %{externalName}({string.Join(", ", args)})");
+        return ZeroI32();
     }
 
     private string LowerStrLen(IReadOnlyList<ExpressionSyntax> arguments)
@@ -1254,6 +1442,13 @@ public sealed class CraneliftFunctionBuilder
         return one;
     }
 
+    private string ZeroI32()
+    {
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
+        return zero;
+    }
+
     private string LowerAssignment(AssignmentExpressionSyntax assign)
     {
         var value = LowerExpression(assign.Right);
@@ -1319,6 +1514,27 @@ public sealed class CraneliftFunctionBuilder
             }
 
             _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: could not resolve array length");
+        }
+        else if (member.Receiver is IdentifierExpressionSyntax enumId &&
+                 _enums.TryGetValue(enumId.Identifier.Text, out var enumDecl))
+        {
+            var memberIndex = -1;
+            for (int i = 0; i < enumDecl.Members.Count; i++)
+            {
+                if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                {
+                    memberIndex = i;
+                    break;
+                }
+            }
+
+            if (memberIndex >= 0)
+            {
+                _instructions.AppendLine($"    {result} = iconst.i32 {memberIndex}");
+                return result;
+            }
+
+            _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: unknown enum member {member.Member.Text}");
         }
         else if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
         {
@@ -1947,6 +2163,67 @@ public sealed class CraneliftFunctionBuilder
         }
 
         return sb.ToString();
+    }
+
+    public sealed record ConstValue(TypeSymbol Type, TokenKind LiteralKind, string LiteralText);
+
+    private string EmitConstValue(ConstValue value)
+    {
+        var val = NewValue();
+        var type = value.Type;
+        if (type is PrimitiveTypeSymbol prim)
+        {
+            switch (prim.PrimitiveName)
+            {
+                case "f32":
+                    _instructions.AppendLine($"    {val} = f32const {FormatFloatLiteral(value)}");
+                    return val;
+                case "f64":
+                    _instructions.AppendLine($"    {val} = f64const {FormatFloatLiteral(value)}");
+                    return val;
+                case "bool":
+                    _instructions.AppendLine($"    {val} = iconst.i32 {FormatBoolLiteral(value)}");
+                    return val;
+            }
+        }
+
+        var clifType = _typeMapper.Map(type);
+        var iconstType = FormatType(clifType);
+        _instructions.AppendLine($"    {val} = iconst.{iconstType} {FormatIntLiteral(value)}");
+        return val;
+    }
+
+    private static string FormatBoolLiteral(ConstValue value) =>
+        value.LiteralKind switch
+        {
+            TokenKind.TrueKeyword => "1",
+            TokenKind.FalseKeyword => "0",
+            _ => "0"
+        };
+
+    private static string FormatIntLiteral(ConstValue value)
+    {
+        if (int.TryParse(value.LiteralText, out var intValue))
+        {
+            return intValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return "0";
+    }
+
+    private static string FormatFloatLiteral(ConstValue value)
+    {
+        if (float.TryParse(value.LiteralText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var floatValue))
+        {
+            return floatValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (int.TryParse(value.LiteralText, out var intValue))
+        {
+            return ((float)intValue).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return "0.0";
     }
 
     private string CoerceAssignmentValue(string value, TypeSymbol? fromType, TypeSymbol? toType)
