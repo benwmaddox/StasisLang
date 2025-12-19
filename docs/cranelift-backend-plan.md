@@ -588,6 +588,9 @@ Source (.stasis)
 - [x] Implement Sudoku helpers (`print_prompt`, `print_invalid`, `print_clue_error`, `print_solved`, `print_cell`)
 - [x] Implement directory list helpers (`list_directory`, `dir_list_entry_is_dir`, `dir_list_entry_copy_name`)
 - [x] Implement `char_*` helpers (classification + conversion)
+- [x] Support unsigned `icmp` conditions in the AOT tool (ult/ule/ugt/uge)
+- [x] Fix `get_window_size` out-parameter lowering
+- [x] Pass array/string arguments by pointer in external calls
 - [ ] Test: Sample program that prints and reads values
 
 **Priority 3: String Support (Week 2)**
@@ -620,7 +623,7 @@ Source (.stasis)
 - [x] Remove `--emit-ir` forcing in CLI for test mode
 - [x] Route `stasis test --all` through the Cranelift harness when using the Cranelift backend
 - [x] Run/test with Cranelift via the native DLL runner (`stasis_runner`)
-- [ ] Test: `stasis test samples/fib_tests.stasis --backend cranelift`
+- [x] Test: `stasis test samples/fib_tests.stasis --backend cranelift`
 
 **Priority 7: Advanced Features (Week 4)**
 - [x] Graphics integration (SDL2/OpenGL calls)
@@ -630,7 +633,7 @@ Source (.stasis)
 
 **Priority 8: Polish & Optimization (Week 4)**
 - [x] Resolve CRT link warnings (LNK4098)
-- [ ] Front-end reachability DCE (entrypoints: main/export/test builds)
+- [x] Front-end reachability DCE (entrypoints: main/export/test builds)
 - [ ] Add compilation time benchmarks
 - [ ] Improve error diagnostics for Cranelift-specific issues
 - [ ] Make IR boundary more robust (consider binary format vs CLIF text)

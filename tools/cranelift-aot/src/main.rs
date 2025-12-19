@@ -983,6 +983,10 @@ fn emit_inst(
             "sle" => IntCC::SignedLessThanOrEqual,
             "sgt" => IntCC::SignedGreaterThan,
             "sge" => IntCC::SignedGreaterThanOrEqual,
+            "ult" => IntCC::UnsignedLessThan,
+            "ule" => IntCC::UnsignedLessThanOrEqual,
+            "ugt" => IntCC::UnsignedGreaterThan,
+            "uge" => IntCC::UnsignedGreaterThanOrEqual,
             other => bail!("unsupported icmp condition: {other}"),
         };
         let v = builder.ins().icmp(cc, a, b);
