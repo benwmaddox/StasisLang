@@ -142,8 +142,8 @@ if (backend == BackendType.Cranelift && selectedBackend is null && !CanUseCranel
     backend = BackendType.Llvm;
 }
 
-// Warn if Cranelift is selected (experimental)
-if (backend == BackendType.Cranelift)
+// Warn if Cranelift is explicitly selected (experimental)
+if (!ShouldSuppressWarnings() && backend == BackendType.Cranelift && selectedBackend is not null)
 {
     Console.Error.WriteLine("warning: Cranelift backend is experimental.");
     if (!OperatingSystem.IsWindows())
@@ -158,6 +158,9 @@ if (!File.Exists(path) && !Directory.Exists(path))
     Console.Error.WriteLine($"error: file not found: {path}");
     Environment.Exit(1);
 }
+
+static bool ShouldSuppressWarnings() =>
+    string.Equals(Environment.GetEnvironmentVariable("STASIS_SUPPRESS_WARNINGS"), "1", StringComparison.OrdinalIgnoreCase);
 
 if (mode == "format")
 {
