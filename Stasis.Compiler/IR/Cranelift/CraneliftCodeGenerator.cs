@@ -267,9 +267,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 : CraneliftTypeMapper.ClifType.I32;
 
             var paramTypes = func.Parameters
-                .Select(p => symbols.TryGetValue(p.Name.Text, out var ps) && ps.Type != null
-                    ? typeMapper.Map(ps.Type)
-                    : CraneliftTypeMapper.ClifType.I32)
+                .Select(p => typeMapper.Map(ResolveType(p.Type, symbols)))
                 .ToArray();
 
             // Generate function body

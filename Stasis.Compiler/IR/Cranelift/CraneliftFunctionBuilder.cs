@@ -18,6 +18,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly Layout.LayoutPlan _layoutPlan;
     private readonly Dictionary<string, LocalSlot> _locals = new();
+    private readonly Dictionary<string, TypeSymbol> _localTypes = new();
     private int _valueCounter;
     private int _blockCounter;
     private readonly List<Diagnostic> _diagnostics;
@@ -49,6 +50,7 @@ public sealed class CraneliftFunctionBuilder
     {
         _instructions.Clear();
         _locals.Clear();
+        _localTypes.Clear();
         _blockCounter = 0;
 
         _valueCounter = function.Parameters.Count;
@@ -67,6 +69,7 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
             _instructions.AppendLine($"    store v{i}, {addr}");
             _locals[param.Name.Text] = new LocalSlot(addr, clifType);
+            _localTypes[param.Name.Text] = paramType;
         }
 
         // Lower the function body
@@ -98,6 +101,7 @@ public sealed class CraneliftFunctionBuilder
     {
         _instructions.Clear();
         _locals.Clear();
+        _localTypes.Clear();
         _valueCounter = 0;
         _blockCounter = 0;
 
@@ -163,10 +167,13 @@ public sealed class CraneliftFunctionBuilder
         var addr = NewValue();
         _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
         _locals[varName] = new LocalSlot(addr, clifType);
+        _localTypes[varName] = varType;
 
         if (varDecl.Initializer != null)
         {
             var initValue = LowerExpression(varDecl.Initializer);
+            var initType = GetExpressionType(varDecl.Initializer);
+            initValue = CoerceAssignmentValue(initValue, initType, varType);
             _instructions.AppendLine($"    store {initValue}, {addr}");
             _instructions.AppendLine($"    ; let {varName} = {initValue}");
         }
@@ -379,30 +386,40 @@ public sealed class CraneliftFunctionBuilder
     {
         var left = LowerExpression(bin.Left);
         var right = LowerExpression(bin.Right);
+        var leftType = GetExpressionType(bin.Left);
+        var rightType = GetExpressionType(bin.Right);
+        var isFloat = IsFloatType(leftType) || IsFloatType(rightType);
+        if (isFloat)
+        {
+            var useF64 = IsF64Type(leftType) || IsF64Type(rightType);
+            left = CoerceFloatOperand(left, leftType, useF64);
+            right = CoerceFloatOperand(right, rightType, useF64);
+        }
 
         var op = bin.OperatorToken.Kind switch
         {
-            TokenKind.Plus => "iadd",
-            TokenKind.Minus => "isub",
-            TokenKind.Star => "imul",
-            TokenKind.Slash => "sdiv",
+            TokenKind.Plus => isFloat ? "fadd" : "iadd",
+            TokenKind.Minus => isFloat ? "fsub" : "isub",
+            TokenKind.Star => isFloat ? "fmul" : "imul",
+            TokenKind.Slash => isFloat ? "fdiv" : "sdiv",
             TokenKind.Percent => "srem",
-            TokenKind.Less => "icmp slt",
-            TokenKind.LessEqual => "icmp sle",
-            TokenKind.Greater => "icmp sgt",
-            TokenKind.GreaterEqual => "icmp sge",
-            TokenKind.EqualEqual => "icmp eq",
-            TokenKind.BangEqual => "icmp ne",
+            TokenKind.Less => isFloat ? "fcmp lt" : "icmp slt",
+            TokenKind.LessEqual => isFloat ? "fcmp le" : "icmp sle",
+            TokenKind.Greater => isFloat ? "fcmp gt" : "icmp sgt",
+            TokenKind.GreaterEqual => isFloat ? "fcmp ge" : "icmp sge",
+            TokenKind.EqualEqual => isFloat ? "fcmp eq" : "icmp eq",
+            TokenKind.BangEqual => isFloat ? "fcmp ne" : "icmp ne",
             TokenKind.AmpAmp => "band",
             TokenKind.PipePipe => "bor",
             _ => "iadd"
         };
 
-        if (op.StartsWith("icmp"))
+        if (op.StartsWith("icmp") || op.StartsWith("fcmp"))
         {
-            var cmpOp = op.Replace("icmp ", "");
+            var cmpOp = op.Replace("icmp ", "").Replace("fcmp ", "");
             var cmp = NewValue();
-            _instructions.AppendLine($"    {cmp} = icmp {cmpOp} {left}, {right}");
+            var cmpPrefix = op.StartsWith("fcmp") ? "fcmp" : "icmp";
+            _instructions.AppendLine($"    {cmp} = {cmpPrefix} {cmpOp} {left}, {right}");
 
             // Stasis represents bool as i32, so convert b1 -> i32.
             var result = NewValue();
@@ -421,10 +438,20 @@ public sealed class CraneliftFunctionBuilder
 
         if (unary.OperatorToken.Kind == TokenKind.Minus)
         {
+            var operandType = GetExpressionType(unary.Operand);
             var result = NewValue();
             var zero = NewValue();
-            _instructions.AppendLine($"    {zero} = iconst.i32 0");
-            _instructions.AppendLine($"    {result} = isub {zero}, {operand}");
+            if (IsFloatType(operandType))
+            {
+                var zeroConst = IsF64Type(operandType) ? "f64const 0.0" : "f32const 0.0";
+                _instructions.AppendLine($"    {zero} = {zeroConst}");
+                _instructions.AppendLine($"    {result} = fsub {zero}, {operand}");
+            }
+            else
+            {
+                _instructions.AppendLine($"    {zero} = iconst.i32 0");
+                _instructions.AppendLine($"    {result} = isub {zero}, {operand}");
+            }
             return result;
         }
         if (unary.OperatorToken.Kind == TokenKind.Bang)
@@ -1230,12 +1257,17 @@ public sealed class CraneliftFunctionBuilder
     private string LowerAssignment(AssignmentExpressionSyntax assign)
     {
         var value = LowerExpression(assign.Right);
+        var valueType = GetExpressionType(assign.Right);
 
         if (assign.Left is IdentifierExpressionSyntax id)
         {
             var name = id.Identifier.Text;
             if (_locals.TryGetValue(name, out var local))
             {
+                if (_localTypes.TryGetValue(name, out var localType))
+                {
+                    value = CoerceAssignmentValue(value, valueType, localType);
+                }
                 _instructions.AppendLine($"    store {value}, {local.Address}");
             }
             else if (_globalTypes.TryGetValue(name, out _))
@@ -1243,6 +1275,10 @@ public sealed class CraneliftFunctionBuilder
                 // Store to global
                 var addr = NewValue();
                 _instructions.AppendLine($"    {addr} = global_value {name}");
+                if (_symbols.TryGetValue(name, out var symbol))
+                {
+                    value = CoerceAssignmentValue(value, valueType, symbol.Type);
+                }
                 _instructions.AppendLine($"    store {value}, {addr}");
             }
             else
@@ -1253,11 +1289,11 @@ public sealed class CraneliftFunctionBuilder
         else if (assign.Left is ArrayAccessExpressionSyntax arrayAccess)
         {
             // Store to array element
-            LowerArrayStore(arrayAccess, value);
+            LowerArrayStore(arrayAccess, value, valueType);
         }
         else if (assign.Left is MemberAccessExpressionSyntax memberAccess)
         {
-            LowerMemberStore(memberAccess, value);
+            LowerMemberStore(memberAccess, value, valueType);
         }
         else
         {
@@ -1508,12 +1544,12 @@ public sealed class CraneliftFunctionBuilder
         return fallback;
     }
 
-    private void LowerArrayStore(ArrayAccessExpressionSyntax array, string value)
+    private void LowerArrayStore(ArrayAccessExpressionSyntax array, string value, TypeSymbol? valueType)
     {
         // Get the array name and index
         if (array.Receiver is MemberAccessExpressionSyntax memberAccess)
         {
-            LowerArrayFieldStore(memberAccess, array.Index, value);
+            LowerArrayFieldStore(memberAccess, array.Index, value, valueType);
             return;
         }
 
@@ -1551,6 +1587,7 @@ public sealed class CraneliftFunctionBuilder
         // Calculate element size
         var elemType = _typeMapper.Map(arrayType.ElementType);
         var elemSize = GetTypeSize(elemType);
+        value = CoerceAssignmentValue(value, valueType, arrayType.ElementType);
 
         // Load array base address
         var baseAddr = NewValue();
@@ -1572,7 +1609,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    store {value}, {elemAddr}");
     }
 
-    private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value)
+    private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value, TypeSymbol? valueType)
     {
         if (memberAccess.Receiver is not IdentifierExpressionSyntax id ||
             !_symbols.TryGetValue(id.Identifier.Text, out var symbol) ||
@@ -1592,6 +1629,7 @@ public sealed class CraneliftFunctionBuilder
 
         var elemType = ResolveType(arrayType.ElementType);
         var clifElemType = _typeMapper.Map(elemType);
+        value = CoerceAssignmentValue(value, valueType, elemType);
         var index = LowerExpression(indexExpr);
         var baseName = $"{id.Identifier.Text}_{memberAccess.Member.Text}";
 
@@ -1611,7 +1649,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    store {value}, {elemAddr}");
     }
 
-    private void LowerMemberStore(MemberAccessExpressionSyntax member, string value)
+    private void LowerMemberStore(MemberAccessExpressionSyntax member, string value, TypeSymbol? valueType)
     {
         if (member.Member.Text == "length")
         {
@@ -1621,7 +1659,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
         {
-            LowerArrayElementFieldStore(arrayAccess, member.Member.Text, value);
+            LowerArrayElementFieldStore(arrayAccess, member.Member.Text, value, valueType);
             return;
         }
 
@@ -1629,13 +1667,14 @@ public sealed class CraneliftFunctionBuilder
         {
             var addr = NewValue();
             _instructions.AppendLine($"    {addr} = global_value {flattenedName}");
+            value = CoerceAssignmentValue(value, valueType, memberType);
             _instructions.AppendLine($"    store {value}, {addr}");
             return;
         }
         _instructions.AppendLine($"    ; error: complex member store");
     }
 
-    private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, string fieldName, string value)
+    private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, string fieldName, string value, TypeSymbol? valueType)
     {
         if (array.Receiver is IdentifierExpressionSyntax id &&
             _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
@@ -1652,6 +1691,7 @@ public sealed class CraneliftFunctionBuilder
 
             var elemType = ResolveType(field.Type);
             var clifElemType = _typeMapper.Map(elemType);
+            value = CoerceAssignmentValue(value, valueType, elemType);
             var index = LowerExpression(array.Index);
             var baseName = $"{structDecl.Name.Text}_{fieldName}";
 
@@ -1692,6 +1732,7 @@ public sealed class CraneliftFunctionBuilder
 
                 var elemType = ResolveType(field.Type);
                 var clifElemType = _typeMapper.Map(elemType);
+                value = CoerceAssignmentValue(value, valueType, elemType);
                 var index = LowerExpression(array.Index);
                 var baseName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
 
@@ -1907,4 +1948,92 @@ public sealed class CraneliftFunctionBuilder
 
         return sb.ToString();
     }
+
+    private string CoerceAssignmentValue(string value, TypeSymbol? fromType, TypeSymbol? toType)
+    {
+        if (fromType is null || toType is null)
+        {
+            return value;
+        }
+
+        if (IsFloatType(toType) && !IsFloatType(fromType))
+        {
+            var result = NewValue();
+            var op = IsF64Type(toType) ? "fcvt_from_sint.f64" : "fcvt_from_sint.f32";
+            _instructions.AppendLine($"    {result} = {op} {value}");
+            return result;
+        }
+
+        return value;
+    }
+
+    private string CoerceFloatOperand(string value, TypeSymbol? fromType, bool useF64)
+    {
+        if (fromType is null || IsFloatType(fromType))
+        {
+            return value;
+        }
+
+        var result = NewValue();
+        var op = useF64 ? "fcvt_from_sint.f64" : "fcvt_from_sint.f32";
+        _instructions.AppendLine($"    {result} = {op} {value}");
+        return result;
+    }
+
+    private TypeSymbol? GetExpressionType(ExpressionSyntax expr)
+    {
+        return expr switch
+        {
+            LiteralExpressionSyntax lit => lit.Literal.Kind switch
+            {
+                TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
+                TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
+                TokenKind.StringLiteral => new PrimitiveTypeSymbol("string"),
+                _ => null
+            },
+            IdentifierExpressionSyntax id when _localTypes.TryGetValue(id.Identifier.Text, out var localType) => localType,
+            IdentifierExpressionSyntax id when _symbols.TryGetValue(id.Identifier.Text, out var sym) => sym.Type,
+            ParenthesizedExpressionSyntax paren => GetExpressionType(paren.Expression),
+            UnaryExpressionSyntax unary when unary.OperatorToken.Kind == TokenKind.Bang => new PrimitiveTypeSymbol("bool"),
+            UnaryExpressionSyntax unary => GetExpressionType(unary.Operand),
+            AssignmentExpressionSyntax assign => GetExpressionType(assign.Right),
+            CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                            _symbols.TryGetValue(id.Identifier.Text, out var funcSym) => funcSym.Type,
+            MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumId =>
+                _symbols.TryGetValue($"{enumId.Identifier.Text}.{member.Member.Text}", out var memberSym) ? memberSym.Type : null,
+            ArrayAccessExpressionSyntax array when GetExpressionType(array.Receiver) is ArrayTypeSymbol arr => arr.ElementType,
+            BinaryExpressionSyntax bin => GetBinaryResultType(bin),
+            _ => null
+        };
+    }
+
+    private TypeSymbol? GetBinaryResultType(BinaryExpressionSyntax bin)
+    {
+        if (bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual
+            or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual
+            or TokenKind.AmpAmp or TokenKind.PipePipe)
+        {
+            return new PrimitiveTypeSymbol("bool");
+        }
+
+        var leftType = GetExpressionType(bin.Left);
+        var rightType = GetExpressionType(bin.Right);
+        if (IsF64Type(leftType) || IsF64Type(rightType))
+        {
+            return new PrimitiveTypeSymbol("f64");
+        }
+        if (IsFloatType(leftType) || IsFloatType(rightType))
+        {
+            return new PrimitiveTypeSymbol("f32");
+        }
+
+        return leftType ?? rightType;
+    }
+
+    private static bool IsFloatType(TypeSymbol? type) =>
+        type is PrimitiveTypeSymbol p && (p.PrimitiveName == "f32" || p.PrimitiveName == "f64");
+
+    private static bool IsF64Type(TypeSymbol? type) =>
+        type is PrimitiveTypeSymbol p && p.PrimitiveName == "f64";
 }
