@@ -16,6 +16,8 @@ public sealed class SemanticAnalyzer
         { "f64", new PrimitiveTypeSymbol("f64") },
         { "bool", new PrimitiveTypeSymbol("bool") },
         { "string", new PrimitiveTypeSymbol("string") },
+        { "utf8", new PrimitiveTypeSymbol("utf8") },
+        { "ascii", new PrimitiveTypeSymbol("ascii") },
         { "void", new VoidTypeSymbol() }
     };
 

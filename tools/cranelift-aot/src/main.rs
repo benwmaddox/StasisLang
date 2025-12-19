@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -22,12 +23,12 @@ use target_lexicon::Triple;
 struct Args
 {
     /// Input CLIF file path.
-    #[arg(long, value_name = "PATH")]
-    input: PathBuf,
+    #[arg(long, value_name = "PATH", required_unless_present = "server")]
+    input: Option<PathBuf>,
 
     /// Output object file path.
-    #[arg(long, value_name = "PATH")]
-    output: PathBuf,
+    #[arg(long, value_name = "PATH", required_unless_present = "server")]
+    output: Option<PathBuf>,
 
     /// Target triple (default: x86_64-pc-windows-msvc).
     #[arg(long, value_name = "TRIPLE", default_value = "x86_64-pc-windows-msvc")]
@@ -40,29 +41,45 @@ struct Args
     /// Optimization level (none|speed|speed_and_size).
     #[arg(long, value_name = "LEVEL", default_value = "none")]
     opt_level: String,
+
+    /// Run in persistent server mode (reads requests from stdin).
+    #[arg(long)]
+    server: bool,
 }
 
 fn main() -> Result<()>
 {
     let args = Args::parse();
 
-    let clif = fs::read_to_string(&args.input)
-        .with_context(|| format!("failed to read input file: {}", args.input.display()))?;
+    if args.server
+    {
+        return run_server();
+    }
 
-    let triple = Triple::from_str(&args.target)
-        .map_err(|_| anyhow::anyhow!("invalid target triple: {}", args.target))?;
+    let input = args.input.context("missing --input")?;
+    let output = args.output.context("missing --output")?;
+    let clif = fs::read_to_string(&input)
+        .with_context(|| format!("failed to read input file: {}", input.display()))?;
 
-    let flags = build_flags(&args.opt_level)?;
+    compile_clif(&clif, &output, &args.target, &args.module_name, &args.opt_level)
+}
+
+fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, opt_level: &str) -> Result<()>
+{
+    let triple = Triple::from_str(target)
+        .map_err(|_| anyhow::anyhow!("invalid target triple: {target}"))?;
+
+    let flags = build_flags(opt_level)?;
     let isa = isa::lookup(triple.clone())
         .context("failed to look up ISA for target")?
         .finish(flags)
         .context("failed to finalize ISA")?;
 
-    let builder = ObjectBuilder::new(isa, args.module_name, default_libcall_names())
+    let builder = ObjectBuilder::new(isa, module_name.to_string(), default_libcall_names())
         .context("failed to create ObjectBuilder")?;
     let mut module = ObjectModule::new(builder);
 
-    let parsed = parse_stasis_clif(&clif).context("failed to parse stasis CLIF")?;
+    let parsed = parse_stasis_clif(clif).context("failed to parse stasis CLIF")?;
 
     // First declare all globals.
     let mut data_ids = std::collections::HashMap::new();
@@ -128,10 +145,101 @@ fn main() -> Result<()>
     let product = module.finish();
     let obj_bytes = product.emit().context("failed to emit object")?;
 
-    fs::write(&args.output, obj_bytes)
-        .with_context(|| format!("failed to write object file: {}", args.output.display()))?;
+    fs::write(output, obj_bytes)
+        .with_context(|| format!("failed to write object file: {}", output.display()))?;
 
     Ok(())
+}
+
+fn run_server() -> Result<()>
+{
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut stdout = io::stdout();
+
+    writeln!(stdout, "READY")?;
+    stdout.flush()?;
+
+    let mut line = String::new();
+    loop
+    {
+        line.clear();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0
+        {
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+        {
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("QUIT")
+        {
+            break;
+        }
+
+        if !trimmed.starts_with("REQ ")
+        {
+            writeln!(stdout, "ERR invalid request header")?;
+            stdout.flush()?;
+            continue;
+        }
+
+        let parts: Vec<_> = trimmed.split_whitespace().collect();
+        if parts.len() != 6
+        {
+            writeln!(stdout, "ERR invalid request header")?;
+            stdout.flush()?;
+            continue;
+        }
+
+        let out_len = parts[1].parse::<usize>().unwrap_or(0);
+        let target_len = parts[2].parse::<usize>().unwrap_or(0);
+        let module_len = parts[3].parse::<usize>().unwrap_or(0);
+        let opt_len = parts[4].parse::<usize>().unwrap_or(0);
+        let clif_len = parts[5].parse::<usize>().unwrap_or(0);
+
+        if out_len == 0 || target_len == 0 || module_len == 0 || opt_len == 0 || clif_len == 0
+        {
+            writeln!(stdout, "ERR invalid request lengths")?;
+            stdout.flush()?;
+            continue;
+        }
+
+        let out_path = read_string(&mut reader, out_len)?;
+        let target = read_string(&mut reader, target_len)?;
+        let module_name = read_string(&mut reader, module_len)?;
+        let opt_level = read_string(&mut reader, opt_len)?;
+        let clif = read_string(&mut reader, clif_len)?;
+
+        let output = PathBuf::from(out_path);
+        let result = compile_clif(&clif, &output, &target, &module_name, &opt_level);
+
+        match result
+        {
+            Ok(()) => {
+                writeln!(stdout, "OK")?;
+                stdout.flush()?;
+            }
+            Err(err) => {
+                writeln!(stdout, "ERR {}", err)?;
+                stdout.flush()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn read_string<R: Read>(reader: &mut R, len: usize) -> Result<String>
+{
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    let s = String::from_utf8(buf).context("invalid UTF-8")?;
+    Ok(s)
 }
 
 fn build_flags(opt_level: &str) -> Result<settings::Flags>
@@ -280,15 +388,20 @@ fn parse_global_decl(line: &str) -> Result<(String, cranelift_codegen::ir::Type,
     // Or: "global numbers: i32[5]"
     let rest = line.strip_prefix("global ").context("missing 'global ' prefix")?;
 
-    // Check for string literal comment
+    // Check for literal comment
     if let Some((decl_part, comment_part)) = rest.split_once(';')
     {
         let (name, ty_str) = decl_part.split_once(':').context("missing ':' in global decl")?;
         let name = name.trim().to_string();
         let (ty, _) = parse_type_with_count(ty_str.trim())?;
 
-        // Parse string literal from comment
+        // Parse literal data from comment
         let comment = comment_part.trim();
+        if let Some(bytes) = parse_bytes_literal_comment(comment)
+        {
+            let size_bytes = bytes.len();
+            return Ok((name, ty, GlobalInitData::String(bytes), size_bytes));
+        }
         if let Some(string_data) = parse_string_literal_comment(comment)
         {
             let size_bytes = string_data.len();
@@ -339,6 +452,28 @@ fn parse_string_literal_comment(comment: &str) -> Option<Vec<u8>>
 
     // Add null terminator for C strings
     bytes.push(0);
+
+    Some(bytes)
+}
+
+fn parse_bytes_literal_comment(comment: &str) -> Option<Vec<u8>>
+{
+    let start = comment.find("bytes:")?;
+    let rest = &comment[start + "bytes:".len()..];
+    let mut bytes = Vec::new();
+    for token in rest.split_whitespace()
+    {
+        let t = token.trim().trim_end_matches(',');
+        if t.is_empty() {
+            continue;
+        }
+        let value = u8::from_str_radix(t, 16).ok()?;
+        bytes.push(value);
+    }
+
+    if bytes.is_empty() {
+        return None;
+    }
 
     Some(bytes)
 }

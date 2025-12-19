@@ -417,6 +417,21 @@ public class LoweringTests
     }
 
     [Fact]
+    public void StringLiteral_UsesUtf8HeaderPayloadOffset()
+    {
+        var ir = Lower("""
+            function main(): i32 {
+                print_string("hi");
+                return 0;
+            }
+            """);
+
+        Assert.Contains("@str_", ir);
+        Assert.Contains("getelementptr", ir);
+        Assert.Contains("i32 8", ir);
+    }
+
+    [Fact]
     public void Lowers_i32_to_f32_in_loop()
     {
         var ir = Lower("""

@@ -170,7 +170,8 @@ public record CodeGenerationOptions(
     bool IncludeTests = true,
     bool EmitTestHarness = true,
     bool HeadlessGraphics = true,
-    OptimizationLevel Optimization = OptimizationLevel.None);
+    OptimizationLevel Optimization = OptimizationLevel.None,
+    bool AllowReachabilityFallback = true);
 
 public enum OptimizationLevel
 {
@@ -536,6 +537,7 @@ Source (.stasis)
 - CLI wiring (Windows only): `stasis run/build --backend cranelift` does CLIF → `.obj` → `clang` link → `.exe`.
 - End-to-end execution: `samples/basic.stasis` runs and returns correct exit code.
 - Calling convention: `windows_fastcall` for Windows x64 compatibility.
+- Native DLL runner for Cranelift `run/test`: `stasis_runner` loads compiled DLLs to avoid relinking the host exe.
 
 **Working Language Features (~20-30% parity with LLVM):**
 - ✅ Arithmetic operations (+, -, *, /, %)
@@ -551,7 +553,6 @@ Source (.stasis)
 **Remaining Gaps (blocking full parity):**
 - ❌ **Array allocation/initialization** - Arrays require explicit allocation/initialization work
 - ❌ **Remaining built-ins** - Math + advanced string helpers (trim/case/num conversions)
-- ❌ **Graphics integration** - SDL2/OpenGL runtime calls not wired up
 - ❌ **Foreach loops** - Not lowered in Cranelift yet
 - ❌ **Test-time reporting** - Harness lacks elapsed time printing
 
@@ -584,11 +585,16 @@ Source (.stasis)
 - [x] Implement `read_int` built-in (stack slot + scanf)
 - [x] Implement `read_char` built-in (stack slot + scanf)
 - [x] Implement time functions: `get_time_ms`, `sleep_ms`, `time`
+- [x] Implement Sudoku helpers (`print_prompt`, `print_invalid`, `print_clue_error`, `print_solved`, `print_cell`)
+- [x] Implement directory list helpers (`list_directory`, `dir_list_entry_is_dir`, `dir_list_entry_copy_name`)
+- [x] Implement `char_*` helpers (classification + conversion)
 - [ ] Test: Sample program that prints and reads values
 
 **Priority 3: String Support (Week 2)**
 - [x] Implement string literal storage (global data section)
 - [x] Wire up string literal loads in CraneliftFunctionBuilder (replace TODO at line 308)
+- [x] Emit UTF-8 headers (byte_length + char_length) for literals and string buffers
+- [x] Update string helpers to read/write header lengths instead of strlen
 - [x] Implement basic string built-ins (strlen, strcmp, strcpy, strncmp, strcat, strchr, strrchr, strstr)
 - [x] Implement advanced string built-in `str_substr`
 - [ ] Implement remaining advanced string built-ins (trim, case transform, numeric conversions)
@@ -598,6 +604,7 @@ Source (.stasis)
 - [ ] Study LayoutPlanner output format and SoA transformation
 - [x] Implement array access with SoA offset calculation (replace TODO at line 483)
 - [x] Implement array length property (replace TODO at line 467)
+- [x] Support local/parameter array element access
 - [ ] Add array allocation and initialization
 - [ ] Test: Fibonacci with array storage
 
@@ -612,16 +619,18 @@ Source (.stasis)
 - [ ] Add test-time reporting to Cranelift harness
 - [x] Remove `--emit-ir` forcing in CLI for test mode
 - [x] Route `stasis test --all` through the Cranelift harness when using the Cranelift backend
+- [x] Run/test with Cranelift via the native DLL runner (`stasis_runner`)
 - [ ] Test: `stasis test samples/fib_tests.stasis --backend cranelift`
 
 **Priority 7: Advanced Features (Week 4)**
-- [ ] Graphics integration (SDL2/OpenGL calls)
+- [x] Graphics integration (SDL2/OpenGL calls)
 - [ ] Remaining math built-ins (sin, cos, sqrt, etc.)
 - [ ] Foreach loop support (currently only for loops work)
-- [ ] Compound assignment to complex l-values
+- [x] Compound assignment to complex l-values
 
 **Priority 8: Polish & Optimization (Week 4)**
-- [ ] Resolve CRT link warnings (LNK4098)
+- [x] Resolve CRT link warnings (LNK4098)
+- [ ] Front-end reachability DCE (entrypoints: main/export/test builds)
 - [ ] Add compilation time benchmarks
 - [ ] Improve error diagnostics for Cranelift-specific issues
 - [ ] Make IR boundary more robust (consider binary format vs CLIF text)

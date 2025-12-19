@@ -15,6 +15,7 @@ static void print_usage(void)
 {
     fprintf(stderr, "usage: stasis_runner <dll_path> [entry]\n");
     fprintf(stderr, "  entry defaults to run_tests (use main for run mode)\n");
+    fprintf(stderr, "usage: stasis_runner --server\n");
 }
 
 static void set_runtime_dir(const char *dll_path)
@@ -49,6 +50,134 @@ static void set_runtime_dir(const char *dll_path)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--server") == 0)
+    {
+        char line[256];
+        fprintf(stderr, "READY\n");
+        fflush(stderr);
+
+        while (fgets(line, sizeof(line), stdin))
+        {
+            size_t line_len = strlen(line);
+            while (line_len > 0 && (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
+            {
+                line[--line_len] = '\0';
+            }
+
+            if (line_len == 0)
+            {
+                continue;
+            }
+
+            if (strcmp(line, "QUIT") == 0)
+            {
+                break;
+            }
+
+            if (strncmp(line, "RUN ", 4) != 0)
+            {
+                fprintf(stderr, "ERR invalid request\n");
+                fflush(stderr);
+                continue;
+            }
+
+            unsigned long dll_len = 0;
+            unsigned long entry_len = 0;
+            if (sscanf(line + 4, "%lu %lu", &dll_len, &entry_len) != 2 || dll_len == 0 || entry_len == 0)
+            {
+                fprintf(stderr, "ERR invalid request\n");
+                fflush(stderr);
+                continue;
+            }
+
+            char *dll_path = (char *)malloc(dll_len + 1);
+            char *entry_name = (char *)malloc(entry_len + 1);
+            if (!dll_path || !entry_name)
+            {
+                free(dll_path);
+                free(entry_name);
+                fprintf(stderr, "ERR out of memory\n");
+                fflush(stderr);
+                continue;
+            }
+
+            if (fread(dll_path, 1, dll_len, stdin) != dll_len ||
+                fread(entry_name, 1, entry_len, stdin) != entry_len)
+            {
+                free(dll_path);
+                free(entry_name);
+                fprintf(stderr, "ERR failed to read request\n");
+                fflush(stderr);
+                continue;
+            }
+
+            dll_path[dll_len] = '\0';
+            entry_name[entry_len] = '\0';
+
+            set_runtime_dir(dll_path);
+
+#ifdef _WIN32
+            HMODULE lib = LoadLibraryA(dll_path);
+            if (!lib)
+            {
+                fprintf(stderr, "ERR failed to load\n");
+                fflush(stderr);
+                free(dll_path);
+                free(entry_name);
+                continue;
+            }
+
+            FARPROC symbol = GetProcAddress(lib, entry_name);
+            if (!symbol)
+            {
+                fprintf(stderr, "ERR entrypoint not found\n");
+                fflush(stderr);
+                FreeLibrary(lib);
+                free(dll_path);
+                free(entry_name);
+                continue;
+            }
+
+            stasis_entry_fn entry = (stasis_entry_fn)symbol;
+            int result = entry();
+            FreeLibrary(lib);
+#else
+            void *lib = dlopen(dll_path, RTLD_NOW);
+            if (!lib)
+            {
+                fprintf(stderr, "ERR failed to load\n");
+                fflush(stderr);
+                free(dll_path);
+                free(entry_name);
+                continue;
+            }
+
+            void *symbol = dlsym(lib, entry_name);
+            if (!symbol)
+            {
+                fprintf(stderr, "ERR entrypoint not found\n");
+                fflush(stderr);
+                dlclose(lib);
+                free(dll_path);
+                free(entry_name);
+                continue;
+            }
+
+            stasis_entry_fn entry = (stasis_entry_fn)symbol;
+            int result = entry();
+            dlclose(lib);
+#endif
+
+            free(dll_path);
+            free(entry_name);
+
+            fprintf(stderr, "OK %d\n", result);
+            fflush(stderr);
+        }
+
+        return 0;
+    }
+
     if (argc < 2)
     {
         print_usage();

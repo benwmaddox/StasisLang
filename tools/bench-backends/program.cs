@@ -100,7 +100,8 @@ static void CompileOnce(string source, BackendType backend, string displayName)
     var options = new CodeGenerationOptions(
         ModuleName: "bench",
         IncludeTests: false,
-        EmitTestHarness: false);
+        EmitTestHarness: false,
+        AllowReachabilityFallback: false);
 
     using var generator = CodeGeneratorFactory.Create(backend, "bench");
     var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);

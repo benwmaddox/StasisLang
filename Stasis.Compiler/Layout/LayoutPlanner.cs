@@ -134,10 +134,34 @@ public sealed class LayoutPlanner
         return type switch
         {
             NamedTypeSyntax named => SizeOfNamed(named.Name),
-            ArrayTypeSyntax array => SizeOf(array.ElementType) * (int.TryParse(array.SizeToken?.Text, out var count) ? count : 1),
+            ArrayTypeSyntax array => SizeOfArray(array),
             _ => 0
         };
     }
+
+    private int SizeOfArray(ArrayTypeSyntax array)
+    {
+        var count = int.TryParse(array.SizeToken?.Text, out var parsed) ? parsed : 1;
+        if (array.ElementType is NamedTypeSyntax named)
+        {
+            var headerSize = HeaderSizeFor(named.Name);
+            if (headerSize > 0)
+            {
+                return headerSize + count;
+            }
+        }
+
+        return SizeOf(array.ElementType) * count;
+    }
+
+    private static int HeaderSizeFor(string name) =>
+        name switch
+        {
+            "string" => 8,
+            "utf8" => 8,
+            "ascii" => 4,
+            _ => 0
+        };
 
     private int SizeOfNamed(string name)
     {
@@ -150,7 +174,9 @@ public sealed class LayoutPlanner
             "i32" => 4,
             "f32" => 4,
             "f64" => 8,
-            "string" => IntPtr.Size, // bare string is a pointer; string[N] should be spelled as u8[N]
+            "string" => IntPtr.Size, // bare string is a pointer; string[N] uses utf8 header + payload.
+            "utf8" => IntPtr.Size,
+            "ascii" => IntPtr.Size,
             _ => 4 // default alignment for unknown; structs handled separately above.
         };
     }

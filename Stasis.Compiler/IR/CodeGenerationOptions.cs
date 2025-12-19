@@ -27,7 +27,8 @@ public sealed record CodeGenerationOptions(
     bool IncludeTests = true,
     bool EmitTestHarness = true,
     bool HeadlessGraphics = true,
-    OptimizationLevel Optimization = OptimizationLevel.None)
+    OptimizationLevel Optimization = OptimizationLevel.None,
+    bool AllowReachabilityFallback = true)
 {
     /// <summary>
     /// Default options for debug/development builds.
@@ -40,7 +41,8 @@ public sealed record CodeGenerationOptions(
     public static CodeGenerationOptions Release { get; } = new(
         IncludeTests: false,
         EmitTestHarness: false,
-        Optimization: OptimizationLevel.Aggressive);
+        Optimization: OptimizationLevel.Aggressive,
+        AllowReachabilityFallback: false);
 
     /// <summary>
     /// Options for graphics-enabled builds.
@@ -50,5 +52,5 @@ public sealed record CodeGenerationOptions(
     /// <summary>
     /// Converts to LowerOptions for backward compatibility.
     /// </summary>
-    public LowerOptions ToLowerOptions() => new(IncludeTests, EmitTestHarness, HeadlessGraphics);
+    public LowerOptions ToLowerOptions() => new(IncludeTests, EmitTestHarness, HeadlessGraphics, AllowReachabilityFallback);
 }

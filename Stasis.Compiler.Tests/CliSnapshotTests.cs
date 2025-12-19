@@ -12,12 +12,31 @@ public class CliSnapshotTests
 
     private static string GetRepoRoot()
     {
-        var current = Directory.GetCurrentDirectory();
+        var current = FindRepoRoot(Directory.GetCurrentDirectory());
+        if (!string.IsNullOrEmpty(current))
+        {
+            return current;
+        }
+
+        var assemblyDir = Path.GetDirectoryName(typeof(CliSnapshotTests).Assembly.Location);
+        current = FindRepoRoot(assemblyDir);
+        if (!string.IsNullOrEmpty(current))
+        {
+            return current;
+        }
+
+        throw new InvalidOperationException("Could not find repo root");
+    }
+
+    private static string? FindRepoRoot(string? start)
+    {
+        var current = start;
         while (current != null && !File.Exists(Path.Combine(current, "Stasis.sln")))
         {
             current = Directory.GetParent(current)?.FullName;
         }
-        return current ?? throw new InvalidOperationException("Could not find repo root");
+
+        return current;
     }
 
     private static string GetSamplePath(string name)
@@ -45,15 +64,7 @@ public class CliSnapshotTests
 
         EnsureCliBuilt(cliProj, root, config);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            Arguments = $"run --no-build --configuration {config} --project \"{cliProj}\" -- {string.Join(" ", args)}",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            WorkingDirectory = root
-        };
+        var psi = CreateCliStartInfo(cliProj, root, config, args);
 
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
@@ -80,6 +91,60 @@ public class CliSnapshotTests
         process.WaitForExit();
 
         return (process.ExitCode, stdout.ToString().TrimEnd(), stderr.ToString().TrimEnd());
+    }
+
+    private static (int exitCode, string stdout, string stderr) RunCliWithEnv(IDictionary<string, string?> environment, params string[] args)
+    {
+        var root = GetRepoRoot();
+        var cliProj = Path.Combine(root, CliProject, $"{CliProject}.csproj");
+        var config = GetBuildConfiguration();
+
+        EnsureCliBuilt(cliProj, root, config);
+
+        var psi = CreateCliStartInfo(cliProj, root, config, args);
+        foreach (var (key, value) in environment)
+        {
+            psi.Environment[key] = value;
+        }
+
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+
+        using var process = new Process { StartInfo = psi };
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+            {
+                stdout.AppendLine(e.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+            {
+                stderr.AppendLine(e.Data);
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+
+        return (process.ExitCode, stdout.ToString().TrimEnd(), stderr.ToString().TrimEnd());
+    }
+
+    private static ProcessStartInfo CreateCliStartInfo(string cliProj, string root, string configuration, string[] args)
+    {
+        return new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            Arguments = $"run --no-build --configuration {configuration} --project \"{cliProj}\" -- {string.Join(" ", args)}",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = root
+        };
     }
 
     private static void EnsureCliBuilt(string cliProj, string root, string configuration)
@@ -146,6 +211,55 @@ public class CliSnapshotTests
         }
 
         return string.Join("\n", result).Trim();
+    }
+
+    [Fact]
+    public Task CraneliftRunner_UsesGraphicsImportLib()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return Task.CompletedTask;
+        }
+
+        var root = GetRepoRoot();
+        if (!TryFindCraneliftAot(root) || !TryFindRunner(root) || !TryFindClang())
+        {
+            return Task.CompletedTask;
+        }
+
+        var importLib = FindGraphicsImportLib(root);
+        if (importLib is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, """
+            test `dummy`(): bool {
+                return true;
+            }
+            """);
+
+        try
+        {
+            var env = new Dictionary<string, string?>
+            {
+                ["STASIS_LOG_COMMANDS"] = "1",
+                ["STASIS_SUPPRESS_WARNINGS"] = "1"
+            };
+            var (exitCode, stdout, stderr) = RunCliWithEnv(env, "test", temp, "--backend", "cranelift", "--graphics");
+            var combined = $"{stdout}\n{stderr}";
+
+            Assert.Equal(0, exitCode);
+            Assert.Contains("stasis_graphics.lib", combined, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("NODEFAULTLIB:libcmt", combined, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+
+        return Task.CompletedTask;
     }
 
     [Fact]
@@ -355,5 +469,68 @@ public class CliSnapshotTests
         }
 
         return false;
+    }
+
+    private static bool TryFindCraneliftAot(string root)
+    {
+        var exeName = OperatingSystem.IsWindows() ? "stasis-cranelift-aot.exe" : "stasis-cranelift-aot";
+        var release = Path.Combine(root, "tools", "cranelift-aot", "target", "release", exeName);
+        if (File.Exists(release))
+        {
+            return true;
+        }
+
+        var debug = Path.Combine(root, "tools", "cranelift-aot", "target", "debug", exeName);
+        return File.Exists(debug);
+    }
+
+    private static bool TryFindRunner(string root)
+    {
+        var exeName = OperatingSystem.IsWindows() ? "stasis_runner.exe" : "stasis_runner";
+        var release = Path.Combine(root, "runtime", "build", "bin", "Release", exeName);
+        if (File.Exists(release))
+        {
+            return true;
+        }
+
+        var repoRoot = Path.Combine(root, exeName);
+        return File.Exists(repoRoot);
+    }
+
+    private static bool TryFindClang()
+    {
+        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            search.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            search.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
+        foreach (var dir in search)
+        {
+            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
+            if (File.Exists(candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? FindGraphicsImportLib(string root)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(root, "runtime", "build", "bin", "Release", "stasis_graphics.lib"),
+            Path.Combine(root, "stasis_graphics.lib")
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
     }
 }

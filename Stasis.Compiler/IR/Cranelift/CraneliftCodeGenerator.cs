@@ -49,7 +49,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         {
             using var builder = new CraneliftModuleBuilder(_moduleName);
 
-            var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests);
+            var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, options.IncludeTests, options.AllowReachabilityFallback);
+            var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
                 builtins.Add("run_tests");
@@ -68,7 +69,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -96,7 +97,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         // Declare C standard library functions
         // Since Cranelift doesn't support variadic functions, we declare multiple signatures
 
-        if (builtins.Contains("print_int") || builtins.Contains("print_char") || builtins.Contains("print_string") || builtins.Contains("run_tests"))
+        if (builtins.Overlaps(new[]
+            {
+                "print_int", "print_char", "print_string",
+                "print_prompt", "print_invalid", "print_clue_error", "print_solved", "print_cell",
+                "run_tests"
+            }))
         {
             // printf3(format: *i8, arg1: i64, arg2: i64) -> i32 (aliased to printf in AOT)
             builder.DeclareExternal("printf3", CraneliftTypeMapper.ClifType.I32,
@@ -265,6 +271,23 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32, CraneliftTypeMapper.ClifType.R64);
         }
 
+        if (builtins.Contains("list_directory"))
+        {
+            builder.DeclareExternal("stasis_list_directory_struct", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("dir_list_entry_copy_name"))
+        {
+            builder.DeclareExternal("stasis_copy_dir_entry_name", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
         if (builtins.Overlaps(new[]
             {
                 "str_len", "str_is_empty", "str_get", "str_set", "str_eq", "str_cmp",
@@ -298,6 +321,36 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         if (builtins.Contains("print_string"))
         {
             builder.DefineStringLiteral("%s");
+        }
+
+        if (builtins.Contains("print_prompt"))
+        {
+            builder.DefineStringLiteral("Enter row col val (1-9, 0 clears), or q to quit:\n");
+        }
+
+        if (builtins.Contains("print_invalid"))
+        {
+            builder.DefineStringLiteral("\u001b[31mInvalid move.\u001b[0m\n");
+        }
+
+        if (builtins.Contains("print_clue_error"))
+        {
+            builder.DefineStringLiteral("\u001b[31mCannot change a clue.\u001b[0m\n");
+        }
+
+        if (builtins.Contains("print_solved"))
+        {
+            builder.DefineStringLiteral("\u001b[32mSolved!\u001b[0m\n");
+        }
+
+        if (builtins.Contains("print_cell"))
+        {
+            builder.DefineStringLiteral(". ");
+            builder.DefineStringLiteral("%s");
+            builder.DefineStringLiteral("%d");
+            builder.DefineStringLiteral("\u001b[36m");
+            builder.DefineStringLiteral("\u001b[32m");
+            builder.DefineStringLiteral("\u001b[0m ");
         }
 
         if (builtins.Contains("read_int"))
@@ -351,9 +404,25 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 case ArrayTypeSyntax arrayType:
                     {
                         var elemType = ResolveType(arrayType.ElementType, symbols);
-                        var clifElemType = typeMapper.Map(elemType);
                         var count = ParseArrayLength(arrayType.SizeToken?.Text);
-                        builder.DefineGlobalArray(globalLayout.Name, clifElemType, count);
+                        if (elemType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            builder.DefineGlobalArray(globalLayout.Name, CraneliftTypeMapper.ClifType.I8, count + headerSize);
+                        }
+                        else if (elemType is ArrayTypeSymbol arrayElem &&
+                                 arrayElem.ElementType is PrimitiveTypeSymbol elemPrim &&
+                                 HeaderSizeFor(elemPrim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(elemPrim.PrimitiveName);
+                            var stride = arrayElem.Size + headerSize;
+                            builder.DefineGlobalArray(globalLayout.Name, CraneliftTypeMapper.ClifType.I8, count * stride);
+                        }
+                        else
+                        {
+                            var clifElemType = typeMapper.Map(elemType);
+                            builder.DefineGlobalArray(globalLayout.Name, clifElemType, count);
+                        }
                         break;
                     }
                 case NamedTypeSyntax namedType when structs.TryGetValue(namedType.Name, out var structInstance):
@@ -379,7 +448,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         List<Diagnostic> diagnostics,
         LayoutPlan layout,
         bool includeTests,
-        bool emitTestHarness)
+        bool emitTestHarness,
+        HashSet<string> reachableFunctions)
     {
         var typeMapper = builder.TypeMapper;
         var structs = compilationUnit.Declarations
@@ -394,6 +464,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
+            if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
             if (!symbols.TryGetValue(func.Name.Text, out var symbol))
                 continue;
 
@@ -557,7 +631,18 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                             var nestedFieldType = ResolveType(nestedField.Type, symbols);
                             var nestedElemType = typeMapper.Map(nestedFieldType);
                             var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
-                            builder.DefineGlobalArray(nestedName, nestedElemType, count);
+                            if (nestedFieldType is ArrayTypeSymbol nestedArray &&
+                                nestedArray.ElementType is PrimitiveTypeSymbol prim &&
+                                HeaderSizeFor(prim.PrimitiveName) > 0)
+                            {
+                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                var stride = nestedArray.Size + headerSize;
+                                builder.DefineGlobalArray(nestedName, CraneliftTypeMapper.ClifType.I8, count * stride);
+                            }
+                            else
+                            {
+                                builder.DefineGlobalArray(nestedName, nestedElemType, count);
+                            }
                         }
                         break;
                     }
@@ -566,7 +651,15 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                         var elemType = ResolveType(arrayType.ElementType, symbols);
                         var clifElemType = typeMapper.Map(elemType);
                         var count = ParseArrayLength(arrayType.SizeToken?.Text);
-                        builder.DefineGlobalArray(fieldName, clifElemType, count);
+                        if (elemType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            builder.DefineGlobalArray(fieldName, CraneliftTypeMapper.ClifType.I8, count + headerSize);
+                        }
+                        else
+                        {
+                            builder.DefineGlobalArray(fieldName, clifElemType, count);
+                        }
                         break;
                     }
                 case NamedTypeSyntax namedField when structs.TryGetValue(namedField.Name, out var nestedStructDecl):
@@ -586,6 +679,15 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     private static int ParseArrayLength(string? text) =>
         int.TryParse(text, out var n) ? n : 1;
 
+    private static int HeaderSizeFor(string name) =>
+        name switch
+        {
+            "string" => 8,
+            "utf8" => 8,
+            "ascii" => 4,
+            _ => 0
+        };
+
     private static TypeSymbol ResolveType(TypeSyntax syntax, IReadOnlyDictionary<string, Symbol> symbols)
     {
         return syntax switch
@@ -602,13 +704,18 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     private static (HashSet<string> Builtins, HashSet<string> StringLiterals) CollectLoweringNeeds(
         CompilationUnitSyntax compilationUnit,
-        bool includeTests)
+        bool includeTests,
+        HashSet<string> reachableFunctions)
     {
         var builtins = new HashSet<string>(StringComparer.Ordinal);
         var stringLiterals = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
+            if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
             CollectFromBlock(func.Body, builtins, stringLiterals);
         }
 
@@ -745,12 +852,18 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     private static bool IsCraneliftBuiltin(string name) =>
         name is "print_int" or "print_char" or "print_string" or "read_int" or "read_char"
+            or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
             or "time" or "get_time_ms" or "sleep_ms"
             or "sin" or "cos" or "sin_fast" or "cos_fast"
             or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line"
             or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_poll_reload" or "gfx_debug_bake_hash"
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
             or "load_font" or "draw_text" or "measure_text" or "set_postfx"
+            or "list_directory" or "dir_list_entry_is_dir" or "dir_list_entry_copy_name"
+            or "char_is_digit" or "char_is_alpha" or "char_is_alnum" or "char_is_space"
+            or "char_is_upper" or "char_is_lower" or "char_is_hex" or "char_is_print"
+            or "char_to_upper" or "char_to_lower" or "char_to_digit" or "char_from_digit"
+            or "char_to_hex" or "char_from_hex"
             or "str_len" or "str_is_empty" or "str_get" or "str_set" or "str_eq" or "str_cmp"
             or "str_copy" or "str_append" or "str_append_char" or "str_clear"
             or "str_contains" or "str_find" or "str_find_char" or "str_find_last_char"

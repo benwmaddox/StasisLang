@@ -79,13 +79,31 @@ public sealed class CraneliftModuleBuilder : IDisposable
         var globalName = $"str_{_stringLiteralCounter++}";
         _stringLiterals[value] = globalName;
 
-        // For now, store as i64 (pointer type)
-        // TODO: Actually emit string data bytes
-        _globalTypes[globalName] = CraneliftTypeMapper.ClifType.I64;
-        _globals.AppendLine($"global {globalName}: i64 ; \"{EscapeString(value)}\"");
+        var bytes = Encoding.UTF8.GetBytes(value);
+        var byteLength = bytes.Length;
+        var payloadBytes = new List<byte>(byteLength + 9);
+        WriteInt32LE(payloadBytes, byteLength);
+        WriteInt32LE(payloadBytes, byteLength); // TODO: track codepoints separately.
+        payloadBytes.AddRange(bytes);
+        payloadBytes.Add(0);
+
+        _globalTypes[globalName] = CraneliftTypeMapper.ClifType.I8;
+        var hex = FormatBytes(payloadBytes);
+        _globals.AppendLine($"global {globalName}: i8[{payloadBytes.Count}] ; bytes: {hex}");
 
         return globalName;
     }
+
+    private static void WriteInt32LE(List<byte> bytes, int value)
+    {
+        bytes.Add((byte)(value & 0xFF));
+        bytes.Add((byte)((value >> 8) & 0xFF));
+        bytes.Add((byte)((value >> 16) & 0xFF));
+        bytes.Add((byte)((value >> 24) & 0xFF));
+    }
+
+    private static string FormatBytes(IEnumerable<byte> bytes) =>
+        string.Join(" ", bytes.Select(b => b.ToString("X2")));
 
     private static string EscapeString(string s)
     {

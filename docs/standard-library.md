@@ -95,7 +95,7 @@ ascii_from_hex(d: i32): u8       // 0->'0', 10->'a', else '?'
 
 ## Module: `str_` (String Operations)
 
-All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; ASCII inputs widen to UTF-8 when passed here.
+All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; there is no implicit widening from `ascii[N]` to `utf8[N]`, so use an explicit conversion helper when needed.
 All operations that accept byte indices validate UTF-8 codepoint boundaries before mutating; invalid ranges are treated as coding errors and trigger a fatal exit rather than continuing with partial writes.
 
 ### Length
@@ -207,6 +207,12 @@ str_to_f32(s: utf8[]): f32                                   // Parse float (0.0
 ```stasis
 str_is_valid_utf8(s: utf8[]): bool              // Check if string is valid UTF-8
 str_sanitize_utf8(s: utf8[]): i32               // Replace invalid sequences with U+FFFD and fix headers
+```
+
+### Conversion (Explicit Only)
+
+```stasis
+to_utf8(dst: utf8[], src: ascii[]): i32         // Copy ASCII bytes into UTF-8 buffer, return byte length
 ```
 
 ---
@@ -368,6 +374,8 @@ gfx_should_quit(): bool
 - [ ] `ascii_*` module (all functions)
 - [ ] `str_*` module (core: len, copy, append, compare, find)
 - [ ] `sys_exit`, `sys_abort`
+
+Note: The CLI currently prepends `src/stdlib/stdlib.stasis` to user source; a future update should load stdlib as a separate file to preserve diagnostic locations.
 
 ### Phase 2: UTF-8 Support
 

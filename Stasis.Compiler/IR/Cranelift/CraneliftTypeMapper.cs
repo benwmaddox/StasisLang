@@ -63,6 +63,8 @@ public sealed class CraneliftTypeMapper
             "f32" => ClifType.F32,
             "f64" => ClifType.F64,
             "string" => ClifType.R64, // String is a pointer
+            "utf8" => ClifType.R64,
+            "ascii" => ClifType.R64,
             "void" => ClifType.Void,
             _ => ClifType.I32
         };
