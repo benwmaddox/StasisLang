@@ -403,7 +403,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             if (mode == "build" || mode == "release")
             {
                 var outPath = outputPath ?? BuildDefaultOutputPath(path);
-                var exitCode = BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                var entryBase = includeTests ? "run_tests" : "main";
+                var entryName = $"{moduleName}__{entryBase}";
+                var exitCode = BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath, entryName);
                 if (logPhaseTiming)
                 {
                     linkMs = phaseStopwatch.ElapsedMilliseconds;
@@ -411,7 +413,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return exitCode;
             }
 
-            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName);
             if (logPhaseTiming)
             {
                 linkMs = phaseStopwatch.ElapsedMilliseconds;
@@ -477,7 +479,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     }
 }
 
-static int ExecuteObject(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int ExecuteObject(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName)
 {
     if (!TryFindTool("clang", out var clang))
     {
@@ -488,7 +490,9 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.exe");
     try
     {
-        var args = BuildClangArgsForObject(objPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
+        var entryBase = mode == "test" ? "run_tests" : "main";
+        var entryName = $"{moduleName}__{entryBase}";
+        var args = BuildClangArgsForObject(objPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName);
         var exit = RunProcess(clang, args);
         if (exit != 0)
         {
@@ -528,7 +532,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
-static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, out long linkMs, out long runMs)
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName, out long linkMs, out long runMs)
 {
     linkMs = 0;
     runMs = 0;
@@ -547,7 +551,9 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
     try
     {
-        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, isDll: true);
+        var entryBase = mode == "test" ? "run_tests" : "main";
+        var entryName = $"{moduleName}__{entryBase}";
+        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true);
         var linkStopwatch = Stopwatch.StartNew();
         var exit = RunProcess(clang, args);
         linkMs = linkStopwatch.ElapsedMilliseconds;
@@ -562,7 +568,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
             CopyGraphicsRuntimeDependencies(dllDir, graphicsLibPath);
         }
 
-        var entry = mode == "test" ? "run_tests" : "main";
+        var entry = entryName;
         if (UseCraneliftRunnerServer())
         {
             var runner = GetCraneliftRunnerServer(runnerPath);
@@ -598,7 +604,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, out linkMs, out runMs);
     }
     finally
     {
@@ -624,7 +630,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, out linkMs, out runMs);
     }
     finally
     {
@@ -635,7 +641,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
     }
 }
 
-static int BuildExecutableFromObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
+static int BuildExecutableFromObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, string? entryName = null)
 {
     if (!TryFindTool("clang", out var clang))
     {
@@ -649,7 +655,7 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
         Directory.CreateDirectory(outDir);
     }
 
-    var args = BuildClangArgsForObject(objPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    var args = BuildClangArgsForObject(objPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName);
     var exit = RunProcess(clang, args);
     if (exit != 0)
     {
@@ -669,7 +675,7 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
     return 0;
 }
 
-static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, bool isDll = false)
+static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, string? entryName = null, bool isDll = false)
 {
     // Link .obj into a normal executable (use CRT defaults).
     var args = new List<string> { $"\"{objPath}\"" };
@@ -746,12 +752,13 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
 
     if (isDll)
     {
-        var exportName = isTest ? "run_tests" : "main";
+        var exportName = entryName ?? (isTest ? "run_tests" : "main");
         args.Add($"-Wl,/EXPORT:{exportName}");
     }
-    else if (isTest)
+    else if (isTest || entryName is not null)
     {
-        args.Add("-Wl,/entry:run_tests");
+        var entry = entryName ?? "run_tests";
+        args.Add($"-Wl,/entry:{entry}");
     }
 
     if (!isDll)
@@ -1797,7 +1804,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
+                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, moduleName);
                     }
                 }
                 finally

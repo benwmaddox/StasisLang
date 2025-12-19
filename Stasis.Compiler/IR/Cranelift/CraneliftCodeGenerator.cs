@@ -69,7 +69,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, _moduleName);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -449,7 +449,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         LayoutPlan layout,
         bool includeTests,
         bool emitTestHarness,
-        HashSet<string> reachableFunctions)
+        HashSet<string> reachableFunctions,
+        string moduleName)
     {
         var typeMapper = builder.TypeMapper;
         var structs = compilationUnit.Declarations
@@ -459,7 +460,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<EnumDeclarationSyntax>()
             .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
         var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, layout, consts, diagnostics);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -481,7 +482,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Generate function body
             var body = functionBuilder.BuildFunctionBody(func, symbol);
-            builder.DefineFunctionWithBody(func.Name.Text, returnType, paramTypes, body);
+            var mangledName = MangleFunctionName(moduleName, func.Name.Text);
+            builder.DefineFunctionWithBody(mangledName, returnType, paramTypes, body);
         }
 
         // Emit test functions if requested
@@ -490,13 +492,14 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
             {
                 var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
+                var mangledTestName = MangleFunctionName(moduleName, testFuncName);
                 var body = functionBuilder.BuildTestBody(test);
-                builder.DefineFunctionWithBody(testFuncName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body);
+                builder.DefineFunctionWithBody(mangledTestName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body);
             }
 
             if (emitTestHarness)
             {
-                EmitTestHarness(compilationUnit, builder, diagnostics);
+                EmitTestHarness(compilationUnit, builder, diagnostics, moduleName);
             }
         }
     }
@@ -517,7 +520,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     private static void EmitTestHarness(
         CompilationUnitSyntax compilationUnit,
         CraneliftModuleBuilder builder,
-        List<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics,
+        string moduleName)
     {
         var tests = compilationUnit.Declarations
             .OfType<TestDeclarationSyntax>()
@@ -531,7 +535,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         {
             body.AppendLine("    v0 = iconst.i32 0");
             body.AppendLine("    return v0");
-            builder.DefineFunctionWithBody("run_tests", CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body.ToString());
+            var harnessName = MangleFunctionName(moduleName, "run_tests");
+            builder.DefineFunctionWithBody(harnessName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body.ToString());
             return;
         }
 
@@ -552,9 +557,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             var testName = testDecl.Name.Text;
             var funcName = $"test_{SanitizeTestName(testName)}";
+            var mangledFuncName = MangleFunctionName(moduleName, funcName);
 
             var result = NewValue(ref valueCounter);
-            body.AppendLine($"    {result} = call %{funcName}()");
+            body.AppendLine($"    {result} = call %{mangledFuncName}()");
 
             var zero = NewValue(ref valueCounter);
             body.AppendLine($"    {zero} = iconst.i32 0");
@@ -604,10 +610,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         body.AppendLine($"    return {failures}");
 
-        builder.DefineFunctionWithBody("run_tests", CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body.ToString());
+        var harnessFunction = MangleFunctionName(moduleName, "run_tests");
+        builder.DefineFunctionWithBody(harnessFunction, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body.ToString());
     }
 
     private static string NewValue(ref int counter) => $"v{counter++}";
+
+    private static string MangleFunctionName(string moduleName, string name) => $"{moduleName}__{name}";
 
     private static void EmitStructInstanceGlobals(
         string globalName,

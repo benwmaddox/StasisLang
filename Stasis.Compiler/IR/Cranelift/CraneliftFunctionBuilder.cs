@@ -19,6 +19,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly Layout.LayoutPlan _layoutPlan;
     private readonly IReadOnlyDictionary<string, ConstValue> _consts;
+    private readonly string _moduleName;
     private readonly Dictionary<string, LocalSlot> _locals = new();
     private readonly Dictionary<string, TypeSymbol> _localTypes = new();
     private int _valueCounter;
@@ -34,7 +35,8 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, string> stringLiterals,
         Layout.LayoutPlan layoutPlan,
         IReadOnlyDictionary<string, ConstValue> consts,
-        List<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics,
+        string moduleName)
     {
         _typeMapper = typeMapper;
         _symbols = symbols;
@@ -45,6 +47,7 @@ public sealed class CraneliftFunctionBuilder
         _layoutPlan = layoutPlan;
         _consts = consts;
         _diagnostics = diagnostics;
+        _moduleName = moduleName;
     }
 
     /// <summary>
@@ -527,16 +530,17 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
+        var callName = IsBuiltinFunction(funcName) ? funcName : MangleFunctionName(funcName);
         var argList = string.Join(", ", args);
         if (IsVoidFunction(funcName))
         {
-            _instructions.AppendLine($"    call %{funcName}({argList})");
+            _instructions.AppendLine($"    call %{callName}({argList})");
             return ZeroI32();
         }
 
         // Then create result value
         var result = NewValue();
-        _instructions.AppendLine($"    {result} = call %{funcName}({argList})");
+        _instructions.AppendLine($"    {result} = call %{callName}({argList})");
 
         return result;
     }
@@ -619,6 +623,8 @@ public sealed class CraneliftFunctionBuilder
             _ => false
         };
     }
+
+    private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 
     private string LowerBuiltinCall(string funcName, IReadOnlyList<ExpressionSyntax> arguments)
     {

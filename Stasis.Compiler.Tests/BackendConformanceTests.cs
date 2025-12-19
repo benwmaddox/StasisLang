@@ -510,7 +510,7 @@ function add(a: i32, b: i32): i32 {
 
         // Cranelift IR contains specific markers
         Assert.Contains("function", craneliftResult.Ir);
-        Assert.Contains("%add", craneliftResult.Ir);
+        Assert.Contains("%test_module__add", craneliftResult.Ir);
     }
 
     private static CodeGenerationResult CompileWithBackend(string source, BackendType backend, bool includeTests = false)

@@ -293,7 +293,7 @@ public class CraneliftBackendConfirmationTests
             }
             """, includeTests: true);
 
-        Assert.Contains("function %run_tests()", ir);
+        Assert.Contains("function %cranelift_confirm__run_tests()", ir);
         Assert.Contains("call %printf3", ir);
         Assert.Contains("call %printf", ir);
         Assert.DoesNotContain("TODO:", ir);
