@@ -227,7 +227,9 @@ public class CraneliftBackendConfirmationTests
             }
             """);
 
-        Assert.Contains("call %strlen", ir);
+        Assert.Contains("iconst.i64 -8", ir);
+        Assert.Contains("load.i32", ir);
+        Assert.DoesNotContain("call %strlen", ir);
         Assert.DoesNotContain("TODO:", ir);
     }
 
@@ -294,6 +296,64 @@ public class CraneliftBackendConfirmationTests
         Assert.Contains("function %run_tests()", ir);
         Assert.Contains("call %printf3", ir);
         Assert.Contains("call %printf", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void CompoundAssignment_LowersToBinaryOp()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                let x: i32 = 1;
+                x += 2;
+                return x;
+            }
+            """);
+
+        Assert.Contains("iadd", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StructArrayLength_UsesConstant()
+    {
+        var ir = CompileCraneliftIr("""
+            struct Foo { values: i32[4]; }
+            global foo: Foo;
+            function main(): i32 {
+                return foo.values.length;
+            }
+            """);
+
+        Assert.Contains("iconst.i32 4", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void ArrayParameterAccess_LoadsFromPointer()
+    {
+        var ir = CompileCraneliftIr("""
+            function sum(buf: i32[4]): i32 {
+                return buf[1];
+            }
+            """);
+
+        Assert.Contains("load.i32", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void StringLiteral_EmitsUtf8HeaderData()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                print_string("hi");
+                return 0;
+            }
+            """);
+
+        Assert.Contains("global str_", ir);
+        Assert.Contains("bytes:", ir);
         Assert.DoesNotContain("TODO:", ir);
     }
 

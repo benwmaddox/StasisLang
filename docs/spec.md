@@ -109,7 +109,9 @@ Type[IntegerLiteral]
 ```
 ascii[N]   // fixed-byte ASCII strings (single-byte code units)
 utf8[N]    // UTF-8 strings with tracked byte and codepoint lengths
+string     // alias for utf8 (default string storage)
 string[N]  // alias for utf8[N] (backward compatibility)
+ascii[N]   // ASCII-only string buffers with a single length header
 ```
 
 **ascii[N] layout and invariants**
@@ -121,11 +123,13 @@ string[N]  // alias for utf8[N] (backward compatibility)
 - Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
 - Invariant: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints.
 - `data[byte_length]` is set to `0` as a sentinel; sentinel is not counted in `N`.
+- Current implementation: `char_length` mirrors `byte_length` until full UTF-8 codepoint tracking lands.
 
 ### Built-in I/O helpers
 
-- `print_string(utf8[N])` prints a UTF-8 string literal; the compiler lowers it to global static storage with headers and a null sentinel, and the runtime maps the payload to an LLVM `i8*`.
-- ASCII literals may be typed as `ascii[N]` and widen to `utf8[N]` when passed to UTF-8 APIs.
+- `print_string(utf8[N])` prints a UTF-8 buffer; the compiler lowers string literals to static storage with UTF-8 headers and a null sentinel, and the runtime passes the payload pointer to the host I/O layer.
+- `string` and `string[N]` are `utf8` aliases, so any string passed to built-ins uses the UTF-8 header layout by default.
+- `ascii[N]` and `utf8[N]` are distinct; there is no implicit widening between them. Use explicit conversion helpers (for example, a stdlib `to_utf8` function) when crossing the boundary.
 - Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -198,7 +199,8 @@ if (runAllInDirectory && mode == "test")
         Environment.Exit(1);
     }
 
-    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner);
+    var allowReachabilityFallback = mode != "release";
+    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback);
     Environment.Exit(overallExit);
 }
 
@@ -217,7 +219,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     long lowerMs = 0;
     long irWriteMs = 0;
     long aotMs = 0;
-    long linkRunMs = 0;
+    long aotSpawnMs = 0;
+    long linkMs = 0;
+    long runMs = 0;
     long llvmWriteMs = 0;
     long llvmExecMs = 0;
     var tempLl = string.Empty;
@@ -282,7 +286,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 ModuleName: moduleName,
                 IncludeTests: includeTests,
                 EmitTestHarness: includeTests,
-                HeadlessGraphics: !enableGraphics);
+                HeadlessGraphics: !enableGraphics,
+                AllowReachabilityFallback: mode != "release");
 
             using var generator = CodeGeneratorFactory.Create(backend, moduleName);
             var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
@@ -344,30 +349,49 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return 1;
             }
 
-            tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
-            File.WriteAllText(tempClif, ir);
-            if (logPhaseTiming)
+            var useAotServer = UseCraneliftAotServer();
+            var useInMemoryClif = useAotServer && useCraneliftRunner && mode != "build" && mode != "release";
+            if (!useInMemoryClif)
             {
-                irWriteMs = phaseStopwatch.ElapsedMilliseconds;
+                tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+                File.WriteAllText(tempClif, ir);
+                if (logPhaseTiming)
+                {
+                    irWriteMs = phaseStopwatch.ElapsedMilliseconds;
+                    phaseStopwatch.Restart();
+                }
+            }
+            else if (logPhaseTiming)
+            {
+                irWriteMs = 0;
                 phaseStopwatch.Restart();
             }
 
             if (useCraneliftRunner && mode != "build" && mode != "release")
             {
-                var runExit = ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool);
+                long? runAotSpawn;
+                long runAotCompile;
+                long runLink;
+                long runRun;
+                var runExit = useInMemoryClif
+                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, out runAotSpawn, out runAotCompile, out runLink, out runRun)
+                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, out runAotSpawn, out runAotCompile, out runLink, out runRun);
                 if (logPhaseTiming)
                 {
-                    aotMs = phaseStopwatch.ElapsedMilliseconds;
-                    phaseStopwatch.Restart();
+                    aotSpawnMs = runAotSpawn ?? 0;
+                    aotMs = runAotCompile;
+                    linkMs = runLink;
+                    runMs = runRun;
                 }
                 return runExit;
             }
 
             tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
-            var aotExit = RunProcess(aotTool, $"--input \"{tempClif}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+            var aotExit = RunCraneliftAot(aotTool, tempClif, tempObj, moduleName, optLevel, out var aotSpawnFallback, out var aotCompileFallback);
             if (logPhaseTiming)
             {
-                aotMs = phaseStopwatch.ElapsedMilliseconds;
+                aotSpawnMs = aotSpawnFallback ?? 0;
+                aotMs = aotCompileFallback;
                 phaseStopwatch.Restart();
             }
             if (aotExit != 0)
@@ -381,7 +405,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 var exitCode = BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
                 if (logPhaseTiming)
                 {
-                    linkRunMs = phaseStopwatch.ElapsedMilliseconds;
+                    linkMs = phaseStopwatch.ElapsedMilliseconds;
                 }
                 return exitCode;
             }
@@ -389,7 +413,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
             if (logPhaseTiming)
             {
-                linkRunMs = phaseStopwatch.ElapsedMilliseconds;
+                linkMs = phaseStopwatch.ElapsedMilliseconds;
             }
             return execExit;
         }
@@ -441,7 +465,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         {
             if (backend == BackendType.Cranelift)
             {
-                Console.WriteLine($"Phase time: read={readMs}ms parse={parseMs}ms sema={semaMs}ms layout={layoutMs}ms lower={lowerMs}ms clif_write={irWriteMs}ms aot={aotMs}ms link_run={linkRunMs}ms");
+                Console.WriteLine($"Phase time: read={readMs}ms parse={parseMs}ms sema={semaMs}ms layout={layoutMs}ms lower={lowerMs}ms clif_write={irWriteMs}ms aot_spawn={aotSpawnMs}ms aot_compile={aotMs}ms link={linkMs}ms run={runMs}ms");
             }
             else
             {
@@ -503,8 +527,10 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
-static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, out long linkMs, out long runMs)
 {
+    linkMs = 0;
+    runMs = 0;
     if (!TryFindTool("clang", out var clang))
     {
         Console.Error.WriteLine("error: run requires clang in PATH.");
@@ -521,7 +547,9 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     try
     {
         var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, isDll: true);
+        var linkStopwatch = Stopwatch.StartNew();
         var exit = RunProcess(clang, args);
+        linkMs = linkStopwatch.ElapsedMilliseconds;
         if (exit != 0)
         {
             return exit;
@@ -534,7 +562,16 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         }
 
         var entry = mode == "test" ? "run_tests" : "main";
-        return RunProcess(runnerPath, $"\"{dllPath}\" {entry}");
+        if (UseCraneliftRunnerServer())
+        {
+            var runner = GetCraneliftRunnerServer(runnerPath);
+            return runner.Run(dllPath, entry, out runMs);
+        }
+
+        var runStopwatch = Stopwatch.StartNew();
+        var runExit = RunProcess(runnerPath, $"\"{dllPath}\" {entry}");
+        runMs = runStopwatch.ElapsedMilliseconds;
+        return runExit;
     }
     finally
     {
@@ -545,18 +582,48 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
+    aotSpawnMs = null;
+    aotCompileMs = 0;
+    linkMs = 0;
+    runMs = 0;
     var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
     try
     {
-        var aotExit = RunProcess(aotTool, $"--input \"{clifPath}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+        var aotExit = RunCraneliftAot(aotTool, clifPath, tempObj, moduleName, optLevel, out aotSpawnMs, out aotCompileMs);
         if (aotExit != 0)
         {
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, out linkMs, out runMs);
+    }
+    finally
+    {
+        if (File.Exists(tempObj))
+        {
+            File.Delete(tempObj);
+        }
+    }
+}
+
+static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+{
+    aotSpawnMs = null;
+    aotCompileMs = 0;
+    linkMs = 0;
+    runMs = 0;
+    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
+    try
+    {
+        var aotExit = RunCraneliftAotFromString(aotTool, clif, tempObj, moduleName, optLevel, out aotSpawnMs, out aotCompileMs);
+        if (aotExit != 0)
+        {
+            return aotExit;
+        }
+
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, out linkMs, out runMs);
     }
     finally
     {
@@ -664,6 +731,10 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
                 args.Add("-ladvapi32");
                 args.Add("-lcfgmgr32");
                 args.Add("-lbcrypt");
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                args.Add("-Wl,/NODEFAULTLIB:libcmt");
             }
         }
         else
@@ -1117,8 +1188,8 @@ static string? FindGraphicsLibrary(bool preferShared = false)
 
     // Prefer workspace runtime outputs before falling back to cwd root
     var cwd = Directory.GetCurrentDirectory();
-    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
@@ -1128,41 +1199,94 @@ static string? FindGraphicsLibrary(bool preferShared = false)
     searchPaths.Add(cwd);
 
     string[] candidates;
+    string[]? fallbackCandidates = null;
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
-        candidates = preferShared
-            ? new[]
+        if (preferShared)
+        {
+            candidates = new[]
             {
                 "stasis_graphics.lib",
-                "stasis_graphics.dll",
+                "stasis_graphics.dll"
+            };
+            fallbackCandidates = new[]
+            {
                 "stasis_graphics_static.lib"
-            }
-            : new[]
+            };
+        }
+        else
+        {
+            candidates = new[]
             {
                 "stasis_graphics_static.lib",
                 "stasis_graphics.lib",
                 "stasis_graphics.dll"
             };
+        }
     }
     else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
     {
         // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics.dylib",
-            "libstasis_graphics_static.a"
+            "libstasis_graphics.dylib"
         };
+        if (preferShared)
+        {
+            fallbackCandidates = new[]
+            {
+                "libstasis_graphics_static.a"
+            };
+        }
+        else
+        {
+            candidates = new[]
+            {
+                "libstasis_graphics_static.a",
+                "libstasis_graphics.dylib"
+            };
+        }
     }
     else
     {
         // Prefer dynamic linking on Unix platforms
         candidates = new[]
         {
-            "libstasis_graphics.so",
-            "libstasis_graphics_static.a"
+            "libstasis_graphics.so"
         };
+        if (preferShared)
+        {
+            fallbackCandidates = new[]
+            {
+                "libstasis_graphics_static.a"
+            };
+        }
+        else
+        {
+            candidates = new[]
+            {
+                "libstasis_graphics_static.a",
+                "libstasis_graphics.so"
+            };
+        }
     }
 
+    var found = FindFirstCandidate(searchPaths, candidates);
+    if (found != null)
+    {
+        return found;
+    }
+
+    if (fallbackCandidates == null)
+    {
+        return null;
+    }
+
+    return FindFirstCandidate(searchPaths, fallbackCandidates);
+}
+
+static string? FindFirstCandidate(IEnumerable<string> searchPaths, IEnumerable<string> candidates)
+{
     foreach (var dir in searchPaths)
     {
         foreach (var name in candidates)
@@ -1170,7 +1294,6 @@ static string? FindGraphicsLibrary(bool preferShared = false)
             var candidate = Path.Combine(dir, name);
             if (File.Exists(candidate))
             {
-                // On Windows, if we found a .dll, return the corresponding .lib for linking
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
                     Path.GetExtension(candidate).Equals(".dll", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1179,7 +1302,11 @@ static string? FindGraphicsLibrary(bool preferShared = false)
                     {
                         return importLib;
                     }
+
+                    // Skip DLLs without an import lib when linking.
+                    continue;
                 }
+
                 return candidate;
             }
         }
@@ -1231,6 +1358,11 @@ static bool TryFindTool(string name, out string path)
 
 static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null)
 {
+    if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
+    {
+        Console.WriteLine($"{fileName} {arguments}");
+    }
+
     var psi = new ProcessStartInfo
     {
         FileName = fileName,
@@ -1242,6 +1374,126 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
     using var proc = Process.Start(psi)!;
     proc.WaitForExit();
     return proc.ExitCode;
+}
+
+
+static bool UseCraneliftAotServer() =>
+    Environment.GetEnvironmentVariable("STASIS_CRANELIFT_AOT_SERVER") == "1";
+
+static bool UseCraneliftRunnerServer() =>
+    Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER_SERVER") == "1";
+
+static CraneliftAotServer GetCraneliftAotServer(string aotTool, out long? spawnMs)
+{
+    lock (CraneliftAotState.Lock)
+    {
+        if (CraneliftAotState.Instance == null || !CraneliftAotState.Instance.IsAlive)
+        {
+            CraneliftAotState.Instance?.Dispose();
+            CraneliftAotState.Instance = CraneliftAotServer.Start(aotTool);
+            spawnMs = CraneliftAotState.Instance.SpawnMs;
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                CraneliftAotState.Instance?.Dispose();
+            };
+        }
+        else
+        {
+            spawnMs = null;
+        }
+
+        return CraneliftAotState.Instance;
+    }
+}
+
+static CraneliftRunnerServer GetCraneliftRunnerServer(string runnerPath)
+{
+    lock (CraneliftRunnerState.Lock)
+    {
+        if (CraneliftRunnerState.Instance == null || !CraneliftRunnerState.Instance.IsAlive)
+        {
+            CraneliftRunnerState.Instance?.Dispose();
+            CraneliftRunnerState.Instance = CraneliftRunnerServer.Start(runnerPath);
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                CraneliftRunnerState.Instance?.Dispose();
+            };
+        }
+
+        return CraneliftRunnerState.Instance;
+    }
+}
+
+static string NormalizeCraneliftOptLevel(string? optLevel)
+{
+    if (string.IsNullOrWhiteSpace(optLevel))
+    {
+        return "none";
+    }
+
+    return optLevel.Trim().ToLowerInvariant() switch
+    {
+        "0" => "none",
+        "1" => "speed",
+        "2" => "speed",
+        "3" => "speed",
+        "s" => "speed_and_size",
+        "z" => "speed_and_size",
+        "speed" => "speed",
+        "speed_and_size" => "speed_and_size",
+        _ => "none"
+    };
+}
+
+static int RunCraneliftAot(string aotTool, string clifPath, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
+{
+    const string target = "x86_64-pc-windows-msvc";
+    var normalizedOpt = NormalizeCraneliftOptLevel(optLevel);
+
+    spawnMs = null;
+    compileMs = 0;
+
+    if (UseCraneliftAotServer())
+    {
+        var server = GetCraneliftAotServer(aotTool, out spawnMs);
+        return server.Compile(clifPath, objPath, target, moduleName, normalizedOpt, out compileMs);
+    }
+
+    var sw = Stopwatch.StartNew();
+    var exit = RunProcess(aotTool, $"--input \"{clifPath}\" --output \"{objPath}\" --target {target} --module-name \"{moduleName}\" --opt-level {normalizedOpt}");
+    compileMs = sw.ElapsedMilliseconds;
+    return exit;
+}
+
+static int RunCraneliftAotFromString(string aotTool, string clif, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
+{
+    const string target = "x86_64-pc-windows-msvc";
+    var normalizedOpt = NormalizeCraneliftOptLevel(optLevel);
+
+    spawnMs = null;
+    compileMs = 0;
+
+    if (UseCraneliftAotServer())
+    {
+        var server = GetCraneliftAotServer(aotTool, out spawnMs);
+        return server.CompileFromBytes(Encoding.UTF8.GetBytes(clif), objPath, target, moduleName, normalizedOpt, out compileMs);
+    }
+
+    var tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+    try
+    {
+        File.WriteAllText(tempClif, clif);
+        return RunCraneliftAot(aotTool, tempClif, objPath, moduleName, optLevel, out spawnMs, out compileMs);
+    }
+    finally
+    {
+        if (File.Exists(tempClif))
+        {
+            File.Delete(tempClif);
+        }
+    }
 }
 
 static int BuildExecutable(string llPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
@@ -1303,10 +1555,10 @@ static void PrintUsage()
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock = true, int lowerDegree = 1) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, useLowerLock, lowerDegree).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, int lowerDegree)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -1339,7 +1591,8 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
-            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, enableGraphics, backend, useLowerLock);
+            var effectiveGraphics = enableGraphics || item.UsesGraphics;
+            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, effectiveGraphics, backend, useLowerLock, allowReachabilityFallback);
             await resultChannel.Writer.WriteAsync(result);
         }
     })).ToArray();
@@ -1349,7 +1602,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var result in resultChannel.Reader.ReadAllAsync())
         {
-            exitCode = Math.Max(exitCode, ConsumeCompileResult(result, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, useCraneliftRunner));
+            exitCode = Math.Max(exitCode, ConsumeCompileResult(result, emitIrOnly, optLevel, enableLto, graphicsLibPath, moduleName, useCraneliftRunner));
         }
     });
 
@@ -1368,25 +1621,27 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType b
     try
     {
         var source = File.ReadAllText(path);
+        source = PrependStdLib(source);
+        var usesGraphics = DetectsGraphicsUsage(source);
         var parse = Parser.Parse(source);
         diagnostics.AddRange(parse.Diagnostics);
         var hasTests = parse.CompilationUnit.Declarations.OfType<TestDeclarationSyntax>().Any();
 
         if (parse.Diagnostics.Count > 0 || (!hasTests && !emitIrOnly))
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
         }
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         stopwatch.Stop();
-        return new PrepareResult(new PreparedForLower(path, source, parse.CompilationUnit, sema, layout, hasTests, stopwatch.ElapsedMilliseconds), null);
+        return new PrepareResult(new PreparedForLower(path, source, parse.CompilationUnit, sema, layout, hasTests, usesGraphics, stopwatch.ElapsedMilliseconds), null);
     }
     finally
     {
@@ -1394,7 +1649,24 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType b
     }
 }
 
-static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock)
+static string PrependStdLib(string source)
+{
+    var stdlibPath = Path.Combine(Directory.GetCurrentDirectory(), "src", "stdlib", "stdlib.stasis");
+    if (!File.Exists(stdlibPath))
+    {
+        return source;
+    }
+
+    var stdlib = File.ReadAllText(stdlibPath);
+    if (string.IsNullOrWhiteSpace(stdlib))
+    {
+        return source;
+    }
+
+    return $"{stdlib}{Environment.NewLine}{source}";
+}
+
+static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock, bool allowReachabilityFallback)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
@@ -1409,7 +1681,8 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
                 ModuleName: moduleName,
                 IncludeTests: includeTests,
                 EmitTestHarness: includeTests,
-                HeadlessGraphics: !enableGraphics);
+                HeadlessGraphics: !enableGraphics,
+                AllowReachabilityFallback: allowReachabilityFallback);
 
             using var generator = CodeGeneratorFactory.Create(backend, moduleName);
             var result = generator.Generate(prep.CompilationUnit, prep.Sema, prep.Layout, options);
@@ -1418,13 +1691,13 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 
             if (emitIrOnly || result.Diagnostics.Count > 0)
             {
-                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
             }
 
             tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
             File.WriteAllText(tempArtifact, result.Ir);
 
-            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
         }
         else
         {
@@ -1449,13 +1722,13 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 
             if (emitIrOnly || lower.Diagnostics.Count > 0)
             {
-                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
             }
 
             tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
             File.WriteAllText(tempArtifact, lower.Ir);
 
-            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
         }
     }
     finally
@@ -1464,7 +1737,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
     }
 }
 
-static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useCraneliftRunner)
+static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, string moduleName, bool useCraneliftRunner)
 {
     var testStopwatch = Stopwatch.StartNew();
 
@@ -1509,7 +1782,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
         {
             if (useCraneliftRunner)
             {
-                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool);
+                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, out _, out _, out _, out _);
             }
             else
             {
@@ -1523,7 +1796,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
                     }
                 }
                 finally
@@ -1538,7 +1811,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     }
     else
     {
-        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
+        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
     }
     testStopwatch.Stop();
     var total = result.CompileMilliseconds + testStopwatch.ElapsedMilliseconds;
@@ -1617,10 +1890,251 @@ static class LlvmLock
     public static readonly object Lower = new();
 }
 
+static class CraneliftAotState
+{
+    public static readonly object Lock = new();
+    public static CraneliftAotServer? Instance;
+}
+
+sealed class CraneliftAotServer : IDisposable
+{
+    private readonly Process process;
+    private readonly Stream input;
+    private readonly StreamReader output;
+    private readonly object gate = new();
+
+    public long SpawnMs { get; }
+    public bool IsAlive => !process.HasExited;
+
+    private CraneliftAotServer(Process process, Stream input, StreamReader output, long spawnMs)
+    {
+        this.process = process;
+        this.input = input;
+        this.output = output;
+        SpawnMs = spawnMs;
+    }
+
+    public static CraneliftAotServer Start(string aotTool)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = aotTool,
+            Arguments = "--server",
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        var sw = Stopwatch.StartNew();
+        var process = Process.Start(psi)!;
+        var output = process.StandardOutput;
+        var ready = output.ReadLine();
+        var spawnMs = sw.ElapsedMilliseconds;
+        if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("stasis-cranelift-aot server failed to start.");
+        }
+
+        return new CraneliftAotServer(process, process.StandardInput.BaseStream, output, spawnMs);
+    }
+
+    public int Compile(string clifPath, string outputPath, string target, string moduleName, string optLevel, out long compileMs)
+    {
+        var clifBytes = File.ReadAllBytes(clifPath);
+        return CompileFromBytes(clifBytes, outputPath, target, moduleName, optLevel, out compileMs);
+    }
+
+    public int CompileFromBytes(byte[] clifBytes, string outputPath, string target, string moduleName, string optLevel, out long compileMs)
+    {
+        var outputBytes = Encoding.UTF8.GetBytes(outputPath);
+        var targetBytes = Encoding.UTF8.GetBytes(target);
+        var moduleBytes = Encoding.UTF8.GetBytes(moduleName);
+        var optBytes = Encoding.UTF8.GetBytes(optLevel);
+
+        lock (gate)
+        {
+            var sw = Stopwatch.StartNew();
+            var header = $"REQ {outputBytes.Length} {targetBytes.Length} {moduleBytes.Length} {optBytes.Length} {clifBytes.Length}\n";
+            var headerBytes = Encoding.UTF8.GetBytes(header);
+            input.Write(headerBytes, 0, headerBytes.Length);
+            input.Write(outputBytes, 0, outputBytes.Length);
+            input.Write(targetBytes, 0, targetBytes.Length);
+            input.Write(moduleBytes, 0, moduleBytes.Length);
+            input.Write(optBytes, 0, optBytes.Length);
+            input.Write(clifBytes, 0, clifBytes.Length);
+            input.Flush();
+
+            var response = output.ReadLine();
+            compileMs = sw.ElapsedMilliseconds;
+            if (response is null)
+            {
+                Console.Error.WriteLine("error: stasis-cranelift-aot server closed unexpectedly.");
+                return 1;
+            }
+
+            if (response.StartsWith("ERR ", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine(response);
+                return 1;
+            }
+
+            return 0;
+        }
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                try
+                {
+                    var quit = Encoding.UTF8.GetBytes("QUIT\n");
+                    input.Write(quit, 0, quit.Length);
+                    input.Flush();
+                }
+                catch
+                {
+                    // Ignore shutdown errors; best effort.
+                }
+
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Ignore disposal errors.
+        }
+    }
+}
+
+static class CraneliftRunnerState
+{
+    public static readonly object Lock = new();
+    public static CraneliftRunnerServer? Instance;
+}
+
+sealed class CraneliftRunnerServer : IDisposable
+{
+    private readonly Process process;
+    private readonly Stream input;
+    private readonly StreamReader control;
+    private readonly object gate = new();
+
+    public bool IsAlive => !process.HasExited;
+
+    private CraneliftRunnerServer(Process process, Stream input, StreamReader control)
+    {
+        this.process = process;
+        this.input = input;
+        this.control = control;
+    }
+
+    public static CraneliftRunnerServer Start(string runnerPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = runnerPath,
+            Arguments = "--server",
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = false
+        };
+
+        var process = Process.Start(psi)!;
+        var control = process.StandardError;
+        var ready = control.ReadLine();
+        if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("stasis_runner server failed to start.");
+        }
+
+        return new CraneliftRunnerServer(process, process.StandardInput.BaseStream, control);
+    }
+
+    public int Run(string dllPath, string entryName, out long runMs)
+    {
+        var dllBytes = Encoding.UTF8.GetBytes(dllPath);
+        var entryBytes = Encoding.UTF8.GetBytes(entryName);
+
+        lock (gate)
+        {
+            var sw = Stopwatch.StartNew();
+            var header = $"RUN {dllBytes.Length} {entryBytes.Length}\n";
+            var headerBytes = Encoding.UTF8.GetBytes(header);
+            input.Write(headerBytes, 0, headerBytes.Length);
+            input.Write(dllBytes, 0, dllBytes.Length);
+            input.Write(entryBytes, 0, entryBytes.Length);
+            input.Flush();
+
+            string? response;
+            do
+            {
+                response = control.ReadLine();
+                if (response == null)
+                {
+                    Console.Error.WriteLine("error: stasis_runner server closed unexpectedly.");
+                    runMs = sw.ElapsedMilliseconds;
+                    return 1;
+                }
+            } while (response.Length == 0);
+
+            runMs = sw.ElapsedMilliseconds;
+            if (response.StartsWith("ERR ", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine(response);
+                return 1;
+            }
+
+            if (response.StartsWith("OK ", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = response.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && int.TryParse(parts[1], out var exitCode))
+                {
+                    return exitCode;
+                }
+            }
+
+            Console.Error.WriteLine("error: invalid runner response.");
+            return 1;
+        }
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                try
+                {
+                    var quit = Encoding.UTF8.GetBytes("QUIT\n");
+                    input.Write(quit, 0, quit.Length);
+                    input.Flush();
+                }
+                catch
+                {
+                    // Ignore shutdown errors; best effort.
+                }
+
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Ignore disposal errors.
+        }
+    }
+}
+
 sealed record CompileResult(
     string FilePath,
     string Source,
     bool HasTests,
+    bool UsesGraphics,
     BackendType Backend,
     string? ArtifactPath,
     string? IrForOutput,
@@ -1635,6 +2149,7 @@ sealed record PreparedForLower(
     SemanticResult Sema,
     LayoutPlan Layout,
     bool HasTests,
+    bool UsesGraphics,
     long PrepMilliseconds);
 
 sealed record PrepareResult(PreparedForLower? Prepared, CompileResult? Result);

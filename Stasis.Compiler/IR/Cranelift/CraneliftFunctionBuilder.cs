@@ -343,7 +343,11 @@ public sealed class CraneliftFunctionBuilder
             var text = UnescapeString(lit.Literal.Text);
             if (_stringLiterals.TryGetValue(text, out var globalName))
             {
-                _instructions.AppendLine($"    {val} = global_value {globalName}");
+                var baseAddr = NewValue();
+                _instructions.AppendLine($"    {baseAddr} = global_value {globalName}");
+                var payload = NewValue();
+                _instructions.AppendLine($"    {payload} = iadd {baseAddr}, {ConstI64(HeaderSizeFor("string"))}");
+                return payload;
             }
             else
             {
@@ -533,6 +537,11 @@ public sealed class CraneliftFunctionBuilder
             "print_int" => true,
             "print_string" => true,
             "print_char" => true,
+            "print_prompt" => true,
+            "print_invalid" => true,
+            "print_clue_error" => true,
+            "print_solved" => true,
+            "print_cell" => true,
             "read_int" => true,
             "read_char" => true,
             "time" => true,
@@ -559,6 +568,23 @@ public sealed class CraneliftFunctionBuilder
             "load_font" => true,
             "draw_text" => true,
             "measure_text" => true,
+            "list_directory" => true,
+            "dir_list_entry_is_dir" => true,
+            "dir_list_entry_copy_name" => true,
+            "char_is_digit" => true,
+            "char_is_alpha" => true,
+            "char_is_alnum" => true,
+            "char_is_space" => true,
+            "char_is_upper" => true,
+            "char_is_lower" => true,
+            "char_is_hex" => true,
+            "char_is_print" => true,
+            "char_to_upper" => true,
+            "char_to_lower" => true,
+            "char_to_digit" => true,
+            "char_from_digit" => true,
+            "char_to_hex" => true,
+            "char_from_hex" => true,
             "str_len" => true,
             "str_is_empty" => true,
             "str_get" => true,
@@ -590,6 +616,16 @@ public sealed class CraneliftFunctionBuilder
                 return LowerPrintChar(arguments);
             case "print_string":
                 return LowerPrintString(arguments);
+            case "print_prompt":
+                return LowerPrintPrompt(arguments);
+            case "print_invalid":
+                return LowerPrintInvalid(arguments);
+            case "print_clue_error":
+                return LowerPrintClueError(arguments);
+            case "print_solved":
+                return LowerPrintSolved(arguments);
+            case "print_cell":
+                return LowerPrintCell(arguments);
             case "read_int":
                 return LowerReadInt(arguments);
             case "read_char":
@@ -642,6 +678,40 @@ public sealed class CraneliftFunctionBuilder
                 return LowerDrawText(arguments);
             case "measure_text":
                 return LowerMeasureText(arguments);
+            case "list_directory":
+                return LowerListDirectory(arguments);
+            case "dir_list_entry_is_dir":
+                return LowerDirListEntryIsDir(arguments);
+            case "dir_list_entry_copy_name":
+                return LowerDirListEntryCopyName(arguments);
+            case "char_is_digit":
+                return LowerCharIsDigit(arguments);
+            case "char_is_alpha":
+                return LowerCharIsAlpha(arguments);
+            case "char_is_alnum":
+                return LowerCharIsAlnum(arguments);
+            case "char_is_space":
+                return LowerCharIsSpace(arguments);
+            case "char_is_upper":
+                return LowerCharIsUpper(arguments);
+            case "char_is_lower":
+                return LowerCharIsLower(arguments);
+            case "char_is_hex":
+                return LowerCharIsHex(arguments);
+            case "char_is_print":
+                return LowerCharIsPrint(arguments);
+            case "char_to_upper":
+                return LowerCharToUpper(arguments);
+            case "char_to_lower":
+                return LowerCharToLower(arguments);
+            case "char_to_digit":
+                return LowerCharToDigit(arguments);
+            case "char_from_digit":
+                return LowerCharFromDigit(arguments);
+            case "char_to_hex":
+                return LowerCharToHex(arguments);
+            case "char_from_hex":
+                return LowerCharFromHex(arguments);
             case "str_len":
                 return LowerStrLen(arguments);
             case "str_is_empty":
@@ -776,6 +846,111 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string LowerPrintPrompt(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("print_prompt expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        return EmitPrintfLiteral("Enter row col val (1-9, 0 clears), or q to quit:\n");
+    }
+
+    private string LowerPrintInvalid(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("print_invalid expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        return EmitPrintfLiteral("\u001b[31mInvalid move.\u001b[0m\n");
+    }
+
+    private string LowerPrintClueError(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("print_clue_error expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        return EmitPrintfLiteral("\u001b[31mCannot change a clue.\u001b[0m\n");
+    }
+
+    private string LowerPrintSolved(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("print_solved expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        return EmitPrintfLiteral("\u001b[32mSolved!\u001b[0m\n");
+    }
+
+    private string LowerPrintCell(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 2)
+        {
+            _diagnostics.Add(new Diagnostic("print_cell expects 2 arguments (value, is_clue).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        var value = LowerExpression(arguments[0]);
+        var isClue = CoerceI32ToB1(LowerExpression(arguments[1]));
+
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
+        var isEmpty = NewValue();
+        _instructions.AppendLine($"    {isEmpty} = icmp eq {value}, {zero}");
+
+        var emptyBlock = NewBlock();
+        var printBlock = NewBlock();
+        var mergeBlock = NewBlock();
+
+        _instructions.AppendLine($"    brif {isEmpty}, {emptyBlock}, {printBlock}");
+
+        _instructions.AppendLine($"{emptyBlock}:");
+        EmitPrintfLiteral(". ");
+        _instructions.AppendLine($"    jump {mergeBlock}");
+
+        _instructions.AppendLine($"{printBlock}:");
+        var cluePrefix = GetOrCreateFormatString("\u001b[36m");
+        var userPrefix = GetOrCreateFormatString("\u001b[32m");
+        var reset = GetOrCreateFormatString("\u001b[0m ");
+        var fmtString = GetOrCreateFormatString("%s");
+        var fmtInt = GetOrCreateFormatString("%d");
+
+        var clueAddr = NewValue();
+        _instructions.AppendLine($"    {clueAddr} = global_value {cluePrefix}");
+        var userAddr = NewValue();
+        _instructions.AppendLine($"    {userAddr} = global_value {userPrefix}");
+        var prefixAddr = NewValue();
+        _instructions.AppendLine($"    {prefixAddr} = select {isClue}, {clueAddr}, {userAddr}");
+
+        var fmtStrAddr = NewValue();
+        _instructions.AppendLine($"    {fmtStrAddr} = global_value {fmtString}");
+        var zero64 = NewValue();
+        _instructions.AppendLine($"    {zero64} = iconst.i64 0");
+        var prefixPrint = NewValue();
+        _instructions.AppendLine($"    {prefixPrint} = call %printf3({fmtStrAddr}, {prefixAddr}, {zero64})");
+
+        var fmtIntAddr = NewValue();
+        _instructions.AppendLine($"    {fmtIntAddr} = global_value {fmtInt}");
+        var value64 = NewValue();
+        _instructions.AppendLine($"    {value64} = sextend.i64 {value}");
+        var valuePrint = NewValue();
+        _instructions.AppendLine($"    {valuePrint} = call %printf3({fmtIntAddr}, {value64}, {zero64})");
+
+        var resetAddr = NewValue();
+        _instructions.AppendLine($"    {resetAddr} = global_value {reset}");
+        var resetPrint = NewValue();
+        _instructions.AppendLine($"    {resetPrint} = call %printf3({fmtStrAddr}, {resetAddr}, {zero64})");
+
+        _instructions.AppendLine($"    jump {mergeBlock}");
+
+        _instructions.AppendLine($"{mergeBlock}:");
+        return ZeroI32();
+    }
+
     private string LowerReadInt(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 0)
@@ -843,6 +1018,158 @@ public sealed class CraneliftFunctionBuilder
         var result = NewValue();
         _instructions.AppendLine($"    {result} = ireduce.i32 {callResult}");
         return result;
+    }
+
+    private string EmitPrintfLiteral(string literal)
+    {
+        var formatGlobalName = GetOrCreateFormatString(literal);
+        var fmtAddr = NewValue();
+        _instructions.AppendLine($"    {fmtAddr} = global_value {formatGlobalName}");
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i64 0");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %printf3({fmtAddr}, {zero}, {zero})");
+        return result;
+    }
+
+    private bool TryGetCharArg(IReadOnlyList<ExpressionSyntax> arguments, string name, out string value)
+    {
+        value = string.Empty;
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic($"{name} expects 1 argument (c: u8).", new SourceSpan(0, 0)));
+            return false;
+        }
+
+        var arg = arguments[0];
+        var raw = LowerExpression(arg);
+        var argType = GetExpressionType(arg);
+        if (argType is PrimitiveTypeSymbol p && p.PrimitiveName == "u8")
+        {
+            var extended = NewValue();
+            _instructions.AppendLine($"    {extended} = uextend.i32 {raw}");
+            value = extended;
+            return true;
+        }
+
+        value = raw;
+        return true;
+    }
+
+    private string LowerCharPredicate(IReadOnlyList<ExpressionSyntax> arguments, string name, char min, char max)
+    {
+        if (!TryGetCharArg(arguments, name, out var c))
+        {
+            return ZeroI32();
+        }
+
+        var result = EmitCharRange(c, min, max);
+        var asI32 = NewValue();
+        _instructions.AppendLine($"    {asI32} = bint.i32 {result}");
+        return asI32;
+    }
+
+    private string EmitCharRange(string value, char min, char max)
+    {
+        var ge = EmitI32Compare(value, "icmp uge", min);
+        var le = EmitI32Compare(value, "icmp ule", max);
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = band {ge}, {le}");
+        return result;
+    }
+
+    private string EmitCharEq(string value, char match)
+    {
+        var eq = EmitI32Compare(value, "icmp eq", match);
+        return eq;
+    }
+
+    private string EmitI32Compare(string value, string op, int constant)
+    {
+        var cmpConst = ConstI32(constant);
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = {op} {value}, {cmpConst}");
+        return result;
+    }
+
+    private string ConstI32(int value)
+    {
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = iconst.i32 {value}");
+        return result;
+    }
+
+    private string ConstI64(int value)
+    {
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = iconst.i64 {value}");
+        return result;
+    }
+
+    private bool TryLowerDirListArgument(ExpressionSyntax expr, out string namesPtr, out string flagsPtr, out string countPtr)
+    {
+        namesPtr = string.Empty;
+        flagsPtr = string.Empty;
+        countPtr = string.Empty;
+
+        if (!TryResolveDirListBase(expr, out var baseName))
+        {
+            return false;
+        }
+
+        if (!_structs.TryGetValue("DirList", out var dirListStruct) || !_structs.TryGetValue("DirEntry", out var dirEntryStruct))
+        {
+            return false;
+        }
+
+        var nameField = dirEntryStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "name", StringComparison.Ordinal));
+        var isDirField = dirEntryStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "is_dir", StringComparison.Ordinal));
+        var countField = dirListStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, "count", StringComparison.Ordinal));
+        if (nameField is null || isDirField is null || countField is null)
+        {
+            return false;
+        }
+
+        var namesGlobal = $"{baseName}_entries_name";
+        var flagsGlobal = $"{baseName}_entries_is_dir";
+        var countGlobal = $"{baseName}_count";
+
+        if (!_globalTypes.ContainsKey(namesGlobal) || !_globalTypes.ContainsKey(flagsGlobal) || !_globalTypes.ContainsKey(countGlobal))
+        {
+            return false;
+        }
+
+        namesPtr = NewValue();
+        _instructions.AppendLine($"    {namesPtr} = global_value {namesGlobal}");
+        flagsPtr = NewValue();
+        _instructions.AppendLine($"    {flagsPtr} = global_value {flagsGlobal}");
+        countPtr = NewValue();
+        _instructions.AppendLine($"    {countPtr} = global_value {countGlobal}");
+        return true;
+    }
+
+    private bool TryResolveDirListBase(ExpressionSyntax expr, out string baseName)
+    {
+        baseName = string.Empty;
+        if (expr is IdentifierExpressionSyntax id &&
+            _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
+            symbol.Type is NamedTypeSymbol named &&
+            string.Equals(named.TypeName, "DirList", StringComparison.Ordinal))
+        {
+            baseName = id.Identifier.Text;
+            return true;
+        }
+
+        if (expr is MemberAccessExpressionSyntax member &&
+            TryResolveFlattenedMember(member, out var flattened, out var memberType) &&
+            memberType is NamedTypeSymbol memberNamed &&
+            string.Equals(memberNamed.TypeName, "DirList", StringComparison.Ordinal))
+        {
+            baseName = flattened;
+            return true;
+        }
+
+        return false;
     }
 
     private string LowerGetTimeMs(IReadOnlyList<ExpressionSyntax> arguments)
@@ -943,6 +1270,294 @@ public sealed class CraneliftFunctionBuilder
     private string LowerMeasureText(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_measure_text", "measure_text expects (font_handle, text).", arguments, 2);
 
+    private string LowerListDirectory(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 2)
+        {
+            _diagnostics.Add(new Diagnostic("list_directory expects (path: string, dir_list: DirList).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("list_directory", "list_directory expects (path: string, dir_list: DirList).");
+        }
+
+        if (!TryLowerDirListArgument(arguments[1], out var namesPtr, out var flagsPtr, out var countPtr))
+        {
+            return EmitInvalidBuiltin("list_directory", "list_directory requires a DirList with entries, is_dir, and count fields.");
+        }
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_list_directory_struct({path}, {namesPtr}, {flagsPtr}, {countPtr})");
+        return result;
+    }
+
+    private string LowerDirListEntryIsDir(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 2)
+        {
+            _diagnostics.Add(new Diagnostic("dir_list_entry_is_dir expects (dir_list: DirList, idx: i32).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        if (!TryLowerDirListArgument(arguments[0], out _, out var flagsPtr, out _))
+        {
+            return EmitInvalidBuiltin("dir_list_entry_is_dir", "dir_list_entry_is_dir requires a DirList with entries, is_dir, and count fields.");
+        }
+
+        var idx = LowerExpression(arguments[1]);
+        var indexI64 = NewValue();
+        _instructions.AppendLine($"    {indexI64} = sextend.i64 {idx}");
+        var elemSize = NewValue();
+        _instructions.AppendLine($"    {elemSize} = iconst.i64 4");
+        var offset = NewValue();
+        _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSize}");
+        var elemPtr = NewValue();
+        _instructions.AppendLine($"    {elemPtr} = iadd {flagsPtr}, {offset}");
+        var flag = NewValue();
+        _instructions.AppendLine($"    {flag} = load.i32 {elemPtr}");
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
+        var isDir = NewValue();
+        _instructions.AppendLine($"    {isDir} = icmp ne {flag}, {zero}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = bint.i32 {isDir}");
+        return result;
+    }
+
+    private string LowerDirListEntryCopyName(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            _diagnostics.Add(new Diagnostic("dir_list_entry_copy_name expects (dir_list: DirList, idx: i32, dst: string).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        if (!TryLowerDirListArgument(arguments[0], out var namesPtr, out _, out _))
+        {
+            return EmitInvalidBuiltin("dir_list_entry_copy_name", "dir_list_entry_copy_name requires a DirList with entries, is_dir, and count fields.");
+        }
+
+        if (!TryGetStringArg(arguments[2], out var dst))
+        {
+            return EmitInvalidBuiltin("dir_list_entry_copy_name", "dir_list_entry_copy_name expects (dir_list: DirList, idx: i32, dst: string).");
+        }
+
+        var idx = LowerExpression(arguments[1]);
+        var headerPtr = EmitUtf8HeaderPointer(dst, HeaderSizeFor("string"));
+        _instructions.AppendLine($"    call %stasis_copy_dir_entry_name({namesPtr}, {idx}, {headerPtr})");
+        return ZeroI32();
+    }
+
+    private string LowerCharIsDigit(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerCharPredicate(arguments, "char_is_digit", '0', '9');
+
+    private string LowerCharIsAlpha(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_is_alpha", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var lower = EmitCharRange(c, 'a', 'z');
+        var upper = EmitCharRange(c, 'A', 'Z');
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = bor {lower}, {upper}");
+        var asI32 = NewValue();
+        _instructions.AppendLine($"    {asI32} = bint.i32 {result}");
+        return asI32;
+    }
+
+    private string LowerCharIsAlnum(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_is_alnum", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var digit = EmitCharRange(c, '0', '9');
+        var lower = EmitCharRange(c, 'a', 'z');
+        var upper = EmitCharRange(c, 'A', 'Z');
+        var alpha = NewValue();
+        _instructions.AppendLine($"    {alpha} = bor {lower}, {upper}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = bor {digit}, {alpha}");
+        var asI32 = NewValue();
+        _instructions.AppendLine($"    {asI32} = bint.i32 {result}");
+        return asI32;
+    }
+
+    private string LowerCharIsSpace(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_is_space", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var isSpace = EmitCharEq(c, ' ');
+        var isTab = EmitCharEq(c, '\t');
+        var isNewline = EmitCharEq(c, '\n');
+        var isCr = EmitCharEq(c, '\r');
+        var r1 = NewValue();
+        _instructions.AppendLine($"    {r1} = bor {isSpace}, {isTab}");
+        var r2 = NewValue();
+        _instructions.AppendLine($"    {r2} = bor {r1}, {isNewline}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = bor {r2}, {isCr}");
+        var asI32 = NewValue();
+        _instructions.AppendLine($"    {asI32} = bint.i32 {result}");
+        return asI32;
+    }
+
+    private string LowerCharIsUpper(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerCharPredicate(arguments, "char_is_upper", 'A', 'Z');
+
+    private string LowerCharIsLower(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerCharPredicate(arguments, "char_is_lower", 'a', 'z');
+
+    private string LowerCharIsHex(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_is_hex", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var digit = EmitCharRange(c, '0', '9');
+        var lower = EmitCharRange(c, 'a', 'f');
+        var upper = EmitCharRange(c, 'A', 'F');
+        var hex = NewValue();
+        _instructions.AppendLine($"    {hex} = bor {lower}, {upper}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = bor {digit}, {hex}");
+        var asI32 = NewValue();
+        _instructions.AppendLine($"    {asI32} = bint.i32 {result}");
+        return asI32;
+    }
+
+    private string LowerCharIsPrint(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerCharPredicate(arguments, "char_is_print", (char)32, (char)126);
+
+    private string LowerCharToUpper(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_to_upper", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var isLower = EmitCharRange(c, 'a', 'z');
+        var upper = NewValue();
+        _instructions.AppendLine($"    {upper} = isub {c}, {ConstI32(32)}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {isLower}, {upper}, {c}");
+        return result;
+    }
+
+    private string LowerCharToLower(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_to_lower", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var isUpper = EmitCharRange(c, 'A', 'Z');
+        var lower = NewValue();
+        _instructions.AppendLine($"    {lower} = iadd {c}, {ConstI32(32)}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {isUpper}, {lower}, {c}");
+        return result;
+    }
+
+    private string LowerCharToDigit(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_to_digit", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var isDigit = EmitCharRange(c, '0', '9');
+        var digit = NewValue();
+        _instructions.AppendLine($"    {digit} = isub {c}, {ConstI32('0')}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {isDigit}, {digit}, {ConstI32(-1)}");
+        return result;
+    }
+
+    private string LowerCharFromDigit(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic("char_from_digit expects 1 argument (d: i32).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        var d = LowerExpression(arguments[0]);
+        var ge0 = EmitI32Compare(d, "icmp sge", 0);
+        var le9 = EmitI32Compare(d, "icmp sle", 9);
+        var valid = NewValue();
+        _instructions.AppendLine($"    {valid} = band {ge0}, {le9}");
+        var ch = NewValue();
+        _instructions.AppendLine($"    {ch} = iadd {d}, {ConstI32('0')}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {valid}, {ch}, {ConstI32('?')}");
+        return result;
+    }
+
+    private string LowerCharToHex(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (!TryGetCharArg(arguments, "char_to_hex", out var c))
+        {
+            return ZeroI32();
+        }
+
+        var isDigit = EmitCharRange(c, '0', '9');
+        var digitVal = NewValue();
+        _instructions.AppendLine($"    {digitVal} = isub {c}, {ConstI32('0')}");
+        var isLower = EmitCharRange(c, 'a', 'f');
+        var lowerVal = NewValue();
+        _instructions.AppendLine($"    {lowerVal} = isub {c}, {ConstI32('a' - 10)}");
+        var isUpper = EmitCharRange(c, 'A', 'F');
+        var upperVal = NewValue();
+        _instructions.AppendLine($"    {upperVal} = isub {c}, {ConstI32('A' - 10)}");
+        var temp = NewValue();
+        _instructions.AppendLine($"    {temp} = select {isLower}, {lowerVal}, {ConstI32(-1)}");
+        var temp2 = NewValue();
+        _instructions.AppendLine($"    {temp2} = select {isUpper}, {upperVal}, {temp}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {isDigit}, {digitVal}, {temp2}");
+        return result;
+    }
+
+    private string LowerCharFromHex(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic("char_from_hex expects 1 argument (d: i32).", new SourceSpan(0, 0)));
+            return ZeroI32();
+        }
+
+        var d = LowerExpression(arguments[0]);
+        var ge0 = EmitI32Compare(d, "icmp sge", 0);
+        var le9 = EmitI32Compare(d, "icmp sle", 9);
+        var isDigit = NewValue();
+        _instructions.AppendLine($"    {isDigit} = band {ge0}, {le9}");
+        var ge10 = EmitI32Compare(d, "icmp sge", 10);
+        var le15 = EmitI32Compare(d, "icmp sle", 15);
+        var isHex = NewValue();
+        _instructions.AppendLine($"    {isHex} = band {ge10}, {le15}");
+        var digitCh = NewValue();
+        _instructions.AppendLine($"    {digitCh} = iadd {d}, {ConstI32('0')}");
+        var d10 = NewValue();
+        _instructions.AppendLine($"    {d10} = isub {d}, {ConstI32(10)}");
+        var hexCh = NewValue();
+        _instructions.AppendLine($"    {hexCh} = iadd {d10}, {ConstI32('a')}");
+        var temp = NewValue();
+        _instructions.AppendLine($"    {temp} = select {isHex}, {hexCh}, {ConstI32('?')}");
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = select {isDigit}, {digitCh}, {temp}");
+        return result;
+    }
+
     private string LowerExternalCallValue(string externalName, string errorMessage, IReadOnlyList<ExpressionSyntax> arguments, int expectedArgs)
     {
         if (arguments.Count != expectedArgs)
@@ -987,11 +1602,8 @@ public sealed class CraneliftFunctionBuilder
             return EmitInvalidBuiltin("str_len", "str_len expects 1 argument (s: u8[]).");
         }
 
-        var len64 = NewValue();
-        _instructions.AppendLine($"    {len64} = call %strlen({ptr})");
-        var result = NewValue();
-        _instructions.AppendLine($"    {result} = ireduce.i32 {len64}");
-        return result;
+        var headerSize = HeaderSizeFor("string");
+        return LoadUtf8ByteLength(ptr, headerSize);
     }
 
     private string LowerStrIsEmpty(IReadOnlyList<ExpressionSyntax> arguments)
@@ -1001,12 +1613,12 @@ public sealed class CraneliftFunctionBuilder
             return EmitInvalidBuiltin("str_is_empty", "str_is_empty expects 1 argument (s: u8[]).");
         }
 
-        var first = NewValue();
-        _instructions.AppendLine($"    {first} = load.i8 {ptr}");
+        var headerSize = HeaderSizeFor("string");
+        var len = LoadUtf8ByteLength(ptr, headerSize);
         var zero = NewValue();
-        _instructions.AppendLine($"    {zero} = iconst.i8 0");
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
         var cmp = NewValue();
-        _instructions.AppendLine($"    {cmp} = icmp eq {first}, {zero}");
+        _instructions.AppendLine($"    {cmp} = icmp eq {len}, {zero}");
         var result = NewValue();
         _instructions.AppendLine($"    {result} = bint.i32 {cmp}");
         return result;
@@ -1041,6 +1653,11 @@ public sealed class CraneliftFunctionBuilder
         var truncated = NewValue();
         _instructions.AppendLine($"    {truncated} = ireduce.i8 {byteVal}");
         _instructions.AppendLine($"    store {truncated}, {addr}");
+        var len64 = NewValue();
+        _instructions.AppendLine($"    {len64} = call %strlen({ptr})");
+        var len = NewValue();
+        _instructions.AppendLine($"    {len} = ireduce.i32 {len64}");
+        StoreUtf8Lengths(ptr, HeaderSizeFor("string"), len);
         var result = NewValue();
         _instructions.AppendLine($"    {result} = iconst.i32 0");
         return result;
@@ -1088,6 +1705,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {len64} = call %strlen({dst})");
         var result = NewValue();
         _instructions.AppendLine($"    {result} = ireduce.i32 {len64}");
+        StoreUtf8Lengths(dst, HeaderSizeFor("string"), result);
         return result;
     }
 
@@ -1103,6 +1721,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {len64} = call %strlen({dst})");
         var result = NewValue();
         _instructions.AppendLine($"    {result} = ireduce.i32 {len64}");
+        StoreUtf8Lengths(dst, HeaderSizeFor("string"), result);
         return result;
     }
 
@@ -1122,14 +1741,16 @@ public sealed class CraneliftFunctionBuilder
         var truncated = NewValue();
         _instructions.AppendLine($"    {truncated} = ireduce.i8 {byteVal}");
         _instructions.AppendLine($"    store {truncated}, {addr}");
+        var one = OneI32();
         var nextIndex = NewValue();
-        _instructions.AppendLine($"    {nextIndex} = iadd {len}, {OneI32()}");
+        _instructions.AppendLine($"    {nextIndex} = iadd {len}, {one}");
         var nextAddr = EmitByteAddress(ptr, nextIndex);
         var zero = NewValue();
         _instructions.AppendLine($"    {zero} = iconst.i8 0");
         _instructions.AppendLine($"    store {zero}, {nextAddr}");
         var result = NewValue();
-        _instructions.AppendLine($"    {result} = iadd {len}, {OneI32()}");
+        _instructions.AppendLine($"    {result} = iadd {len}, {one}");
+        StoreUtf8Lengths(ptr, HeaderSizeFor("string"), result);
         return result;
     }
 
@@ -1143,6 +1764,9 @@ public sealed class CraneliftFunctionBuilder
         var zero = NewValue();
         _instructions.AppendLine($"    {zero} = iconst.i8 0");
         _instructions.AppendLine($"    store {zero}, {ptr}");
+        var len = NewValue();
+        _instructions.AppendLine($"    {len} = iconst.i32 0");
+        StoreUtf8Lengths(ptr, HeaderSizeFor("string"), len);
         var result = NewValue();
         _instructions.AppendLine($"    {result} = iconst.i32 0");
         return result;
@@ -1315,6 +1939,7 @@ public sealed class CraneliftFunctionBuilder
         var zeroByte = NewValue();
         _instructions.AppendLine($"    {zeroByte} = iconst.i8 0");
         _instructions.AppendLine($"    store {zeroByte}, {termAddr}");
+        StoreUtf8Lengths(dst, HeaderSizeFor("string"), byteLen);
 
         return byteLen;
     }
@@ -1361,15 +1986,53 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string EmitUtf8HeaderPointer(string payloadPtr, int headerSize)
+    {
+        var headerPtr = NewValue();
+        _instructions.AppendLine($"    {headerPtr} = iadd {payloadPtr}, {ConstI64(-headerSize)}");
+        return headerPtr;
+    }
+
+    private string LoadUtf8ByteLength(string payloadPtr, int headerSize)
+    {
+        var headerPtr = EmitUtf8HeaderPointer(payloadPtr, headerSize);
+        var len = NewValue();
+        _instructions.AppendLine($"    {len} = load.i32 {headerPtr}");
+        return len;
+    }
+
+    private void StoreUtf8Lengths(string payloadPtr, int headerSize, string byteLen)
+    {
+        var headerPtr = EmitUtf8HeaderPointer(payloadPtr, headerSize);
+        _instructions.AppendLine($"    store {byteLen}, {headerPtr}");
+        var charPtr = EmitByteAddress(headerPtr, ConstI32(4));
+        _instructions.AppendLine($"    store {byteLen}, {charPtr}");
+    }
+
     private bool TryLowerArrayPointer(ExpressionSyntax expr, out string ptr)
     {
         ptr = string.Empty;
         if (expr is IdentifierExpressionSyntax id)
         {
+            if (_locals.TryGetValue(id.Identifier.Text, out var local) &&
+                _localTypes.TryGetValue(id.Identifier.Text, out var localType) &&
+                localType is ArrayTypeSymbol)
+            {
+                ptr = NewValue();
+                _instructions.AppendLine($"    {ptr} = load.{FormatType(local.Type)} {local.Address}");
+                return true;
+            }
+
             if (_symbols.TryGetValue(id.Identifier.Text, out var symbol) && symbol.Type is ArrayTypeSymbol)
             {
                 ptr = NewValue();
                 _instructions.AppendLine($"    {ptr} = global_value {id.Identifier.Text}");
+                if (symbol.Type is ArrayTypeSymbol arrayType && IsStringBuffer(arrayType, out var headerSize))
+                {
+                    var payload = NewValue();
+                    _instructions.AppendLine($"    {payload} = iadd {ptr}, {ConstI64(headerSize)}");
+                    ptr = payload;
+                }
                 return true;
             }
         }
@@ -1379,10 +2042,18 @@ public sealed class CraneliftFunctionBuilder
         {
             ptr = NewValue();
             _instructions.AppendLine($"    {ptr} = global_value {arrayName}");
+            if (_symbols.TryGetValue(arrayName, out var symbol) &&
+                symbol.Type is ArrayTypeSymbol arrayType &&
+                IsStringBuffer(arrayType, out var headerSize))
+            {
+                var payload = NewValue();
+                _instructions.AppendLine($"    {payload} = iadd {ptr}, {ConstI64(headerSize)}");
+                ptr = payload;
+            }
             return true;
         }
 
-        _diagnostics.Add(new Diagnostic("String built-ins require global array arguments.", new SourceSpan(0, 0)));
+        _diagnostics.Add(new Diagnostic("String built-ins require array arguments.", new SourceSpan(0, 0)));
         return false;
     }
 
@@ -1453,6 +2124,15 @@ public sealed class CraneliftFunctionBuilder
     {
         var value = LowerExpression(assign.Right);
         var valueType = GetExpressionType(assign.Right);
+        var isCompound = assign.OperatorToken.Kind != TokenKind.Equal;
+
+        if (isCompound)
+        {
+            var current = LowerExpression(assign.Left);
+            var leftType = GetExpressionType(assign.Left);
+            value = LowerCompoundAssignmentValue(assign.OperatorToken.Kind, current, leftType, value, valueType);
+            valueType = leftType;
+        }
 
         if (assign.Left is IdentifierExpressionSyntax id)
         {
@@ -1506,11 +2186,33 @@ public sealed class CraneliftFunctionBuilder
         {
             // Array length - resolve statically from symbol type
             if (member.Receiver is IdentifierExpressionSyntax id &&
-                _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
+                _localTypes.TryGetValue(id.Identifier.Text, out var localType) &&
+                localType is ArrayTypeSymbol localArrayType)
+            {
+                _instructions.AppendLine($"    {result} = iconst.i32 {localArrayType.Size}");
+                return result;
+            }
+
+            if (member.Receiver is IdentifierExpressionSyntax globalId &&
+                _symbols.TryGetValue(globalId.Identifier.Text, out var symbol) &&
                 symbol.Type is ArrayTypeSymbol arrayType)
             {
                 _instructions.AppendLine($"    {result} = iconst.i32 {arrayType.Size}");
                 return result;
+            }
+
+            if (member.Receiver is MemberAccessExpressionSyntax arrayMember &&
+                TryResolveMemberBase(arrayMember.Receiver, out _, out var baseType) &&
+                baseType is NamedTypeSymbol named &&
+                _structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == arrayMember.Member.Text);
+                if (field?.Type is ArrayTypeSyntax arraySyntax &&
+                    int.TryParse(arraySyntax.SizeToken?.Text, out var size))
+                {
+                    _instructions.AppendLine($"    {result} = iconst.i32 {size}");
+                    return result;
+                }
             }
 
             _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: could not resolve array length");
@@ -1539,6 +2241,20 @@ public sealed class CraneliftFunctionBuilder
         else if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
         {
             return LowerArrayElementFieldAccess(arrayAccess, member.Member.Text);
+        }
+        else if (TryResolveArrayMember(member, out var arrayName))
+        {
+            var addr = NewValue();
+            _instructions.AppendLine($"    {addr} = global_value {arrayName}");
+            if (_symbols.TryGetValue(arrayName, out var symbol) &&
+                symbol.Type is ArrayTypeSymbol arrayType &&
+                IsStringBuffer(arrayType, out var headerSize))
+            {
+                var payload = NewValue();
+                _instructions.AppendLine($"    {payload} = iadd {addr}, {ConstI64(headerSize)}");
+                return payload;
+            }
+            return addr;
         }
         else if (TryResolveFlattenedMember(member, out var flattenedName, out var memberType))
         {
@@ -1576,12 +2292,40 @@ public sealed class CraneliftFunctionBuilder
         var index = LowerExpression(array.Index);
 
         // Check if it's a global, parameter, or local
-        if (_locals.ContainsKey(arrayName))
+        if (_locals.TryGetValue(arrayName, out var local) &&
+            _localTypes.TryGetValue(arrayName, out var localType) &&
+            localType is ArrayTypeSymbol localArrayType)
         {
-            // Local/parameter array - TODO: need local array support
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; TODO: local array access");
-            return err;
+            if (IsStringBuffer(localArrayType, out var localHeaderSize))
+            {
+                var payloadBase = NewValue();
+                _instructions.AppendLine($"    {payloadBase} = load.{FormatType(local.Type)} {local.Address}");
+                var addr = EmitByteAddress(payloadBase, index);
+                var value = NewValue();
+                _instructions.AppendLine($"    {value} = load.i8 {addr}");
+                var localResult = NewValue();
+                _instructions.AppendLine($"    {localResult} = uextend.i32 {value}");
+                return localResult;
+            }
+
+            var localElemType = _typeMapper.Map(localArrayType.ElementType);
+            var localElemSize = GetTypeSize(localElemType);
+
+            var localBaseAddr = NewValue();
+            _instructions.AppendLine($"    {localBaseAddr} = load.{FormatType(local.Type)} {local.Address}");
+
+            var localElemSizeVal = NewValue();
+            _instructions.AppendLine($"    {localElemSizeVal} = iconst.i64 {localElemSize}");
+            var localIndexI64 = NewValue();
+            _instructions.AppendLine($"    {localIndexI64} = sextend.i64 {index}");
+            var localOffset = NewValue();
+            _instructions.AppendLine($"    {localOffset} = imul {localIndexI64}, {localElemSizeVal}");
+            var localElemAddr = NewValue();
+            _instructions.AppendLine($"    {localElemAddr} = iadd {localBaseAddr}, {localOffset}");
+
+            var localResultValue = NewValue();
+            _instructions.AppendLine($"    {localResultValue} = load.{FormatType(localElemType)} {localElemAddr}");
+            return localResultValue;
         }
 
         // Global array - get base address and calculate element address
@@ -1600,31 +2344,59 @@ public sealed class CraneliftFunctionBuilder
             return err;
         }
 
-        // Calculate element size
-        var elemType = _typeMapper.Map(arrayType.ElementType);
-        var elemSize = GetTypeSize(elemType);
-
         // Load array base address
-        var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {arrayName}");
+        var globalBaseAddr = NewValue();
+        _instructions.AppendLine($"    {globalBaseAddr} = global_value {arrayName}");
+
+        if (TryGetStringBufferElement(arrayType.ElementType, out var payloadSize, out var elementHeaderSize))
+        {
+            var stride = payloadSize + elementHeaderSize;
+            var strideVal = NewValue();
+            _instructions.AppendLine($"    {strideVal} = iconst.i64 {stride}");
+            var elemIndexI64 = NewValue();
+            _instructions.AppendLine($"    {elemIndexI64} = sextend.i64 {index}");
+            var elemOffset = NewValue();
+            _instructions.AppendLine($"    {elemOffset} = imul {elemIndexI64}, {strideVal}");
+            var elemBase = NewValue();
+            _instructions.AppendLine($"    {elemBase} = iadd {globalBaseAddr}, {elemOffset}");
+            var payload = NewValue();
+            _instructions.AppendLine($"    {payload} = iadd {elemBase}, {ConstI64(elementHeaderSize)}");
+            return payload;
+        }
+
+        if (IsStringBuffer(arrayType, out var globalHeaderSize))
+        {
+            var payloadBase = NewValue();
+            _instructions.AppendLine($"    {payloadBase} = iadd {globalBaseAddr}, {ConstI64(globalHeaderSize)}");
+            var addr = EmitByteAddress(payloadBase, index);
+            var value = NewValue();
+            _instructions.AppendLine($"    {value} = load.i8 {addr}");
+            var globalResultValue = NewValue();
+            _instructions.AppendLine($"    {globalResultValue} = uextend.i32 {value}");
+            return globalResultValue;
+        }
+
+        // Calculate element size
+        var globalElemType = _typeMapper.Map(arrayType.ElementType);
+        var globalElemSize = GetTypeSize(globalElemType);
 
         // Calculate offset: index * elem_size
-        var elemSizeVal = NewValue();
-        _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
-        var indexI64 = NewValue();
-        _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
-        var offset = NewValue();
-        _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
+        var globalElemSizeVal = NewValue();
+        _instructions.AppendLine($"    {globalElemSizeVal} = iconst.i64 {globalElemSize}");
+        var globalIndexI64 = NewValue();
+        _instructions.AppendLine($"    {globalIndexI64} = sextend.i64 {index}");
+        var globalOffset = NewValue();
+        _instructions.AppendLine($"    {globalOffset} = imul {globalIndexI64}, {globalElemSizeVal}");
 
         // Calculate element address: base + offset
-        var elemAddr = NewValue();
-        _instructions.AppendLine($"    {elemAddr} = iadd {baseAddr}, {offset}");
+        var globalElemAddr = NewValue();
+        _instructions.AppendLine($"    {globalElemAddr} = iadd {globalBaseAddr}, {globalOffset}");
 
         // Load the element value
-        var result = NewValue();
-        _instructions.AppendLine($"    {result} = load.{FormatType(elemType)} {elemAddr}");
+        var globalResult = NewValue();
+        _instructions.AppendLine($"    {globalResult} = load.{FormatType(globalElemType)} {globalElemAddr}");
 
-        return result;
+        return globalResult;
     }
 
     private string LowerArrayFieldAccess(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr)
@@ -1779,10 +2551,26 @@ public sealed class CraneliftFunctionBuilder
         var index = LowerExpression(array.Index);
 
         // Check if it's a global, parameter, or local
-        if (_locals.ContainsKey(arrayName))
+        if (_locals.TryGetValue(arrayName, out var local) &&
+            _localTypes.TryGetValue(arrayName, out var localType) &&
+            localType is ArrayTypeSymbol localArrayType)
         {
-            // Local/parameter array - TODO: need local array support
-            _instructions.AppendLine($"    ; TODO: local array store");
+            value = CoerceAssignmentValue(value, valueType, localArrayType.ElementType);
+            var localElemType = _typeMapper.Map(localArrayType.ElementType);
+            var localElemSize = GetTypeSize(localElemType);
+
+            var localBaseAddr = NewValue();
+            _instructions.AppendLine($"    {localBaseAddr} = load.{FormatType(local.Type)} {local.Address}");
+
+            var localElemSizeVal = NewValue();
+            _instructions.AppendLine($"    {localElemSizeVal} = iconst.i64 {localElemSize}");
+            var localIndexI64 = NewValue();
+            _instructions.AppendLine($"    {localIndexI64} = sextend.i64 {index}");
+            var localOffset = NewValue();
+            _instructions.AppendLine($"    {localOffset} = imul {localIndexI64}, {localElemSizeVal}");
+            var localElemAddr = NewValue();
+            _instructions.AppendLine($"    {localElemAddr} = iadd {localBaseAddr}, {localOffset}");
+            _instructions.AppendLine($"    store {value}, {localElemAddr}");
             return;
         }
 
@@ -1801,28 +2589,28 @@ public sealed class CraneliftFunctionBuilder
         }
 
         // Calculate element size
-        var elemType = _typeMapper.Map(arrayType.ElementType);
-        var elemSize = GetTypeSize(elemType);
+        var globalElemType = _typeMapper.Map(arrayType.ElementType);
+        var globalElemSize = GetTypeSize(globalElemType);
         value = CoerceAssignmentValue(value, valueType, arrayType.ElementType);
 
         // Load array base address
-        var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {arrayName}");
+        var globalBaseAddr = NewValue();
+        _instructions.AppendLine($"    {globalBaseAddr} = global_value {arrayName}");
 
         // Calculate offset: index * elem_size
-        var elemSizeVal = NewValue();
-        _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
-        var indexI64 = NewValue();
-        _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
-        var offset = NewValue();
-        _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
+        var globalElemSizeVal = NewValue();
+        _instructions.AppendLine($"    {globalElemSizeVal} = iconst.i64 {globalElemSize}");
+        var globalIndexI64 = NewValue();
+        _instructions.AppendLine($"    {globalIndexI64} = sextend.i64 {index}");
+        var globalOffset = NewValue();
+        _instructions.AppendLine($"    {globalOffset} = imul {globalIndexI64}, {globalElemSizeVal}");
 
         // Calculate element address: base + offset
-        var elemAddr = NewValue();
-        _instructions.AppendLine($"    {elemAddr} = iadd {baseAddr}, {offset}");
+        var globalElemAddr = NewValue();
+        _instructions.AppendLine($"    {globalElemAddr} = iadd {globalBaseAddr}, {globalOffset}");
 
         // Store the value to the element address
-        _instructions.AppendLine($"    store {value}, {elemAddr}");
+        _instructions.AppendLine($"    store {value}, {globalElemAddr}");
     }
 
     private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value, TypeSymbol? valueType)
@@ -2071,6 +2859,47 @@ public sealed class CraneliftFunctionBuilder
         };
     }
 
+    private static int HeaderSizeFor(string name) =>
+        name switch
+        {
+            "string" => 8,
+            "utf8" => 8,
+            "ascii" => 4,
+            _ => 0
+        };
+
+    private static bool IsStringBuffer(ArrayTypeSymbol arrayType, out int headerSize)
+    {
+        headerSize = 0;
+        if (arrayType.ElementType is PrimitiveTypeSymbol prim)
+        {
+            headerSize = HeaderSizeFor(prim.PrimitiveName);
+            return headerSize > 0;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetStringBufferElement(TypeSymbol? elementType, out int payloadSize, out int headerSize)
+    {
+        payloadSize = 0;
+        headerSize = 0;
+        if (elementType is ArrayTypeSymbol array &&
+            array.ElementType is PrimitiveTypeSymbol prim)
+        {
+            headerSize = HeaderSizeFor(prim.PrimitiveName);
+            if (headerSize <= 0)
+            {
+                return false;
+            }
+
+            payloadSize = array.Size;
+            return true;
+        }
+
+        return false;
+    }
+
     private string NewValue() => $"v{_valueCounter++}";
     private string NewBlock() => $"block{_blockCounter++}";
     private string CoerceI32ToB1(string value)
@@ -2224,6 +3053,31 @@ public sealed class CraneliftFunctionBuilder
         }
 
         return "0.0";
+    }
+
+    private string LowerCompoundAssignmentValue(TokenKind opKind, string left, TypeSymbol? leftType, string right, TypeSymbol? rightType)
+    {
+        var isFloat = IsFloatType(leftType) || IsFloatType(rightType);
+        if (isFloat)
+        {
+            var useF64 = IsF64Type(leftType) || IsF64Type(rightType);
+            left = CoerceFloatOperand(left, leftType, useF64);
+            right = CoerceFloatOperand(right, rightType, useF64);
+        }
+
+        var op = opKind switch
+        {
+            TokenKind.PlusEqual => isFloat ? "fadd" : "iadd",
+            TokenKind.MinusEqual => isFloat ? "fsub" : "isub",
+            TokenKind.StarEqual => isFloat ? "fmul" : "imul",
+            TokenKind.SlashEqual => isFloat ? "fdiv" : "sdiv",
+            TokenKind.PercentEqual => "srem",
+            _ => "iadd"
+        };
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = {op} {left}, {right}");
+        return result;
     }
 
     private string CoerceAssignmentValue(string value, TypeSymbol? fromType, TypeSymbol? toType)
