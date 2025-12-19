@@ -11,6 +11,12 @@ Build and self-test:
 dotnet test
 ```
 
+On Windows, helper scripts can build and test everything (including Cranelift AOT):
+```bat
+build.bat
+test.bat
+```
+
 Run a Stasis program (executes via `lli` if available, else `clang`):
 ```sh
 stasis run samples/basic.stasis
