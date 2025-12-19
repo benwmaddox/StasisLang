@@ -146,6 +146,11 @@ if (backend == BackendType.Cranelift && selectedBackend is null && !CanUseCranel
     backend = BackendType.Llvm;
 }
 
+if (backend == BackendType.Cranelift && (mode == "test" || mode == "run"))
+{
+    useCraneliftRunner = true;
+}
+
 // Warn if Cranelift is explicitly selected (experimental)
 if (!ShouldSuppressWarnings() && backend == BackendType.Cranelift && selectedBackend is not null)
 {
@@ -340,7 +345,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             }
 
             tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
-            tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
             File.WriteAllText(tempClif, ir);
             if (logPhaseTiming)
             {
@@ -348,6 +352,18 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 phaseStopwatch.Restart();
             }
 
+            if (useCraneliftRunner && mode != "build" && mode != "release")
+            {
+                var runExit = ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool);
+                if (logPhaseTiming)
+                {
+                    aotMs = phaseStopwatch.ElapsedMilliseconds;
+                    phaseStopwatch.Restart();
+                }
+                return runExit;
+            }
+
+            tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
             var aotExit = RunProcess(aotTool, $"--input \"{tempClif}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
             if (logPhaseTiming)
             {
@@ -370,9 +386,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return exitCode;
             }
 
-            var execExit = useCraneliftRunner
-                ? ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath)
-                : ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
             if (logPhaseTiming)
             {
                 linkRunMs = phaseStopwatch.ElapsedMilliseconds;
@@ -497,6 +511,12 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         return 1;
     }
 
+    if (!TryFindCraneliftRunner(out var runnerPath))
+    {
+        Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
+        return 1;
+    }
+
     var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
     try
     {
@@ -514,7 +534,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         }
 
         var entry = mode == "test" ? "run_tests" : "main";
-        return RunDllEntry(dllPath, entry);
+        return RunProcess(runnerPath, $"\"{dllPath}\" {entry}");
     }
     finally
     {
@@ -525,33 +545,25 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int RunDllEntry(string dllPath, string entryName)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool)
 {
-    IntPtr handle;
+    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
     try
     {
-        handle = NativeLibrary.Load(dllPath);
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"error: failed to load {dllPath}: {ex.Message}");
-        return 1;
-    }
-
-    try
-    {
-        if (!NativeLibrary.TryGetExport(handle, entryName, out var export))
+        var aotExit = RunProcess(aotTool, $"--input \"{clifPath}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+        if (aotExit != 0)
         {
-            Console.Error.WriteLine($"error: entrypoint {entryName} not exported in {dllPath}");
-            return 1;
+            return aotExit;
         }
 
-        var entry = Marshal.GetDelegateForFunctionPointer<StasisEntryPoint>(export);
-        return entry();
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
     }
     finally
     {
-        NativeLibrary.Free(handle);
+        if (File.Exists(tempObj))
+        {
+            File.Delete(tempObj);
+        }
     }
 }
 
@@ -617,7 +629,7 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
     var linkingStaticGraphics = false;
     if (enableGraphics)
     {
-        var libPath = graphicsLibPath ?? FindGraphicsLibrary();
+        var libPath = graphicsLibPath ?? FindGraphicsLibrary(preferShared: isDll);
         if (!string.IsNullOrEmpty(libPath))
         {
             var libFile = Path.GetFileName(libPath);
@@ -729,6 +741,38 @@ static bool TryFindCraneliftAot(out string path)
     }
 
     return TryFindTool("stasis-cranelift-aot", out path);
+}
+
+static bool TryFindCraneliftRunner(out string path)
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER_EXE");
+    if (!string.IsNullOrEmpty(env) && File.Exists(env))
+    {
+        path = env;
+        return true;
+    }
+
+    var repoRoot = FindRepoRoot();
+    if (!string.IsNullOrEmpty(repoRoot))
+    {
+        var exeName = OperatingSystem.IsWindows() ? "stasis_runner.exe" : "stasis_runner";
+        var release = Path.Combine(repoRoot, "runtime", "build", "bin", "Release", exeName);
+        if (File.Exists(release))
+        {
+            path = release;
+            return true;
+        }
+
+        var root = Path.Combine(repoRoot, exeName);
+        if (File.Exists(root))
+        {
+            path = root;
+            return true;
+        }
+    }
+
+    path = string.Empty;
+    return false;
 }
 
 static bool CanUseCranelift(bool emitIrOnly)
@@ -988,7 +1032,7 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
         }
 
         // Fall back to search helper
-        var foundDll = FindGraphicsLibrary();
+        var foundDll = FindGraphicsLibrary(preferShared: true);
         if (!string.IsNullOrEmpty(foundDll))
         {
             candidates.Add(foundDll);
@@ -1061,7 +1105,7 @@ static bool DetectsGraphicsUsage(string source)
     return false;
 }
 
-static string? FindGraphicsLibrary()
+static string? FindGraphicsLibrary(bool preferShared = false)
 {
     // Look for the graphics library in common locations
     var searchPaths = new List<string>();
@@ -1086,13 +1130,19 @@ static string? FindGraphicsLibrary()
     string[] candidates;
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
-        // Keep static linking for now (DLL exports need debugging)
-        candidates = new[]
-        {
-            "stasis_graphics_static.lib",
-            "stasis_graphics.lib",
-            "stasis_graphics.dll"
-        };
+        candidates = preferShared
+            ? new[]
+            {
+                "stasis_graphics.lib",
+                "stasis_graphics.dll",
+                "stasis_graphics_static.lib"
+            }
+            : new[]
+            {
+                "stasis_graphics_static.lib",
+                "stasis_graphics.lib",
+                "stasis_graphics.dll"
+            };
     }
     else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
     {
@@ -1250,7 +1300,7 @@ static void PrintUsage()
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
-    Console.WriteLine("Cranelift: use --cranelift-runner (or STASIS_CRANELIFT_RUNNER=1) to run via a DLL loader instead of linking a full exe.");
+    Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
 }
 
 static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock = true, int lowerDegree = 1) =>
@@ -1457,26 +1507,31 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
         }
         else
         {
-            var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
-            try
+            if (useCraneliftRunner)
             {
-                var aotExit = RunProcess(aotTool, $"--input \"{result.ArtifactPath}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
-                if (aotExit != 0)
-                {
-                    executeExit = aotExit;
-                }
-                else
-                {
-                    executeExit = useCraneliftRunner
-                        ? ExecuteObjectWithRunner("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath)
-                        : ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
-                }
+                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool);
             }
-            finally
+            else
             {
-                if (File.Exists(tempObj))
+                var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
+                try
                 {
-                    File.Delete(tempObj);
+                    var aotExit = RunProcess(aotTool, $"--input \"{result.ArtifactPath}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+                    if (aotExit != 0)
+                    {
+                        executeExit = aotExit;
+                    }
+                    else
+                    {
+                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                    }
+                }
+                finally
+                {
+                    if (File.Exists(tempObj))
+                    {
+                        File.Delete(tempObj);
+                    }
                 }
             }
         }
