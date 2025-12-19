@@ -550,6 +550,11 @@ static string BuildClangArgsForObject(string objPath, string exePath, bool isTes
             }
 
             args.Add($"\"{libPath}\"");
+            var libDir = Path.GetDirectoryName(libPath);
+            if (!string.IsNullOrEmpty(libDir))
+            {
+                args.Add($"-L\"{libDir}\"");
+            }
 
             if (isStaticLib)
             {
@@ -601,10 +606,9 @@ static string BuildClangArgsForObject(string objPath, string exePath, bool isTes
         args.Add("-lkernel32");
         args.Add("-lmsvcrt");
         args.Add("-llegacy_stdio_definitions");
-        if (!linkingStaticGraphics)
-        {
-            args.Add("-lucrt");
-        }
+        args.Add("-lucrt");
+        args.Add("-lvcruntime");
+        args.Add("-loldnames");
     }
 
     return string.Join(" ", args);
@@ -851,10 +855,9 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             args.Add("-lmsvcrt");
             // legacy_stdio_definitions provides printf and related functions
             args.Add("-llegacy_stdio_definitions");
-            if (!linkingStaticGraphics)
-            {
-                args.Add("-lucrt");
-            }
+            args.Add("-lucrt");
+            args.Add("-lvcruntime");
+            args.Add("-loldnames");
         }
     }
     else if (isTest)
