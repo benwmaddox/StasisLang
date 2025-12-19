@@ -160,7 +160,6 @@ struct ParsedModule
 struct ParsedGlobal
 {
     name: String,
-    ty: cranelift_codegen::ir::Type,
     init_data: GlobalInitData,
     size_bytes: usize,
 }
@@ -215,9 +214,9 @@ fn parse_stasis_clif(input: &str) -> Result<ParsedModule>
         if line.starts_with("global ")
         {
             lines.next();
-            let (name, ty, init_data, size_bytes) = parse_global_decl(line)
+            let (name, _ty, init_data, size_bytes) = parse_global_decl(line)
                 .with_context(|| format!("failed to parse global declaration: {line}"))?;
-            globals.push(ParsedGlobal { name, ty, init_data, size_bytes });
+            globals.push(ParsedGlobal { name, init_data, size_bytes });
             continue;
         }
 
