@@ -162,6 +162,34 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void ConstIdentifiers_LowerToConstants()
+    {
+        var ir = CompileCraneliftIr("""
+            const BRICK_WIDTH: f32 = 60.0;
+            function main(): f32 {
+                return BRICK_WIDTH + 5.0;
+            }
+            """);
+
+        Assert.Contains("f32const 60", ir);
+        Assert.DoesNotContain("unknown identifier BRICK_WIDTH", ir);
+    }
+
+    [Fact]
+    public void EnumMemberAccess_LowersToI32Const()
+    {
+        var ir = CompileCraneliftIr("""
+            enum Mode { Alpha, Beta, Gamma }
+            function main(): i32 {
+                return Mode.Gamma;
+            }
+            """);
+
+        Assert.Contains("iconst.i32 2", ir);
+        Assert.DoesNotContain("unknown enum member", ir);
+    }
+
+    [Fact]
     public void PrintInt_UsesPrintf()
     {
         var ir = CompileCraneliftIr("""

@@ -134,6 +134,137 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Overlaps(new[] { "sin", "sin_fast" }))
+        {
+            builder.DeclareExternal("sinf", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Overlaps(new[] { "cos", "cos_fast" }))
+        {
+            builder.DeclareExternal("cosf", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("init_window"))
+        {
+            // stasis_init_window(width: i32, height: i32, title: *i8) -> i32
+            builder.DeclareExternal("stasis_init_window", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("begin_frame"))
+        {
+            builder.DeclareExternal("stasis_begin_frame", CraneliftTypeMapper.ClifType.Void);
+        }
+
+        if (builtins.Contains("end_frame"))
+        {
+            builder.DeclareExternal("stasis_end_frame", CraneliftTypeMapper.ClifType.Void);
+        }
+
+        if (builtins.Contains("clear"))
+        {
+            builder.DeclareExternal("stasis_clear", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("draw_line"))
+        {
+            builder.DeclareExternal("stasis_draw_line", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("gfx_load_sprite"))
+        {
+            builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("gfx_draw_sprite"))
+        {
+            builder.DeclareExternal("stasis_gfx_draw_sprite", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("gfx_poll_reload"))
+        {
+            builder.DeclareExternal("stasis_gfx_poll_reload", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_debug_bake_hash"))
+        {
+            builder.DeclareExternal("stasis_gfx_debug_bake_hash", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("is_key_down"))
+        {
+            builder.DeclareExternal("stasis_is_key_down", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("should_quit"))
+        {
+            builder.DeclareExternal("stasis_should_quit", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("get_window_size"))
+        {
+            builder.DeclareExternal("stasis_get_window_size", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("set_fullscreen"))
+        {
+            builder.DeclareExternal("stasis_set_fullscreen", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("set_postfx"))
+        {
+            builder.DeclareExternal("stasis_set_postfx", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("load_font"))
+        {
+            builder.DeclareExternal("stasis_load_font", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("draw_text"))
+        {
+            builder.DeclareExternal("stasis_draw_text", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.I32, CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+        }
+
+        if (builtins.Contains("measure_text"))
+        {
+            builder.DeclareExternal("stasis_measure_text", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32, CraneliftTypeMapper.ClifType.R64);
+        }
+
         if (builtins.Overlaps(new[]
             {
                 "str_len", "str_is_empty", "str_get", "str_set", "str_eq", "str_cmp",
@@ -254,7 +385,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
             .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, builder.GlobalTypes, builder.StringLiterals, layout, diagnostics);
+        var enums = compilationUnit.Declarations
+            .OfType<EnumDeclarationSyntax>()
+            .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
+        var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, layout, consts, diagnostics);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -611,6 +746,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     private static bool IsCraneliftBuiltin(string name) =>
         name is "print_int" or "print_char" or "print_string" or "read_int" or "read_char"
             or "time" or "get_time_ms" or "sleep_ms"
+            or "sin" or "cos" or "sin_fast" or "cos_fast"
+            or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line"
+            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_poll_reload" or "gfx_debug_bake_hash"
+            or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
+            or "load_font" or "draw_text" or "measure_text" or "set_postfx"
             or "str_len" or "str_is_empty" or "str_get" or "str_set" or "str_eq" or "str_cmp"
             or "str_copy" or "str_append" or "str_append_char" or "str_clear"
             or "str_contains" or "str_find" or "str_find_char" or "str_find_last_char"
@@ -649,5 +789,32 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         }
 
         return sb.ToString();
+    }
+
+    private static IReadOnlyDictionary<string, CraneliftFunctionBuilder.ConstValue> CollectConstValues(
+        CompilationUnitSyntax compilationUnit,
+        IReadOnlyDictionary<string, Symbol> symbols,
+        List<Diagnostic> diagnostics)
+    {
+        var consts = new Dictionary<string, CraneliftFunctionBuilder.ConstValue>(StringComparer.Ordinal);
+        foreach (var decl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
+        {
+            if (decl.Initializer is null)
+            {
+                diagnostics.Add(new Diagnostic("Cranelift requires const initializers.", decl.Name.Span));
+                continue;
+            }
+
+            if (decl.Initializer is not LiteralExpressionSyntax lit)
+            {
+                diagnostics.Add(new Diagnostic("Cranelift requires const initializers to be literals for now.", decl.Initializer.Span));
+                continue;
+            }
+
+            var type = ResolveType(decl.Type, symbols);
+            consts[decl.Name.Text] = new CraneliftFunctionBuilder.ConstValue(type, lit.Literal.Kind, lit.Literal.Text);
+        }
+
+        return consts;
     }
 }
