@@ -61,6 +61,11 @@ if not exist "%CD%\\..\\..\\build" (
     mkdir "%CD%\\..\\..\\build" >NUL 2>&1
 )
 copy /Y "%CD%\\bin\\Release\\*.dll" "%CD%\\..\\..\\build" >NUL 2>&1
+echo Copying stasis_runner to repo root and build/ for auto-discovery...
+if exist "%CD%\\bin\\Release\\stasis_runner.exe" (
+    copy /Y "%CD%\\bin\\Release\\stasis_runner.exe" "%CD%\\..\\.." >NUL 2>&1
+    copy /Y "%CD%\\bin\\Release\\stasis_runner.exe" "%CD%\\..\\..\\build" >NUL 2>&1
+)
 
 echo.
 echo Copying static dependency libs to build\\Release for single-exe links...
