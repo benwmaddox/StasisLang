@@ -15,6 +15,10 @@ public static class Reachability
         {
             callGraph[name] = CollectCalledFunctions(func.Body, functions);
         }
+        foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
+        {
+            callGraph[test.Name.Text] = CollectCalledFunctions(test.Body, functions);
+        }
 
         var reachable = new HashSet<string>(StringComparer.Ordinal);
         var queue = new Queue<string>();
@@ -33,10 +37,7 @@ public static class Reachability
         {
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
             {
-                foreach (var callee in CollectCalledFunctions(test.Body, functions))
-                {
-                    queue.Enqueue(callee);
-                }
+                queue.Enqueue(test.Name.Text);
             }
         }
 

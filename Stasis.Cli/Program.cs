@@ -231,6 +231,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     try
     {
         var source = File.ReadAllText(path);
+        source = PrependStdLib(source);
         if (logPhaseTiming)
         {
             readMs = phaseStopwatch.ElapsedMilliseconds;
