@@ -199,6 +199,18 @@ Environment.Exit(singleExit);
 static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
+    var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    long readMs = 0;
+    long parseMs = 0;
+    long semaMs = 0;
+    long layoutMs = 0;
+    long lowerMs = 0;
+    long irWriteMs = 0;
+    long aotMs = 0;
+    long linkRunMs = 0;
+    long llvmWriteMs = 0;
+    long llvmExecMs = 0;
     var tempLl = string.Empty;
     var tempObj = string.Empty;
     var tempClif = string.Empty;
@@ -206,6 +218,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     try
     {
         var source = File.ReadAllText(path);
+        if (logPhaseTiming)
+        {
+            readMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
 
         // Auto-detect graphics usage if not explicitly enabled
         if (!enableGraphics && DetectsGraphicsUsage(source))
@@ -214,6 +231,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var parse = Parser.Parse(source);
+        if (logPhaseTiming)
+        {
+            parseMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
         if (parse.Diagnostics.Count > 0)
         {
             
@@ -222,6 +244,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        if (logPhaseTiming)
+        {
+            semaMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
         if (sema.Diagnostics.Count > 0)
         {
             PrintDiagnostics(sema.Diagnostics, source, path);
@@ -229,6 +256,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        if (logPhaseTiming)
+        {
+            layoutMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
 
         // Generate code using selected backend
         string ir;
@@ -270,6 +302,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             ir = lower.Ir;
             lowerDiagnostics = lower.Diagnostics;
         }
+        if (logPhaseTiming)
+        {
+            lowerMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
         if (lowerDiagnostics.Count > 0)
         {
             PrintDiagnostics(lowerDiagnostics, source, path);
@@ -301,8 +338,18 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
             tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
             File.WriteAllText(tempClif, ir);
+            if (logPhaseTiming)
+            {
+                irWriteMs = phaseStopwatch.ElapsedMilliseconds;
+                phaseStopwatch.Restart();
+            }
 
             var aotExit = RunProcess(aotTool, $"--input \"{tempClif}\" --output \"{tempObj}\" --target x86_64-pc-windows-msvc");
+            if (logPhaseTiming)
+            {
+                aotMs = phaseStopwatch.ElapsedMilliseconds;
+                phaseStopwatch.Restart();
+            }
             if (aotExit != 0)
             {
                 return aotExit;
@@ -311,24 +358,47 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             if (mode == "build" || mode == "release")
             {
                 var outPath = outputPath ?? BuildDefaultOutputPath(path);
-                return BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                var exitCode = BuildExecutableFromObject(tempObj, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                if (logPhaseTiming)
+                {
+                    linkRunMs = phaseStopwatch.ElapsedMilliseconds;
+                }
+                return exitCode;
             }
 
-            return ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            if (logPhaseTiming)
+            {
+                linkRunMs = phaseStopwatch.ElapsedMilliseconds;
+            }
+            return execExit;
         }
 
         // LLVM path: emit .ll and run via lli/clang.
         tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
         File.WriteAllText(tempLl, ir);
+        if (logPhaseTiming)
+        {
+            llvmWriteMs = phaseStopwatch.ElapsedMilliseconds;
+            phaseStopwatch.Restart();
+        }
 
         if (mode == "build" || mode == "release")
         {
             var outPath = outputPath ?? BuildDefaultOutputPath(path);
             var exitCode = BuildExecutable(tempLl, outPath, includeTests, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            if (logPhaseTiming)
+            {
+                llvmExecMs = phaseStopwatch.ElapsedMilliseconds;
+            }
             return exitCode;
         }
 
         var executeExit = Execute(mode, tempLl, optLevel, enableLto, enableGraphics, graphicsLibPath);
+        if (logPhaseTiming)
+        {
+            llvmExecMs = phaseStopwatch.ElapsedMilliseconds;
+        }
         return executeExit;
     }
     finally
@@ -347,6 +417,17 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         fileStopwatch.Stop();
+        if (logPhaseTiming)
+        {
+            if (backend == BackendType.Cranelift)
+            {
+                Console.WriteLine($"Phase time: read={readMs}ms parse={parseMs}ms sema={semaMs}ms layout={layoutMs}ms lower={lowerMs}ms clif_write={irWriteMs}ms aot={aotMs}ms link_run={linkRunMs}ms");
+            }
+            else
+            {
+                Console.WriteLine($"Phase time: read={readMs}ms parse={parseMs}ms sema={semaMs}ms layout={layoutMs}ms lower={lowerMs}ms ll_write={llvmWriteMs}ms llvm_exec={llvmExecMs}ms");
+            }
+        }
         Console.WriteLine($"Total time={fileStopwatch.ElapsedMilliseconds}ms");
     }
 }
