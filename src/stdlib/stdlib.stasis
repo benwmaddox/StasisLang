@@ -1,7 +1,7 @@
 // Stasis standard library (stub)
 // Loaded by default by the CLI. Functions will be added incrementally.
 
-function to_utf8(dst: utf8[], src: ascii[], dst_max: i32): i32 {
+function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     str_clear(dst);
     let i: i32 = 0;
     for (i = 0; i < dst_max; i = i + 1) {
