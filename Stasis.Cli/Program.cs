@@ -30,6 +30,7 @@ var enableLto = false;
 var enableGraphics = false;
 string? graphicsLibPath = null;
 BackendType? selectedBackend = null;
+var useCraneliftRunner = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER") == "1";
 
 while (cliArgs.Count > 0)
 {
@@ -96,6 +97,9 @@ while (cliArgs.Count > 0)
                 Console.Error.WriteLine($"error: invalid --backend '{backendArg}'. Use 'llvm' or 'cranelift'.");
                 Environment.Exit(1);
             }
+            break;
+        case "--cranelift-runner":
+            useCraneliftRunner = true;
             break;
         case "--help":
             PrintUsage();
@@ -189,14 +193,14 @@ if (runAllInDirectory && mode == "test")
         Environment.Exit(1);
     }
 
-    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend);
+    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner);
     Environment.Exit(overallExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true, bool useCraneliftRunner = false)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
@@ -366,7 +370,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return exitCode;
             }
 
-            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+            var execExit = useCraneliftRunner
+                ? ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath)
+                : ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
             if (logPhaseTiming)
             {
                 linkRunMs = phaseStopwatch.ElapsedMilliseconds;
@@ -483,6 +489,72 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+    try
+    {
+        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, isDll: true);
+        var exit = RunProcess(clang, args);
+        if (exit != 0)
+        {
+            return exit;
+        }
+
+        var dllDir = Path.GetDirectoryName(dllPath);
+        if (enableGraphics && !string.IsNullOrEmpty(dllDir))
+        {
+            CopyGraphicsRuntimeDependencies(dllDir, graphicsLibPath);
+        }
+
+        var entry = mode == "test" ? "run_tests" : "main";
+        return RunDllEntry(dllPath, entry);
+    }
+    finally
+    {
+        if (File.Exists(dllPath))
+        {
+            File.Delete(dllPath);
+        }
+    }
+}
+
+static int RunDllEntry(string dllPath, string entryName)
+{
+    IntPtr handle;
+    try
+    {
+        handle = NativeLibrary.Load(dllPath);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: failed to load {dllPath}: {ex.Message}");
+        return 1;
+    }
+
+    try
+    {
+        if (!NativeLibrary.TryGetExport(handle, entryName, out var export))
+        {
+            Console.Error.WriteLine($"error: entrypoint {entryName} not exported in {dllPath}");
+            return 1;
+        }
+
+        var entry = Marshal.GetDelegateForFunctionPointer<StasisEntryPoint>(export);
+        return entry();
+    }
+    finally
+    {
+        NativeLibrary.Free(handle);
+    }
+}
+
 static int BuildExecutableFromObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     if (!TryFindTool("clang", out var clang))
@@ -517,10 +589,16 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
     return 0;
 }
 
-static string BuildClangArgsForObject(string objPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
+static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, bool isDll = false)
 {
     // Link .obj into a normal executable (use CRT defaults).
-    var args = new List<string> { $"\"{objPath}\"", "-o", $"\"{exePath}\"" };
+    var args = new List<string> { $"\"{objPath}\"" };
+    if (isDll)
+    {
+        args.Add("-shared");
+    }
+    args.Add("-o");
+    args.Add($"\"{outputPath}\"");
 
     if (!string.IsNullOrWhiteSpace(optLevel))
     {
@@ -582,14 +660,22 @@ static string BuildClangArgsForObject(string objPath, string exePath, bool isTes
         }
     }
 
-    if (isTest)
+    if (isDll)
+    {
+        var exportName = isTest ? "run_tests" : "main";
+        args.Add($"-Wl,/EXPORT:{exportName}");
+    }
+    else if (isTest)
     {
         args.Add("-Wl,/entry:run_tests");
     }
 
-    args.Add("-Wl,/subsystem:console");
-    args.Add("-Wl,/ignore:4210");
-    args.Add("-Wl,/STACK:8388608");
+    if (!isDll)
+    {
+        args.Add("-Wl,/subsystem:console");
+        args.Add("-Wl,/ignore:4210");
+        args.Add("-Wl,/STACK:8388608");
+    }
 
     if (linkingStaticGraphics)
     {
@@ -1164,12 +1250,13 @@ static void PrintUsage()
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
+    Console.WriteLine("Cranelift: use --cranelift-runner (or STASIS_CRANELIFT_RUNNER=1) to run via a DLL loader instead of linking a full exe.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true, int lowerDegree = 1) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useLowerLock, lowerDegree).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock, int lowerDegree)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -1212,7 +1299,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var result in resultChannel.Reader.ReadAllAsync())
         {
-            exitCode = Math.Max(exitCode, ConsumeCompileResult(result, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath));
+            exitCode = Math.Max(exitCode, ConsumeCompileResult(result, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, useCraneliftRunner));
         }
     });
 
@@ -1327,7 +1414,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
     }
 }
 
-static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, bool useCraneliftRunner)
 {
     var testStopwatch = Stopwatch.StartNew();
 
@@ -1380,7 +1467,9 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                 }
                 else
                 {
-                    executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                    executeExit = useCraneliftRunner
+                        ? ExecuteObjectWithRunner("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath)
+                        : ExecuteObject("test", tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath);
                 }
             }
             finally
