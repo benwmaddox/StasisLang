@@ -92,10 +92,16 @@ GlobalDecl       -> "global" Identifier ":" Type ";"
 
 ```
 FunctionDecl     -> ExportOpt
-                    "function" Identifier
+                    "function" AttributeListOpt Identifier
                     "(" ParamListOpt ")"
                     ReturnTypeOpt
                     Block
+```
+
+```
+AttributeListOpt -> Attribute AttributeListOpt
+                  | <empty>
+Attribute        -> "@" Identifier
 ```
 
 ```

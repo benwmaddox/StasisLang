@@ -120,6 +120,23 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void InlineAttribute_InlinesSimpleReturn()
+    {
+        var ir = CompileCraneliftIr("""
+            function @inline add(a: i32, b: i32): i32 {
+                return a + b;
+            }
+
+            function main(): i32 {
+                return add(1, 2);
+            }
+            """);
+
+        Assert.Contains("iadd", ir);
+        Assert.DoesNotContain("call %cranelift_confirm__add", ir);
+    }
+
+    [Fact]
     public void Time_UsesTruncationFromI64()
     {
         var ir = CompileCraneliftIr("""

@@ -468,7 +468,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<EnumDeclarationSyntax>()
             .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
         var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+        var functions = compilationUnit.Declarations
+            .OfType<FunctionDeclarationSyntax>()
+            .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functions, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -488,8 +491,14 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 .Select(p => typeMapper.Map(ResolveType(p.Type, symbols)))
                 .ToArray();
 
+            var attributes = GetFunctionAttributes(func);
+
             // Generate function body
             var body = functionBuilder.BuildFunctionBody(func, symbol);
+            if (attributes.Count > 0)
+            {
+                body = $"; attrs: {string.Join(" ", attributes)}{Environment.NewLine}{body}";
+            }
             var mangledName = MangleFunctionName(moduleName, func.Name.Text);
             builder.DefineFunctionWithBody(mangledName, returnType, paramTypes, body);
         }
@@ -524,6 +533,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         }
         return sb.ToString();
     }
+
+    private static List<string> GetFunctionAttributes(FunctionDeclarationSyntax func) =>
+        func.Attributes.Select(a => a.Text).ToList();
 
     private static void EmitTestHarness(
         CompilationUnitSyntax compilationUnit,
