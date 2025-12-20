@@ -84,5 +84,5 @@ block0:
     v39 = call %printf3(v38, v36, v1)
     return v8
 },
-  Stderr: warning: Cranelift backend is experimental.
+  Stderr: 
 }
