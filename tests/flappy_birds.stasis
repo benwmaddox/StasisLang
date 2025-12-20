@@ -1,0 +1,24 @@
+import "../examples/flappy_birds_core.stasis";
+
+test `collision with top pipe`() {
+    reset();
+    bird_y = 10.0;
+    pipe_x[0] = BIRD_X;
+    pipe_gap_y[0] = 60.0;
+    return check_collision();
+}
+
+test `bird survives in gap`() {
+    reset();
+    bird_y = 60.0;
+    pipe_x[0] = BIRD_X;
+    pipe_gap_y[0] = 60.0;
+    return !check_collision();
+}
+
+test `pipes move left`() {
+    reset();
+    let start: f32 = pipe_x[0];
+    step(false);
+    return pipe_x[0] == start - PIPE_SPEED;
+}
