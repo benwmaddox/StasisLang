@@ -32,6 +32,9 @@ const PIPE_SPEED: f32 = 1.5;
 
 const WORLD_W: f32 = 200.0;
 const WORLD_H: f32 = 120.0;
+const SCREEN_W: i32 = 400;
+const SCREEN_H: i32 = 240;
+const SCALE: f32 = 2.0;
 
 global bird_y: f32;
 global bird_vy: f32;
@@ -133,6 +136,72 @@ function step(input_flap: bool): bool {
     return !check_collision();
 }
 
+function to_screen_x(x: f32): f32 {
+    return x * SCALE;
+}
+
+function to_screen_y(y: f32): f32 {
+    return y * SCALE;
+}
+
+function draw_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f32, b: f32, a: f32) {
+    let x1: f32 = to_screen_x(min_x);
+    let y1: f32 = to_screen_y(min_y);
+    let x2: f32 = to_screen_x(max_x);
+    let y2: f32 = to_screen_y(max_y);
+    draw_line(x1, y1, x2, y1, r, g, b, a);
+    draw_line(x2, y1, x2, y2, r, g, b, a);
+    draw_line(x2, y2, x1, y2, r, g, b, a);
+    draw_line(x1, y2, x1, y1, r, g, b, a);
+}
+
+function draw_frame() {
+    begin_frame();
+    clear(0.05, 0.07, 0.12, 1.0);
+
+    let ground_y: f32 = WORLD_H;
+    draw_line(0.0, to_screen_y(ground_y), to_screen_x(WORLD_W), to_screen_y(ground_y), 0.2, 0.8, 0.2, 1.0);
+
+    let i: i32 = 0;
+    for (i = 0; i < 3; i = i + 1) {
+        let px: f32 = pipe_x[i];
+        let gap: f32 = pipe_gap_y[i];
+
+        let top_min_x: f32 = px;
+        let top_min_y: f32 = 0.0;
+        let top_max_x: f32 = px + PIPE_W;
+        let top_max_y: f32 = gap - GAP_HALF;
+
+        let bot_min_x: f32 = px;
+        let bot_min_y: f32 = gap + GAP_HALF;
+        let bot_max_x: f32 = px + PIPE_W;
+        let bot_max_y: f32 = WORLD_H;
+
+        draw_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
+    }
+
+    draw_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
+
+    end_frame();
+}
+
+function main(): i32 {
+    if (!init_window(SCREEN_W, SCREEN_H, "Stasis Flappy")) {
+        return 1;
+    }
+    reset();
+    while (!should_quit()) {
+        let do_flap: bool = is_key_down(44);
+        if (!step(do_flap)) {
+            reset();
+        }
+        draw_frame();
+        sleep_ms(16);
+    }
+    return 0;
+}
+
 test `collision with top pipe`() {
     reset();
     bird_y = 10.0;
@@ -157,26 +226,20 @@ test `pipes move left`() {
 }
 ```
 
-## Add a minimal main
+## Run with visuals
 
-This tutorial keeps gameplay deterministic and testable, but we still want a real entry point.
-Here is a minimal `main` that runs 120 frames, flapping every 30 frames:
+The code above already includes a tiny render loop using the SDL graphics runtime:
 
-```stasis
-function main(): i32 {
-    reset();
-    let frame: i32 = 0;
-    for (frame = 0; frame < 120; frame = frame + 1) {
-        let do_flap: bool = (frame % 30) == 0;
-        if (!step(do_flap)) {
-            return 1;
-        }
-    }
-    return 0;
-}
+- `init_window` to create a window
+- `begin_frame` / `clear` / `draw_line` / `end_frame` for drawing
+- `is_key_down(44)` for Space to flap
+
+To run it with graphics (Windows), build the graphics runtime and launch:
+
 ```
-
-You can expand this later with the graphics runtime and real input.
+runtime\build.bat
+dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
+```
 
 ---
 
@@ -205,15 +268,13 @@ You should see three passing tests. That means the core physics and collision lo
 
 ---
 
-## 4) Add A Simple Render Loop (Optional)
+## 4) Visual polish ideas
 
-If you want visuals, call `step()` in a loop and wire in the graphics runtime (SDL bindings). The same logic still holds; you just draw rectangles for bird and pipes.
+The basic visuals are already in place. If you want to level it up:
 
-Minimal idea:
-
-- Bird rectangle at `(BIRD_X, bird_y)`
-- Pipe rectangles for top and bottom
-- Call `step(is_key_down(...))` each frame
+- Fill rectangles by drawing multiple lines per edge
+- Add a sky gradient (two clears + lines)
+- Draw a score bar at the top using lines and `print_int`
 
 ---
 
