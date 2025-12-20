@@ -16,6 +16,7 @@ import "src/stdlib/stdlib.stasis";
 4. **Consistent naming**: `module_verb_noun` pattern
 5. **No app-specific functions**: Generic primitives only
 6. **Explicit about bytes vs codepoints**: Function names and docs clearly indicate which unit they operate on
+7. **No globals in stdlib**: standard library files may declare consts, structs, enums, and functions only
 
 ---
 

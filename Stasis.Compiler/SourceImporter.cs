@@ -24,6 +24,11 @@ public static class SourceImporter
             return string.Empty;
         }
 
+        if (IsStdlibPath(fullPath))
+        {
+            EnsureStdlibHasNoGlobals(fullPath, source, diagnostics);
+        }
+
         var sb = new StringBuilder(source.Length);
         var lineStart = 0;
         var index = 0;
@@ -62,6 +67,28 @@ public static class SourceImporter
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    private static bool IsStdlibPath(string fullPath)
+    {
+        var normalized = fullPath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var marker = $"{Path.DirectorySeparatorChar}src{Path.DirectorySeparatorChar}stdlib{Path.DirectorySeparatorChar}";
+        return normalized.Contains(marker, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureStdlibHasNoGlobals(string fullPath, string source, List<Diagnostic> diagnostics)
+    {
+        var lex = Lexer.Lex(source);
+        foreach (var token in lex.Tokens)
+        {
+            if (token.Kind != TokenKind.GlobalKeyword)
+            {
+                continue;
+            }
+
+            diagnostics.Add(new Diagnostic($"stdlib files may not declare globals: {fullPath}", new SourceSpan(0, 0)));
+            return;
+        }
     }
 
     private static bool TryParseImport(string line, out string path)

@@ -52,4 +52,30 @@ public class SourceImporterTests
             tempDir.Delete(true);
         }
     }
+
+    [Fact]
+    public void ExpandImports_RejectsStdlibGlobals()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_imports");
+        try
+        {
+            var stdlibDir = Path.Combine(tempDir.FullName, "src", "stdlib");
+            Directory.CreateDirectory(stdlibDir);
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var stdlibPath = Path.Combine(stdlibDir, "bad.stasis");
+            File.WriteAllText(stdlibPath, "global bad: i32;");
+            File.WriteAllText(entryPath, "import \"src/stdlib/bad.stasis\";\nfunction main(): i32 { return 0; }");
+
+            var diagnostics = new List<Diagnostic>();
+            var source = File.ReadAllText(entryPath);
+            _ = SourceImporter.ExpandImports(entryPath, source, diagnostics);
+
+            Assert.Single(diagnostics);
+            Assert.Contains("stdlib files may not declare globals", diagnostics[0].Message);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
 }
