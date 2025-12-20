@@ -115,6 +115,18 @@ function step(input_flap: bool): bool {
     return !check_collision();
 }
 
+function main(): i32 {
+    reset();
+    let frame: i32 = 0;
+    for (frame = 0; frame < 120; frame = frame + 1) {
+        let do_flap: bool = (frame % 30) == 0;
+        if (!step(do_flap)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 test `collision with top pipe`() {
     reset();
     bird_y = 10.0;

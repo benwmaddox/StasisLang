@@ -157,6 +157,27 @@ test `pipes move left`() {
 }
 ```
 
+## Add a minimal main
+
+This tutorial keeps gameplay deterministic and testable, but we still want a real entry point.
+Here is a minimal `main` that runs 120 frames, flapping every 30 frames:
+
+```stasis
+function main(): i32 {
+    reset();
+    let frame: i32 = 0;
+    for (frame = 0; frame < 120; frame = frame + 1) {
+        let do_flap: bool = (frame % 30) == 0;
+        if (!step(do_flap)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+```
+
+You can expand this later with the graphics runtime and real input.
+
 ---
 
 ## 2) How The Loop Works
