@@ -2,6 +2,16 @@
 
 Welcome! We are going to build a clean, deterministic Flappy Birds clone with Stasis and the standard library. It is a small loop with pure math, global state, and testable collision checks. The result is simple, fast, and great for iteration.
 
+## The Stasis approach (quick overview)
+
+Stasis is built around a few core ideas that shape this tutorial:
+
+- Static global memory only: all game state lives in globals.
+- AoS in code, SoA in memory: struct fields lower to parallel arrays for fast, predictable access.
+- Deterministic logic: no hidden allocation or implicit copies.
+- Tests are first class: small functions stay testable, even inside games.
+- Backends: Cranelift is fast for iteration; LLVM is for release builds.
+
 We will lean on two modules:
 
 - `stdlib` for core helpers
@@ -155,6 +165,18 @@ function draw_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f3
     draw_line(x1, y2, x1, y1, r, g, b, a);
 }
 
+function draw_filled_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f32, b: f32, a: f32) {
+    let x1: f32 = to_screen_x(min_x);
+    let y1: f32 = to_screen_y(min_y);
+    let x2: f32 = to_screen_x(max_x);
+    let y2: f32 = to_screen_y(max_y);
+    let y: f32 = y1;
+    while (y <= y2) {
+        draw_line(x1, y, x2, y, r, g, b, a);
+        y = y + 1.0;
+    }
+}
+
 function draw_frame() {
     begin_frame();
     clear(0.05, 0.07, 0.12, 1.0);
@@ -177,11 +199,11 @@ function draw_frame() {
         let bot_max_x: f32 = px + PIPE_W;
         let bot_max_y: f32 = WORLD_H;
 
-        draw_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
-        draw_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_filled_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_filled_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
     }
 
-    draw_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
+    draw_filled_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
 
     end_frame();
 }
@@ -272,7 +294,6 @@ You should see three passing tests. That means the core physics and collision lo
 
 The basic visuals are already in place. If you want to level it up:
 
-- Fill rectangles by drawing multiple lines per edge
 - Add a sky gradient (two clears + lines)
 - Draw a score bar at the top using lines and `print_int`
 

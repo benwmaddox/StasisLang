@@ -137,6 +137,18 @@ function draw_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f3
     draw_line(x1, y2, x1, y1, r, g, b, a);
 }
 
+function draw_filled_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f32, b: f32, a: f32) {
+    let x1: f32 = to_screen_x(min_x);
+    let y1: f32 = to_screen_y(min_y);
+    let x2: f32 = to_screen_x(max_x);
+    let y2: f32 = to_screen_y(max_y);
+    let y: f32 = y1;
+    while (y <= y2) {
+        draw_line(x1, y, x2, y, r, g, b, a);
+        y = y + 1.0;
+    }
+}
+
 function draw_frame() {
     begin_frame();
     clear(0.05, 0.07, 0.12, 1.0);
@@ -159,11 +171,11 @@ function draw_frame() {
         let bot_max_x: f32 = px + PIPE_W;
         let bot_max_y: f32 = WORLD_H;
 
-        draw_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
-        draw_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_filled_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_filled_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
     }
 
-    draw_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
+    draw_filled_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
 
     end_frame();
 }
