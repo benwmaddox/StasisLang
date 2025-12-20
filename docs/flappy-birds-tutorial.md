@@ -1,6 +1,6 @@
 # Flappy Birds In Stasis (A Tiny, Deterministic Clone)
 
-Welcome! We are going to build a clean, deterministic Flappy Birds clone with Stasis and the standard library. It is a small loop with pure math, global state, and testable collision checks. The result is simple, fast, and great for iteration.
+Welcome! We are going to build a clean, deterministic Flappy Birds clone with Stasis and the standard library. The core loop stays tiny and testable, and the visuals are driven by a couple of sprites.
 
 ## The Stasis approach (quick overview)
 
@@ -21,9 +21,41 @@ You will explicitly import both (nothing is auto-included).
 
 ---
 
-## 1) Create The Source File
+## 1) Create The Assets
 
-Create `examples/flappy_birds.stasis` with the full code below.
+We will use the `.stv` sprite format so you can hot-reload visuals. Create these files:
+
+`assets_src/flappy-birds/bird.stv`
+
+```
+stv 1
+size 16 12
+rgba 1 0.9 0.2 1
+rect 2 3 12 6
+rgba 0.95 0.7 0.15 1
+circle 12 6 2
+rgba 0 0 0 1
+rect 10 4 2 2
+```
+
+`assets_src/flappy-birds/pipe.stv`
+
+```
+stv 1
+size 24 64
+rgba 0.2 0.9 0.3 1
+rect 0 0 24 64
+rgba 0.15 0.75 0.25 1
+rect 2 4 20 56
+rgba 0.1 0.6 0.2 1
+rect 0 0 24 6
+```
+
+---
+
+## 2) Core Gameplay Module
+
+Create `examples/flappy_birds_core.stasis`. This file is pure logic: no rendering and no input. It is safe to import from tests.
 
 ```
 import "../src/stdlib/stdlib.stasis";
@@ -42,9 +74,6 @@ const PIPE_SPEED: f32 = 1.5;
 
 const WORLD_W: f32 = 200.0;
 const WORLD_H: f32 = 120.0;
-const SCREEN_W: i32 = 400;
-const SCREEN_H: i32 = 240;
-const SCALE: f32 = 2.0;
 
 global bird_y: f32;
 global bird_vy: f32;
@@ -145,6 +174,36 @@ function step(input_flap: bool): bool {
     update_pipes();
     return !check_collision();
 }
+```
+
+---
+
+## 3) Visual Main File (Sprites)
+
+Create `examples/flappy_birds.stasis`. This file adds input and graphics using sprites.
+
+```
+import "../src/stdlib/stdlib.stasis";
+import "flappy_birds_core.stasis";
+
+const SCREEN_W: i32 = 400;
+const SCREEN_H: i32 = 240;
+const SCALE: f32 = 2.0;
+
+const BIRD_SPRITE_W: f32 = 16.0;
+const BIRD_SPRITE_H: f32 = 12.0;
+const PIPE_SPRITE_W: f32 = 24.0;
+const PIPE_SPRITE_H: f32 = 64.0;
+
+const KEY_SPACE: i32 = 44;
+
+global spr_bird: i32;
+global spr_pipe: i32;
+
+function init_assets() {
+    spr_bird = gfx_load_sprite("assets_src/flappy-birds/bird.stv");
+    spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.stv");
+}
 
 function to_screen_x(x: f32): f32 {
     return x * SCALE;
@@ -154,26 +213,24 @@ function to_screen_y(y: f32): f32 {
     return y * SCALE;
 }
 
-function draw_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f32, b: f32, a: f32) {
-    let x1: f32 = to_screen_x(min_x);
-    let y1: f32 = to_screen_y(min_y);
-    let x2: f32 = to_screen_x(max_x);
-    let y2: f32 = to_screen_y(max_y);
-    draw_line(x1, y1, x2, y1, r, g, b, a);
-    draw_line(x2, y1, x2, y2, r, g, b, a);
-    draw_line(x2, y2, x1, y2, r, g, b, a);
-    draw_line(x1, y2, x1, y1, r, g, b, a);
-}
+function draw_pipe(px: f32, gap: f32) {
+    let pipe_scale_x: f32 = (PIPE_W * SCALE) / PIPE_SPRITE_W;
 
-function draw_filled_rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32, r: f32, g: f32, b: f32, a: f32) {
-    let x1: f32 = to_screen_x(min_x);
-    let y1: f32 = to_screen_y(min_y);
-    let x2: f32 = to_screen_x(max_x);
-    let y2: f32 = to_screen_y(max_y);
-    let y: f32 = y1;
-    while (y <= y2) {
-        draw_line(x1, y, x2, y, r, g, b, a);
-        y = y + 1.0;
+    let top_h: f32 = gap - GAP_HALF;
+    if (top_h > 0.5) {
+        let sy_top: f32 = (top_h * SCALE) / PIPE_SPRITE_H;
+        let cx_top: f32 = to_screen_x(px + PIPE_W * 0.5);
+        let cy_top: f32 = to_screen_y(top_h * 0.5);
+        gfx_draw_sprite(spr_pipe, cx_top, cy_top, pipe_scale_x, sy_top, 0.0, 1.0, 1.0, 1.0, 1.0);
+    }
+
+    let bottom_start: f32 = gap + GAP_HALF;
+    let bottom_h: f32 = WORLD_H - bottom_start;
+    if (bottom_h > 0.5) {
+        let sy_bottom: f32 = (bottom_h * SCALE) / PIPE_SPRITE_H;
+        let cx_bottom: f32 = to_screen_x(px + PIPE_W * 0.5);
+        let cy_bottom: f32 = to_screen_y(bottom_start + bottom_h * 0.5);
+        gfx_draw_sprite(spr_pipe, cx_bottom, cy_bottom, pipe_scale_x, sy_bottom, 0.0, 1.0, 1.0, 1.0, 1.0);
     }
 }
 
@@ -181,29 +238,19 @@ function draw_frame() {
     begin_frame();
     clear(0.05, 0.07, 0.12, 1.0);
 
-    let ground_y: f32 = WORLD_H;
-    draw_line(0.0, to_screen_y(ground_y), to_screen_x(WORLD_W), to_screen_y(ground_y), 0.2, 0.8, 0.2, 1.0);
+    gfx_poll_reload(spr_bird);
+    gfx_poll_reload(spr_pipe);
 
     let i: i32 = 0;
     for (i = 0; i < 3; i = i + 1) {
-        let px: f32 = pipe_x[i];
-        let gap: f32 = pipe_gap_y[i];
-
-        let top_min_x: f32 = px;
-        let top_min_y: f32 = 0.0;
-        let top_max_x: f32 = px + PIPE_W;
-        let top_max_y: f32 = gap - GAP_HALF;
-
-        let bot_min_x: f32 = px;
-        let bot_min_y: f32 = gap + GAP_HALF;
-        let bot_max_x: f32 = px + PIPE_W;
-        let bot_max_y: f32 = WORLD_H;
-
-        draw_filled_rect(top_min_x, top_min_y, top_max_x, top_max_y, 0.2, 0.9, 0.3, 1.0);
-        draw_filled_rect(bot_min_x, bot_min_y, bot_max_x, bot_max_y, 0.2, 0.9, 0.3, 1.0);
+        draw_pipe(pipe_x[i], pipe_gap_y[i]);
     }
 
-    draw_filled_rect(BIRD_X, bird_y, BIRD_X + BIRD_W, bird_y + BIRD_H, 1.0, 0.9, 0.2, 1.0);
+    let bird_scale_x: f32 = (BIRD_W * SCALE) / BIRD_SPRITE_W;
+    let bird_scale_y: f32 = (BIRD_H * SCALE) / BIRD_SPRITE_H;
+    let bird_cx: f32 = to_screen_x(BIRD_X + BIRD_W * 0.5);
+    let bird_cy: f32 = to_screen_y(bird_y + BIRD_H * 0.5);
+    gfx_draw_sprite(spr_bird, bird_cx, bird_cy, bird_scale_x, bird_scale_y, 0.0, 1.0, 1.0, 1.0, 1.0);
 
     end_frame();
 }
@@ -212,9 +259,12 @@ function main(): i32 {
     if (!init_window(SCREEN_W, SCREEN_H, "Stasis Flappy")) {
         return 1;
     }
+
+    init_assets();
     reset();
+
     while (!should_quit()) {
-        let do_flap: bool = is_key_down(44);
+        let do_flap: bool = is_key_down(KEY_SPACE);
         if (!step(do_flap)) {
             reset();
         }
@@ -223,6 +273,16 @@ function main(): i32 {
     }
     return 0;
 }
+```
+
+---
+
+## 4) Tests Live Separately
+
+Create `tests/flappy_birds.stasis` so test builds do not depend on the graphics runtime:
+
+```
+import "flappy_birds_core.stasis";
 
 test `collision with top pipe`() {
     reset();
@@ -248,61 +308,34 @@ test `pipes move left`() {
 }
 ```
 
-## Run with visuals
-
-The code above already includes a tiny render loop using the SDL graphics runtime:
-
-- `init_window` to create a window
-- `begin_frame` / `clear` / `draw_line` / `end_frame` for drawing
-- `is_key_down(44)` for Space to flap
-
-To run it with graphics (Windows), build the graphics runtime and launch:
-
-```
-runtime\build.bat
-dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
-```
-
 ---
 
-## 2) How The Loop Works
-
-We split the loop into tiny, testable pieces:
-
-- `update_bird()` applies gravity and moves the bird
-- `update_pipes()` scrolls pipes and respawns them
-- `check_collision()` uses `game_aabb_intersects` on top/bottom pipes
-- `step(input_flap)` runs one frame and returns alive/dead
-
-This mirrors the classic game flow, but it stays deterministic and easily tested.
-
----
-
-## 3) Run The Tests
+## 5) Run The Tests
 
 From the repo root:
 
 ```
-Stasis.Cli\bin\Debug\net9.0\Stasis.Cli.exe test examples\flappy_birds.stasis --backend cranelift
+Stasis.Cliin\Debug
+et9.0\Stasis.Cli.exe test testslappy_birds.stasis --backend cranelift
 ```
 
-You should see three passing tests. That means the core physics and collision logic are solid.
+---
+
+## 6) Run With Visuals
+
+Build the graphics runtime and launch:
+
+```
+runtimeuild.bat
+dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtimeuild\Release\stasis_graphics.dll
+```
 
 ---
 
-## 4) Visual polish ideas
-
-The basic visuals are already in place. If you want to level it up:
-
-- Add a sky gradient (two clears + lines)
-- Draw a score bar at the top using lines and `print_int`
-
----
-
-## 5) Next Fun Improvements
+## 7) Next Fun Improvements
 
 - Add score text and sound
 - Scale difficulty by increasing `PIPE_SPEED`
-- Use `game_aabb_sweep_resolve` for smoother responses
+- Add a scrolling background sprite
 
-You now have a clean, deterministic Flappy Birds core. That is an excellent base to build from.
+You now have a clean, deterministic Flappy Birds core with hot-reloadable visuals.

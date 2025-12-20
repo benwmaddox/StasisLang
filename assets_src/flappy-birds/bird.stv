@@ -1,0 +1,8 @@
+stv 1
+size 16 12
+rgba 1 0.9 0.2 1
+rect 2 3 12 6
+rgba 0.95 0.7 0.15 1
+circle 12 6 2
+rgba 0 0 0 1
+rect 10 4 2 2
