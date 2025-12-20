@@ -15,5 +15,5 @@ block0():
     v4 = load.i32 v0
     return v4
 },
-  Stderr: warning: Cranelift backend is experimental.
+  Stderr: 
 }

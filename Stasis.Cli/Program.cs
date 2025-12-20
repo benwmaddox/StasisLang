@@ -156,10 +156,9 @@ if (backend == BackendType.Cranelift && (mode == "test" || mode == "run"))
     useCraneliftRunner = true;
 }
 
-// Warn if Cranelift is explicitly selected (experimental)
+// Warn if Cranelift is explicitly selected on unsupported platforms.
 if (!ShouldSuppressWarnings() && backend == BackendType.Cranelift && selectedBackend is not null)
 {
-    Console.Error.WriteLine("warning: Cranelift backend is experimental.");
     if (!OperatingSystem.IsWindows())
     {
         Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift native output is only implemented for Windows x64 currently.");

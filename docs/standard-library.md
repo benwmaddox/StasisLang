@@ -113,6 +113,10 @@ ascii_cmp(a: ascii[], b: ascii[]): i32
 ascii_eq(a: ascii[], b: ascii[]): bool
 ascii_find_byte(s: ascii[], b: u8): i32
 ascii_find_last_byte(s: ascii[], b: u8): i32
+ascii_starts_with(s: ascii[], prefix: ascii[]): bool
+ascii_ends_with(s: ascii[], suffix: ascii[]): bool
+ascii_find(s: ascii[], needle: ascii[]): i32
+ascii_contains(s: ascii[], needle: ascii[]): bool
 ```
 
 ---
@@ -391,6 +395,34 @@ game_aabb_intersects(
 
 game_aabb_contains_point(
     ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    px: f32, py: f32
+): bool
+
+game_aabb_union(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    bx_min_x: f32, bx_min_y: f32, bx_max_x: f32, bx_max_y: f32,
+    out_min_x: f32[], out_min_y: f32[], out_max_x: f32[], out_max_y: f32[]
+)
+
+game_aabb_overlap_depth(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    bx_min_x: f32, bx_min_y: f32, bx_max_x: f32, bx_max_y: f32,
+    out_dx: f32[], out_dy: f32[]
+): bool
+
+game_aabb_sweep_resolve(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    bx_min_x: f32, bx_min_y: f32, bx_max_x: f32, bx_max_y: f32,
+    out_resolve_x: f32[], out_resolve_y: f32[]
+): bool
+
+game_circle_intersects(
+    ax: f32, ay: f32, ar: f32,
+    bx: f32, by: f32, br: f32
+): bool
+
+game_circle_contains_point(
+    cx: f32, cy: f32, r: f32,
     px: f32, py: f32
 ): bool
 ```
