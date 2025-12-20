@@ -151,6 +151,7 @@ import "relative/path/to/file.stasis";
 - Imported content is inlined once (duplicate imports are ignored).
 - Import directives are removed before parsing, so only top-level declarations remain.
 - Standard library modules are regular imports; the compiler does not auto-include them.
+- TODO: consider preserving per-file source maps (instead of raw concatenation) for more precise diagnostics.
 
 ### Struct Types
 
@@ -414,6 +415,12 @@ return;
 function name(param: Type, ...): ReturnType {
     ...
 }
+```
+
+Attributes may appear between `function` and the name:
+
+```
+function @inline name(param: Type): ReturnType { ... }
 ```
 
 ### Function properties:

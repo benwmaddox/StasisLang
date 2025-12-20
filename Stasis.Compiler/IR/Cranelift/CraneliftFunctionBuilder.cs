@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
@@ -15,6 +16,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, Symbol> _symbols;
     private readonly IReadOnlyDictionary<string, StructDeclarationSyntax> _structs;
     private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
+    private readonly IReadOnlyDictionary<string, FunctionDeclarationSyntax> _functions;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly IReadOnlyDictionary<string, string> _cStringLiterals;
@@ -24,6 +26,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly Dictionary<string, LocalSlot> _locals = new();
     private readonly Dictionary<string, TypeSymbol> _localTypes = new();
     private readonly Dictionary<string, ForeachElementBinding> _elementBindings = new();
+    private readonly HashSet<string> _inlineStack = new(StringComparer.Ordinal);
     private int _valueCounter;
     private int _blockCounter;
     private readonly List<Diagnostic> _diagnostics;
@@ -33,6 +36,7 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, Symbol> symbols,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
         IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
         IReadOnlyDictionary<string, string> stringLiterals,
         IReadOnlyDictionary<string, string> cStringLiterals,
@@ -45,6 +49,7 @@ public sealed class CraneliftFunctionBuilder
         _symbols = symbols;
         _structs = structs;
         _enums = enums;
+        _functions = functions;
         _globalTypes = globalTypes;
         _stringLiterals = stringLiterals;
         _cStringLiterals = cStringLiterals;
@@ -65,6 +70,7 @@ public sealed class CraneliftFunctionBuilder
         _locals.Clear();
         _localTypes.Clear();
         _elementBindings.Clear();
+        _inlineStack.Clear();
         _blockCounter = 0;
 
         _valueCounter = function.Parameters.Count;
@@ -117,6 +123,7 @@ public sealed class CraneliftFunctionBuilder
         _locals.Clear();
         _localTypes.Clear();
         _elementBindings.Clear();
+        _inlineStack.Clear();
         _valueCounter = 0;
         _blockCounter = 0;
 
@@ -637,6 +644,11 @@ public sealed class CraneliftFunctionBuilder
             return LowerBuiltinCall(funcName, call.Arguments);
         }
 
+        if (TryInlineCall(call, funcName, out var inlined))
+        {
+            return inlined;
+        }
+
         // Lower arguments first
         var args = new List<string>();
         foreach (var arg in call.Arguments)
@@ -667,6 +679,101 @@ public sealed class CraneliftFunctionBuilder
 
         return result;
     }
+
+    private bool TryInlineCall(CallExpressionSyntax call, string funcName, out string result)
+    {
+        result = string.Empty;
+        if (!_functions.TryGetValue(funcName, out var func))
+        {
+            return false;
+        }
+
+        if (!HasInlineAttribute(func))
+        {
+            return false;
+        }
+
+        if (_inlineStack.Contains(funcName))
+        {
+            return false;
+        }
+
+        if (func.Parameters.Count != call.Arguments.Count)
+        {
+            return false;
+        }
+
+        if (func.Body.Statements.Count != 1 || func.Body.Statements[0] is not ReturnStatementSyntax ret || ret.Expression is null)
+        {
+            return false;
+        }
+
+        var savedLocals = new List<(string Name, LocalSlot? Slot, TypeSymbol? Type)>();
+        _inlineStack.Add(funcName);
+
+        for (int i = 0; i < func.Parameters.Count; i++)
+        {
+            var param = func.Parameters[i];
+            var argExpr = call.Arguments[i];
+            var argType = GetExpressionType(argExpr);
+            var paramType = ResolveType(param.Type);
+            var clifType = NormalizeLocalStorageType(_typeMapper.Map(paramType));
+
+            var argValue = LowerInlineArgument(argExpr, paramType);
+            argValue = CoerceAssignmentValue(argValue, argType, paramType);
+
+            var addr = NewValue();
+            _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
+            _instructions.AppendLine($"    store {argValue}, {addr}");
+
+            savedLocals.Add((param.Name.Text, _locals.TryGetValue(param.Name.Text, out var existing) ? existing : null, _localTypes.TryGetValue(param.Name.Text, out var existingType) ? existingType : null));
+            _locals[param.Name.Text] = new LocalSlot(addr, clifType);
+            _localTypes[param.Name.Text] = paramType;
+        }
+
+        result = LowerExpression(ret.Expression);
+
+        for (int i = savedLocals.Count - 1; i >= 0; i--)
+        {
+            var saved = savedLocals[i];
+            if (saved.Slot is null)
+            {
+                _locals.Remove(saved.Name);
+            }
+            else
+            {
+                _locals[saved.Name] = saved.Slot;
+            }
+
+            if (saved.Type is null)
+            {
+                _localTypes.Remove(saved.Name);
+            }
+            else
+            {
+                _localTypes[saved.Name] = saved.Type;
+            }
+        }
+
+        _inlineStack.Remove(funcName);
+        return true;
+    }
+
+    private string LowerInlineArgument(ExpressionSyntax argExpr, TypeSymbol paramType)
+    {
+        if (paramType is ArrayTypeSymbol)
+        {
+            if (TryLowerArrayPointerForCall(argExpr, out var ptr))
+            {
+                return ptr;
+            }
+        }
+
+        return LowerExpression(argExpr);
+    }
+
+    private static bool HasInlineAttribute(FunctionDeclarationSyntax func) =>
+        func.Attributes.Any(attr => string.Equals(attr.Text, "inline", StringComparison.Ordinal));
 
     private string LowerOperatorCall(OperatorCallExpressionSyntax op)
     {
