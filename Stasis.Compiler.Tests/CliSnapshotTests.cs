@@ -454,6 +454,29 @@ public class CliSnapshotTests
         }
     }
 
+    [Fact]
+    public void Import_LineNumbers_UseExpandedSource()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_import_line");
+        try
+        {
+            var imported = Path.Combine(tempDir.FullName, "lib.stasis");
+            var entry = Path.Combine(tempDir.FullName, "main.stasis");
+            File.WriteAllText(imported, "function ok(): i32 { return 1; }\nfunction broken {");
+            File.WriteAllText(entry, "import \"lib.stasis\";\nfunction main(): i32 { return 0; }");
+
+            var (exitCode, _, stderr) = RunCli("run", entry, "--backend", "llvm");
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("function broken {", stderr);
+            Assert.Contains(":2:17)", stderr);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
+
     private static bool TryFindLli()
     {
         var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
