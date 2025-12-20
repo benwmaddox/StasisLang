@@ -19,6 +19,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
     private readonly HashSet<string> _externalFunctions = new();
     private readonly Dictionary<string, CraneliftTypeMapper.ClifType> _globalTypes = new();
     private readonly Dictionary<string, string> _stringLiterals = new(); // maps literal value -> global name
+    private readonly Dictionary<string, string> _cStringLiterals = new(); // maps C string value -> global name
     private readonly CraneliftTypeMapper _typeMapper = new();
     private int _stringLiteralCounter;
 
@@ -31,6 +32,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
     public IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> GlobalTypes => _globalTypes;
     public IReadOnlySet<string> ExternalFunctions => _externalFunctions;
     public IReadOnlyDictionary<string, string> StringLiterals => _stringLiterals;
+    public IReadOnlyDictionary<string, string> CStringLiterals => _cStringLiterals;
 
     /// <summary>
     /// Defines a global variable.
@@ -82,8 +84,35 @@ public sealed class CraneliftModuleBuilder : IDisposable
         var bytes = Encoding.UTF8.GetBytes(value);
         var byteLength = bytes.Length;
         var payloadBytes = new List<byte>(byteLength + 9);
+        var charLength = CountCodepoints(value);
         WriteInt32LE(payloadBytes, byteLength);
-        WriteInt32LE(payloadBytes, byteLength); // TODO: track codepoints separately.
+        WriteInt32LE(payloadBytes, charLength);
+        payloadBytes.AddRange(bytes);
+        payloadBytes.Add(0);
+
+        _globalTypes[globalName] = CraneliftTypeMapper.ClifType.I8;
+        var hex = FormatBytes(payloadBytes);
+        _globals.AppendLine($"global {globalName}: i8[{payloadBytes.Count}] ; bytes: {hex}");
+
+        return globalName;
+    }
+
+    /// <summary>
+    /// Defines a C string literal as raw bytes (null-terminated, no Stasis header).
+    /// Returns the global name for this literal.
+    /// </summary>
+    public string DefineCStringLiteral(string value)
+    {
+        if (_cStringLiterals.TryGetValue(value, out var existingName))
+        {
+            return existingName;
+        }
+
+        var globalName = $"cstr_{_stringLiteralCounter++}";
+        _cStringLiterals[value] = globalName;
+
+        var bytes = Encoding.UTF8.GetBytes(value);
+        var payloadBytes = new List<byte>(bytes.Length + 1);
         payloadBytes.AddRange(bytes);
         payloadBytes.Add(0);
 
@@ -100,6 +129,23 @@ public sealed class CraneliftModuleBuilder : IDisposable
         bytes.Add((byte)((value >> 8) & 0xFF));
         bytes.Add((byte)((value >> 16) & 0xFF));
         bytes.Add((byte)((value >> 24) & 0xFF));
+    }
+
+    private static int CountCodepoints(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        foreach (var rune in value.EnumerateRunes())
+        {
+            _ = rune;
+            count++;
+        }
+
+        return count;
     }
 
     private static string FormatBytes(IEnumerable<byte> bytes) =>
@@ -124,7 +170,6 @@ public sealed class CraneliftModuleBuilder : IDisposable
         var retStr = FormatReturnType(returnType);
         _functions.AppendLine($"function %{name}({paramStr}){retStr} windows_fastcall {{");
         _functions.AppendLine($"block0:");
-        _functions.AppendLine($"    ; TODO: function body");
         if (returnType != CraneliftTypeMapper.ClifType.Void)
         {
             _functions.AppendLine($"    v0 = iconst.i32 0");

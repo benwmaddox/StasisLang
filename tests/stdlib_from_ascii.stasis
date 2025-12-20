@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 global ascii_src: ascii[8];
 global utf8_dst: utf8[8];
 

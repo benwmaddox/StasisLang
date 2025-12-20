@@ -1172,8 +1172,9 @@ public sealed class ModuleLowerer
             var bytes = Encoding.UTF8.GetBytes(text);
             var byteLength = bytes.Length;
             var payloadBytes = new List<byte>(byteLength + 9);
+            var charLength = CountCodepoints(text);
             WriteInt32LE(payloadBytes, byteLength);
-            WriteInt32LE(payloadBytes, byteLength); // TODO: track codepoints separately.
+            WriteInt32LE(payloadBytes, charLength);
             payloadBytes.AddRange(bytes);
             payloadBytes.Add(0);
 
@@ -1199,6 +1200,23 @@ public sealed class ModuleLowerer
             bytes.Add((byte)((value >> 8) & 0xFF));
             bytes.Add((byte)((value >> 16) & 0xFF));
             bytes.Add((byte)((value >> 24) & 0xFF));
+        }
+
+        private static int CountCodepoints(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return 0;
+            }
+
+            var count = 0;
+            foreach (var rune in value.EnumerateRunes())
+            {
+                _ = rune;
+                count++;
+            }
+
+            return count;
         }
 
         private LLVMValueRef GetUtf8HeaderPtr(LLVMBuilderRef builder, LLVMValueRef payloadPtr)

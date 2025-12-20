@@ -97,18 +97,27 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         // Declare C standard library functions
         // Since Cranelift doesn't support variadic functions, we declare multiple signatures
 
-        if (builtins.Overlaps(new[]
+            if (builtins.Overlaps(new[]
+                {
+                    "print_int", "print_char", "print_string",
+                    "print_prompt", "print_invalid", "print_clue_error", "print_solved", "print_cell",
+                    "run_tests"
+                }))
             {
-                "print_int", "print_char", "print_string",
-                "print_prompt", "print_invalid", "print_clue_error", "print_solved", "print_cell",
-                "run_tests"
-            }))
+                // printf3(format: *i8, arg1: i64, arg2: i64) -> i32 (aliased to printf in AOT)
+                builder.DeclareExternal("printf3", CraneliftTypeMapper.ClifType.I32,
+                    CraneliftTypeMapper.ClifType.I64,
+                    CraneliftTypeMapper.ClifType.I64,
+                    CraneliftTypeMapper.ClifType.I64);
+            }
+
+        if (builtins.Contains("run_tests"))
         {
-            // printf3(format: *i8, arg1: i64, arg2: i64) -> i32 (aliased to printf in AOT)
-            builder.DeclareExternal("printf3", CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.I64,
-                CraneliftTypeMapper.ClifType.I64,
+            // time(tloc: *i64) -> i64
+            builder.DeclareExternal("time", CraneliftTypeMapper.ClifType.I64,
                 CraneliftTypeMapper.ClifType.I64);
+            // clock() -> i64
+            builder.DeclareExternal("clock", CraneliftTypeMapper.ClifType.I64);
         }
 
 
@@ -310,60 +319,59 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         if (builtins.Contains("print_int"))
         {
-            builder.DefineStringLiteral(" %d");
+            builder.DefineCStringLiteral(" %d");
         }
 
         if (builtins.Contains("print_char"))
         {
-            builder.DefineStringLiteral("%c");
+            builder.DefineCStringLiteral("%c");
         }
 
         if (builtins.Contains("print_string"))
         {
-            builder.DefineStringLiteral("%s");
+            builder.DefineCStringLiteral("%s");
         }
 
         if (builtins.Contains("print_prompt"))
         {
-            builder.DefineStringLiteral("Enter row col val (1-9, 0 clears), or q to quit:\n");
+            builder.DefineCStringLiteral("Enter row col val (1-9, 0 clears), or q to quit:\n");
         }
 
         if (builtins.Contains("print_invalid"))
         {
-            builder.DefineStringLiteral("\u001b[31mInvalid move.\u001b[0m\n");
+            builder.DefineCStringLiteral("\u001b[31mInvalid move.\u001b[0m\n");
         }
 
         if (builtins.Contains("print_clue_error"))
         {
-            builder.DefineStringLiteral("\u001b[31mCannot change a clue.\u001b[0m\n");
+            builder.DefineCStringLiteral("\u001b[31mCannot change a clue.\u001b[0m\n");
         }
 
         if (builtins.Contains("print_solved"))
         {
-            builder.DefineStringLiteral("\u001b[32mSolved!\u001b[0m\n");
+            builder.DefineCStringLiteral("\u001b[32mSolved!\u001b[0m\n");
         }
 
         if (builtins.Contains("print_cell"))
         {
-            builder.DefineStringLiteral(". ");
-            builder.DefineStringLiteral("%s");
-            builder.DefineStringLiteral("%d");
-            builder.DefineStringLiteral("\u001b[36m");
-            builder.DefineStringLiteral("\u001b[32m");
-            builder.DefineStringLiteral("\u001b[0m ");
+            builder.DefineCStringLiteral(". ");
+            builder.DefineCStringLiteral("%s");
+            builder.DefineCStringLiteral("%d");
+            builder.DefineCStringLiteral("\u001b[36m");
+            builder.DefineCStringLiteral("\u001b[32m");
+            builder.DefineCStringLiteral("\u001b[0m ");
         }
 
         if (builtins.Contains("read_int"))
         {
-            builder.DefineStringLiteral("%d");
+            builder.DefineCStringLiteral("%d");
         }
 
         if (builtins.Contains("read_char"))
         {
-            builder.DefineStringLiteral(" %c");
+            builder.DefineCStringLiteral(" %c");
         }
 
-        // TODO: Add more C runtime functions as needed
     }
 
     private static void EmitGlobals(
@@ -460,7 +468,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<EnumDeclarationSyntax>()
             .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
         var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, layout, consts, diagnostics, moduleName);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -543,9 +551,18 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         var failures = NewValue(ref valueCounter);
         body.AppendLine($"    {failures} = iconst.i32 0");
 
-        var passFmt = builder.DefineStringLiteral("PASS: %s\n");
-        var failFmt = builder.DefineStringLiteral("FAIL: %s\n");
-        var summaryFmt = builder.DefineStringLiteral("Tests: passed=%d failed=%d\n");
+        var passFmt = builder.DefineCStringLiteral("\u001b[32mPASS\u001b[0m: %s\n");
+        var failFmt = builder.DefineCStringLiteral("\u001b[31mFAIL\u001b[0m: %s\n");
+        var summaryPassFmt = builder.DefineCStringLiteral("Tests: \u001b[32mpassed=%d\u001b[0m failed=%d");
+        var summaryFailFmt = builder.DefineCStringLiteral("Tests: passed=%d \u001b[31mfailed=%d\u001b[0m");
+        var summaryTimeFmt = builder.DefineCStringLiteral(" test-time=%dms\n");
+
+        var zero64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {zero64} = iconst.i64 0");
+        var startTime = NewValue(ref valueCounter);
+        body.AppendLine($"    {startTime} = call %time({zero64})");
+        var startClock = NewValue(ref valueCounter);
+        body.AppendLine($"    {startClock} = call %clock()");
 
         foreach (var testDecl in tests)
         {
@@ -576,7 +593,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             var isPass = NewValue(ref valueCounter);
             body.AppendLine($"    {isPass} = icmp eq {failI32}, {zero}");
 
-            var testNameGlobal = builder.DefineStringLiteral(testName);
+            var testNameGlobal = builder.DefineCStringLiteral(testName);
             var nameAddr = NewValue(ref valueCounter);
             body.AppendLine($"    {nameAddr} = global_value {testNameGlobal}");
 
@@ -587,8 +604,6 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             var fmtAddr = NewValue(ref valueCounter);
             body.AppendLine($"    {fmtAddr} = select {isPass}, {passAddr}, {failAddr}");
-            var zero64 = NewValue(ref valueCounter);
-            body.AppendLine($"    {zero64} = iconst.i64 0");
             var print = NewValue(ref valueCounter);
             body.AppendLine($"    {print} = call %printf3({fmtAddr}, {nameAddr}, {zero64})");
         }
@@ -599,14 +614,56 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         var passed = NewValue(ref valueCounter);
         body.AppendLine($"    {passed} = isub {totalVal}, {failures}");
 
+        var endTime = NewValue(ref valueCounter);
+        body.AppendLine($"    {endTime} = call %time({zero64})");
+        var elapsedSeconds = NewValue(ref valueCounter);
+        body.AppendLine($"    {elapsedSeconds} = isub {endTime}, {startTime}");
+        var thousand64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {thousand64} = iconst.i64 1000");
+        var timeMs64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {timeMs64} = imul {elapsedSeconds}, {thousand64}");
+
+        var endClock = NewValue(ref valueCounter);
+        body.AppendLine($"    {endClock} = call %clock()");
+        var elapsedTicks = NewValue(ref valueCounter);
+        body.AppendLine($"    {elapsedTicks} = isub {endClock}, {startClock}");
+        var ticksTimesMs = NewValue(ref valueCounter);
+        body.AppendLine($"    {ticksTimesMs} = imul {elapsedTicks}, {thousand64}");
+        var clockDivisor = NewValue(ref valueCounter);
+        body.AppendLine($"    {clockDivisor} = iconst.i64 1000");
+        var clockMs64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {clockMs64} = sdiv {ticksTimesMs}, {clockDivisor}");
+
+        var useTime = NewValue(ref valueCounter);
+        body.AppendLine($"    {useTime} = icmp ne {timeMs64}, {zero64}");
+        var elapsedMs64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {elapsedMs64} = select {useTime}, {timeMs64}, {clockMs64}");
+        var elapsedMs = NewValue(ref valueCounter);
+        body.AppendLine($"    {elapsedMs} = ireduce.i32 {elapsedMs64}");
+
+        var zero32 = NewValue(ref valueCounter);
+        body.AppendLine($"    {zero32} = iconst.i32 0");
+        var hasFailures = NewValue(ref valueCounter);
+        body.AppendLine($"    {hasFailures} = icmp ne {failures}, {zero32}");
+
+        var passFmtAddr = NewValue(ref valueCounter);
+        body.AppendLine($"    {passFmtAddr} = global_value {summaryPassFmt}");
+        var failFmtAddr = NewValue(ref valueCounter);
+        body.AppendLine($"    {failFmtAddr} = global_value {summaryFailFmt}");
         var summaryAddr = NewValue(ref valueCounter);
-        body.AppendLine($"    {summaryAddr} = global_value {summaryFmt}");
+        body.AppendLine($"    {summaryAddr} = select {hasFailures}, {failFmtAddr}, {passFmtAddr}");
         var passed64 = NewValue(ref valueCounter);
         body.AppendLine($"    {passed64} = sextend.i64 {passed}");
         var failures64 = NewValue(ref valueCounter);
         body.AppendLine($"    {failures64} = sextend.i64 {failures}");
+        var elapsed64 = NewValue(ref valueCounter);
+        body.AppendLine($"    {elapsed64} = sextend.i64 {elapsedMs}");
         var summaryCall = NewValue(ref valueCounter);
         body.AppendLine($"    {summaryCall} = call %printf3({summaryAddr}, {passed64}, {failures64})");
+        var summaryTimeAddr = NewValue(ref valueCounter);
+        body.AppendLine($"    {summaryTimeAddr} = global_value {summaryTimeFmt}");
+        var summaryTimeCall = NewValue(ref valueCounter);
+        body.AppendLine($"    {summaryTimeCall} = call %printf3({summaryTimeAddr}, {elapsed64}, {zero64})");
 
         body.AppendLine($"    return {failures}");
 

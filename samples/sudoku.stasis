@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 function idx(r: i32, c: i32): i32 {
     return r * 9 + c;
 }

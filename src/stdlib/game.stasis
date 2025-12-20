@@ -1,0 +1,36 @@
+// Game-focused utilities (not loaded by default).
+
+function game_aabb_intersects(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    bx_min_x: f32, bx_min_y: f32, bx_max_x: f32, bx_max_y: f32
+): bool {
+    if (ax_max_x < bx_min_x) { return false; }
+    if (ax_min_x > bx_max_x) { return false; }
+    if (ax_max_y < bx_min_y) { return false; }
+    if (ax_min_y > bx_max_y) { return false; }
+    return true;
+}
+
+function game_aabb_contains_point(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    px: f32, py: f32
+): bool {
+    if (px < ax_min_x) { return false; }
+    if (px > ax_max_x) { return false; }
+    if (py < ax_min_y) { return false; }
+    if (py > ax_max_y) { return false; }
+    return true;
+}
+
+test `game_aabb_intersects detects overlap`() {
+    return game_aabb_intersects(0.0, 0.0, 2.0, 2.0, 1.0, 1.0, 3.0, 3.0);
+}
+
+test `game_aabb_intersects detects separation`() {
+    return !game_aabb_intersects(0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0);
+}
+
+test `game_aabb_contains_point checks bounds`() {
+    return game_aabb_contains_point(0.0, 0.0, 2.0, 2.0, 1.0, 1.0)
+        && !game_aabb_contains_point(0.0, 0.0, 2.0, 2.0, 3.0, 1.0);
+}

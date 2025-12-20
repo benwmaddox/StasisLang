@@ -523,6 +523,27 @@ public class CliSnapshotTests
         return false;
     }
 
+    [Fact]
+    public void Import_GameModule_Works()
+    {
+        var root = GetRepoRoot();
+        var tempDir = Directory.CreateTempSubdirectory("stasis_imports_cli");
+        try
+        {
+            var gamePath = Path.Combine(root, "src", "stdlib", "game.stasis").Replace("\\", "/");
+            var entryPath = Path.Combine(tempDir.FullName, "import_game.stasis");
+            File.WriteAllText(entryPath, $"import \"{gamePath}\";\n\ntest `import works`() {{ return game_aabb_intersects(0.0, 0.0, 1.0, 1.0, 0.5, 0.5, 1.5, 1.5); }}");
+
+            var result = RunCli("test", entryPath, "--backend", "cranelift", "--emit-ir");
+
+            Assert.Equal(0, result.exitCode);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
+
     private static string? FindGraphicsImportLib(string root)
     {
         var candidates = new[]

@@ -2,6 +2,12 @@
 
 This document defines the standard library for the Stasis programming language.
 
+Import the core stdlib explicitly when needed:
+
+```
+import "src/stdlib/stdlib.stasis";
+```
+
 ## Design Principles
 
 1. **Prefix by module**: `str_`, `io_`, `sys_`, `math_`, `ascii_`, `mem_`, `gfx_`
@@ -91,11 +97,29 @@ ascii_to_hex(b: u8): i32         // '0'->0, 'a'->10, 'F'->15, else -1
 ascii_from_hex(d: i32): u8       // 0->'0', 10->'a', else '?'
 ```
 
+### ASCII String Buffers
+
+```stasis
+ascii_len(s: ascii[]): i32               // Length from header
+ascii_is_empty(s: ascii[]): bool         // True if length == 0
+ascii_get(s: ascii[], index: i32): u8    // Get byte at index
+ascii_set(s: ascii[], index: i32, b: u8) // Set byte, update header if needed
+ascii_recount(s: ascii[]): i32           // Recompute length from sentinel, fix header
+ascii_clear(s: ascii[])                  // Reset length to 0 and write sentinel
+ascii_copy(dst: ascii[], src: ascii[]): i32
+ascii_append(dst: ascii[], src: ascii[]): i32
+ascii_append_byte(dst: ascii[], b: u8): i32
+ascii_cmp(a: ascii[], b: ascii[]): i32
+ascii_eq(a: ascii[], b: ascii[]): bool
+ascii_find_byte(s: ascii[], b: u8): i32
+ascii_find_last_byte(s: ascii[], b: u8): i32
+```
+
 ---
 
 ## Module: `str_` (String Operations)
 
-All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; there is no implicit widening from `ascii[N]` to `utf8[N]`, so use an explicit conversion helper when needed.
+All string functions operate on `utf8[N]` values (`string[N]` alias). Unless noted, mutating functions update both `byte_length` and `char_length` and maintain the null sentinel. The payload is always a null-terminated UTF-8 byte sequence, so C interop can pass the payload pointer directly and ignore the header unless length metadata is required. For ASCII-only payloads, prefer `ascii[N]` and the `ascii_` helpers; there is no implicit widening from `ascii[N]` to `utf8[N]`, so use an explicit conversion helper when needed.
 All operations that accept byte indices validate UTF-8 codepoint boundaries before mutating; invalid ranges are treated as coding errors and trigger a fatal exit rather than continuing with partial writes.
 
 ### Length
@@ -351,6 +375,28 @@ mem_cmp(a: u8[], b: u8[], count: i32): i32     // Compare bytes, return -1/0/1
 
 ---
 
+## Module: `game_` (Game Utilities)
+
+Not loaded by default. Include explicitly when you want engine/game helpers in Stasis code.
+
+```
+import "src/stdlib/game.stasis";
+```
+
+```stasis
+game_aabb_intersects(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    bx_min_x: f32, bx_min_y: f32, bx_max_x: f32, bx_max_y: f32
+): bool
+
+game_aabb_contains_point(
+    ax_min_x: f32, ax_min_y: f32, ax_max_x: f32, ax_max_y: f32,
+    px: f32, py: f32
+): bool
+```
+
+---
+
 ## Module: `gfx_` (Graphics - External Runtime)
 
 These are implemented in `runtime/stasis_graphics.c`, not as compiler built-ins.
@@ -371,11 +417,11 @@ gfx_should_quit(): bool
 
 ### Phase 1: Essential (Self-Hosting Foundation)
 
-- [ ] `ascii_*` module (all functions)
-- [ ] `str_*` module (core: len, copy, append, compare, find)
+- [x] `ascii_*` module (all functions)
+- [x] `str_*` module (core: len, copy, append, compare, find)
 - [ ] `sys_exit`, `sys_abort`
 
-Note: The CLI currently prepends `src/stdlib/stdlib.stasis` to user source; a future update should load stdlib as a separate file to preserve diagnostic locations.
+Note: Standard library modules are not loaded automatically; import them explicitly from your source files.
 
 ### Phase 2: UTF-8 Support
 
@@ -388,9 +434,10 @@ Note: The CLI currently prepends `src/stdlib/stdlib.stasis` to user source; a fu
 
 - [ ] `math_sqrt`, `math_abs_*`, `math_min_*`, `math_max_*`, `math_clamp_*`
 - [ ] `io_println`, `io_read_line`, `io_newline`
-- [ ] `mem_*` functions
+- [x] `mem_*` functions
 - [ ] `sys_random*`
 - [ ] Number conversion functions
+- [ ] Use bulk memory operations where possible (prefer mem_copy/mem_set style loops or intrinsics over per-byte helpers)
 
 ### Phase 4: Extended Math
 
