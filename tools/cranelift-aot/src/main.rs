@@ -110,7 +110,7 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
     let mut function_ids = std::collections::HashMap::new();
     for ext in &parsed.externals
     {
-        // Alias printf_str to printf (workaround for variadic printf)
+        // Alias printf_* to printf (workaround for variadic printf)
         let link_name = if ext.name == "printf_str" || ext.name == "printf3" { "printf" } else { &ext.name };
 
         let id = module

@@ -1,0 +1,33 @@
+import "../src/stdlib/stdlib.stasis";
+
+global ascii_a: ascii[8];
+global ascii_b: ascii[8];
+
+test `ascii_len tracks header`() {
+    ascii_clear(ascii_a);
+    ascii_append_byte(ascii_a, 65);
+    ascii_append_byte(ascii_a, 66);
+    return ascii_len(ascii_a) == 2
+        && ascii_get(ascii_a, 0) == 65
+        && ascii_get(ascii_a, 1) == 66;
+}
+
+test `ascii_copy copies bytes`() {
+    ascii_clear(ascii_a);
+    ascii_append_byte(ascii_a, 72);
+    ascii_append_byte(ascii_a, 105);
+    ascii_copy(ascii_b, ascii_a);
+    return ascii_len(ascii_b) == 2
+        && ascii_get(ascii_b, 0) == 72
+        && ascii_get(ascii_b, 1) == 105;
+}
+
+test `ascii_cmp compares`() {
+    ascii_clear(ascii_a);
+    ascii_clear(ascii_b);
+    ascii_append_byte(ascii_a, 65);
+    ascii_append_byte(ascii_b, 66);
+    return ascii_cmp(ascii_a, ascii_b) == -1
+        && ascii_cmp(ascii_b, ascii_a) == 1
+        && ascii_eq(ascii_a, ascii_a);
+}

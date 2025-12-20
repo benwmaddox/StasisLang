@@ -18,6 +18,19 @@ static void print_usage(void)
     fprintf(stderr, "usage: stasis_runner --server\n");
 }
 
+#ifdef _WIN32
+static void enable_vt_processing(HANDLE handle)
+{
+    DWORD mode = 0;
+    if (!GetConsoleMode(handle, &mode))
+    {
+        return;
+    }
+    mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(handle, mode);
+}
+#endif
+
 static void set_runtime_dir(const char *dll_path)
 {
     char dir_buffer[1024];
@@ -50,6 +63,11 @@ static void set_runtime_dir(const char *dll_path)
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    enable_vt_processing(GetStdHandle(STD_OUTPUT_HANDLE));
+    enable_vt_processing(GetStdHandle(STD_ERROR_HANDLE));
+#endif
+
     if (argc >= 2 && strcmp(argv[1], "--server") == 0)
     {
         char line[256];

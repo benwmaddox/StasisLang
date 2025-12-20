@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // STV Viewer - preview `.stv` sprite files with a file tree panel.
 // Controls: Up/Down to move, Enter to open, Left to go up, Tab toggles mode, Esc to quit.
 

@@ -123,7 +123,11 @@ ascii[N]   // ASCII-only string buffers with a single length header
 - Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
 - Invariant: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints.
 - `data[byte_length]` is set to `0` as a sentinel; sentinel is not counted in `N`.
-- Current implementation: `char_length` mirrors `byte_length` until full UTF-8 codepoint tracking lands.
+- C interop: the payload is a null-terminated UTF-8 byte sequence, so host functions can treat `data` as a normal C string and ignore the header unless length metadata is needed.
+
+**string literal typing**
+- String literals are context-typed: `""` can target `ascii[N]` or `utf8[N]`/`string` based on the expected type.
+- Non-literal values still require explicit conversion between `ascii[N]` and `utf8[N]`.
 
 ### Built-in I/O helpers
 
@@ -134,6 +138,19 @@ ascii[N]   // ASCII-only string buffers with a single length header
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
 - String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
+
+### Imports
+
+Stasis supports source-level imports that inline another `.stasis` file before parsing.
+
+```
+import "relative/path/to/file.stasis";
+```
+
+- Imports are resolved relative to the importing file.
+- Imported content is inlined once (duplicate imports are ignored).
+- Import directives are removed before parsing, so only top-level declarations remain.
+- Standard library modules are regular imports; the compiler does not auto-include them.
 
 ### Struct Types
 
@@ -421,7 +438,7 @@ Global arrays of struct references become SoA automatically.
 # **11. Modules**
 
 - File = Module
-- All top-level declarations are visible by filename-level import (v2 will add explicit imports)
+- All top-level declarations are visible by filename-level import through `import "file.stasis";`
 - Compiled via signature-first pass, then tree shaking.
 
 ---

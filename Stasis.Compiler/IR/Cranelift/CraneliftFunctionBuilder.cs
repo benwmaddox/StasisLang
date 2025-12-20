@@ -17,11 +17,13 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
+    private readonly IReadOnlyDictionary<string, string> _cStringLiterals;
     private readonly Layout.LayoutPlan _layoutPlan;
     private readonly IReadOnlyDictionary<string, ConstValue> _consts;
     private readonly string _moduleName;
     private readonly Dictionary<string, LocalSlot> _locals = new();
     private readonly Dictionary<string, TypeSymbol> _localTypes = new();
+    private readonly Dictionary<string, ForeachElementBinding> _elementBindings = new();
     private int _valueCounter;
     private int _blockCounter;
     private readonly List<Diagnostic> _diagnostics;
@@ -33,6 +35,7 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
         IReadOnlyDictionary<string, string> stringLiterals,
+        IReadOnlyDictionary<string, string> cStringLiterals,
         Layout.LayoutPlan layoutPlan,
         IReadOnlyDictionary<string, ConstValue> consts,
         List<Diagnostic> diagnostics,
@@ -44,6 +47,7 @@ public sealed class CraneliftFunctionBuilder
         _enums = enums;
         _globalTypes = globalTypes;
         _stringLiterals = stringLiterals;
+        _cStringLiterals = cStringLiterals;
         _layoutPlan = layoutPlan;
         _consts = consts;
         _diagnostics = diagnostics;
@@ -60,6 +64,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.Clear();
         _locals.Clear();
         _localTypes.Clear();
+        _elementBindings.Clear();
         _blockCounter = 0;
 
         _valueCounter = function.Parameters.Count;
@@ -111,6 +116,7 @@ public sealed class CraneliftFunctionBuilder
         _instructions.Clear();
         _locals.Clear();
         _localTypes.Clear();
+        _elementBindings.Clear();
         _valueCounter = 0;
         _blockCounter = 0;
 
@@ -160,11 +166,14 @@ public sealed class CraneliftFunctionBuilder
             case ForStatementSyntax forStmt:
                 LowerFor(forStmt);
                 break;
+            case ForeachStatementSyntax foreachStmt:
+                LowerForeach(foreachStmt);
+                break;
             case BlockStatementSyntax blockStmt:
                 LowerBlock(blockStmt);
                 break;
             default:
-                _instructions.AppendLine($"    ; TODO: {stmt.GetType().Name}");
+                _diagnostics.Add(new Diagnostic($"Statement not supported in Cranelift backend: {stmt.GetType().Name}.", stmt.Span));
                 break;
         }
     }
@@ -295,6 +304,112 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"{endBlock}:");
     }
 
+    private void LowerForeach(ForeachStatementSyntax foreachStmt)
+    {
+        if (!TryResolveForeachIterable(foreachStmt.Iterable, out var iterable))
+        {
+            _diagnostics.Add(new Diagnostic("foreach target must be a fixed-size array.", foreachStmt.Iterable.Span));
+            return;
+        }
+
+        var internalIndexName = $"__foreach_idx_{_blockCounter}";
+        var indexSlot = NewValue();
+        _instructions.AppendLine($"    {indexSlot} = stack_slot.i32");
+        var zero = NewValue();
+        _instructions.AppendLine($"    {zero} = iconst.i32 0");
+        _instructions.AppendLine($"    store {zero}, {indexSlot}");
+
+        var previousIndexSlot = _locals.ContainsKey(internalIndexName)
+            ? _locals[internalIndexName]
+            : null;
+        var previousIndexType = _localTypes.ContainsKey(internalIndexName)
+            ? _localTypes[internalIndexName]
+            : null;
+        _locals[internalIndexName] = new LocalSlot(indexSlot, CraneliftTypeMapper.ClifType.I32);
+        _localTypes[internalIndexName] = new PrimitiveTypeSymbol("i32");
+
+        var iteratorName = foreachStmt.Iterator.Text;
+        var indexName = foreachStmt.IndexVariable?.Text;
+        var previousIteratorBinding = _elementBindings.ContainsKey(iteratorName)
+            ? _elementBindings[iteratorName]
+            : null;
+        var previousIteratorLocal = _locals.ContainsKey(iteratorName) ? _locals[iteratorName] : null;
+        var previousIteratorType = _localTypes.ContainsKey(iteratorName) ? _localTypes[iteratorName] : null;
+        var previousIndexLocal = indexName is not null && _locals.ContainsKey(indexName) ? _locals[indexName] : null;
+        var previousIndexTypeEntry = indexName is not null && _localTypes.ContainsKey(indexName) ? _localTypes[indexName] : null;
+
+        if (foreachStmt.BindByElement)
+        {
+            _elementBindings[iteratorName] = new ForeachElementBinding(foreachStmt.Iterable, iterable.ElementType, internalIndexName);
+            if (indexName is not null)
+            {
+                _locals[indexName] = new LocalSlot(indexSlot, CraneliftTypeMapper.ClifType.I32);
+                _localTypes[indexName] = new PrimitiveTypeSymbol("i32");
+            }
+        }
+        else
+        {
+            _locals[iteratorName] = new LocalSlot(indexSlot, CraneliftTypeMapper.ClifType.I32);
+            _localTypes[iteratorName] = new PrimitiveTypeSymbol("i32");
+            if (indexName is not null)
+            {
+                _locals[indexName] = new LocalSlot(indexSlot, CraneliftTypeMapper.ClifType.I32);
+                _localTypes[indexName] = new PrimitiveTypeSymbol("i32");
+            }
+        }
+
+        var condBlock = NewBlock();
+        var bodyBlock = NewBlock();
+        var latchBlock = NewBlock();
+        var endBlock = NewBlock();
+
+        _instructions.AppendLine($"    jump {condBlock}");
+
+        _instructions.AppendLine($"{condBlock}:");
+        var currentIndex = NewValue();
+        _instructions.AppendLine($"    {currentIndex} = load.i32 {indexSlot}");
+        var lengthVal = NewValue();
+        _instructions.AppendLine($"    {lengthVal} = iconst.i32 {iterable.Length}");
+        var cond = NewValue();
+        _instructions.AppendLine($"    {cond} = icmp slt {currentIndex}, {lengthVal}");
+        _instructions.AppendLine($"    brif {cond}, {bodyBlock}, {endBlock}");
+
+        _instructions.AppendLine($"{bodyBlock}:");
+        LowerBlock(foreachStmt.Body);
+        _instructions.AppendLine($"    jump {latchBlock}");
+
+        _instructions.AppendLine($"{latchBlock}:");
+        var nextIndex = NewValue();
+        _instructions.AppendLine($"    {nextIndex} = iadd {currentIndex}, {ConstI32(1)}");
+        _instructions.AppendLine($"    store {nextIndex}, {indexSlot}");
+        _instructions.AppendLine($"    jump {condBlock}");
+
+        _instructions.AppendLine($"{endBlock}:");
+
+        if (foreachStmt.BindByElement)
+        {
+            if (previousIteratorBinding is not null)
+            {
+                _elementBindings[iteratorName] = previousIteratorBinding;
+            }
+            else
+            {
+                _elementBindings.Remove(iteratorName);
+            }
+        }
+        else
+        {
+            RestoreLocal(iteratorName, previousIteratorLocal, previousIteratorType);
+        }
+
+        if (indexName is not null)
+        {
+            RestoreLocal(indexName, previousIndexLocal, previousIndexTypeEntry);
+        }
+
+        RestoreLocal(internalIndexName, previousIndexSlot, previousIndexType);
+    }
+
     private string LowerExpression(ExpressionSyntax expr)
     {
         switch (expr)
@@ -309,6 +424,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerUnary(unary);
             case CallExpressionSyntax call:
                 return LowerCall(call);
+            case OperatorCallExpressionSyntax op:
+                return LowerOperatorCall(op);
             case ParenthesizedExpressionSyntax paren:
                 return LowerExpression(paren.Expression);
             case AssignmentExpressionSyntax assign:
@@ -319,7 +436,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerArrayAccess(array);
             default:
                 var val = NewValue();
-                _instructions.AppendLine($"    {val} = iconst.i32 0 ; TODO: {expr.GetType().Name}");
+                _diagnostics.Add(new Diagnostic($"Expression not supported in Cranelift backend: {expr.GetType().Name}.", expr.Span));
+                _instructions.AppendLine($"    {val} = iconst.i32 0");
                 return val;
         }
     }
@@ -365,8 +483,8 @@ public sealed class CraneliftFunctionBuilder
         }
         else
         {
-            // String or other literal
-            _instructions.AppendLine($"    {val} = iconst.i64 0 ; TODO: string literal");
+            _diagnostics.Add(new Diagnostic("Unsupported literal expression.", lit.Span));
+            _instructions.AppendLine($"    {val} = iconst.i32 0");
         }
 
         return val;
@@ -375,6 +493,11 @@ public sealed class CraneliftFunctionBuilder
     private string LowerIdentifier(IdentifierExpressionSyntax id)
     {
         var name = id.Identifier.Text;
+
+        if (_elementBindings.TryGetValue(name, out var binding))
+        {
+            return LowerForeachElementValue(binding, id.Span);
+        }
 
         // Check locals/parameters (stored in stack slots)
         if (_locals.TryGetValue(name, out var local))
@@ -491,8 +614,8 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var fallback = NewValue();
-        _instructions.AppendLine($"    {fallback} = {operand} ; TODO: unary {unary.OperatorToken.Kind}");
-        return fallback;
+        _diagnostics.Add(new Diagnostic($"Unary operator '{unary.OperatorToken.Text}' is not supported in Cranelift backend.", unary.Span));
+        return operand;
     }
 
     private string LowerCall(CallExpressionSyntax call)
@@ -543,6 +666,132 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {result} = call %{callName}({argList})");
 
         return result;
+    }
+
+    private string LowerOperatorCall(OperatorCallExpressionSyntax op)
+    {
+        var opText = op.OperatorToken.Text;
+        if (op.Arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span));
+            return ZeroI32();
+        }
+
+        var rhs = LowerExpression(op.Arguments[0]);
+        if (opText == "=")
+        {
+            _diagnostics.Add(new Diagnostic("Use infix '=' for assignment.", op.Span));
+            StoreOperatorAssignment(op.Receiver, rhs, GetExpressionType(op.Arguments[0]));
+            return rhs;
+        }
+
+        var lhs = LowerExpression(op.Receiver);
+        return LowerBinaryOperator(opText, lhs, rhs, GetExpressionType(op.Receiver), GetExpressionType(op.Arguments[0]), op.Span);
+    }
+
+    private void StoreOperatorAssignment(ExpressionSyntax target, string value, TypeSymbol? valueType)
+    {
+        switch (target)
+        {
+            case IdentifierExpressionSyntax id:
+                {
+                    var name = id.Identifier.Text;
+                    if (_elementBindings.TryGetValue(name, out var elementBinding))
+                    {
+                        LowerForeachElementStore(elementBinding, value, valueType, target.Span);
+                        return;
+                    }
+                    if (_locals.TryGetValue(name, out var local))
+                    {
+                        if (_localTypes.TryGetValue(name, out var localType))
+                        {
+                            value = CoerceAssignmentValue(value, valueType, localType);
+                        }
+                        _instructions.AppendLine($"    store {value}, {local.Address}");
+                        return;
+                    }
+                    if (_globalTypes.TryGetValue(name, out _))
+                    {
+                        var addr = NewValue();
+                        _instructions.AppendLine($"    {addr} = global_value {name}");
+                        if (_symbols.TryGetValue(name, out var symbol))
+                        {
+                            value = CoerceAssignmentValue(value, valueType, symbol.Type);
+                        }
+                        _instructions.AppendLine($"    store {value}, {addr}");
+                        return;
+                    }
+                    _instructions.AppendLine($"    ; unknown assignment target {name}");
+                    return;
+                }
+            case ArrayAccessExpressionSyntax arrayAccess:
+                LowerArrayStore(arrayAccess, value, valueType);
+                return;
+            case MemberAccessExpressionSyntax memberAccess:
+                if (memberAccess.Receiver is IdentifierExpressionSyntax receiverId &&
+                    _elementBindings.TryGetValue(receiverId.Identifier.Text, out var boundElement))
+                {
+                    LowerForeachElementFieldStore(boundElement, memberAccess.Member.Text, value, valueType, target.Span);
+                    return;
+                }
+                LowerMemberStore(memberAccess, value, valueType);
+                return;
+            default:
+                _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", target.Span));
+                return;
+        }
+    }
+
+    private string LowerBinaryOperator(string opText, string left, string right, TypeSymbol? leftType, TypeSymbol? rightType, SourceSpan span)
+    {
+        var isFloat = IsFloatType(leftType) || IsFloatType(rightType);
+        if (isFloat)
+        {
+            var useF64 = IsF64Type(leftType) || IsF64Type(rightType);
+            left = CoerceFloatOperand(left, leftType, useF64);
+            right = CoerceFloatOperand(right, rightType, useF64);
+        }
+
+        var op = opText switch
+        {
+            "+" => isFloat ? "fadd" : "iadd",
+            "-" => isFloat ? "fsub" : "isub",
+            "*" => isFloat ? "fmul" : "imul",
+            "/" => isFloat ? "fdiv" : "sdiv",
+            "%" => "srem",
+            "<" => isFloat ? "fcmp lt" : "icmp slt",
+            "<=" => isFloat ? "fcmp le" : "icmp sle",
+            ">" => isFloat ? "fcmp gt" : "icmp sgt",
+            ">=" => isFloat ? "fcmp ge" : "icmp sge",
+            "==" => isFloat ? "fcmp eq" : "icmp eq",
+            "!=" => isFloat ? "fcmp ne" : "icmp ne",
+            "&&" => "band",
+            "||" => "bor",
+            _ => string.Empty
+        };
+
+        if (string.IsNullOrEmpty(op))
+        {
+            _diagnostics.Add(new Diagnostic($"Unsupported operator '{opText}'.", span));
+            var fallback = NewValue();
+            _instructions.AppendLine($"    {fallback} = iconst.i32 0");
+            return fallback;
+        }
+
+        if (op.StartsWith("icmp") || op.StartsWith("fcmp"))
+        {
+            var cmpOp = op.Replace("icmp ", "").Replace("fcmp ", "");
+            var cmp = NewValue();
+            var cmpPrefix = op.StartsWith("fcmp") ? "fcmp" : "icmp";
+            _instructions.AppendLine($"    {cmp} = {cmpPrefix} {cmpOp} {left}, {right}");
+            var result = NewValue();
+            _instructions.AppendLine($"    {result} = bint.i32 {cmp}");
+            return result;
+        }
+
+        var nonCmp = NewValue();
+        _instructions.AppendLine($"    {nonCmp} = {op} {left}, {right}");
+        return nonCmp;
     }
 
     private bool IsVoidFunction(string name) =>
@@ -767,13 +1016,11 @@ public sealed class CraneliftFunctionBuilder
             case "str_substr":
                 return LowerStrSubstr(arguments);
 
-            default:
-                // Unsupported built-in - emit placeholder
-                var fallback = NewValue();
-                _instructions.AppendLine($"    {fallback} = iconst.i32 0 ; TODO: built-in {funcName}");
-                return fallback;
-        }
-    }
+              default:
+                  _diagnostics.Add(new Diagnostic($"Built-in '{funcName}' is not supported in Cranelift backend.", new SourceSpan(0, 0)));
+                  return ZeroI32();
+          }
+      }
 
     private string LowerPrintInt(IReadOnlyList<ExpressionSyntax> arguments)
     {
@@ -2059,7 +2306,7 @@ public sealed class CraneliftFunctionBuilder
 
     private string GetOrCreateFormatString(string format)
     {
-        if (_stringLiterals.TryGetValue(format, out var existing))
+        if (_cStringLiterals.TryGetValue(format, out var existing))
         {
             return existing;
         }
@@ -2268,6 +2515,11 @@ public sealed class CraneliftFunctionBuilder
         if (assign.Left is IdentifierExpressionSyntax id)
         {
             var name = id.Identifier.Text;
+            if (_elementBindings.TryGetValue(name, out var elementBinding))
+            {
+                LowerForeachElementStore(elementBinding, value, valueType, assign.Left.Span);
+                return value;
+            }
             if (_locals.TryGetValue(name, out var local))
             {
                 if (_localTypes.TryGetValue(name, out var localType))
@@ -2299,11 +2551,17 @@ public sealed class CraneliftFunctionBuilder
         }
         else if (assign.Left is MemberAccessExpressionSyntax memberAccess)
         {
+            if (memberAccess.Receiver is IdentifierExpressionSyntax receiverId &&
+                _elementBindings.TryGetValue(receiverId.Identifier.Text, out var elementBinding))
+            {
+                LowerForeachElementFieldStore(elementBinding, memberAccess.Member.Text, value, valueType, assign.Left.Span);
+                return value;
+            }
             LowerMemberStore(memberAccess, value, valueType);
         }
         else
         {
-            _instructions.AppendLine($"    ; TODO: complex assignment");
+            _diagnostics.Add(new Diagnostic("Assignment target not supported in Cranelift backend.", assign.Left.Span));
         }
 
         return value;
@@ -2369,6 +2627,18 @@ public sealed class CraneliftFunctionBuilder
 
             _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: unknown enum member {member.Member.Text}");
         }
+        else if (member.Receiver is IdentifierExpressionSyntax receiverId &&
+                 _elementBindings.TryGetValue(receiverId.Identifier.Text, out var elementBinding))
+        {
+            if (elementBinding.ElementType is NamedTypeSymbol)
+            {
+                return LowerForeachElementFieldAccess(elementBinding, member.Member.Text, member.Span);
+            }
+
+            _diagnostics.Add(new Diagnostic("Only struct elements support field access in foreach.", member.Span));
+            _instructions.AppendLine($"    {result} = iconst.i32 0");
+            return result;
+        }
         else if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
         {
             return LowerArrayElementFieldAccess(arrayAccess, member.Member.Text);
@@ -2398,8 +2668,8 @@ public sealed class CraneliftFunctionBuilder
         }
         else
         {
-            // Struct field access - TODO: SoA transformation
-            _instructions.AppendLine($"    {result} = iconst.i32 0 ; TODO: member access .{member.Member.Text}");
+            _diagnostics.Add(new Diagnostic($"Member access not supported in Cranelift backend: .{member.Member.Text}", member.Span));
+            _instructions.AppendLine($"    {result} = iconst.i32 0");
         }
 
         return result;
@@ -2662,7 +2932,8 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var fallback = NewValue();
-        _instructions.AppendLine($"    {fallback} = iconst.i32 0 ; error: unsupported array element field access");
+        _diagnostics.Add(new Diagnostic("Array element field access not supported in Cranelift backend.", array.Span));
+        _instructions.AppendLine($"    {fallback} = iconst.i32 0");
         return fallback;
     }
 
@@ -2689,6 +2960,17 @@ public sealed class CraneliftFunctionBuilder
             _localTypes.TryGetValue(arrayName, out var localType) &&
             localType is ArrayTypeSymbol localArrayType)
         {
+            if (IsStringBuffer(localArrayType, out _))
+            {
+                var localPayloadBase = NewValue();
+                _instructions.AppendLine($"    {localPayloadBase} = load.{FormatType(local.Type)} {local.Address}");
+                var addr = EmitByteAddress(localPayloadBase, index);
+                var truncated = NewValue();
+                _instructions.AppendLine($"    {truncated} = ireduce.i8 {value}");
+                _instructions.AppendLine($"    store {truncated}, {addr}");
+                return;
+            }
+
             value = CoerceAssignmentValue(value, valueType, localArrayType.ElementType);
             var localElemType = _typeMapper.Map(localArrayType.ElementType);
             var localElemSize = GetTypeSize(localElemType);
@@ -2730,6 +3012,18 @@ public sealed class CraneliftFunctionBuilder
         // Load array base address
         var globalBaseAddr = NewValue();
         _instructions.AppendLine($"    {globalBaseAddr} = global_value {arrayName}");
+
+        if (IsStringBuffer(arrayType, out var globalHeaderSize))
+        {
+            var payloadBase = NewValue();
+            var headerOffset = ConstI64(globalHeaderSize);
+            _instructions.AppendLine($"    {payloadBase} = iadd {globalBaseAddr}, {headerOffset}");
+            var addr = EmitByteAddress(payloadBase, index);
+            var truncated = NewValue();
+            _instructions.AppendLine($"    {truncated} = ireduce.i8 {value}");
+            _instructions.AppendLine($"    store {truncated}, {addr}");
+            return;
+        }
 
         // Calculate offset: index * elem_size
         var globalElemSizeVal = NewValue();
@@ -2892,7 +3186,111 @@ public sealed class CraneliftFunctionBuilder
             }
         }
 
-        _instructions.AppendLine($"    ; error: unsupported array element field store");
+        _diagnostics.Add(new Diagnostic("Array element field store not supported in Cranelift backend.", array.Span));
+    }
+
+    private string LowerForeachElementValue(ForeachElementBinding binding, SourceSpan span)
+    {
+        if (binding.ElementType is NamedTypeSymbol)
+        {
+            _diagnostics.Add(new Diagnostic("Struct elements must access a field.", span));
+            var fallback = NewValue();
+            _instructions.AppendLine($"    {fallback} = iconst.i32 0");
+            return fallback;
+        }
+
+        var arrayAccess = BuildForeachArrayAccess(binding);
+        return LowerArrayAccess(arrayAccess);
+    }
+
+    private string LowerForeachElementFieldAccess(ForeachElementBinding binding, string fieldName, SourceSpan span)
+    {
+        var arrayAccess = BuildForeachArrayAccess(binding);
+        return LowerArrayElementFieldAccess(arrayAccess, fieldName);
+    }
+
+    private void LowerForeachElementStore(ForeachElementBinding binding, string value, TypeSymbol? valueType, SourceSpan span)
+    {
+        if (binding.ElementType is NamedTypeSymbol)
+        {
+            _diagnostics.Add(new Diagnostic("Struct elements must assign individual fields.", span));
+            return;
+        }
+
+        var arrayAccess = BuildForeachArrayAccess(binding);
+        LowerArrayStore(arrayAccess, value, valueType);
+    }
+
+    private void LowerForeachElementFieldStore(ForeachElementBinding binding, string fieldName, string value, TypeSymbol? valueType, SourceSpan span)
+    {
+        if (binding.ElementType is not NamedTypeSymbol)
+        {
+            _diagnostics.Add(new Diagnostic("Only struct elements support field assignment.", span));
+            return;
+        }
+
+        var arrayAccess = BuildForeachArrayAccess(binding);
+        LowerArrayElementFieldStore(arrayAccess, fieldName, value, valueType);
+    }
+
+    private ArrayAccessExpressionSyntax BuildForeachArrayAccess(ForeachElementBinding binding)
+    {
+        var idxToken = new Token(TokenKind.Identifier, binding.IndexName, new SourceSpan(0, 0));
+        var idxExpr = new IdentifierExpressionSyntax(idxToken);
+        var lbracket = new Token(TokenKind.LBracket, "[", new SourceSpan(0, 0));
+        var rbracket = new Token(TokenKind.RBracket, "]", new SourceSpan(0, 0));
+        return new ArrayAccessExpressionSyntax(binding.Iterable, lbracket, idxExpr, rbracket);
+    }
+
+    private bool TryResolveForeachIterable(ExpressionSyntax iterable, out ForeachIterableInfo info)
+    {
+        info = new ForeachIterableInfo(iterable, new NamedTypeSymbol("unknown"), 0);
+
+        if (iterable is IdentifierExpressionSyntax id)
+        {
+            if (_localTypes.TryGetValue(id.Identifier.Text, out var localType) && localType is ArrayTypeSymbol localArray)
+            {
+                info = new ForeachIterableInfo(iterable, localArray.ElementType, localArray.Size);
+                return localArray.Size > 0;
+            }
+
+            if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Type is ArrayTypeSymbol array)
+            {
+                info = new ForeachIterableInfo(iterable, array.ElementType, array.Size);
+                return array.Size > 0;
+            }
+        }
+
+        if (iterable is MemberAccessExpressionSyntax member &&
+            TryResolveMemberBase(member.Receiver, out _, out var baseType) &&
+            baseType is NamedTypeSymbol named &&
+            _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+            if (field?.Type is ArrayTypeSyntax arraySyntax)
+            {
+                var elementType = ResolveType(arraySyntax.ElementType);
+                var length = int.TryParse(arraySyntax.SizeToken?.Text, out var size) ? size : 0;
+                info = new ForeachIterableInfo(iterable, elementType, length);
+                return length > 0;
+            }
+        }
+
+        return false;
+    }
+
+    private void RestoreLocal(string name, LocalSlot? slot, TypeSymbol? type)
+    {
+        if (slot is not null && type is not null)
+        {
+            _locals[name] = slot;
+            _localTypes[name] = type;
+        }
+        else
+        {
+            _locals.Remove(name);
+            _localTypes.Remove(name);
+        }
     }
 
     private TypeSymbol ResolveType(TypeSyntax syntax)
@@ -3091,8 +3489,6 @@ public sealed class CraneliftFunctionBuilder
         return lastStmt is ReturnStatementSyntax;
     }
 
-    private sealed record LocalSlot(string Address, CraneliftTypeMapper.ClifType Type);
-
     private static string UnescapeString(string text)
     {
         if (string.IsNullOrEmpty(text))
@@ -3254,7 +3650,7 @@ public sealed class CraneliftFunctionBuilder
                 TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
                 TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                 TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
-                TokenKind.StringLiteral => new PrimitiveTypeSymbol("string"),
+                TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
                 _ => null
             },
             IdentifierExpressionSyntax id when _localTypes.TryGetValue(id.Identifier.Text, out var localType) => localType,
@@ -3269,8 +3665,31 @@ public sealed class CraneliftFunctionBuilder
                 _symbols.TryGetValue($"{enumId.Identifier.Text}.{member.Member.Text}", out var memberSym) ? memberSym.Type : null,
             ArrayAccessExpressionSyntax array when GetExpressionType(array.Receiver) is ArrayTypeSymbol arr => arr.ElementType,
             BinaryExpressionSyntax bin => GetBinaryResultType(bin),
+            OperatorCallExpressionSyntax op => GetOperatorCallResultType(op),
             _ => null
         };
+    }
+
+    private TypeSymbol? GetOperatorCallResultType(OperatorCallExpressionSyntax op)
+    {
+        var opText = op.OperatorToken.Text;
+        if (opText is "==" or "!=" or "<" or "<=" or ">" or ">=" or "&&" or "||")
+        {
+            return new PrimitiveTypeSymbol("bool");
+        }
+
+        var leftType = GetExpressionType(op.Receiver);
+        var rightType = op.Arguments.Count > 0 ? GetExpressionType(op.Arguments[0]) : null;
+        if (IsF64Type(leftType) || IsF64Type(rightType))
+        {
+            return new PrimitiveTypeSymbol("f64");
+        }
+        if (IsFloatType(leftType) || IsFloatType(rightType))
+        {
+            return new PrimitiveTypeSymbol("f32");
+        }
+
+        return leftType ?? rightType;
     }
 
     private TypeSymbol? GetBinaryResultType(BinaryExpressionSyntax bin)
@@ -3301,4 +3720,10 @@ public sealed class CraneliftFunctionBuilder
 
     private static bool IsF64Type(TypeSymbol? type) =>
         type is PrimitiveTypeSymbol p && p.PrimitiveName == "f64";
+
+    private sealed record ForeachIterableInfo(ExpressionSyntax Iterable, TypeSymbol ElementType, int Length);
+
+    private sealed record ForeachElementBinding(ExpressionSyntax Iterable, TypeSymbol ElementType, string IndexName);
+
+    private sealed record LocalSlot(string Address, CraneliftTypeMapper.ClifType Type);
 }

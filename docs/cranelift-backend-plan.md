@@ -553,8 +553,8 @@ Source (.stasis)
 **Remaining Gaps (blocking full parity):**
 - ❌ **Array allocation/initialization** - Arrays require explicit allocation/initialization work
 - ❌ **Remaining built-ins** - Math + advanced string helpers (trim/case/num conversions)
-- ❌ **Foreach loops** - Not lowered in Cranelift yet
-- ❌ **Test-time reporting** - Harness lacks elapsed time printing
+- ✅ **Foreach loops** - Lowered to indexed loops with element/index bindings
+- ✅ **Test-time reporting** - Harness prints elapsed time per test run
 
 **Architecture Quality:**
 - Clean separation: CraneliftCodeGenerator, CraneliftModuleBuilder, CraneliftFunctionBuilder, CraneliftTypeMapper
@@ -619,7 +619,7 @@ Source (.stasis)
 **Priority 6: Test Harness (Week 3)**
 - [x] Generate `run_tests` entry point function
 - [x] Implement test result collection and reporting (PASS/FAIL + summary counts)
-- [ ] Add test-time reporting to Cranelift harness
+- [x] Add test-time reporting to Cranelift harness
 - [x] Remove `--emit-ir` forcing in CLI for test mode
 - [x] Route `stasis test --all` through the Cranelift harness when using the Cranelift backend
 - [x] Run/test with Cranelift via the native DLL runner (`stasis_runner`)
@@ -628,15 +628,29 @@ Source (.stasis)
 **Priority 7: Advanced Features (Week 4)**
 - [x] Graphics integration (SDL2/OpenGL calls)
 - [ ] Remaining math built-ins (sin, cos, sqrt, etc.)
-- [ ] Foreach loop support (currently only for loops work)
+- [x] Foreach loop support (currently only for loops work)
 - [x] Compound assignment to complex l-values
 
 **Priority 8: Polish & Optimization (Week 4)**
 - [x] Resolve CRT link warnings (LNK4098)
 - [x] Front-end reachability DCE (entrypoints: main/export/test builds)
+- [x] Replace Cranelift TODO fallbacks with explicit diagnostics
+- [ ] Use bulk memory operations where possible (prefer mem_copy/mem_set style loops or intrinsics over per-byte helpers)
 - [ ] Add compilation time benchmarks
 - [ ] Improve error diagnostics for Cranelift-specific issues
 - [ ] Make IR boundary more robust (consider binary format vs CLIF text)
+
+**Priority 9: Iteration & Hot Reload (Week 5)**
+
+**Goal:** Enable fast edit/reload loops for running samples, aiming for <100ms compile+run on small edits.
+
+- [x] CLI `--watch` mode restarts run/test on file changes (process-based reload)
+- [ ] Use a stable host process with hot-swapped logic DLLs (no process restart)
+- [ ] Reduce link time for Cranelift DLLs (lld fast-link profile, fewer inputs)
+- [ ] Optional in-memory loading path to avoid disk writes for test-only runs
+- [ ] Track per-phase timings in watch mode and report P90/P95 compile+run latency
+
+**Current bottleneck:** link time dominates larger samples; optimize link surface area and reuse host process to hit the 100ms goal.
 
 **Definition of "Full Execution":**
 After Priority 1-6 are complete, the Cranelift backend should be able to:

@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Asteroids - Minimal Vector Graphics Demo
 // Controls: A/D or Arrow keys to rotate, W or Up to thrust, Space to fire, Escape to quit
 

@@ -28,6 +28,7 @@ TopLevelItemList -> TopLevelItem TopLevelItemList
 
 ```
 TopLevelItem     -> StructDecl
+                  | ImportDecl
                   | EnumDecl
                   | GlobalDecl
                   | FunctionDecl
@@ -37,6 +38,12 @@ TopLevelItem     -> StructDecl
 ---
 
 # **2. Declarations**
+
+## 2.0 Import Declarations
+
+```
+ImportDecl       -> "import" StringLiteral ";"
+```
 
 ## 2.1 Struct Declarations
 

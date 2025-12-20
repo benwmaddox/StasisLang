@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
 

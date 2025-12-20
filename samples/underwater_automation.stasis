@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Underwater Automation Sample - calm bioluminescent lane factory.
 // Single global struct holds all state; arrays are AoS for compiler compatibility.
 

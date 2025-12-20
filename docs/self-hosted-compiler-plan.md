@@ -122,7 +122,7 @@ Before implementing the self-hosted compiler, Stasis requires several language f
 | Feature | Current Status | Notes |
 |---------|----------------|-------|
 | String manipulation | Partial | Need: concat, substring, comparison |
-| Character-by-character iteration | Partial | Need: `str_char_at()`, `str_byte_at()` |
+| Character-by-character iteration | Partial | Need: `str_next_codepoint()` + `str_decode_codepoint()` (byte helpers exist) |
 | Dynamic-like arrays | ❌ Missing | Need growable buffers (via fixed upper bound) |
 | File I/O | ❌ Missing | Need: `sys_read_file()`, `sys_write_file()` |
 | Process execution | ❌ Missing | Need: `sys_exec()` for AOT tool |
@@ -141,7 +141,7 @@ function sys_exec(command: ascii[1024], args: ascii[4096]): i32  // returns exit
 function sys_exec_capture(command: ascii[1024], output: ascii[65536]): i32
 
 // String utilities (if not already present)
-function str_append(dest: ascii[N], src: ascii[M]): bool
+function ascii_append(dest: ascii[N], src: ascii[M]): i32
 function str_from_i32(value: i32, buffer: ascii[16]): i32  // returns length
 function str_to_i32(s: ascii[N]): i32
 function char_is_alpha(c: u8): bool

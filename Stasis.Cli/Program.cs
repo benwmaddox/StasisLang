@@ -26,6 +26,7 @@ var moduleName = "module";
 var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
+var watch = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
@@ -68,6 +69,9 @@ while (cliArgs.Count > 0)
             break;
         case "--all":
             runAllInDirectory = true;
+            break;
+        case "--watch":
+            watch = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -186,6 +190,20 @@ if (mode == "format")
 
 LlvmNativeLoader.EnsureLoaded();
 
+if (watch)
+{
+    if (runAllInDirectory)
+    {
+        Console.Error.WriteLine("error: --watch cannot be combined with --all.");
+        Environment.Exit(1);
+    }
+    if (mode is "build" or "release" or "format")
+    {
+        Console.Error.WriteLine("error: --watch is only supported for run/test modes.");
+        Environment.Exit(1);
+    }
+}
+
 if (runAllInDirectory && mode == "test")
 {
     var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
@@ -202,6 +220,19 @@ if (runAllInDirectory && mode == "test")
     var allowReachabilityFallback = mode != "release";
     var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback);
     Environment.Exit(overallExit);
+}
+
+if (watch)
+{
+    if (backend == BackendType.Cranelift)
+    {
+        Environment.SetEnvironmentVariable("STASIS_CRANELIFT_AOT_SERVER", "1");
+        Environment.SetEnvironmentVariable("STASIS_CRANELIFT_RUNNER_SERVER", "1");
+        useCraneliftRunner = true;
+    }
+
+    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner);
+    Environment.Exit(watchExit);
 }
 
 var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner);
@@ -230,12 +261,16 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
     try
     {
-        var source = File.ReadAllText(path);
-        source = PrependStdLib(source);
+        var source = LoadSourceWithImports(path, out var importDiagnostics, out var importSource);
         if (logPhaseTiming)
         {
             readMs = phaseStopwatch.ElapsedMilliseconds;
             phaseStopwatch.Restart();
+        }
+        if (importDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(importDiagnostics, importSource, path);
+            return 1;
         }
 
         // Auto-detect graphics usage if not explicitly enabled
@@ -493,7 +528,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
         var entryBase = mode == "test" ? "run_tests" : "main";
         var entryName = $"{moduleName}__{entryBase}";
         var args = BuildClangArgsForObject(objPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName);
-        var exit = RunProcess(clang, args);
+        var exit = RunProcess(clang, args, suppressOutput: true);
         if (exit != 0)
         {
             return exit;
@@ -555,7 +590,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         var entryName = $"{moduleName}__{entryBase}";
         var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true);
         var linkStopwatch = Stopwatch.StartNew();
-        var exit = RunProcess(clang, args);
+        var exit = RunProcess(clang, args, suppressOutput: true);
         linkMs = linkStopwatch.ElapsedMilliseconds;
         if (exit != 0)
         {
@@ -584,7 +619,14 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     {
         if (File.Exists(dllPath))
         {
-            File.Delete(dllPath);
+            try
+            {
+                File.Delete(dllPath);
+            }
+            catch
+            {
+                // Best-effort cleanup; DLLs can be locked if still in use.
+            }
         }
     }
 }
@@ -656,7 +698,7 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
     }
 
     var args = BuildClangArgsForObject(objPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName);
-    var exit = RunProcess(clang, args);
+    var exit = RunProcess(clang, args, suppressOutput: true);
     if (exit != 0)
     {
         return exit;
@@ -682,9 +724,11 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
     if (isDll)
     {
         args.Add("-shared");
+        args.Add("-Wl,/NOIMPLIB");
     }
     args.Add("-o");
     args.Add($"\"{outputPath}\"");
+    args.Add("-Wl,/NOLOGO");
 
     if (!string.IsNullOrWhiteSpace(optLevel))
     {
@@ -910,7 +954,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
         try
         {
             var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
-            var exit = RunProcess(clang, args);
+            var exit = RunProcess(clang, args, suppressOutput: true);
             if (exit != 0)
             {
                 return exit;
@@ -956,6 +1000,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
+    args.Add("-Wl,/NOLOGO");
     var linkingStaticGraphics = false;
     args.Add("-Wno-override-module");
     if (!string.IsNullOrWhiteSpace(optLevel))
@@ -1364,7 +1409,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false)
 {
     if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
     {
@@ -1378,9 +1423,35 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         UseShellExecute = false
     };
     configure?.Invoke(psi);
+    if (suppressOutput)
+    {
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+    }
 
     using var proc = Process.Start(psi)!;
+    string? stdOut = null;
+    string? stdErr = null;
+    if (psi.RedirectStandardOutput)
+    {
+        stdOut = proc.StandardOutput.ReadToEnd();
+    }
+    if (psi.RedirectStandardError)
+    {
+        stdErr = proc.StandardError.ReadToEnd();
+    }
     proc.WaitForExit();
+    if (proc.ExitCode != 0)
+    {
+        if (!string.IsNullOrWhiteSpace(stdOut))
+        {
+            Console.Write(stdOut);
+        }
+        if (!string.IsNullOrWhiteSpace(stdErr))
+        {
+            Console.Error.Write(stdErr);
+        }
+    }
     return proc.ExitCode;
 }
 
@@ -1519,7 +1590,7 @@ static int BuildExecutable(string llPath, string outputPath, bool isTest, string
     }
 
     var args = BuildClangArgs(llPath, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath);
-    var exit = RunProcess(clang, args);
+    var exit = RunProcess(clang, args, suppressOutput: true);
     if (exit != 0)
     {
         return exit;
@@ -1549,15 +1620,133 @@ static string BuildDefaultOutputPath(string sourcePath)
     return Path.Combine(string.IsNullOrEmpty(dir) ? Directory.GetCurrentDirectory() : dir, name + ext);
 }
 
+static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner)
+{
+    var fullPath = Path.GetFullPath(path);
+    var dir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
+    var fileName = Path.GetFileName(fullPath);
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+
+    using var watcher = new FileSystemWatcher(dir, fileName)
+    {
+        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+    };
+
+    using var changeSignal = new ManualResetEventSlim(false);
+    void OnChange(object? _, FileSystemEventArgs __)
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    watcher.Changed += OnChange;
+    watcher.Created += OnChange;
+    watcher.Renamed += OnChange;
+    watcher.EnableRaisingEvents = true;
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+        changeSignal.Set();
+    };
+
+    var childArgs = Environment.GetCommandLineArgs()
+        .Skip(1)
+        .Where(arg => !string.Equals(arg, "--watch", StringComparison.OrdinalIgnoreCase))
+        .Select(QuoteArg)
+        .ToArray();
+
+    var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+    if (string.IsNullOrEmpty(exePath))
+    {
+        Console.Error.WriteLine("error: unable to resolve stasis executable for --watch.");
+        return 1;
+    }
+    if (Path.GetFileNameWithoutExtension(exePath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
+        childArgs.Length > 0 && childArgs[0].Equals("run", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine("error: --watch requires running the built CLI (not `dotnet run`).");
+        return 1;
+    }
+
+    Process? child = null;
+    if (mode == "run")
+    {
+        child = StartWatchChild(exePath, childArgs);
+    }
+    else
+    {
+        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner);
+    }
+
+    while (!cts.IsCancellationRequested)
+    {
+        try
+        {
+            changeSignal.Wait(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+
+        while (DateTime.UtcNow - lastChange < debounce)
+        {
+            Thread.Sleep(10);
+        }
+        changeSignal.Reset();
+
+        if (mode == "run")
+        {
+            if (child is not null && !child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                child.WaitForExit();
+            }
+            child = StartWatchChild(exePath, childArgs);
+        }
+        else
+        {
+            _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner);
+        }
+    }
+
+    if (child is not null && !child.HasExited)
+    {
+        child.Kill(entireProcessTree: true);
+        child.WaitForExit();
+    }
+
+    return 0;
+}
+
+static Process StartWatchChild(string exePath, string[] args)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = exePath,
+        Arguments = string.Join(" ", args),
+        UseShellExecute = false
+    };
+    return Process.Start(psi)!;
+}
+
+static string QuoteArg(string arg) =>
+    arg.Contains(' ') ? $"\"{arg}\"" : arg;
+
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc test [<file>|--all] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
+    Console.WriteLine("  stasisc run <file> [--watch] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Watch: use --watch to re-run on file changes (run/test only).");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
@@ -1628,8 +1817,12 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType b
     var diagnostics = new List<Diagnostic>();
     try
     {
-        var source = File.ReadAllText(path);
-        source = PrependStdLib(source);
+    var source = LoadSourceWithImports(path, out var importDiagnostics, out var importSource);
+    if (importDiagnostics.Count > 0)
+    {
+        PrintDiagnostics(importDiagnostics, importSource, path);
+        return new PrepareResult(null, new CompileResult(path, importSource, false, false, backend, null, null, importDiagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+    }
         var usesGraphics = DetectsGraphicsUsage(source);
         var parse = Parser.Parse(source);
         diagnostics.AddRange(parse.Diagnostics);
@@ -1657,22 +1850,16 @@ static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType b
     }
 }
 
-static string PrependStdLib(string source)
+static string LoadSourceWithImports(string path, out List<Diagnostic> importDiagnostics, out string sourceForDiagnostics)
 {
-    var stdlibPath = Path.Combine(Directory.GetCurrentDirectory(), "src", "stdlib", "stdlib.stasis");
-    if (!File.Exists(stdlibPath))
-    {
-        return source;
-    }
-
-    var stdlib = File.ReadAllText(stdlibPath);
-    if (string.IsNullOrWhiteSpace(stdlib))
-    {
-        return source;
-    }
-
-    return $"{stdlib}{Environment.NewLine}{source}";
+    var original = File.ReadAllText(path);
+    var diagnostics = new List<Diagnostic>();
+    var result = SourceImporter.ExpandImports(path, original, diagnostics);
+    importDiagnostics = diagnostics;
+    sourceForDiagnostics = result.OriginalSource;
+    return result.ExpandedSource;
 }
+
 
 static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock, bool allowReachabilityFallback)
 {
@@ -2079,7 +2266,7 @@ sealed class CraneliftRunnerServer : IDisposable
             input.Flush();
 
             string? response;
-            do
+            while (true)
             {
                 response = control.ReadLine();
                 if (response == null)
@@ -2088,7 +2275,17 @@ sealed class CraneliftRunnerServer : IDisposable
                     runMs = sw.ElapsedMilliseconds;
                     return 1;
                 }
-            } while (response.Length == 0);
+                if (response.Length == 0)
+                {
+                    continue;
+                }
+                if (response.StartsWith("ERR ", StringComparison.OrdinalIgnoreCase) ||
+                    response.StartsWith("OK ", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+                // Ignore non-control stderr output.
+            }
 
             runMs = sw.ElapsedMilliseconds;
             if (response.StartsWith("ERR ", StringComparison.OrdinalIgnoreCase))
