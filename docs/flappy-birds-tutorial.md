@@ -1,32 +1,26 @@
-# Flappy Birds In Stasis (A Tiny, Deterministic Clone)
+# Flappy Bird In Stasis (Step‑By‑Step)
 
-Welcome! We are going to build a clean, deterministic Flappy Birds clone with Stasis and the standard library. The core loop stays tiny and testable, and the visuals are driven by a couple of sprites.
+This walkthrough is for developers new to Stasis with only basic game experience. You will build a small, deterministic Flappy Bird clone with tests, sprites, and a fast Cranelift loop.
 
-## The Stasis approach (quick overview)
+## Why Stasis is different
 
-Stasis is built around a few core ideas that shape this tutorial:
+- Static global memory only; no heap.
+- AoS in source, SoA in memory for predictable layouts.
+- Explicit imports (stdlib is not auto-loaded).
+- Cranelift is the default fast backend; LLVM is for release.
 
-- Static global memory only: all game state lives in globals.
-- AoS in code, SoA in memory: struct fields lower to parallel arrays for fast, predictable access.
-- Deterministic logic: no hidden allocation or implicit copies.
-- Tests are first class: small functions stay testable, even inside games.
-- Backends: Cranelift is fast for iteration; LLVM is for release builds.
-
-We will lean on two modules:
-
-- `stdlib` for core helpers
-- `game` for AABB collision
-
-You will explicitly import both (nothing is auto-included).
+We will use:
+- `stdlib` (core helpers)
+- `game` (AABB helpers)
+- `gfx_*` built-ins from the graphics runtime for drawing.
 
 ---
 
-## 1) Create The Assets
+## 1) Create the sprites
 
-We will use the `.stv` sprite format so you can hot-reload visuals. Create these files:
+Stasis graphics uses hot-reloadable `.stv` sprites. Make two files under `assets_src/flappy-birds/`.
 
 `assets_src/flappy-birds/bird.stv`
-
 ```
 stv 1
 size 16 12
@@ -39,7 +33,6 @@ rect 10 4 2 2
 ```
 
 `assets_src/flappy-birds/pipe.stv`
-
 ```
 stv 1
 size 24 64
@@ -53,9 +46,9 @@ rect 0 0 24 6
 
 ---
 
-## 2) Core Gameplay Module
+## 2) Core gameplay (logic only)
 
-Create `examples/flappy_birds_core.stasis`. This file is pure logic: no rendering and no input. It is safe to import from tests.
+Place pure logic in `examples/flappy_birds_core.stasis`. It holds all state and collisions and is safe for tests (no graphics calls).
 
 ```
 import "../src/stdlib/stdlib.stasis";
@@ -178,9 +171,47 @@ function step(input_flap: bool): bool {
 
 ---
 
-## 3) Visual Main File (Sprites)
+## 3) Tests (graphics-free)
 
-Create `examples/flappy_birds.stasis`. This file adds input and graphics using sprites.
+Keep tests independent of the graphics runtime in `tests/flappy_birds.stasis`.
+
+```
+import "../examples/flappy_birds_core.stasis";
+
+test `collision with top pipe`() {
+    reset();
+    bird_y = 10.0;
+    pipe_x[0] = BIRD_X;
+    pipe_gap_y[0] = 60.0;
+    return check_collision();
+}
+
+test `bird survives in gap`() {
+    reset();
+    bird_y = 60.0;
+    pipe_x[0] = BIRD_X;
+    pipe_gap_y[0] = 60.0;
+    return !check_collision();
+}
+
+test `pipes move left`() {
+    reset();
+    let start: f32 = pipe_x[0];
+    step(false);
+    return pipe_x[0] == start - PIPE_SPEED;
+}
+```
+
+Run them (Cranelift default):
+```
+Stasis.Cli\bin\Debug\net9.0\Stasis.Cli.exe test tests\flappy_birds.stasis
+```
+
+---
+
+## 4) Visual game loop (sprites + input)
+
+`examples/flappy_birds.stasis` adds graphics and input on top of the core.
 
 ```
 import "../src/stdlib/stdlib.stasis";
@@ -205,13 +236,8 @@ function init_assets() {
     spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.stv");
 }
 
-function to_screen_x(x: f32): f32 {
-    return x * SCALE;
-}
-
-function to_screen_y(y: f32): f32 {
-    return y * SCALE;
-}
+function to_screen_x(x: f32): f32 { return x * SCALE; }
+function to_screen_y(y: f32): f32 { return y * SCALE; }
 
 function draw_pipe(px: f32, gap: f32) {
     let pipe_scale_x: f32 = (PIPE_W * SCALE) / PIPE_SPRITE_W;
@@ -275,67 +301,20 @@ function main(): i32 {
 }
 ```
 
----
-
-## 4) Tests Live Separately
-
-Create `tests/flappy_birds.stasis` so test builds do not depend on the graphics runtime:
-
+Run it (Windows graphics path):
 ```
-import "flappy_birds_core.stasis";
-
-test `collision with top pipe`() {
-    reset();
-    bird_y = 10.0;
-    pipe_x[0] = BIRD_X;
-    pipe_gap_y[0] = 60.0;
-    return check_collision();
-}
-
-test `bird survives in gap`() {
-    reset();
-    bird_y = 60.0;
-    pipe_x[0] = BIRD_X;
-    pipe_gap_y[0] = 60.0;
-    return !check_collision();
-}
-
-test `pipes move left`() {
-    reset();
-    let start: f32 = pipe_x[0];
-    step(false);
-    return pipe_x[0] == start - PIPE_SPEED;
-}
+runtime\build.bat
+dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
 ```
+
+Hot reload tip: edit the `.stv` files; `gfx_poll_reload` will rebake them at runtime.
 
 ---
 
-## 5) Run The Tests
+## 5) Next ideas
 
-From the repo root:
+- Add score text with `load_font` + `draw_text`.
+- Gradually increase `PIPE_SPEED` to ramp difficulty.
+- Add a scrolling background sprite for parallax.
 
-```
-Stasis.Cliin\Debug
-et9.0\Stasis.Cli.exe test testslappy_birds.stasis --backend cranelift
-```
-
----
-
-## 6) Run With Visuals
-
-Build the graphics runtime and launch:
-
-```
-runtimeuild.bat
-dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtimeuild\Release\stasis_graphics.dll
-```
-
----
-
-## 7) Next Fun Improvements
-
-- Add score text and sound
-- Scale difficulty by increasing `PIPE_SPEED`
-- Add a scrolling background sprite
-
-You now have a clean, deterministic Flappy Birds core with hot-reloadable visuals.
+You now have a minimal, tested Flappy Bird in Stasis with sprites and fast Cranelift iteration.
