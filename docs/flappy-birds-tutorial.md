@@ -1,24 +1,27 @@
-# Flappy Bird In Stasis (Step‑By‑Step)
+# Flappy Bird In Stasis — A Gentle, Old-School Walkthrough
 
-This walkthrough is for developers new to Stasis with only basic game experience. You will build a small, deterministic Flappy Bird clone with tests, sprites, and a fast Cranelift loop.
+This tutorial is for developers new to Stasis and comfortable with only basic game dev. We will build a Flappy Bird clone the “simple systems” way: explicit state, tight loops, deterministic behavior, and minimal surprises. Think of the 90s-style clarity—no hidden allocations, no background magic—paired with a modern toolchain where Cranelift gives fast iteration and LLVM is there for release.
 
-## Why Stasis is different
+## What is Stasis?
 
-- Static global memory only; no heap.
-- AoS in source, SoA in memory for predictable layouts.
-- Explicit imports (stdlib is not auto-loaded).
-- Cranelift is the default fast backend; LLVM is for release.
+- Static global memory only; no heap or hidden allocations.
+- Array-of-Structs syntax, Structure-of-Arrays storage for predictable layouts.
+- Explicit imports (stdlib is **not** auto-loaded).
+- Two backends: Cranelift (fast iteration by default) and LLVM (release/optimization).
+- Tests are built-in and live in ordinary `.stasis` files.
 
-We will use:
-- `stdlib` (core helpers)
-- `game` (AABB helpers)
-- `gfx_*` built-ins from the graphics runtime for drawing.
+We’ll use:
+- `stdlib` for core helpers.
+- `game` for AABB helpers.
+- `gfx_*` built-ins (from the graphics runtime) for drawing and hot-reloading sprites.
 
 ---
 
-## 1) Create the sprites
+## 1) Sprites — why first?
 
-Stasis graphics uses hot-reloadable `.stv` sprites. Make two files under `assets_src/flappy-birds/`.
+We start with visuals so you can see progress quickly and hot-reload assets without touching code. Stasis sprites use `.stv`, a tiny ASCII format that bakes into an atlas at runtime.
+
+Create these under `assets_src/flappy-birds/`:
 
 `assets_src/flappy-birds/bird.stv`
 ```
@@ -44,12 +47,15 @@ rgba 0.1 0.6 0.2 1
 rect 0 0 24 6
 ```
 
+**Why:** Hot reload lets you iterate on art instantly; the runtime rebakes when you edit these files.
+
 ---
 
-## 2) Core gameplay (logic only)
+## 2) Core gameplay — keep it pure and testable
 
-Place pure logic in `examples/flappy_birds_core.stasis`. It holds all state and collisions and is safe for tests (no graphics calls).
+We isolate logic from rendering so tests don’t need the graphics runtime. This is the old-school “data + functions” approach: globals for state, simple math, and clear rules.
 
+Create `examples/flappy_birds_core.stasis`:
 ```
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/game.stasis";
@@ -169,12 +175,13 @@ function step(input_flap: bool): bool {
 }
 ```
 
+**Why:** The whole game state is explicit, so tests can poke it, and there’s no hidden memory churn. This mirrors older game loops: update physics, update world, check collisions.
+
 ---
 
-## 3) Tests (graphics-free)
+## 3) Tests — catch mistakes early
 
-Keep tests independent of the graphics runtime in `tests/flappy_birds.stasis`.
-
+Keep tests graphics-free so they run fast everywhere. Create `tests/flappy_birds.stasis`:
 ```
 import "../examples/flappy_birds_core.stasis";
 
@@ -201,18 +208,18 @@ test `pipes move left`() {
     return pipe_x[0] == start - PIPE_SPEED;
 }
 ```
-
-Run them (Cranelift default):
+Run them (Cranelift is the default fast backend):
 ```
 Stasis.Cli\bin\Debug\net9.0\Stasis.Cli.exe test tests\flappy_birds.stasis
 ```
 
+**Why:** Fast tests mirror the classic “tight loop, clear data” philosophy. We prove collisions and motion without any rendering noise.
+
 ---
 
-## 4) Visual game loop (sprites + input)
+## 4) Visual loop — add sprites and input
 
-`examples/flappy_birds.stasis` adds graphics and input on top of the core.
-
+Now layer graphics and input on top of the core. Create `examples/flappy_birds.stasis`:
 ```
 import "../src/stdlib/stdlib.stasis";
 import "flappy_birds_core.stasis";
@@ -307,7 +314,7 @@ runtime\build.bat
 dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
 ```
 
-Hot reload tip: edit the `.stv` files; `gfx_poll_reload` will rebake them at runtime.
+**Why:** This mirrors the classic game loop—poll input, advance physics, draw—while keeping data in globals for deterministic behavior. Hot reload via `gfx_poll_reload` means you can tweak art without restarting.
 
 ---
 
@@ -317,4 +324,4 @@ Hot reload tip: edit the `.stv` files; `gfx_poll_reload` will rebake them at run
 - Gradually increase `PIPE_SPEED` to ramp difficulty.
 - Add a scrolling background sprite for parallax.
 
-You now have a minimal, tested Flappy Bird in Stasis with sprites and fast Cranelift iteration.
+You now have a minimal, tested Flappy Bird in Stasis with fast Cranelift iteration and hot-reloadable sprites. Keep the spirit: small data, explicit steps, easy to reason about. 
