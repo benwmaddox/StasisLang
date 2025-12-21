@@ -49,6 +49,15 @@ jobs:
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
 
+      - name: Validate SVG assets
+        run: |
+          if [ -d "assets_src" ] && find assets_src -name "*.svg" -type f | head -1 | grep -q .; then
+            dotnet run --project Stasis.SvgValidator/Stasis.SvgValidator.csproj -c Release --no-build -- --dir assets_src
+          else
+            echo "No SVG files to validate"
+          fi
+        shell: bash
+
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
 
