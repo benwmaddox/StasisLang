@@ -1804,9 +1804,27 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var artifacts = new List<string>();
     Process? runner = null;
 
-    int BuildAndSwap(bool startRunner)
+    int BuildAndSwap(bool startRunner, out string timingLine)
     {
+        timingLine = string.Empty;
+        var swTotal = Stopwatch.StartNew();
+        var readMs = 0L;
+        var parseMs = 0L;
+        var semaMs = 0L;
+        var layoutMs = 0L;
+        var lowerMs = 0L;
+        var clifWriteMs = 0L;
+        var aotSpawnMs = 0L;
+        var aotCompileMs = 0L;
+        var linkMs = 0L;
+        var planMs = 0L;
+        var swapWriteMs = 0L;
+        var runnerSpawnMs = 0L;
+
+        var phase = Stopwatch.StartNew();
         var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        readMs = phase.ElapsedMilliseconds;
+        phase.Restart();
         if (importDiagnostics.Count > 0)
         {
             PrintDiagnostics(importDiagnostics, importSource, sourcePath);
@@ -1815,12 +1833,16 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
         var usesGraphics = enableGraphics || DetectsGraphicsUsage(source);
         var parse = Parser.Parse(source);
+        parseMs = phase.ElapsedMilliseconds;
+        phase.Restart();
         if (parse.Diagnostics.Count > 0)
         {
             PrintDiagnostics(parse.Diagnostics, source, sourcePath);
             return 1;
         }
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        semaMs = phase.ElapsedMilliseconds;
+        phase.Restart();
         if (sema.Diagnostics.Count > 0)
         {
             PrintDiagnostics(sema.Diagnostics, source, sourcePath);
@@ -1834,6 +1856,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        layoutMs = phase.ElapsedMilliseconds;
+        phase.Restart();
         var options = new CodeGenerationOptions(
             ModuleName: moduleName,
             IncludeTests: false,
@@ -1843,6 +1867,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
         using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
         var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        lowerMs = phase.ElapsedMilliseconds;
+        phase.Restart();
         if (result.Diagnostics.Count > 0)
         {
             PrintDiagnostics(result.Diagnostics, source, sourcePath);
@@ -1854,22 +1880,31 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var clifPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
         var objPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
         File.WriteAllText(clifPath, result.Ir);
+        clifWriteMs = phase.ElapsedMilliseconds;
+        phase.Restart();
 
         try
         {
-            var aotExit = RunCraneliftAot(aotTool, clifPath, objPath, moduleName, optLevel, out _, out _);
+            var aotExit = RunCraneliftAot(aotTool, clifPath, objPath, moduleName, optLevel, out var spawnFallback, out var compileFallback);
+            aotSpawnMs = spawnFallback ?? 0;
+            aotCompileMs = compileFallback;
             if (aotExit != 0)
             {
                 return aotExit;
             }
+            phase.Restart();
 
             if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var plan))
             {
                 return 1;
             }
+            planMs = phase.ElapsedMilliseconds;
+            phase.Restart();
 
             var linkArgs = BuildClangArgsForObject(objPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
             var linkExit = RunProcess(clang, linkArgs, suppressOutput: true);
+            linkMs = phase.ElapsedMilliseconds;
+            phase.Restart();
             if (linkExit != 0)
             {
                 return linkExit;
@@ -1895,16 +1930,26 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     WorkingDirectory = repoRoot
                 };
                 psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+                var spawnSw = Stopwatch.StartNew();
                 runner = Process.Start(psi);
+                spawnSw.Stop();
+                runnerSpawnMs = spawnSw.ElapsedMilliseconds;
                 if (runner is null)
                 {
                     Console.Error.WriteLine("error: failed to start runner.");
                     return 1;
                 }
+                swTotal.Stop();
+                timingLine =
+                    $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite=0 runnerSpawn={runnerSpawnMs} total={swTotal.ElapsedMilliseconds}";
                 return 0;
             }
 
             File.WriteAllText(swapFile, hotDll, Encoding.ASCII);
+            swapWriteMs = phase.ElapsedMilliseconds;
+            swTotal.Stop();
+            timingLine =
+                $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite={swapWriteMs} total={swTotal.ElapsedMilliseconds}";
             return 0;
         }
         finally
@@ -1920,7 +1965,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
     }
 
-    var initial = BuildAndSwap(startRunner: true);
+    var initial = BuildAndSwap(startRunner: true, out _);
     if (initial != 0)
     {
         return initial;
@@ -1975,12 +2020,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         changeSignal.Reset();
 
-        var t0 = Stopwatch.StartNew();
-        var exit = BuildAndSwap(startRunner: false);
-        t0.Stop();
+        var exit = BuildAndSwap(startRunner: false, out var timingLine);
         if (exit == 0)
         {
-            Console.Error.WriteLine($"HOTRELOAD compiled+swapped in {t0.ElapsedMilliseconds}ms");
+            Console.Error.WriteLine(timingLine);
         }
     }
 
