@@ -3,6 +3,7 @@ project(stasis_graphics C)
 
 option(STASIS_GRAPHICS_BUILD_SHARED "Build the graphics runtime as a DLL" ON)
 option(STASIS_GRAPHICS_BUILD_STATIC "Build the graphics runtime as a static library" ON)
+option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ON)
 
 # Prefer static CRT when possible (for single-exe bundling)
 if (MSVC)
@@ -68,5 +69,19 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
     )
     install(TARGETS stasis_graphics_static
         ARCHIVE DESTINATION lib
+    )
+endif()
+
+if(STASIS_BUILD_RUNNER)
+    add_executable(stasis_runner stasis_runner.c)
+    if(WIN32)
+        target_compile_definitions(stasis_runner PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_link_libraries(stasis_runner PRIVATE dl)
+    endif()
+    set_target_properties(stasis_runner PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug"
     )
 endif()

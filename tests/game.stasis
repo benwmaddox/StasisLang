@@ -1,0 +1,47 @@
+import "../src/stdlib/game.stasis";
+
+global game_tmp_min_x: f32[1];
+global game_tmp_min_y: f32[1];
+global game_tmp_max_x: f32[1];
+global game_tmp_max_y: f32[1];
+global game_tmp_dx: f32[1];
+global game_tmp_dy: f32[1];
+global game_tmp_resolve_x: f32[1];
+global game_tmp_resolve_y: f32[1];
+
+test `game_aabb_intersects detects overlap`() {
+    return game_aabb_intersects(0.0, 0.0, 2.0, 2.0, 1.0, 1.0, 3.0, 3.0);
+}
+
+test `game_aabb_intersects detects separation`() {
+    return !game_aabb_intersects(0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0);
+}
+
+test `game_aabb_contains_point checks bounds`() {
+    return game_aabb_contains_point(0.0, 0.0, 2.0, 2.0, 1.0, 1.0)
+        && !game_aabb_contains_point(0.0, 0.0, 2.0, 2.0, 3.0, 1.0);
+}
+
+test `game_aabb_union merges bounds`() {
+    game_aabb_union(0.0, 0.0, 1.0, 1.0, -2.0, -1.0, 0.5, 2.0, game_tmp_min_x, game_tmp_min_y, game_tmp_max_x, game_tmp_max_y);
+    return game_tmp_min_x[0] == -2.0 && game_tmp_min_y[0] == -1.0 && game_tmp_max_x[0] == 1.0 && game_tmp_max_y[0] == 2.0;
+}
+
+test `game_aabb_overlap_depth reports separation`() {
+    return !game_aabb_overlap_depth(0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, game_tmp_dx, game_tmp_dy);
+}
+
+test `game_aabb_sweep_resolve picks axis`() {
+    let hit: bool = game_aabb_sweep_resolve(0.0, 0.0, 2.0, 2.0, 1.5, 0.5, 3.0, 1.5, game_tmp_resolve_x, game_tmp_resolve_y);
+    return hit && game_tmp_resolve_x[0] != 0.0 && game_tmp_resolve_y[0] == 0.0;
+}
+
+test `game_circle_intersects detects overlap`() {
+    return game_circle_intersects(0.0, 0.0, 1.0, 1.5, 0.0, 1.0)
+        && !game_circle_intersects(0.0, 0.0, 1.0, 3.0, 0.0, 1.0);
+}
+
+test `game_circle_contains_point checks bounds`() {
+    return game_circle_contains_point(0.0, 0.0, 2.0, 1.0, 1.0)
+        && !game_circle_contains_point(0.0, 0.0, 1.0, 2.0, 0.0);
+}

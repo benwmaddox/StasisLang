@@ -7,6 +7,7 @@ using Stasis.Compiler;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using Stasis.Compiler.IR.Llvm;
 using System.Collections.Generic;
 
 namespace Stasis.Compiler.IR;
@@ -21,12 +22,13 @@ public sealed class ModuleLowerer
     {
         var opts = options ?? LowerOptions.Default;
         using var builder = new LlvmModuleBuilder(moduleName);
+        var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, opts.IncludeTests, opts.AllowReachabilityFallback);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
-        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests);
+        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions);
 
         var diagnostics = new List<Diagnostic>();
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics);
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics, reachableFunctions);
         lowerer.Lower(compilationUnit, opts.IncludeTests);
 
         if (opts.IncludeTests && opts.EmitTestHarness)
@@ -72,10 +74,11 @@ public sealed class ModuleLowerer
                             : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
 
                         // Special handling for string arrays: use UTF-8 byte buffer
-                        if (elementType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                        if (elementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
                         {
                             // Fixed-size string: 8-byte header + data bytes
-                            builder.DefineGlobalArray(global.Name.Text, LLVMTypeRef.Int8, length + 8);
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            builder.DefineGlobalArray(global.Name.Text, LLVMTypeRef.Int8, length + (uint)headerSize);
                         }
                         else
                         {
@@ -121,10 +124,11 @@ public sealed class ModuleLowerer
                             // Special handling for string array fields in nested structs
                             if (nestedFieldType is ArrayTypeSymbol arrType &&
                                 arrType.ElementType is PrimitiveTypeSymbol prim &&
-                                prim.PrimitiveName == "string")
+                                HeaderSizeFor(prim.PrimitiveName) > 0)
                             {
                                 // Each entry in the outer array contains a string buffer: [count x [strSize+8 x i8]]
-                                var stringSize = arrType.Size + 8;  // UTF-8 header + data
+                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                var stringSize = arrType.Size + headerSize;  // UTF-8 header + data
                                 var stringBufferType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)stringSize);
                                 builder.DefineGlobalArray(nestedName, stringBufferType, count);
                             }
@@ -143,10 +147,11 @@ public sealed class ModuleLowerer
                         var count = ParseArrayLength(arrayType.SizeToken?.Text ?? string.Empty);
 
                         // Special handling for string arrays: use UTF-8 byte buffer
-                        if (elemType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                        if (elemType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
                         {
                             // Fixed-size string: 8-byte header + data bytes
-                            builder.DefineGlobalArray(fieldName, LLVMTypeRef.Int8, count + 8);
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            builder.DefineGlobalArray(fieldName, LLVMTypeRef.Int8, count + (uint)headerSize);
                         }
                         else
                         {
@@ -231,6 +236,15 @@ public sealed class ModuleLowerer
             "u32" or "i32" or "f32" => 4,
             "f64" => 8,
             _ => 4
+        };
+
+    private static int HeaderSizeFor(string name) =>
+        name switch
+        {
+            "string" => 8,
+            "utf8" => 8,
+            "ascii" => 4,
+            _ => 0
         };
 
     private void EmitTestHarness(CompilationUnitSyntax compilationUnit, LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, List<Diagnostic> diagnostics)
@@ -868,14 +882,16 @@ public sealed class ModuleLowerer
         private const int DirEntryStride = 268;
         private int _blockId;
         private readonly bool _headlessGraphics;
+        private readonly HashSet<string> _reachableFunctions;
 
-        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests, bool headlessGraphics)
+        public FunctionLowerer(LlvmModuleBuilder moduleBuilder, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, List<Diagnostic> diagnostics, bool includeTests, bool headlessGraphics, HashSet<string> reachableFunctions)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
             _globalLayouts = layout.Globals.ToDictionary(g => g.Name, g => g, StringComparer.Ordinal);
             _diagnostics = diagnostics;
             _headlessGraphics = headlessGraphics;
+            _reachableFunctions = reachableFunctions;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit, bool includeTests)
@@ -895,6 +911,10 @@ public sealed class ModuleLowerer
 
             foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
             {
+                if (!_reachableFunctions.Contains(fn.Name.Text))
+                {
+                    continue;
+                }
                 LowerFunction(fn);
             }
 
@@ -1136,7 +1156,7 @@ public sealed class ModuleLowerer
                 case TokenKind.StringLiteral:
                     {
                         var text = UnescapeString(lit.Literal.Text);
-                        return builder.BuildGlobalStringPtr(text, $"str_{_blockId++}");
+                        return EmitUtf8Literal(builder, text);
                     }
                 case TokenKind.TrueKeyword:
                     return ConstI32(1);
@@ -1145,6 +1165,79 @@ public sealed class ModuleLowerer
                 default:
                     return ConstI32(0);
             }
+        }
+
+        private LLVMValueRef EmitUtf8Literal(LLVMBuilderRef builder, string text)
+        {
+            var bytes = Encoding.UTF8.GetBytes(text);
+            var byteLength = bytes.Length;
+            var payloadBytes = new List<byte>(byteLength + 9);
+            var charLength = CountCodepoints(text);
+            WriteInt32LE(payloadBytes, byteLength);
+            WriteInt32LE(payloadBytes, charLength);
+            payloadBytes.AddRange(bytes);
+            payloadBytes.Add(0);
+
+            var arrType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)payloadBytes.Count);
+            var values = payloadBytes
+                .Select(b => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, b, false))
+                .ToArray();
+            var initializer = LLVMValueRef.CreateConstArray(LLVMTypeRef.Int8, values);
+
+            var name = $"str_{_blockId++}";
+            var global = _moduleBuilder.Module.AddGlobal(arrType, name);
+            global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            global.IsGlobalConstant = true;
+            global.Initializer = initializer;
+
+            var headerSize = HeaderSizeFor("string");
+            return builder.BuildGEP2(arrType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{name}.payload");
+        }
+
+        private static void WriteInt32LE(List<byte> bytes, int value)
+        {
+            bytes.Add((byte)(value & 0xFF));
+            bytes.Add((byte)((value >> 8) & 0xFF));
+            bytes.Add((byte)((value >> 16) & 0xFF));
+            bytes.Add((byte)((value >> 24) & 0xFF));
+        }
+
+        private static int CountCodepoints(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return 0;
+            }
+
+            var count = 0;
+            foreach (var rune in value.EnumerateRunes())
+            {
+                _ = rune;
+                count++;
+            }
+
+            return count;
+        }
+
+        private LLVMValueRef GetUtf8HeaderPtr(LLVMBuilderRef builder, LLVMValueRef payloadPtr)
+        {
+            var headerSize = HeaderSizeFor("string");
+            var headerBytePtr = builder.BuildGEP2(LLVMTypeRef.Int8, payloadPtr, new[] { ConstI32(-headerSize) }, "utf8.header");
+            return builder.BuildBitCast(headerBytePtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "utf8.header.i32");
+        }
+
+        private LLVMValueRef LoadUtf8ByteLength(LLVMBuilderRef builder, LLVMValueRef payloadPtr)
+        {
+            var headerPtr = GetUtf8HeaderPtr(builder, payloadPtr);
+            return builder.BuildLoad2(LLVMTypeRef.Int32, headerPtr, "utf8.byte_length");
+        }
+
+        private void StoreUtf8Lengths(LLVMBuilderRef builder, LLVMValueRef payloadPtr, LLVMValueRef byteLen)
+        {
+            var headerPtr = GetUtf8HeaderPtr(builder, payloadPtr);
+            builder.BuildStore(byteLen, headerPtr);
+            var charPtr = builder.BuildGEP2(LLVMTypeRef.Int32, headerPtr, new[] { ConstI32(1) }, "utf8.char_length.ptr");
+            builder.BuildStore(byteLen, charPtr);
         }
 
         private LLVMValueRef LowerUnary(LLVMBuilderRef builder, UnaryExpressionSyntax unary, Dictionary<string, LocalBinding> locals)
@@ -1549,15 +1642,11 @@ public sealed class ModuleLowerer
                         if (args[0] is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
                         {
                             var text = UnescapeString(lit.Literal.Text);
-                            strPtr = builder.BuildGlobalStringPtr(text, $"strlit_{_blockId++}");
+                            strPtr = EmitUtf8Literal(builder, text);
                         }
                         else
                         {
-                            var value = LowerExpression(builder, args[0], locals);
-                            var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-                            strPtr = value.TypeOf.Kind == LLVMTypeKind.LLVMPointerTypeKind
-                                ? value
-                                : builder.BuildIntToPtr(value, i8Ptr, "str.ptr");
+                            strPtr = LowerCStringPointer(builder, args[0], locals);
                         }
 
                         EmitPrintf(builder, "%s", strPtr);
@@ -2066,12 +2155,15 @@ public sealed class ModuleLowerer
                         }
 
                         var idx = LowerExpression(builder, args[1], locals);
-                        var dst = LowerCStringPointer(builder, args[2], locals);
+                        var dstPayload = LowerCStringPointer(builder, args[2], locals);
                         if (!TryLowerDirListArgument(builder, args[0], locals, out var namesPtr, out _, out _))
                         {
                             AddDiagnostic("dir_list_entry_copy_name requires a DirList with entries, is_dir, and count fields.", span);
                             return ConstI32(0);
                         }
+
+                        var dstHeader = GetUtf8HeaderPtr(builder, dstPayload);
+                        var dst = builder.BuildBitCast(dstHeader, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "dir_list_entry_copy.dst");
 
                         var stride = ConstI32(DirEntryStride);
                         var offset = builder.BuildMul(idx, stride, "dir_list_entry_copy_name.offset");
@@ -2447,16 +2539,13 @@ public sealed class ModuleLowerer
                             AddDiagnostic("str_len expects 1 argument (s: u8[]).", span);
                             return ConstI32(0);
                         }
-                        // Get pointer to the array and call strlen
-                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
                         var ptr = LowerArrayPointer(builder, args[0], locals);
                         if (ptr.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_len requires an array argument.", span);
                             return ConstI32(0);
                         }
-                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptr }, "strlen.call");
-                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_len");
+                        return LoadUtf8ByteLength(builder, ptr);
                     }
 
                 case "str_is_empty":
@@ -2472,8 +2561,8 @@ public sealed class ModuleLowerer
                             AddDiagnostic("str_is_empty requires an array argument.", span);
                             return ConstI32(0);
                         }
-                        var firstByte = builder.BuildLoad2(LLVMTypeRef.Int8, ptr, "firstByte");
-                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, firstByte, ConstI8(0), "isZero");
+                        var len = LoadUtf8ByteLength(builder, ptr);
+                        var isZero = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, len, ConstI32(0), "isZero");
                         return builder.BuildZExt(isZero, LLVMTypeRef.Int32, "str_is_empty");
                     }
 
@@ -2514,6 +2603,10 @@ public sealed class ModuleLowerer
                         var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { index }, "elemPtr");
                         var truncated = builder.BuildTrunc(byteVal, LLVMTypeRef.Int8, "byte");
                         builder.BuildStore(truncated, elemPtr);
+                        var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
+                        var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptr }, "strlen.call");
+                        var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_set.len");
+                        StoreUtf8Lengths(builder, ptr, len);
                         return ConstI32(0);
                     }
 
@@ -2573,7 +2666,9 @@ public sealed class ModuleLowerer
                         }
                         builder.BuildCall2(strcpyType, strcpyFn, new[] { ptrDst, ptrSrc }, "");
                         var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
-                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_copy.len");
+                        var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_copy.len");
+                        StoreUtf8Lengths(builder, ptrDst, len);
+                        return len;
                     }
 
                 case "str_append":
@@ -2594,7 +2689,9 @@ public sealed class ModuleLowerer
                         }
                         builder.BuildCall2(strcatType, strcatFn, new[] { ptrDst, ptrSrc }, "");
                         var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
-                        return builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_append.len");
+                        var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_append.len");
+                        StoreUtf8Lengths(builder, ptrDst, len);
+                        return len;
                     }
 
                 case "str_append_char":
@@ -2619,7 +2716,9 @@ public sealed class ModuleLowerer
                         builder.BuildStore(truncated, elemPtr);
                         var nextPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { builder.BuildAdd(len, ConstI32(1), "next") }, "nextPtr");
                         builder.BuildStore(ConstI8(0), nextPtr);
-                        return builder.BuildAdd(len, ConstI32(1), "str_append_char.len");
+                        var newLen = builder.BuildAdd(len, ConstI32(1), "str_append_char.len");
+                        StoreUtf8Lengths(builder, ptrDst, newLen);
+                        return newLen;
                     }
 
                 case "str_clear":
@@ -2636,6 +2735,7 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
                         builder.BuildStore(ConstI8(0), ptr);
+                        StoreUtf8Lengths(builder, ptr, ConstI32(0));
                         return ConstI32(0);
                     }
 
@@ -2900,6 +3000,7 @@ public sealed class ModuleLowerer
                         builder.BuildCall2(memcpyType, memcpyFn, new[] { ptrDst, startPtr, len64 }, "substr.copy");
                         var terminatorPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { byteLen }, "substr.term");
                         builder.BuildStore(ConstI8(0), terminatorPtr);
+                        StoreUtf8Lengths(builder, ptrDst, byteLen);
                         return byteLen;
                     }
 
@@ -2932,12 +3033,20 @@ public sealed class ModuleLowerer
                     var global = _moduleBuilder.Module.GetNamedGlobal(id.Identifier.Text);
                     if (global.Handle != IntPtr.Zero)
                     {
+                        if (arrayTypeSym.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            var payloadSize = arrayTypeSym.Size + headerSize;
+                            var llvmPayloadArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)Math.Max(1, payloadSize));
+                            return builder.BuildGEP2(llvmPayloadArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{id.Identifier.Text}.payload");
+                        }
+
                         // Get element type from the semantic type symbol
                         var elemType = _moduleBuilder.TypeMapper.Map(arrayTypeSym.ElementType);
-                        var size = arrayTypeSym.Size;
-                        var llvmArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, size));
+                        var arraySize = arrayTypeSym.Size;
+                        var llvmElemArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, arraySize));
                         // GEP to get pointer to first element
-                        return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{id.Identifier.Text}.ptr");
+                        return builder.BuildGEP2(llvmElemArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{id.Identifier.Text}.ptr");
                     }
                 }
                 // Check for local array binding
@@ -2966,10 +3075,18 @@ public sealed class ModuleLowerer
                         var global = _moduleBuilder.Module.GetNamedGlobal(flattenedPath);
                         if (global.Handle != IntPtr.Zero)
                         {
+                            if (memberArrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                            {
+                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                var payloadSize = memberArrayType.Size + headerSize;
+                                var llvmPayloadArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)Math.Max(1, payloadSize));
+                                return builder.BuildGEP2(llvmPayloadArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{flattenedPath}.payload");
+                            }
+
                             var elemType = _moduleBuilder.TypeMapper.Map(memberArrayType.ElementType);
-                            var size = memberArrayType.Size;
-                            var llvmArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, size));
-                            return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedPath}.ptr");
+                            var arraySize = memberArrayType.Size;
+                            var llvmElemArrayType = LLVMTypeRef.CreateArray(elemType, (uint)Math.Max(1, arraySize));
+                            return builder.BuildGEP2(llvmElemArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedPath}.ptr");
                         }
                     }
                 }
@@ -3213,6 +3330,30 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerArrayAccess(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, Dictionary<string, LocalBinding> locals)
         {
+            if (arr.Receiver is IdentifierExpressionSyntax id &&
+                _symbols.TryGetValue(id.Identifier.Text, out var sym) &&
+                (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) &&
+                sym.Type is ArrayTypeSymbol arrayType &&
+                arrayType.ElementType is ArrayTypeSymbol innerArray &&
+                innerArray.ElementType is PrimitiveTypeSymbol prim &&
+                HeaderSizeFor(prim.PrimitiveName) > 0)
+            {
+                var globalName = TryResolveGlobalName(id.Identifier.Text);
+                var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+                if (global.Handle != IntPtr.Zero)
+                {
+                    var index = LowerExpression(builder, arr.Index, locals);
+                    var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                    var stride = innerArray.Size + headerSize;
+                    var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                    var basePtr = builder.BuildBitCast(global, i8Ptr, "strbase");
+                    var offset = builder.BuildMul(index, ConstI32(stride), "str.offset");
+                    var elemBase = builder.BuildGEP2(LLVMTypeRef.Int8, basePtr, new[] { offset }, "str.elem.base");
+                    var payloadPtr = builder.BuildGEP2(LLVMTypeRef.Int8, elemBase, new[] { ConstI32(headerSize) }, "str.elem.payload");
+                    return payloadPtr;
+                }
+            }
+
             if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var ptr, out var elemType))
             {
                 return builder.BuildLoad2(elemType, ptr, "elemload");
@@ -3269,11 +3410,12 @@ public sealed class ModuleLowerer
                             if (fieldType is ArrayTypeSymbol arrayType)
                             {
                                 // Special handling for string arrays
-                                if (arrayType.ElementType is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+                                if (arrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
                                 {
                                     // String array: [N+8 x i8] - return pointer to first element
-                                    var llvmArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)(arrayType.Size + 8));
-                                    return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{flattenedName}.ptr");
+                                    var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                    var llvmArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)(arrayType.Size + headerSize));
+                                    return builder.BuildGEP2(llvmArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{flattenedName}.payload");
                                 }
                                 else
                                 {
@@ -4154,7 +4296,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             _diagnostics.Add(new Diagnostic(message, span));
     }
 
-    private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder, bool includeTests)
+    private static void EmitFunctionSignatures(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder, bool includeTests, HashSet<string> reachableFunctions)
     {
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
@@ -4162,6 +4304,10 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
 
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
+            if (!reachableFunctions.Contains(fn.Name.Text))
+            {
+                continue;
+            }
             EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters);
         }
 

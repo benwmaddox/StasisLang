@@ -53,6 +53,7 @@ public enum TokenKind
     BangEqual,
     Colon,
     Bang,
+    At,
 
     LParen,
     RParen,

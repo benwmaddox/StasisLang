@@ -1,5 +1,6 @@
 using LLVMSharp.Interop;
 using Stasis.Compiler.IR;
+using Stasis.Compiler.IR.Llvm;
 using Stasis.Compiler.Semantic;
 
 namespace Stasis.Compiler.Tests;

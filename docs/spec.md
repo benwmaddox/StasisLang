@@ -5,7 +5,7 @@ Got you, Ben. Here is a **complete, consolidated, detailed Stasis Language Speci
 - Infix arithmetic/comparison with TypeScript-style precedence; compound assignment supported
 - Only one assignment operator may appear in an expression (no chaining).
 - AoS → SoA translation model
-- LLVM as backend
+- LLVM and Cranelift backends
 - Static memory rules
 - Modules, functions, tests, globals
 - Compiler phases
@@ -26,7 +26,7 @@ _A statically-allocated, AoS-syntax / SoA-storage, operator-method-based languag
 
 # **1. Overview**
 
-Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly and LLVM IR**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** for IR construction and emission.
+Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly, LLVM IR, and Cranelift CLIF**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** and a Cranelift AOT path for IR construction and emission.
 
 The core design pillars are:
 
@@ -41,7 +41,7 @@ The core design pillars are:
   ```
 
 - **AoS source structure → SoA target memory**
-- **LLVM and WASM compatibility**
+- **LLVM, Cranelift, and WASM compatibility**
 - **Analyzable effects** (reads vs writes can be statically determined)
 - **Deterministic layout** — struct offsets, array bounds known at compile time
 - **Direct opcode functions** for arithmetic and memory operations
@@ -109,7 +109,9 @@ Type[IntegerLiteral]
 ```
 ascii[N]   // fixed-byte ASCII strings (single-byte code units)
 utf8[N]    // UTF-8 strings with tracked byte and codepoint lengths
+string     // alias for utf8 (default string storage)
 string[N]  // alias for utf8[N] (backward compatibility)
+ascii[N]   // ASCII-only string buffers with a single length header
 ```
 
 **ascii[N] layout and invariants**
@@ -121,15 +123,35 @@ string[N]  // alias for utf8[N] (backward compatibility)
 - Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
 - Invariant: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints.
 - `data[byte_length]` is set to `0` as a sentinel; sentinel is not counted in `N`.
+- C interop: the payload is a null-terminated UTF-8 byte sequence, so host functions can treat `data` as a normal C string and ignore the header unless length metadata is needed.
+
+**string literal typing**
+- String literals are context-typed: `""` can target `ascii[N]` or `utf8[N]`/`string` based on the expected type.
+- Non-literal values still require explicit conversion between `ascii[N]` and `utf8[N]`.
 
 ### Built-in I/O helpers
 
-- `print_string(utf8[N])` prints a UTF-8 string literal; the compiler lowers it to global static storage with headers and a null sentinel, and the runtime maps the payload to an LLVM `i8*`.
-- ASCII literals may be typed as `ascii[N]` and widen to `utf8[N]` when passed to UTF-8 APIs.
+- `print_string(utf8[N])` prints a UTF-8 buffer; the compiler lowers string literals to static storage with UTF-8 headers and a null sentinel, and the runtime passes the payload pointer to the host I/O layer.
+- `string` and `string[N]` are `utf8` aliases, so any string passed to built-ins uses the UTF-8 header layout by default.
+- `ascii[N]` and `utf8[N]` are distinct; there is no implicit widening between them. Use explicit conversion helpers (for example, a stdlib `from_ascii` function) when crossing the boundary.
 - Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
 - String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
+
+### Imports
+
+Stasis supports source-level imports that inline another `.stasis` file before parsing.
+
+```
+import "relative/path/to/file.stasis";
+```
+
+- Imports are resolved relative to the importing file.
+- Imported content is inlined once (duplicate imports are ignored).
+- Import directives are removed before parsing, so only top-level declarations remain.
+- Standard library modules are regular imports; the compiler does not auto-include them.
+- TODO: consider preserving per-file source maps (instead of raw concatenation) for more precise diagnostics.
 
 ### Struct Types
 
@@ -395,6 +417,12 @@ function name(param: Type, ...): ReturnType {
 }
 ```
 
+Attributes may appear between `function` and the name:
+
+```
+function @inline name(param: Type): ReturnType { ... }
+```
+
 ### Function properties:
 
 - No overloading.
@@ -417,7 +445,7 @@ Global arrays of struct references become SoA automatically.
 # **11. Modules**
 
 - File = Module
-- All top-level declarations are visible by filename-level import (v2 will add explicit imports)
+- All top-level declarations are visible by filename-level import through `import "file.stasis";`
 - Compiled via signature-first pass, then tree shaking.
 
 ---
@@ -577,6 +605,7 @@ function damage(e: Enemy, amt: u8): void {
 | Function signatures first pass | ✔            |
 | Tree shaking                   | ✔            |
 | LLVM backend                   | ✔            |
+| Cranelift backend (debug)      | ✔ (experimental) |
 | WASM backend                   | ✔            |
 | Deterministic behavior         | ✔            |
 | Suitable for parallel analysis | ✔            |
