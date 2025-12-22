@@ -18,5 +18,6 @@ svg source -> bake_svg_to_rgba() -> RGBA pixels -> GPU atlas (mipmapped)
 ## Guidance for Authors
 
 - Author sprites as plain SVG with explicit `width`/`height` (or a `viewBox` that matches).
-- Keep shapes simple (rect, line, circle) for predictable baking; light gradients/opacity are OK.
+- Keep shapes simple (rect, line, circle, path) for predictable baking; gradients/opacity are OK.
+- Avoid SVG filters and SMIL animation tags; the runtime bakes a single frame. For animation, split into layers and animate transforms/alpha in Stasis code.
 - Keep files ASCII to match repo guidelines.
