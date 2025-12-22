@@ -1421,6 +1421,9 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         Arguments = arguments,
         UseShellExecute = false
     };
+    // Pass asset root to child processes so relative sprite paths resolve to the workspace.
+    var assetRoot = Directory.GetCurrentDirectory();
+    psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = assetRoot;
     configure?.Invoke(psi);
     if (suppressOutput)
     {
@@ -1730,6 +1733,7 @@ static Process StartWatchChild(string exePath, string[] args)
         Arguments = string.Join(" ", args),
         UseShellExecute = false
     };
+    psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = Directory.GetCurrentDirectory();
     return Process.Start(psi)!;
 }
 

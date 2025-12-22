@@ -86,7 +86,7 @@ static GLuint g_line_vao = 0;
 static GLint g_line_pos_loc = -1;
 static GLint g_line_color_loc = -1;
 
-/* Sprite atlas + batching (baked from .stv sources) */
+/* Sprite atlas + batching (baked from SVG sources) */
 #define MAX_SPRITES 256
 #define SPRITE_ATLAS_W 1024
 #define SPRITE_ATLAS_H 1024
@@ -285,9 +285,50 @@ static void flush_lines(void) {
     g_line_count = 0;
 }
 
+static char g_asset_base[512] = {0};
+static char g_asset_env[512] = {0};
+
+static void ensure_asset_base(void) {
+    if (g_asset_base[0] != 0) return;
+
+    /* Prefer explicit env override */
+    const char* env = getenv("STASIS_ASSET_ROOT");
+    if (env && *env) {
+        strncpy(g_asset_env, env, sizeof(g_asset_env) - 1);
+        g_asset_env[sizeof(g_asset_env) - 1] = 0;
+        strncpy(g_asset_base, g_asset_env, sizeof(g_asset_base) - 1);
+        g_asset_base[sizeof(g_asset_base) - 1] = 0;
+        return;
+    }
+#if defined(_WIN32)
+    _getcwd(g_asset_base, (int)sizeof(g_asset_base));
+#else
+    getcwd(g_asset_base, sizeof(g_asset_base));
+#endif
+}
+
 static char* read_text_file(const char* path) {
+    ensure_asset_base();
+
     FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        /* If relative, try anchored to startup cwd */
+        if (!(path[0] == '/' || path[0] == '\\' || (path[1] == ':' && (path[2] == '\\' || path[2] == '/')))) {
+            char alt[1024];
+            snprintf(alt, sizeof(alt), "%s/%s", g_asset_base, path);
+            for (char* p = alt; *p; ++p) {
+                if (*p == '\\') *p = '/';
+            }
+            f = fopen(alt, "rb");
+            if (!f) {
+                fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, alt);
+                return NULL;
+            }
+        } else {
+            fprintf(stderr, "read_text_file: failed %s\n", path);
+            return NULL;
+        }
+    }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -624,97 +665,202 @@ static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     return h;
 }
 
-static int bake_stv_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
+/* --- Minimal SVG rasterizer (rect/line/circle; no transforms) --- */
+static int svg_attr_color(const char* tag, const char* name, float* r, float* g, float* b, float* a, float default_a) {
+    const char* p = strstr(tag, name);
+    if (!p) return 0;
+    p = strchr(p, '"');
+    if (!p) return 0;
+    p++;
+    const char* end = strchr(p, '"');
+    if (!end) return 0;
+    if ((end - p) == 7 && p[0] == '#') {
+        unsigned int rv = 0, gv = 0, bv = 0;
+        if (sscanf(p + 1, "%02x%02x%02x", &rv, &gv, &bv) == 3) {
+            *r = (float)rv / 255.0f;
+            *g = (float)gv / 255.0f;
+            *b = (float)bv / 255.0f;
+            *a = default_a;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static float svg_attr_float(const char* tag, const char* name, float fallback) {
+    const char* p = strstr(tag, name);
+    if (!p) return fallback;
+    p = strchr(p, '"');
+    if (!p) return fallback;
+    p++;
+    return strtof(p, NULL);
+}
+
+static void svg_draw_rect(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
+    float x = svg_attr_float(tag, "x", 0.0f);
+    float y = svg_attr_float(tag, "y", 0.0f);
+    float w = svg_attr_float(tag, "width", 0.0f);
+    float h = svg_attr_float(tag, "height", 0.0f);
+    float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
+    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
+    float opacity = svg_attr_float(tag, "opacity", 1.0f);
+    float fill_opacity = svg_attr_float(tag, "fill-opacity", 1.0f) * opacity;
+    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
+    float stroke_w = svg_attr_float(tag, "stroke-width", 0.0f);
+
+    if (svg_attr_color(tag, "fill", &fill_r, &fill_g, &fill_b, &fill_a, fill_opacity) && fill_a > 0.0f) {
+        draw_rect_rgba(buf, sw, sh,
+            (int)floorf(x * ss), (int)floorf(y * ss),
+            (int)ceilf(w * ss), (int)ceilf(h * ss),
+            fill_r, fill_g, fill_b, fill_a);
+    }
+
+    if (stroke_w > 0.0f && svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f) {
+        float t = stroke_w * ss;
+        /* Top */
+        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(w * ss), (int)ceilf(t), stroke_r, stroke_g, stroke_b, stroke_a);
+        /* Bottom */
+        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf((y + h - stroke_w) * ss), (int)ceilf(w * ss), (int)ceilf(t), stroke_r, stroke_g, stroke_b, stroke_a);
+        /* Left */
+        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(t), (int)ceilf(h * ss), stroke_r, stroke_g, stroke_b, stroke_a);
+        /* Right */
+        draw_rect_rgba(buf, sw, sh, (int)floorf((x + w - stroke_w) * ss), (int)floorf(y * ss), (int)ceilf(t), (int)ceilf(h * ss), stroke_r, stroke_g, stroke_b, stroke_a);
+    }
+}
+
+static void svg_draw_circle(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
+    float cx = svg_attr_float(tag, "cx", 0.0f);
+    float cy = svg_attr_float(tag, "cy", 0.0f);
+    float r = svg_attr_float(tag, "r", 0.0f);
+    float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
+    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
+    float opacity = svg_attr_float(tag, "opacity", 1.0f);
+    float fill_opacity = svg_attr_float(tag, "fill-opacity", 1.0f) * opacity;
+    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
+    float stroke_w = svg_attr_float(tag, "stroke-width", 0.0f);
+
+    int has_fill = svg_attr_color(tag, "fill", &fill_r, &fill_g, &fill_b, &fill_a, fill_opacity) && fill_a > 0.0f;
+    int has_stroke = stroke_w > 0.0f && svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f;
+
+    if (has_stroke) {
+        draw_circle_rgba(buf, sw, sh, cx * ss, cy * ss, r * ss, stroke_r, stroke_g, stroke_b, stroke_a);
+    }
+
+    if (has_fill) {
+        float inner_r = r;
+        if (has_stroke) {
+            inner_r -= stroke_w;
+            if (inner_r < 0.0f) inner_r = 0.0f;
+        }
+        draw_circle_rgba(buf, sw, sh, cx * ss, cy * ss, inner_r * ss, fill_r, fill_g, fill_b, fill_a);
+    }
+}
+
+static void svg_draw_line(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
+    float x1 = svg_attr_float(tag, "x1", 0.0f);
+    float y1 = svg_attr_float(tag, "y1", 0.0f);
+    float x2 = svg_attr_float(tag, "x2", 0.0f);
+    float y2 = svg_attr_float(tag, "y2", 0.0f);
+    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
+    float opacity = svg_attr_float(tag, "opacity", 1.0f);
+    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
+    float stroke_w = svg_attr_float(tag, "stroke-width", 1.0f);
+
+    if (svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f) {
+        draw_line_rgba(buf, sw, sh, x1 * ss, y1 * ss, x2 * ss, y2 * ss, stroke_w * ss, stroke_r, stroke_g, stroke_b, stroke_a);
+    }
+}
+
+static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
     *out_h = 0;
 
-    char* text = read_text_file(path);
-    if (!text) return 0;
+    char* file = read_text_file(path);
+    if (!file) {
+        fprintf(stderr, "bake_svg_to_rgba: failed to read %s\n", path);
+        return 0;
+    }
+    char* text = file;
 
-    int w = 0, h = 0;
-    int saw_header = 0;
-    int ready = 0;
+    /* skip UTF-8 BOM if present */
+    if ((unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) {
+        text += 3;
+    }
+
+    /* find <svg ...> */
+    const char* svg = strstr(text, "<svg");
+    if (!svg) {
+        fprintf(stderr, "bake_svg_to_rgba: missing <svg> in %s\n", path);
+        free(file);
+        return 0;
+    }
+    float width = svg_attr_float(svg, "width", 0.0f);
+    float height = svg_attr_float(svg, "height", 0.0f);
+    if (width <= 0.0f || height <= 0.0f) {
+        /* fallback to viewBox */
+        const char* vb = strstr(svg, "viewBox");
+        if (vb) {
+            const char* q = strchr(vb, '"');
+            if (q) {
+                q++;
+                float minx = 0.0f, miny = 0.0f, vbw = 0.0f, vbh = 0.0f;
+                if (sscanf(q, "%f %f %f %f", &minx, &miny, &vbw, &vbh) == 4) {
+                    width = vbw;
+                    height = vbh;
+                }
+            }
+        }
+    }
+    if (width <= 0.0f || height <= 0.0f) {
+        fprintf(stderr, "bake_svg_to_rgba: missing width/height and viewBox in %s\n", path);
+        free(file);
+        return 0;
+    }
+
+    int w = (int)ceilf(width);
+    int h = (int)ceilf(height);
+    if (w <= 0 || h <= 0) {
+        fprintf(stderr, "bake_svg_to_rgba: invalid dimensions %dx%d in %s\n", w, h, path);
+        free(file);
+        return 0;
+    }
+
     const int ss = 2;
-    int sw = 0;
-    int sh = 0;
-    unsigned char* sbuf = NULL;
+    int sw = w * ss;
+    int sh = h * ss;
+    unsigned char* sbuf = (unsigned char*)calloc((size_t)sw * (size_t)sh * 4, 1);
+    if (!sbuf) {
+        fprintf(stderr, "bake_svg_to_rgba: OOM allocating %d x %d buffer for %s\n", sw, sh, path);
+        free(file);
+        return 0;
+    }
 
-    float cr = 1.0f, cg = 1.0f, cb = 1.0f, ca = 1.0f;
     for (char* p = text; *p; ) {
         char* line = p;
         while (*p && *p != '\n') p++;
         if (*p == '\n') { *p = 0; p++; }
         while (*line == ' ' || *line == '\t' || *line == '\r') line++;
-        if (*line == 0 || *line == '#') continue;
+        if (*line == 0) continue;
 
-        if (!saw_header) {
-            if (strncmp(line, "stv 1", 5) != 0) {
-                free(text);
-                return 0;
-            }
-            saw_header = 1;
-            continue;
+        if (strncmp(line, "<rect", 5) == 0) {
+            svg_draw_rect(sbuf, sw, sh, line, ss);
+        } else if (strncmp(line, "<circle", 7) == 0) {
+            svg_draw_circle(sbuf, sw, sh, line, ss);
+        } else if (strncmp(line, "<line", 5) == 0) {
+            svg_draw_line(sbuf, sw, sh, line, ss);
         }
-
-        if (!ready) {
-            if (strncmp(line, "size ", 5) == 0) {
-                if (sscanf(line + 5, "%d %d", &w, &h) == 2 && w > 0 && h > 0) {
-                    sw = w * ss;
-                    sh = h * ss;
-                    sbuf = (unsigned char*)calloc((size_t)sw * (size_t)sh * 4, 1);
-                    if (!sbuf) {
-                        free(text);
-                        return 0;
-                    }
-                    ready = 1;
-                }
-            }
-            continue;
-        }
-
-        if (strncmp(line, "rgba ", 5) == 0) {
-            (void)sscanf(line + 5, "%f %f %f %f", &cr, &cg, &cb, &ca);
-            continue;
-        }
-        if (strncmp(line, "rect ", 5) == 0) {
-            float x, y, rw, rh;
-            if (sscanf(line + 5, "%f %f %f %f", &x, &y, &rw, &rh) == 4) {
-                draw_rect_rgba(sbuf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(rw * ss), (int)ceilf(rh * ss), cr, cg, cb, ca);
-            }
-            continue;
-        }
-        if (strncmp(line, "circle ", 7) == 0) {
-            float cx, cy, rad;
-            if (sscanf(line + 7, "%f %f %f", &cx, &cy, &rad) == 3) {
-                draw_circle_rgba(sbuf, sw, sh, cx * ss, cy * ss, rad * ss, cr, cg, cb, ca);
-            }
-            continue;
-        }
-        if (strncmp(line, "line ", 5) == 0) {
-            float x1, y1, x2, y2, t;
-            if (sscanf(line + 5, "%f %f %f %f %f", &x1, &y1, &x2, &y2, &t) == 5) {
-                draw_line_rgba(sbuf, sw, sh, x1 * ss, y1 * ss, x2 * ss, y2 * ss, t * ss, cr, cg, cb, ca);
-            }
-            continue;
-        }
-    }
-
-    if (!saw_header || !ready || w <= 0 || h <= 0 || !sbuf) {
-        if (sbuf) free(sbuf);
-        free(text);
-        return 0;
     }
 
     unsigned char* out = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
     if (!out) {
         free(sbuf);
-        free(text);
+        free(file);
         return 0;
     }
     downsample_2x(out, w, h, sbuf, sw, sh);
     free(sbuf);
-    free(text);
+    free(file);
     *out_pixels = out;
     *out_w = w;
     *out_h = h;
@@ -722,14 +868,14 @@ static int bake_stv_to_rgba(const char* path, unsigned char** out_pixels, int* o
 }
 
 /*
- * Debug helper: bake a .stv to RGBA on the CPU and return a deterministic 32-bit hash of the pixels.
+ * Debug helper: bake an SVG to RGBA on the CPU and return a deterministic 32-bit hash of the pixels.
  * Returns 0 on error (and logs).
  */
 STASIS_EXPORT int stasis_gfx_debug_bake_hash(const char* path) {
     if (!path || !*path) return 0;
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+    if (!bake_svg_to_rgba(path, &pixels, &w, &h)) {
         SDL_Log("gfx_debug_bake_hash: failed to bake %s", path);
         return 0;
     }
@@ -1511,7 +1657,7 @@ static int sprite_find_by_path(const char* path) {
 static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+    if (!bake_svg_to_rgba(path, &pixels, &w, &h)) {
         SDL_Log("gfx_load_sprite: failed to bake %s", path);
         return 0;
     }
@@ -1608,7 +1754,7 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
 }
 
 /*
- * Load and bake a sprite from a .stv file into the global atlas.
+ * Load and bake a sprite from an SVG file into the global atlas.
  * Returns an integer handle (stable for the lifetime of the process).
  */
 STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
@@ -1616,6 +1762,21 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
     if (!g_window) return 0;
     if (!g_use_sdl_renderer && !g_gl_context) return 0;
     if (g_use_sdl_renderer && !g_renderer) return 0;
+
+    /* Debug: log path and cwd for easier troubleshooting */
+    char cwd[512];
+#if defined(_WIN32)
+    if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
+#else
+    if (getcwd(cwd, sizeof(cwd)) != NULL)
+#endif
+    {
+        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s\n", cwd, path);
+    }
+    else
+    {
+        fprintf(stderr, "gfx_load_sprite: path=%s\n", path);
+    }
 
     int existing = sprite_find_by_path(path);
     if (existing) return existing;
