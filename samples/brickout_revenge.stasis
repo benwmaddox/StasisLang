@@ -129,6 +129,19 @@ struct Timers {
     tick_time_ms: i32;
 }
 
+struct BrickoutSprites {
+    paddle: i32;
+    ball: i32;
+    brick_basic_base: i32;
+    brick_basic_turret: i32;
+    brick_basic_fx: i32;
+    brick_armored_base: i32;
+    brick_armored_turret: i32;
+    brick_armored_fx: i32;
+    brick_reflector_base: i32;
+    brick_reflector_fx: i32;
+}
+
 struct GameState {
     bricks: Brick[50];
     balls: Ball[900];
@@ -144,14 +157,10 @@ struct GameState {
     running: i32;
     frame_times: i32[120];
     frame_time_index: i32;
+    sprites: BrickoutSprites;
 }
 
 global state: GameState;
-global spr_paddle: i32;
-global spr_ball: i32;
-global spr_brick_basic: i32;
-global spr_brick_armored: i32;
-global spr_brick_reflector: i32;
 
 function reset_frame_times(): void {
     let i: i32 = 0;
@@ -262,7 +271,6 @@ function init_game(reset_progress: bool): void {
 
     // Init timers
     state.timers.last_time = get_time_ms();
-    state.timers.frame_start = 0;
     state.timers.ball_spawn_cd = 0;
     state.timers.phase_timer = 0;
     state.timers.tick_time_ms = 0;
@@ -819,28 +827,61 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
 }
 
 function draw_bricks(): void {
+    let now_ms: i32 = get_time_ms();
+    let t_mod: i32 = now_ms % 2000;
+    let t_f: f32 = t_mod;
+    let phase: f32 = (t_f / 2000.0) * 2.0 * PI;
+    let wave: f32 = sin_fast(phase);
+    let pulse: f32 = 0.5 + 0.5 * wave;
+    let fx_alpha: f32 = 0.10 + 0.20 * pulse;
+
     foreach (let brick in state.bricks) {
         if (brick.active) {
-            let h: i32 = spr_brick_basic;
+            let h_base: i32 = state.sprites.brick_basic_base;
+            let h_turret: i32 = state.sprites.brick_basic_turret;
+            let h_fx: i32 = state.sprites.brick_basic_fx;
             if (brick.brick_type == BRICK_BASIC) {
-                h = spr_brick_basic;
+                h_base = state.sprites.brick_basic_base;
+                h_turret = state.sprites.brick_basic_turret;
+                h_fx = state.sprites.brick_basic_fx;
             }
             if (brick.brick_type == BRICK_ARMORED) {
-                h = spr_brick_armored;
+                h_base = state.sprites.brick_armored_base;
+                h_turret = state.sprites.brick_armored_turret;
+                h_fx = state.sprites.brick_armored_fx;
             }
             if (brick.brick_type == BRICK_REFLECTOR) {
-                h = spr_brick_reflector;
+                h_base = state.sprites.brick_reflector_base;
+                h_turret = 0;
+                h_fx = state.sprites.brick_reflector_fx;
             }
 
             let cx: f32 = brick.x + brick.width / 2.0;
             let cy: f32 = brick.y + brick.height / 2.0;
             let sx: f32 = brick.width / 160.0;  // sprite viewBox width
             let sy: f32 = brick.height / 64.0;  // sprite viewBox height
-            if (h == 0) {
-                // Fallback: line rectangle when sprites are unavailable
-                draw_rect(brick.x, brick.y, brick.width, brick.height, 1.0, 1.0, 1.0, 1.0);
-            } else {
-                gfx_draw_sprite(h, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+
+            if (h_base != 0) {
+                gfx_draw_sprite(h_base, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+            }
+
+            // Turret bob/pulse (driven by time; no SVG animation tags)
+            if (h_turret != 0) {
+                let seed: f32 = cx * 0.013 + cy * 0.021;
+                let wobble: f32 = sin_fast(phase + seed);
+                let oy: f32 = wobble * 1.4;
+                let rot: f32 = wobble * 0.05;
+                let a: f32 = 0.85 + 0.15 * (0.5 + 0.5 * wobble);
+                gfx_draw_sprite(h_turret, cx, cy + oy, sx, sy, rot, 1.0, 1.0, 1.0, a);
+            }
+
+            // Effects layer (pulse alpha)
+            if (h_fx != 0) {
+                let a: f32 = fx_alpha;
+                if (brick.brick_type == BRICK_REFLECTOR) {
+                    a = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
+                }
+                gfx_draw_sprite(h_fx, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, a);
             }
 
             // Shot tracer (tower attack feedback)
@@ -869,10 +910,10 @@ function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
             let scale: f32 = (ball.radius * 2.0) / 32.0;
-            if (spr_ball == 0) {
+            if (state.sprites.ball == 0) {
                 draw_circle(ball.x, ball.y, ball.radius, 1.0, 0.3, 1.0, 1.0);
             } else {
-                gfx_draw_sprite(spr_ball, ball.x, ball.y, scale, scale, 0.0, 1.0, 1.0, 1.0, 1.0);
+                gfx_draw_sprite(state.sprites.ball, ball.x, ball.y, scale, scale, 0.0, 1.0, 1.0, 1.0, 1.0);
             }
 
             // Ball HP bar
@@ -893,12 +934,12 @@ function draw_balls(): void {
 function draw_paddle(): void {
     let sx: f32 = state.paddle.width / 128.0;
     let sy: f32 = state.paddle.height / 24.0;
-    if (spr_paddle == 0) {
+    if (state.sprites.paddle == 0) {
         let px: f32 = state.paddle.x - state.paddle.width / 2.0;
         let py: f32 = state.paddle.y - state.paddle.height / 2.0;
         draw_filled_rect(px, py, state.paddle.width, state.paddle.height, 0.3, 1.0, 1.0, 1.0);
     } else {
-        gfx_draw_sprite(spr_paddle, state.paddle.x, state.paddle.y, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+        gfx_draw_sprite(state.sprites.paddle, state.paddle.x, state.paddle.y, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
     }
 }
 
@@ -1246,11 +1287,16 @@ function draw_ui(): void {
 
 function draw_frame(): void {
     // Hot reload during development (no flags for now)
-    if (spr_paddle == 0) { } else { gfx_poll_reload(spr_paddle); }
-    if (spr_ball == 0) { } else { gfx_poll_reload(spr_ball); }
-    if (spr_brick_basic == 0) { } else { gfx_poll_reload(spr_brick_basic); }
-    if (spr_brick_armored == 0) { } else { gfx_poll_reload(spr_brick_armored); }
-    if (spr_brick_reflector == 0) { } else { gfx_poll_reload(spr_brick_reflector); }
+    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
+    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
+    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
+    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
+    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
+    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
+    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
+    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
+    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
+    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
 
     draw_bricks();
     draw_balls();
@@ -1283,11 +1329,16 @@ function main(): i32 {
         return 1;
     }
 
-    spr_paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.svg");
-    spr_ball = gfx_load_sprite("assets_src/brickout-revenge/ball.svg");
-    spr_brick_basic = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.svg");
-    spr_brick_armored = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.svg");
-    spr_brick_reflector = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
+    state.sprites.paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.svg");
+    state.sprites.ball = gfx_load_sprite("assets_src/brickout-revenge/ball.svg");
+    state.sprites.brick_basic_base = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.svg");
+    state.sprites.brick_basic_turret = gfx_load_sprite("assets_src/brickout-revenge/brick_basic_turret.svg");
+    state.sprites.brick_basic_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_basic_fx.svg");
+    state.sprites.brick_armored_base = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.svg");
+    state.sprites.brick_armored_turret = gfx_load_sprite("assets_src/brickout-revenge/brick_armored_turret.svg");
+    state.sprites.brick_armored_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_armored_fx.svg");
+    state.sprites.brick_reflector_base = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
+    state.sprites.brick_reflector_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector_fx.svg");
 
     seed_rng(time());
     init_game(true);
