@@ -16,8 +16,8 @@ global spr_bird: i32;
 global spr_pipe: i32;
 
 function init_assets() {
-    spr_bird = gfx_load_sprite("assets_src/flappy-birds/bird.stv");
-    spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.stv");
+    spr_bird = gfx_load_sprite("assets_src/flappy-birds/bird.svg");
+    spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.svg");
 }
 
 function to_screen_x(x: f32): f32 {
