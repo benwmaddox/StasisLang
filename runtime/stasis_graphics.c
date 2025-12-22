@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <ctype.h>
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <direct.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -23,6 +25,13 @@
 /* stb_truetype for font rendering */
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+
+/* nanosvg for SVG parsing/rasterization */
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVG_ALL_COLOR_KEYWORDS
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
 
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
@@ -306,26 +315,47 @@ static void ensure_asset_base(void) {
 #endif
 }
 
+static int is_absolute_path(const char* path) {
+    if (!path || !*path) return 0;
+#if defined(_WIN32)
+    if (path[0] == '\\' || path[0] == '/') return 1;
+    if (isalpha((unsigned char)path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) return 1;
+    return 0;
+#else
+    return path[0] == '/';
+#endif
+}
+
+static int resolve_asset_path(const char* path, char* out, size_t out_size) {
+    if (!out || out_size < 2 || !path || !*path) return 0;
+    ensure_asset_base();
+    if (is_absolute_path(path)) {
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = 0;
+    } else {
+        snprintf(out, out_size, "%s/%s", g_asset_base, path);
+        out[out_size - 1] = 0;
+    }
+    for (char* p = out; *p; ++p) {
+        if (*p == '\\') *p = '/';
+    }
+    return 1;
+}
+
 static char* read_text_file(const char* path) {
     ensure_asset_base();
 
     FILE* f = fopen(path, "rb");
-    char alt[1024];
+    char resolved[1024];
 
     if (!f) {
-        /* If relative, try anchored to startup cwd */
-        if (!(path[0] == '/' || path[0] == '\\' || (path[1] == ':' && (path[2] == '\\' || path[2] == '/')))) {
-            snprintf(alt, sizeof(alt), "%s/%s", g_asset_base, path);
-            for (char* p = alt; *p; ++p) {
-                if (*p == '\\') *p = '/';
-            }
-            f = fopen(alt, "rb");
-            if (!f) {
-                fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, alt);
-                return NULL;
-            }
-        } else {
+        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
             fprintf(stderr, "read_text_file: failed %s\n", path);
+            return NULL;
+        }
+        f = fopen(resolved, "rb");
+        if (!f) {
+            fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, resolved);
             return NULL;
         }
     }
@@ -381,13 +411,21 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 }
 
 static uint64_t get_file_mtime(const char* path) {
+    char resolved[1024];
+    const char* probe = path;
+    if (!is_absolute_path(path)) {
+        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+            return 0;
+        }
+        probe = resolved;
+    }
 #if defined(_WIN32)
     struct _stat st;
-    if (_stat(path, &st) != 0) return 0;
+    if (_stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #else
     struct stat st;
-    if (stat(path, &st) != 0) return 0;
+    if (stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #endif
 }
@@ -665,227 +703,58 @@ static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     return h;
 }
 
-/* --- Minimal SVG rasterizer (rect/line/circle; no transforms) --- */
-static int svg_attr_color(const char* tag, const char* name, float* r, float* g, float* b, float* a, float default_a) {
-    const char* p = strstr(tag, name);
-    if (!p) return 0;
-    p = strchr(p, '"');
-    if (!p) return 0;
-    p++;
-    const char* end = strchr(p, '"');
-    if (!end) return 0;
-    if ((end - p) == 7 && p[0] == '#') {
-        unsigned int rv = 0, gv = 0, bv = 0;
-        if (sscanf(p + 1, "%02x%02x%02x", &rv, &gv, &bv) == 3) {
-            *r = (float)rv / 255.0f;
-            *g = (float)gv / 255.0f;
-            *b = (float)bv / 255.0f;
-            *a = default_a;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static float svg_attr_float(const char* tag, const char* name, float fallback) {
-    const char* p = strstr(tag, name);
-    if (!p) return fallback;
-    p = strchr(p, '"');
-    if (!p) return fallback;
-    p++;
-    return strtof(p, NULL);
-}
-
-static void svg_parse_translate(const char* tag, float* tx, float* ty) {
-    *tx = 0.0f;
-    *ty = 0.0f;
-    const char* tf = strstr(tag, "transform");
-    if (!tf) return;
-    const char* tpar = strchr(tf, '(');
-    if (!tpar) return;
-    tpar++;
-    sscanf(tpar, "%f %f", tx, ty);
-}
-
-static void svg_draw_rect(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
-    float x = svg_attr_float(tag, "x", 0.0f);
-    float y = svg_attr_float(tag, "y", 0.0f);
-    float w = svg_attr_float(tag, "width", 0.0f);
-    float h = svg_attr_float(tag, "height", 0.0f);
-    float tx, ty;
-    svg_parse_translate(tag, &tx, &ty);
-    x += tx; y += ty;
-
-    float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
-    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
-    float opacity = svg_attr_float(tag, "opacity", 1.0f);
-    float fill_opacity = svg_attr_float(tag, "fill-opacity", 1.0f) * opacity;
-    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
-    float stroke_w = svg_attr_float(tag, "stroke-width", 0.0f);
-
-    if (svg_attr_color(tag, "fill", &fill_r, &fill_g, &fill_b, &fill_a, fill_opacity) && fill_a > 0.0f) {
-        draw_rect_rgba(buf, sw, sh,
-            (int)floorf(x * ss), (int)floorf(y * ss),
-            (int)ceilf(w * ss), (int)ceilf(h * ss),
-            fill_r, fill_g, fill_b, fill_a);
-    }
-
-    if (stroke_w > 0.0f && svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f) {
-        float t = stroke_w * ss;
-        /* Top */
-        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(w * ss), (int)ceilf(t), stroke_r, stroke_g, stroke_b, stroke_a);
-        /* Bottom */
-        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf((y + h - stroke_w) * ss), (int)ceilf(w * ss), (int)ceilf(t), stroke_r, stroke_g, stroke_b, stroke_a);
-        /* Left */
-        draw_rect_rgba(buf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(t), (int)ceilf(h * ss), stroke_r, stroke_g, stroke_b, stroke_a);
-        /* Right */
-        draw_rect_rgba(buf, sw, sh, (int)floorf((x + w - stroke_w) * ss), (int)floorf(y * ss), (int)ceilf(t), (int)ceilf(h * ss), stroke_r, stroke_g, stroke_b, stroke_a);
-    }
-}
-
-static void svg_draw_circle(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
-    float cx = svg_attr_float(tag, "cx", 0.0f);
-    float cy = svg_attr_float(tag, "cy", 0.0f);
-    float r = svg_attr_float(tag, "r", 0.0f);
-    float tx, ty;
-    svg_parse_translate(tag, &tx, &ty);
-    cx += tx; cy += ty;
-
-    float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
-    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
-    float opacity = svg_attr_float(tag, "opacity", 1.0f);
-    float fill_opacity = svg_attr_float(tag, "fill-opacity", 1.0f) * opacity;
-    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
-    float stroke_w = svg_attr_float(tag, "stroke-width", 0.0f);
-
-    int has_fill = svg_attr_color(tag, "fill", &fill_r, &fill_g, &fill_b, &fill_a, fill_opacity) && fill_a > 0.0f;
-    int has_stroke = stroke_w > 0.0f && svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f;
-
-    if (has_stroke) {
-        draw_circle_rgba(buf, sw, sh, cx * ss, cy * ss, r * ss, stroke_r, stroke_g, stroke_b, stroke_a);
-    }
-
-    if (has_fill) {
-        float inner_r = r;
-        if (has_stroke) {
-            inner_r -= stroke_w;
-            if (inner_r < 0.0f) inner_r = 0.0f;
-        }
-        draw_circle_rgba(buf, sw, sh, cx * ss, cy * ss, inner_r * ss, fill_r, fill_g, fill_b, fill_a);
-    }
-}
-
-static void svg_draw_line(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
-    float x1 = svg_attr_float(tag, "x1", 0.0f);
-    float y1 = svg_attr_float(tag, "y1", 0.0f);
-    float x2 = svg_attr_float(tag, "x2", 0.0f);
-    float y2 = svg_attr_float(tag, "y2", 0.0f);
-    float tx, ty;
-    svg_parse_translate(tag, &tx, &ty);
-    x1 += tx; y1 += ty;
-    x2 += tx; y2 += ty;
-
-    float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
-    float opacity = svg_attr_float(tag, "opacity", 1.0f);
-    float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
-    float stroke_w = svg_attr_float(tag, "stroke-width", 1.0f);
-
-    if (svg_attr_color(tag, "stroke", &stroke_r, &stroke_g, &stroke_b, &stroke_a, stroke_opacity) && stroke_a > 0.0f) {
-        draw_line_rgba(buf, sw, sh, x1 * ss, y1 * ss, x2 * ss, y2 * ss, stroke_w * ss, stroke_r, stroke_g, stroke_b, stroke_a);
-    }
-}
-
+/* SVG rasterization (paths, gradients, transforms) via NanoSVG */
 static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
     *out_h = 0;
 
-    char* file = read_text_file(path);
-    if (!file) {
-        fprintf(stderr, "bake_svg_to_rgba: failed to read %s\n", path);
-        return 0;
-    }
-    char* text = file;
-
-    /* skip UTF-8 BOM if present */
-    if ((unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) {
-        text += 3;
-    }
-
-    /* find <svg ...> */
-    const char* svg = strstr(text, "<svg");
-    if (!svg) {
-        fprintf(stderr, "bake_svg_to_rgba: missing <svg> in %s\n", path);
-        free(file);
-        return 0;
-    }
-    float width = svg_attr_float(svg, "width", 0.0f);
-    float height = svg_attr_float(svg, "height", 0.0f);
-    if (width <= 0.0f || height <= 0.0f) {
-        /* fallback to viewBox */
-        const char* vb = strstr(svg, "viewBox");
-        if (vb) {
-            const char* q = strchr(vb, '"');
-            if (q) {
-                q++;
-                float minx = 0.0f, miny = 0.0f, vbw = 0.0f, vbh = 0.0f;
-                if (sscanf(q, "%f %f %f %f", &minx, &miny, &vbw, &vbh) == 4) {
-                    width = vbw;
-                    height = vbh;
-                }
-            }
-        }
-    }
-    if (width <= 0.0f || height <= 0.0f) {
-        fprintf(stderr, "bake_svg_to_rgba: missing width/height and viewBox in %s\n", path);
-        free(file);
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        fprintf(stderr, "bake_svg_to_rgba: bad path %s\n", path ? path : "(null)");
         return 0;
     }
 
-    int w = (int)ceilf(width);
-    int h = (int)ceilf(height);
+    NSVGimage* image = nsvgParseFromFile(resolved, "px", 96.0f);
+    if (!image) {
+        fprintf(stderr, "bake_svg_to_rgba: failed to parse %s\n", resolved);
+        return 0;
+    }
+
+    int w = (int)ceilf(image->width);
+    int h = (int)ceilf(image->height);
     if (w <= 0 || h <= 0) {
-        fprintf(stderr, "bake_svg_to_rgba: invalid dimensions %dx%d in %s\n", w, h, path);
-        free(file);
+        fprintf(stderr, "bake_svg_to_rgba: invalid size %dx%d in %s\n", w, h, resolved);
+        nsvgDelete(image);
         return 0;
     }
 
-    const int ss = 2;
-    int sw = w * ss;
-    int sh = h * ss;
-    unsigned char* sbuf = (unsigned char*)calloc((size_t)sw * (size_t)sh * 4, 1);
-    if (!sbuf) {
-        fprintf(stderr, "bake_svg_to_rgba: OOM allocating %d x %d buffer for %s\n", sw, sh, path);
-        free(file);
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!rast) {
+        fprintf(stderr, "bake_svg_to_rgba: failed to create rasterizer for %s\n", resolved);
+        nsvgDelete(image);
         return 0;
     }
 
-    for (char* p = text; *p; ) {
-        char* line = p;
-        while (*p && *p != '\n') p++;
-        if (*p == '\n') { *p = 0; p++; }
-        while (*line == ' ' || *line == '\t' || *line == '\r') line++;
-        if (*line == 0) continue;
-
-        if (strncmp(line, "<rect", 5) == 0) {
-            svg_draw_rect(sbuf, sw, sh, line, ss);
-        } else if (strncmp(line, "<circle", 7) == 0) {
-            svg_draw_circle(sbuf, sw, sh, line, ss);
-        } else if (strncmp(line, "<line", 5) == 0) {
-            svg_draw_line(sbuf, sw, sh, line, ss);
-        }
-    }
-
-    unsigned char* out = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
-    if (!out) {
-        free(sbuf);
-        free(file);
+    unsigned char* pixels = (unsigned char*)malloc((size_t)w * (size_t)h * 4u);
+    if (!pixels) {
+        fprintf(stderr, "bake_svg_to_rgba: OOM allocating %d x %d buffer for %s\n", w, h, resolved);
+        nsvgDeleteRasterizer(rast);
+        nsvgDelete(image);
         return 0;
     }
-    downsample_2x(out, w, h, sbuf, sw, sh);
-    free(sbuf);
-    free(file);
-    *out_pixels = out;
+    memset(pixels, 0, (size_t)w * (size_t)h * 4u);
+
+    float sx = (float)w / image->width;
+    float sy = (float)h / image->height;
+    float scale = sx < sy ? sx : sy;
+
+    nsvgRasterize(rast, image, 0.0f, 0.0f, scale, pixels, w, h, w * 4);
+
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(image);
+
+    *out_pixels = pixels;
     *out_w = w;
     *out_h = h;
     return 1;
@@ -1787,6 +1656,12 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
     if (!g_use_sdl_renderer && !g_gl_context) return 0;
     if (g_use_sdl_renderer && !g_renderer) return 0;
 
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        SDL_Log("gfx_load_sprite: could not resolve %s", path);
+        return 0;
+    }
+
     /* Debug: log path and cwd for easier troubleshooting */
     char cwd[512];
 #if defined(_WIN32)
@@ -1795,30 +1670,30 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
     if (getcwd(cwd, sizeof(cwd)) != NULL)
 #endif
     {
-        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s\n", cwd, path);
+        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
     }
     else
     {
-        fprintf(stderr, "gfx_load_sprite: path=%s\n", path);
+        fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
     }
 
-    int existing = sprite_find_by_path(path);
+    int existing = sprite_find_by_path(resolved);
     if (existing) return existing;
 
     for (int i = 0; i < MAX_SPRITES; i++) {
         if (!g_sprites[i].used) {
             SpriteEntry* e = &g_sprites[i];
             memset(e, 0, sizeof(*e));
-            e->path = stasis_strdup(path);
+            e->path = stasis_strdup(resolved);
             if (!e->path) return 0;
             e->used = 1;
-            if (!sprite_build_into_entry(e, path, 0)) {
+            if (!sprite_build_into_entry(e, resolved, 0)) {
                 free(e->path);
                 memset(e, 0, sizeof(*e));
                 return 0;
             }
             g_sprite_count++;
-            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", path, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
             return i + 1;
         }
     }

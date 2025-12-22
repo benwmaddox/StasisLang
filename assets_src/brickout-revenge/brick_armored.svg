@@ -1,13 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="80" height="36" viewBox="0 0 80 36">
-  <rect x="0" y="0" width="80" height="36" fill="none" opacity="0"/>
-  <rect x="0" y="0" width="80" height="36" fill="#3a4a63"/>
-  <rect x="4" y="4" width="72" height="28" fill="#4f6b8f"/>
-  <line x1="4" y1="18" x2="76" y2="18" stroke="#29374a" stroke-width="2"/>
-  <line x1="16" y1="4" x2="16" y2="18" stroke="#29374a" stroke-width="2"/>
-  <line x1="32" y1="4" x2="32" y2="18" stroke="#29374a" stroke-width="2"/>
-  <line x1="48" y1="18" x2="48" y2="32" stroke="#29374a" stroke-width="2"/>
-  <line x1="64" y1="18" x2="64" y2="32" stroke="#29374a" stroke-width="2"/>
-  <rect x="30" y="10" width="20" height="14" fill="#d8e2f2"/>
-  <rect x="33" y="6" width="14" height="6" fill="#9fb6d6"/>
-  <rect x="0" y="0" width="80" height="36" fill="none" stroke="#1c2533" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <defs>
+    <filter id="soft">
+      <feGaussianBlur stdDeviation="1.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <g id="base" filter="url(#soft)">
+    <rect width="160" height="64" rx="3" fill="#6a6a6a"/>
+    <rect x="4" y="4" width="152" height="56" rx="2" fill="#8a8a8a"/>
+    <path d="M0 32H160" stroke="#4a4a4a" stroke-width="4"/>
+    <path d="M40 0V32M80 0V32M120 0V32" stroke="#4a4a4a" stroke-width="2" opacity=".8"/>
+    <rect x="0" y="0" width="160" height="64" rx="3" fill="none" stroke="#3a3a3a" stroke-width="2"/>
+  </g>
+
+  <g id="turret" filter="url(#soft)">
+    <rect x="72" y="16" width="16" height="16" rx="3" fill="#252020"/>
+    <rect x="76" y="24" width="8" height="20" rx="2" fill="#3b1f1a"/>
+    <rect x="78" y="12" width="4" height="10" fill="#c9c2b6"/>
+    <animateTransform attributeName="transform" type="translate" values="0 0; 0 -2; 0 0" dur="1.2s" repeatCount="indefinite"/>
+  </g>
+
+  <g id="effects" filter="url(#soft)" fill="none">
+    <rect x="2" y="2" width="156" height="60" rx="4" stroke="#cfa08e" stroke-width="2" opacity=".2">
+      <animate attributeName="opacity" values=".25;0" dur="1.4s" repeatCount="indefinite"/>
+    </rect>
+    <line x1="80" y1="6" x2="80" y2="-6" stroke="#f2e8dc" stroke-width="2" opacity=".8">
+      <animate attributeName="opacity" values="0;1;0" dur=".8s" repeatCount="indefinite"/>
+    </line>
+  </g>
 </svg>
