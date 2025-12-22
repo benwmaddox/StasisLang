@@ -744,68 +744,89 @@ int main(int argc, char **argv)
         for (;;)
         {
             /* Swap between ticks if requested. */
-            if (swap_file_path && file_exists(swap_file_path))
-            {
-                char new_path[2048];
-                if (read_text_file(swap_file_path, new_path, sizeof(new_path)) == 0)
-                {
-                    DeleteFileA(swap_file_path);
-
-                    uint8_t *buffer = NULL;
-                    if (state_path && state_map_path)
+                    if (swap_file_path && file_exists(swap_file_path))
                     {
-                        buffer = (uint8_t *)malloc(total_bytes);
-                        if (!buffer)
+                        char new_path[2048];
+                        if (read_text_file(swap_file_path, new_path, sizeof(new_path)) == 0)
                         {
-                            fprintf(stderr, "error: out of memory\n");
-                            result = 1;
-                            break;
+                            DeleteFileA(swap_file_path);
+
+                            LARGE_INTEGER sw_freq;
+                            LARGE_INTEGER sw_t0;
+                            LARGE_INTEGER sw_t1;
+                            QueryPerformanceFrequency(&sw_freq);
+
+                            uint8_t *buffer = NULL;
+                            long long save_us = 0;
+                            long long load_us = 0;
+                            long long restore_us = 0;
+                            if (state_path && state_map_path)
+                            {
+                                buffer = (uint8_t *)malloc(total_bytes);
+                                if (!buffer)
+                                {
+                                    fprintf(stderr, "error: out of memory\n");
+                                    result = 1;
+                                    break;
+                                }
+                                QueryPerformanceCounter(&sw_t0);
+                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes) != 0)
+                                {
+                                    free(buffer);
+                                    result = 1;
+                                    break;
+                                }
+                                QueryPerformanceCounter(&sw_t1);
+                                save_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                            }
+
+                            QueryPerformanceCounter(&sw_t0);
+                            HMODULE new_lib = LoadLibraryA(new_path);
+                            QueryPerformanceCounter(&sw_t1);
+                            load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                            if (!new_lib)
+                            {
+                                fprintf(stderr, "error: failed to load %s\n", new_path);
+                                free(buffer);
+                                result = 1;
+                                break;
+                            }
+
+                            FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
+                            if (!new_tick_sym)
+                            {
+                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                                FreeLibrary(new_lib);
+                                free(buffer);
+                                result = 1;
+                                break;
+                            }
+
+                            if (buffer)
+                            {
+                                QueryPerformanceCounter(&sw_t0);
+                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes) != 0)
+                                {
+                                    FreeLibrary(new_lib);
+                                    free(buffer);
+                                    result = 1;
+                                    break;
+                                }
+                                QueryPerformanceCounter(&sw_t1);
+                                restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                                free(buffer);
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, restore_us, total_bytes, sym_count);
+                            }
+                            else
+                            {
+                                fprintf(stderr, "HOTSWAP ok: load=%lldus\n", load_us);
+                            }
+
+                            FreeLibrary(lib);
+                            lib = new_lib;
+                            tick = (stasis_tick_fn)new_tick_sym;
                         }
-                        if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes) != 0)
-                        {
-                            free(buffer);
-                            result = 1;
-                            break;
-                        }
                     }
-
-                    HMODULE new_lib = LoadLibraryA(new_path);
-                    if (!new_lib)
-                    {
-                        fprintf(stderr, "error: failed to load %s\n", new_path);
-                        free(buffer);
-                        result = 1;
-                        break;
-                    }
-
-                    FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
-                    if (!new_tick_sym)
-                    {
-                        fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, new_path);
-                        FreeLibrary(new_lib);
-                        free(buffer);
-                        result = 1;
-                        break;
-                    }
-
-                    if (buffer)
-                    {
-                        if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes) != 0)
-                        {
-                            FreeLibrary(new_lib);
-                            free(buffer);
-                            result = 1;
-                            break;
-                        }
-                        free(buffer);
-                        fprintf(stderr, "HOTSWAP ok\n");
-                    }
-
-                    FreeLibrary(lib);
-                    lib = new_lib;
-                    tick = (stasis_tick_fn)new_tick_sym;
-                }
-            }
 
             int tick_result = tick();
             if (tick_result != 0)
