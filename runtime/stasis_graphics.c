@@ -1243,7 +1243,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
                 SDL_GL_DeleteContext(g_gl_context);
                 g_gl_context = NULL;
             } else {
-                SDL_GL_SetSwapInterval(1);
+                int swap_ok = SDL_GL_SetSwapInterval(1);
+                if (swap_ok != 0) {
+                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync): %s", SDL_GetError());
+                }
                 glViewport(0, 0, width, height);
                 glDisable(GL_SCISSOR_TEST);
                 glEnable(GL_BLEND);
@@ -1278,6 +1281,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             SDL_DestroyWindow(g_window);
             SDL_Quit();
             return 0;
+        }
+        if (SDL_RenderSetVSync(g_renderer, 1) != 0) {
+            SDL_Log("SDL_RenderSetVSync failed: %s", SDL_GetError());
         }
         SDL_RenderSetLogicalSize(g_renderer, width, height);
         SDL_RendererInfo info;
