@@ -1049,6 +1049,175 @@ function draw_decimal_1_tenths(value_tenths: i32, x: f32, y: f32, scale: f32): v
     draw_digit(decimal_part, digit_x, y, scale);
 }
 
+function hud_glyph_M(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    draw_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_S(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_L(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_O(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_G(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_I(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_C(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_B(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_A(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    draw_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_R(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_K(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_draw_ms_logic(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_M(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+    cx = cx + adv * 2.0;
+    hud_glyph_L(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_O(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_G(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_I(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_C(cx, y, s);
+}
+
+function hud_draw_balls(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_B(cx, y, s); cx = cx + adv;
+    hud_glyph_A(cx, y, s); cx = cx + adv;
+    hud_glyph_L(cx, y, s); cx = cx + adv;
+    hud_glyph_L(cx, y, s); cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+}
+
+function hud_draw_bricks(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_B(cx, y, s); cx = cx + adv;
+    hud_glyph_R(cx, y, s); cx = cx + adv;
+    hud_glyph_I(cx, y, s); cx = cx + adv;
+    hud_glyph_C(cx, y, s); cx = cx + adv;
+    hud_glyph_K(cx, y, s); cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+}
+
 function draw_ui(): void {
     // Score in top-left
     draw_number(state.score, 20.0, 10.0, 8.0);
@@ -1059,11 +1228,14 @@ function draw_ui(): void {
     // Average frame time in bottom-left (in milliseconds with 1 decimal)
     let avg_time_tenths: i32 = compute_avg_frame_time_tenths();
     draw_decimal_1_tenths(avg_time_tenths, 20.0, SCREEN_H - 30.0, 6.0);
+    hud_draw_ms_logic(90.0, SCREEN_H - 28.0, 3.0);
 
     // Debug: Active counts in bottom-right
     let active_balls_count: i32 = count_active_balls();
     let active_bricks_count: i32 = count_active_bricks();
+    hud_draw_balls(SCREEN_W - 190.0, SCREEN_H - 52.0, 3.0);
     draw_number(active_balls_count, SCREEN_W - 80.0, SCREEN_H - 50.0, 4.0);
+    hud_draw_bricks(SCREEN_W - 190.0, SCREEN_H - 32.0, 3.0);
     draw_number(active_bricks_count, SCREEN_W - 80.0, SCREEN_H - 30.0, 4.0);
 
     if (state.phase == PHASE_LOSE) {
