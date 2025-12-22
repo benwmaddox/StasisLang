@@ -1781,6 +1781,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
     var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
     var swapFile = Path.Combine(repoRoot, "build", "hotstate", $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+    var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA.dll");
+    var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB.dll");
     Directory.CreateDirectory(Path.GetDirectoryName(swapFile)!);
     try
     {
@@ -1801,7 +1805,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         cts.Cancel();
     };
 
-    var artifacts = new List<string>();
+    string? activeDll = null;
     Process? runner = null;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
@@ -1876,7 +1880,9 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var hotDll = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+        var hotDll = activeDll is null
+            ? swapDllA
+            : (string.Equals(activeDll, swapDllA, StringComparison.OrdinalIgnoreCase) ? swapDllB : swapDllA);
         var clifPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
         var objPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
         File.WriteAllText(clifPath, result.Ir);
@@ -1916,7 +1922,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 CopyGraphicsRuntimeDependencies(dllDir, graphicsLibPath);
             }
 
-            artifacts.Add(hotDll);
+            activeDll = hotDll;
 
             if (startRunner)
             {
@@ -2031,18 +2037,6 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     {
         runner.Kill(entireProcessTree: true);
         runner.WaitForExit();
-    }
-
-    foreach (var art in artifacts)
-    {
-        try
-        {
-            File.Delete(art);
-        }
-        catch
-        {
-            // best effort
-        }
     }
 
     return 0;
