@@ -824,8 +824,8 @@ function draw_bricks(): void {
 
             let cx: f32 = brick.x + brick.width / 2.0;
             let cy: f32 = brick.y + brick.height / 2.0;
-            let sx: f32 = brick.width / 64.0;
-            let sy: f32 = brick.height / 24.0;
+            let sx: f32 = brick.width / 80.0;   // sprite is 80px wide
+            let sy: f32 = brick.height / 36.0;  // sprite is 36px tall
             if (h == 0) {
                 // Fallback: line rectangle when sprites are unavailable
                 draw_rect(brick.x, brick.y, brick.width, brick.height, 1.0, 1.0, 1.0, 1.0);

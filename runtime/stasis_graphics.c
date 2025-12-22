@@ -85,6 +85,8 @@ static GLuint g_line_vbo = 0;
 static GLuint g_line_vao = 0;
 static GLint g_line_pos_loc = -1;
 static GLint g_line_color_loc = -1;
+static char g_asset_base[512] = {0};
+static char g_asset_env[512] = {0};
 
 /* Sprite atlas + batching (baked from SVG sources) */
 #define MAX_SPRITES 256
@@ -285,9 +287,6 @@ static void flush_lines(void) {
     g_line_count = 0;
 }
 
-static char g_asset_base[512] = {0};
-static char g_asset_env[512] = {0};
-
 static void ensure_asset_base(void) {
     if (g_asset_base[0] != 0) return;
 
@@ -311,10 +310,11 @@ static char* read_text_file(const char* path) {
     ensure_asset_base();
 
     FILE* f = fopen(path, "rb");
+    char alt[1024];
+
     if (!f) {
         /* If relative, try anchored to startup cwd */
         if (!(path[0] == '/' || path[0] == '\\' || (path[1] == ':' && (path[2] == '\\' || path[2] == '/')))) {
-            char alt[1024];
             snprintf(alt, sizeof(alt), "%s/%s", g_asset_base, path);
             for (char* p = alt; *p; ++p) {
                 if (*p == '\\') *p = '/';
@@ -696,11 +696,26 @@ static float svg_attr_float(const char* tag, const char* name, float fallback) {
     return strtof(p, NULL);
 }
 
+static void svg_parse_translate(const char* tag, float* tx, float* ty) {
+    *tx = 0.0f;
+    *ty = 0.0f;
+    const char* tf = strstr(tag, "transform");
+    if (!tf) return;
+    const char* tpar = strchr(tf, '(');
+    if (!tpar) return;
+    tpar++;
+    sscanf(tpar, "%f %f", tx, ty);
+}
+
 static void svg_draw_rect(unsigned char* buf, int sw, int sh, const char* tag, int ss) {
     float x = svg_attr_float(tag, "x", 0.0f);
     float y = svg_attr_float(tag, "y", 0.0f);
     float w = svg_attr_float(tag, "width", 0.0f);
     float h = svg_attr_float(tag, "height", 0.0f);
+    float tx, ty;
+    svg_parse_translate(tag, &tx, &ty);
+    x += tx; y += ty;
+
     float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
     float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
     float opacity = svg_attr_float(tag, "opacity", 1.0f);
@@ -732,6 +747,10 @@ static void svg_draw_circle(unsigned char* buf, int sw, int sh, const char* tag,
     float cx = svg_attr_float(tag, "cx", 0.0f);
     float cy = svg_attr_float(tag, "cy", 0.0f);
     float r = svg_attr_float(tag, "r", 0.0f);
+    float tx, ty;
+    svg_parse_translate(tag, &tx, &ty);
+    cx += tx; cy += ty;
+
     float fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
     float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
     float opacity = svg_attr_float(tag, "opacity", 1.0f);
@@ -761,6 +780,11 @@ static void svg_draw_line(unsigned char* buf, int sw, int sh, const char* tag, i
     float y1 = svg_attr_float(tag, "y1", 0.0f);
     float x2 = svg_attr_float(tag, "x2", 0.0f);
     float y2 = svg_attr_float(tag, "y2", 0.0f);
+    float tx, ty;
+    svg_parse_translate(tag, &tx, &ty);
+    x1 += tx; y1 += ty;
+    x2 += tx; y2 += ty;
+
     float stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 1.0f;
     float opacity = svg_attr_float(tag, "opacity", 1.0f);
     float stroke_opacity = svg_attr_float(tag, "stroke-opacity", 1.0f) * opacity;
