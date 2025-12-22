@@ -149,6 +149,7 @@ struct GameState {
     cursor: Cursor;
     timers: Timers;
     frame_timer: FrameTimer;
+    initialized: i32;
     phase: i32;
     wave: i32;
     score: i32;
@@ -1311,17 +1312,21 @@ function main(): i32 {
     state.sprites.brick_reflector_base = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
     state.sprites.brick_reflector_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector_fx.svg");
 
-    seed_rng(time());
-    init_game(true);
-    setup_default_bricks();
-    start_wave();
+    if (state.initialized == 0) {
+        seed_rng(time());
+        init_game(true);
+        setup_default_bricks();
+        start_wave();
+
+        // Initialize frame time buffer with baseline value
+        frame_timer_init(state.frame_timer.samples_ms);
+        state.frame_timer.sample_index = frame_timer_reset_index();
+
+        state.initialized = 1;
+    }
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
-
-    // Initialize frame time buffer with baseline value
-    frame_timer_init(state.frame_timer.samples_ms);
-    state.frame_timer.sample_index = frame_timer_reset_index();
 
     let frame: i32 = 0;
     for (frame = 0; state.running == 1; frame = frame + 1) {
