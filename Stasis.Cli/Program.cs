@@ -461,8 +461,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 }
                 if (enableHotState)
                 {
-                    var entryName = $"{moduleName}__main";
-                    if (!TryCreateHotStatePlan(path, layout, moduleName, exports, out var createdPlan))
+                    if (!TryCreateHotStatePlan(path, layout, moduleName, exports, excludeSpriteFields: true, out var createdPlan))
                     {
                         return 1;
                     }
@@ -1900,7 +1899,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             }
             phase.Restart();
 
-            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var plan))
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
             {
                 return 1;
             }
@@ -2047,7 +2046,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     return 0;
 }
 
-static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, out HotStatePlan plan)
+static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, bool excludeSpriteFields, out HotStatePlan plan)
 {
     plan = new HotStatePlan(string.Empty, string.Empty, string.Empty, string.Empty);
     if (exportedFunctions.Count == 0)
@@ -2064,7 +2063,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     }
 
     var entries = state.Fields
-        .Where(f => !f.Name.StartsWith("state_sprites_", StringComparison.Ordinal))
+        .Where(f => !excludeSpriteFields || !f.Name.StartsWith("state_sprites_", StringComparison.Ordinal))
         .Select(f => (Name: f.Name, Size: f.Size))
         .ToArray();
 
