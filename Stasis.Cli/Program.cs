@@ -1276,7 +1276,7 @@ static bool DetectsGraphicsUsage(string source)
     return Regex.IsMatch(
         source,
         @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down)" +
+        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|time|get_time_ms|sleep_ms)" +
         @"\s*\(",
         RegexOptions.CultureInvariant);
 }
@@ -1769,6 +1769,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var fileName = Path.GetFileName(fullPath);
     var debounce = TimeSpan.FromMilliseconds(75);
     var lastChange = DateTime.UtcNow;
+    var pendingRestart = false;
 
     using var watcher = new FileSystemWatcher(dir, fileName)
     {
@@ -1828,31 +1829,54 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     {
         try
         {
-            changeSignal.Wait(cts.Token);
+            if (enableHotState && mode == "run")
+            {
+                changeSignal.Wait(TimeSpan.FromMilliseconds(100), cts.Token);
+            }
+            else
+            {
+                changeSignal.Wait(cts.Token);
+            }
         }
         catch (OperationCanceledException)
         {
             break;
         }
 
-        while (DateTime.UtcNow - lastChange < debounce)
+        if (changeSignal.IsSet)
         {
-            Thread.Sleep(10);
-        }
-        changeSignal.Reset();
-
-        if (mode == "run")
-        {
-            if (child is not null && !child.HasExited)
+            while (DateTime.UtcNow - lastChange < debounce)
             {
-                child.Kill(entireProcessTree: true);
-                child.WaitForExit();
+                Thread.Sleep(10);
             }
-            child = StartWatchChild(exePath, childArgs);
+            changeSignal.Reset();
+
+            if (mode == "run")
+            {
+                if (enableHotState)
+                {
+                    pendingRestart = true;
+                }
+                else
+                {
+                    if (child is not null && !child.HasExited)
+                    {
+                        child.Kill(entireProcessTree: true);
+                        child.WaitForExit();
+                    }
+                    child = StartWatchChild(exePath, childArgs);
+                }
+            }
+            else
+            {
+                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+            }
         }
-        else
+
+        if (mode == "run" && enableHotState && pendingRestart && (child is null || child.HasExited))
         {
-            _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+            child = StartWatchChild(exePath, childArgs);
+            pendingRestart = false;
         }
     }
 

@@ -1,0 +1,16 @@
+struct SleepState {
+    counter: i32;
+}
+
+global state: SleepState;
+
+function main(): i32 {
+    print_string("run counter=");
+    print_int(state.counter);
+    print_char(10);
+
+    state.counter = state.counter + 1;
+    sleep_ms(3000);
+    return 0;
+}
+
