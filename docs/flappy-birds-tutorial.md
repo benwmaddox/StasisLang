@@ -19,11 +19,11 @@ We’ll use:
 
 ## 1) Sprites — why first?
 
-We start with visuals so you can see progress quickly and hot-reload assets without touching code. Stasis sprites use `.stv`, a tiny ASCII format that bakes into an atlas at runtime.
+We start with visuals so you can see progress quickly and hot-reload assets without touching code. Stasis sprites now use standard SVG and are baked into an atlas at runtime.
 
 Create these under `assets_src/flappy-birds/`:
 
-`assets_src/flappy-birds/bird.stv`
+`assets_src/flappy-birds/bird.svg`
 ```
 stv 1
 size 16 12
@@ -35,7 +35,7 @@ rgba 0 0 0 1
 rect 10 4 2 2
 ```
 
-`assets_src/flappy-birds/pipe.stv`
+`assets_src/flappy-birds/pipe.svg`
 ```
 stv 1
 size 24 64
@@ -239,8 +239,8 @@ global spr_bird: i32;
 global spr_pipe: i32;
 
 function init_assets() {
-    spr_bird = gfx_load_sprite("assets_src/flappy-birds/bird.stv");
-    spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.stv");
+    spr_bird = gfx_load_sprite("assets_src/flappy-birds/bird.svg");
+    spr_pipe = gfx_load_sprite("assets_src/flappy-birds/pipe.svg");
 }
 
 function to_screen_x(x: f32): f32 { return x * SCALE; }
