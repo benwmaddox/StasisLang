@@ -267,7 +267,6 @@ function init_game(reset_progress: bool): void {
 
     // Init timers
     state.timers.last_time = get_time_ms();
-    state.timers.frame_start = 0;
     state.timers.ball_spawn_cd = 0;
     state.timers.phase_timer = 0;
     state.timers.tick_time_ms = 0;
