@@ -12,6 +12,7 @@
 #endif
 
 typedef int (*stasis_entry_fn)(void);
+typedef int (*stasis_tick_fn)(void);
 
 typedef struct stasis_state_symbol
 {
@@ -287,6 +288,74 @@ static int save_state_snapshot(const char *path, uint64_t hash, const uint8_t *d
 }
 
 #ifdef _WIN32
+static int file_exists(const char *path)
+{
+    DWORD attr = GetFileAttributesA(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static int read_text_file(const char *path, char *out, size_t out_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return 1;
+    }
+
+    size_t got = fread(out, 1, out_cap - 1, f);
+    fclose(f);
+    out[got] = '\0';
+
+    /* trim whitespace */
+    while (got > 0 && (out[got - 1] == '\n' || out[got - 1] == '\r' || out[got - 1] == ' ' || out[got - 1] == '\t'))
+    {
+        out[--got] = '\0';
+    }
+    size_t start = 0;
+    while (out[start] == ' ' || out[start] == '\t')
+    {
+        start++;
+    }
+    if (start > 0)
+    {
+        memmove(out, out + start, strlen(out + start) + 1);
+    }
+
+    return out[0] == '\0' ? 1 : 0;
+}
+
+static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        FARPROC addr = GetProcAddress(lib, syms[i].name);
+        if (!addr)
+        {
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy(buffer + syms[i].offset, (void *)addr, syms[i].size);
+    }
+    return 0;
+}
+
+static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        FARPROC addr = GetProcAddress(lib, syms[i].name);
+        if (!addr)
+        {
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy((void *)addr, buffer + syms[i].offset, syms[i].size);
+    }
+    return 0;
+}
+
 static DWORD WINAPI hot_exit_thread(LPVOID user_data)
 {
     stasis_hot_exit_args *args = (stasis_hot_exit_args *)user_data;
@@ -500,6 +569,8 @@ int main(int argc, char **argv)
     const char *state_path = NULL;
     const char *state_map_path = NULL;
     const char *hot_exit_path = NULL;
+    const char *swap_file_path = NULL;
+    int fps = 60;
     for (int i = 2; i < argc; i++)
     {
         if (strcmp(argv[i], "--state") == 0 && i + 1 < argc)
@@ -515,6 +586,24 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--hot-exit-file") == 0 && i + 1 < argc)
         {
             hot_exit_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--swap-file") == 0 && i + 1 < argc)
+        {
+            swap_file_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc)
+        {
+            fps = atoi(argv[++i]);
+            if (fps < 1)
+            {
+                fps = 1;
+            }
+            if (fps > 240)
+            {
+                fps = 240;
+            }
             continue;
         }
     }
@@ -619,8 +708,139 @@ int main(int argc, char **argv)
         hot_exit_handle = CreateThread(NULL, 0, hot_exit_thread, &hot_exit_args, 0, NULL);
     }
 
+    /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
+    char tick_name[512];
+    tick_name[0] = '\0';
+    const char *sep = strstr(entry_name, "__");
+    if (sep)
+    {
+        size_t prefix_len = (size_t)(sep - entry_name) + 2;
+        if (prefix_len + 4 < sizeof(tick_name))
+        {
+            memcpy(tick_name, entry_name, prefix_len);
+            memcpy(tick_name + prefix_len, "tick", 5);
+        }
+    }
+
+    FARPROC tick_sym = NULL;
+    if (tick_name[0] != '\0')
+    {
+        tick_sym = GetProcAddress(lib, tick_name);
+    }
+
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
+
+    if (result == 0 && tick_sym)
+    {
+        stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        long long target_us = 1000000LL / (long long)fps;
+
+        LARGE_INTEGER last;
+        QueryPerformanceCounter(&last);
+
+        for (;;)
+        {
+            /* Swap between ticks if requested. */
+            if (swap_file_path && file_exists(swap_file_path))
+            {
+                char new_path[2048];
+                if (read_text_file(swap_file_path, new_path, sizeof(new_path)) == 0)
+                {
+                    DeleteFileA(swap_file_path);
+
+                    uint8_t *buffer = NULL;
+                    if (state_path && state_map_path)
+                    {
+                        buffer = (uint8_t *)malloc(total_bytes);
+                        if (!buffer)
+                        {
+                            fprintf(stderr, "error: out of memory\n");
+                            result = 1;
+                            break;
+                        }
+                        if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes) != 0)
+                        {
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                    }
+
+                    HMODULE new_lib = LoadLibraryA(new_path);
+                    if (!new_lib)
+                    {
+                        fprintf(stderr, "error: failed to load %s\n", new_path);
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
+                    if (!new_tick_sym)
+                    {
+                        fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                        FreeLibrary(new_lib);
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    if (buffer)
+                    {
+                        if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes) != 0)
+                        {
+                            FreeLibrary(new_lib);
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                        free(buffer);
+                        fprintf(stderr, "HOTSWAP ok\n");
+                    }
+
+                    FreeLibrary(lib);
+                    lib = new_lib;
+                    tick = (stasis_tick_fn)new_tick_sym;
+                }
+            }
+
+            int tick_result = tick();
+            if (tick_result != 0)
+            {
+                result = tick_result == 1 ? 0 : tick_result;
+                break;
+            }
+
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            long long elapsed_us = (now.QuadPart - last.QuadPart) * 1000000LL / freq.QuadPart;
+            last = now;
+
+            long long sleep_us = target_us - elapsed_us;
+            while (sleep_us > 0)
+            {
+                /* Break host sleep if a swap is pending. */
+                if (swap_file_path && file_exists(swap_file_path))
+                {
+                    break;
+                }
+                DWORD ms = (DWORD)(sleep_us / 1000LL);
+                if (ms == 0)
+                {
+                    ms = 1;
+                }
+                if (ms > 5)
+                {
+                    ms = 5;
+                }
+                Sleep(ms);
+                sleep_us -= (long long)ms * 1000LL;
+            }
+        }
+    }
 
     if (hot_exit_handle)
     {

@@ -35,6 +35,7 @@ string? graphicsLibPath = null;
 BackendType? selectedBackend = null;
 var useCraneliftRunner = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER") == "1";
 var enableHotState = false;
+var tickHostFps = 60;
 
 while (cliArgs.Count > 0)
 {
@@ -110,6 +111,13 @@ while (cliArgs.Count > 0)
             break;
         case "--hot-state":
             enableHotState = true;
+            break;
+        case "--fps" when cliArgs.Count > 0:
+            if (!int.TryParse(cliArgs.Dequeue(), out tickHostFps) || tickHostFps < 1 || tickHostFps > 240)
+            {
+                Console.Error.WriteLine("error: --fps expects an integer between 1 and 240.");
+                Environment.Exit(1);
+            }
             break;
         case "--help":
             PrintUsage();
@@ -202,6 +210,11 @@ if (!File.Exists(path) && !Directory.Exists(path))
 static bool ShouldSuppressWarnings() =>
     string.Equals(Environment.GetEnvironmentVariable("STASIS_SUPPRESS_WARNINGS"), "1", StringComparison.OrdinalIgnoreCase);
 
+static bool ContainsTopLevelFunction(CompilationUnitSyntax unit, string name) =>
+    unit.Declarations
+        .OfType<FunctionDeclarationSyntax>()
+        .Any(f => string.Equals(f.Name.Text, name, StringComparison.Ordinal));
+
 if (mode == "format")
 {
     var input = File.ReadAllText(path);
@@ -257,14 +270,14 @@ if (watch)
         useCraneliftRunner = true;
     }
 
-    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState);
+    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState, tickHostFps);
     Environment.Exit(watchExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, int tickHostFps, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
@@ -432,10 +445,24 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             if (useCraneliftRunner && mode != "build" && mode != "release")
             {
                 HotStatePlan? hotStatePlan = null;
+                var hasTick = ContainsTopLevelFunction(parse.CompilationUnit, "tick");
+                var exports = new List<string>();
+                if (mode == "run")
+                {
+                    exports.Add($"{moduleName}__main");
+                    if (hasTick)
+                    {
+                        exports.Add($"{moduleName}__tick");
+                    }
+                }
+                else
+                {
+                    exports.Add($"{moduleName}__run_tests");
+                }
                 if (enableHotState)
                 {
                     var entryName = $"{moduleName}__main";
-                    if (!TryCreateHotStatePlan(path, layout, moduleName, entryName, out var createdPlan))
+                    if (!TryCreateHotStatePlan(path, layout, moduleName, exports, out var createdPlan))
                     {
                         return 1;
                     }
@@ -447,8 +474,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 long runLink;
                 long runRun;
                 var runExit = useInMemoryClif
-                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, out runAotSpawn, out runAotCompile, out runLink, out runRun)
-                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, out runAotSpawn, out runAotCompile, out runLink, out runRun);
+                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
+                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
                 if (logPhaseTiming)
                 {
                     aotSpawnMs = runAotSpawn ?? 0;
@@ -604,7 +631,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
-static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName, HotStatePlan? hotStatePlan, out long linkMs, out long runMs)
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName, HotStatePlan? hotStatePlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long linkMs, out long runMs)
 {
     linkMs = 0;
     runMs = 0;
@@ -625,7 +652,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
         var entryName = $"{moduleName}__{entryBase}";
-        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsDefFilePath: hotStatePlan?.DefPath);
+        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsDefFilePath: hotStatePlan?.DefPath, windowsExports: dllExports);
         var linkStopwatch = Stopwatch.StartNew();
         var exit = RunProcess(clang, args, suppressOutput: true);
         linkMs = linkStopwatch.ElapsedMilliseconds;
@@ -665,6 +692,10 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
             runnerArgs += $" --state \"{hotStatePlan.SnapshotPath}\" --state-map \"{hotStatePlan.MapPath}\"";
             runnerArgs += $" --hot-exit-file \"{hotStatePlan.HotExitPath}\"";
         }
+        if (tickHostFps is not null)
+        {
+            runnerArgs += $" --fps {tickHostFps.Value}";
+        }
         var runExit = RunProcess(runnerPath, runnerArgs);
         runMs = runStopwatch.ElapsedMilliseconds;
         return runExit;
@@ -685,7 +716,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -700,7 +731,20 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, out linkMs, out runMs);
+        IReadOnlyList<string> exports;
+        if (mode == "test")
+        {
+            exports = new[] { $"{moduleName}__run_tests" };
+        }
+        else if (tickHostFps is not null)
+        {
+            exports = new[] { $"{moduleName}__main", $"{moduleName}__tick" };
+        }
+        else
+        {
+            exports = new[] { $"{moduleName}__main" };
+        }
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, exports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -711,7 +755,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
     }
 }
 
-static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -726,7 +770,20 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, out linkMs, out runMs);
+        IReadOnlyList<string> exports;
+        if (mode == "test")
+        {
+            exports = new[] { $"{moduleName}__run_tests" };
+        }
+        else if (tickHostFps is not null)
+        {
+            exports = new[] { $"{moduleName}__main", $"{moduleName}__tick" };
+        }
+        else
+        {
+            exports = new[] { $"{moduleName}__main" };
+        }
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, exports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -771,7 +828,7 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
     return 0;
 }
 
-static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, string? entryName = null, bool isDll = false, string? windowsDefFilePath = null)
+static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, string? entryName = null, bool isDll = false, string? windowsDefFilePath = null, IReadOnlyList<string>? windowsExports = null)
 {
     // Link .obj into a normal executable (use CRT defaults).
     var args = new List<string> { $"\"{objPath}\"" };
@@ -868,7 +925,13 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
             }
             else
             {
-                args.Add($"-Wl,/EXPORT:{exportName}");
+                var exports = windowsExports is { Count: > 0 }
+                    ? windowsExports
+                    : new[] { exportName };
+                foreach (var ex in exports)
+                {
+                    args.Add($"-Wl,/EXPORT:{ex}");
+                }
             }
         }
     }
@@ -1293,6 +1356,9 @@ static bool DetectsGraphicsUsage(string source)
         RegexOptions.CultureInvariant);
 }
 
+static bool DetectsTickUsage(string source) =>
+    Regex.IsMatch(source, @"(?m)^\s*function\s+tick\s*\(", RegexOptions.CultureInvariant);
+
 static string? FindGraphicsLibrary(bool preferShared = false)
 {
     // Look for the graphics library in common locations
@@ -1695,9 +1761,258 @@ static string GetHotExitFilePath(string sourcePath, string moduleName)
     return Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 }
 
-static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, string entryName, out HotStatePlan plan)
+static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindCraneliftRunner(out var runnerPath))
+    {
+        Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
+        return 1;
+    }
+    if (!TryFindCraneliftAot(out var aotTool))
+    {
+        Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+        return 1;
+    }
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var swapFile = Path.Combine(repoRoot, "build", "hotstate", $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
+    Directory.CreateDirectory(Path.GetDirectoryName(swapFile)!);
+    try
+    {
+        if (File.Exists(swapFile))
+        {
+            File.Delete(swapFile);
+        }
+    }
+    catch
+    {
+        // ignore
+    }
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    var artifacts = new List<string>();
+    Process? runner = null;
+
+    int BuildAndSwap(bool startRunner)
+    {
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        if (importDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            return 1;
+        }
+
+        var usesGraphics = enableGraphics || DetectsGraphicsUsage(source);
+        var parse = Parser.Parse(source);
+        if (parse.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            return 1;
+        }
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        if (sema.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            return 1;
+        }
+
+        if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
+        {
+            Console.Error.WriteLine("error: tick hot-swap mode requires a top-level `function tick()`.");
+            return 1;
+        }
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var options = new CodeGenerationOptions(
+            ModuleName: moduleName,
+            IncludeTests: false,
+            EmitTestHarness: false,
+            HeadlessGraphics: !usesGraphics,
+            AllowReachabilityFallback: true);
+
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
+        var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        if (result.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            Console.WriteLine(result.Ir);
+            return 1;
+        }
+
+        var hotDll = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+        var clifPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+        var objPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
+        File.WriteAllText(clifPath, result.Ir);
+
+        try
+        {
+            var aotExit = RunCraneliftAot(aotTool, clifPath, objPath, moduleName, optLevel, out _, out _);
+            if (aotExit != 0)
+            {
+                return aotExit;
+            }
+
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var plan))
+            {
+                return 1;
+            }
+
+            var linkArgs = BuildClangArgsForObject(objPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
+            var linkExit = RunProcess(clang, linkArgs, suppressOutput: true);
+            if (linkExit != 0)
+            {
+                return linkExit;
+            }
+
+            var dllDir = Path.GetDirectoryName(hotDll);
+            if (usesGraphics && !string.IsNullOrEmpty(dllDir))
+            {
+                CopyGraphicsRuntimeDependencies(dllDir, graphicsLibPath);
+            }
+
+            artifacts.Add(hotDll);
+
+            if (startRunner)
+            {
+                var entry = $"{moduleName}__main";
+                var runnerArgs = $"\"{hotDll}\" {entry} --state \"{plan.SnapshotPath}\" --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = runnerPath,
+                    Arguments = runnerArgs,
+                    UseShellExecute = false,
+                    WorkingDirectory = repoRoot
+                };
+                psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+                runner = Process.Start(psi);
+                if (runner is null)
+                {
+                    Console.Error.WriteLine("error: failed to start runner.");
+                    return 1;
+                }
+                return 0;
+            }
+
+            File.WriteAllText(swapFile, hotDll, Encoding.ASCII);
+            return 0;
+        }
+        finally
+        {
+            if (File.Exists(clifPath))
+            {
+                File.Delete(clifPath);
+            }
+            if (File.Exists(objPath))
+            {
+                File.Delete(objPath);
+            }
+        }
+    }
+
+    var initial = BuildAndSwap(startRunner: true);
+    if (initial != 0)
+    {
+        return initial;
+    }
+
+    var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
+    var fileName = Path.GetFileName(sourcePath);
+    using var watcher = new FileSystemWatcher(dir, fileName)
+    {
+        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+    };
+
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void OnChange(object? _, FileSystemEventArgs __)
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    watcher.Changed += OnChange;
+    watcher.Created += OnChange;
+    watcher.Renamed += OnChange;
+    watcher.EnableRaisingEvents = true;
+
+    while (!cts.IsCancellationRequested)
+    {
+        if (runner is not null && runner.HasExited)
+        {
+            Console.Error.WriteLine($"error: runner exited with code {runner.ExitCode}");
+            break;
+        }
+
+        try
+        {
+            changeSignal.Wait(TimeSpan.FromMilliseconds(50), cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+
+        if (!changeSignal.IsSet)
+        {
+            continue;
+        }
+
+        while (DateTime.UtcNow - lastChange < debounce)
+        {
+            Thread.Sleep(10);
+        }
+        changeSignal.Reset();
+
+        var t0 = Stopwatch.StartNew();
+        var exit = BuildAndSwap(startRunner: false);
+        t0.Stop();
+        if (exit == 0)
+        {
+            Console.Error.WriteLine($"HOTRELOAD compiled+swapped in {t0.ElapsedMilliseconds}ms");
+        }
+    }
+
+    if (runner is not null && !runner.HasExited)
+    {
+        runner.Kill(entireProcessTree: true);
+        runner.WaitForExit();
+    }
+
+    foreach (var art in artifacts)
+    {
+        try
+        {
+            File.Delete(art);
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+
+    return 0;
+}
+
+static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, out HotStatePlan plan)
 {
     plan = new HotStatePlan(string.Empty, string.Empty, string.Empty, string.Empty);
+    if (exportedFunctions.Count == 0)
+    {
+        Console.Error.WriteLine("error: --hot-state requires at least one exported function.");
+        return false;
+    }
 
     var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
     if (state is null)
@@ -1768,9 +2083,12 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
 
     var def = new StringBuilder();
     def.Append("EXPORTS\n");
-    def.Append("  ");
-    def.Append(entryName);
-    def.Append('\n');
+    foreach (var fn in exportedFunctions)
+    {
+        def.Append("  ");
+        def.Append(fn);
+        def.Append('\n');
+    }
     foreach (var (name, _) in entries)
     {
         def.Append("  ");
@@ -1783,7 +2101,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     return true;
 }
 
-static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState)
+static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps)
 {
     var fullPath = Path.GetFullPath(path);
     var dir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
@@ -1793,6 +2111,16 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var pendingRestart = false;
     var restartRequestedAt = DateTime.MinValue;
     var hotExitPath = enableHotState && mode == "run" ? GetHotExitFilePath(fullPath, moduleName) : null;
+
+    if (mode == "run" &&
+        enableHotState &&
+        backend == BackendType.Cranelift &&
+        useCraneliftRunner &&
+        OperatingSystem.IsWindows() &&
+        DetectsTickUsage(File.ReadAllText(fullPath)))
+    {
+        return WatchCraneliftTickHotSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);
+    }
 
     using var watcher = new FileSystemWatcher(dir, fileName)
     {
@@ -1845,7 +2173,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     }
     else
     {
-        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
     }
 
     while (!cts.IsCancellationRequested)
@@ -1905,7 +2233,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
             }
             else
             {
-                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
             }
         }
 
@@ -1948,7 +2276,7 @@ static string QuoteArg(string arg) =>
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--watch] [--hot-state] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc run <file> [--watch] [--hot-state] [--fps <1..240>] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
@@ -1956,6 +2284,7 @@ static void PrintUsage()
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Watch: use --watch to re-run on file changes (run/test only).");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across runs, enabling simple stateful restart experiments.");
+    Console.WriteLine("Tick hosting: if your program defines `function tick()`, the runner will call `main()` once then call `tick()` at `--fps` (host paced) and can hot-swap between ticks in --watch + --hot-state mode.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
@@ -2186,7 +2515,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
         {
             if (useCraneliftRunner)
             {
-                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, out _, out _, out _, out _);
+                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, tickHostFps: null, out _, out _, out _, out _);
             }
             else
             {
