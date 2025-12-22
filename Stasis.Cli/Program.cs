@@ -651,7 +651,19 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         var runnerArgs = $"\"{dllPath}\" {entry}";
         if (hotStatePlan is not null)
         {
+            try
+            {
+                if (File.Exists(hotStatePlan.HotExitPath))
+                {
+                    File.Delete(hotStatePlan.HotExitPath);
+                }
+            }
+            catch
+            {
+                // Best-effort; stale trigger file will be handled by runner.
+            }
             runnerArgs += $" --state \"{hotStatePlan.SnapshotPath}\" --state-map \"{hotStatePlan.MapPath}\"";
+            runnerArgs += $" --hot-exit-file \"{hotStatePlan.HotExitPath}\"";
         }
         var runExit = RunProcess(runnerPath, runnerArgs);
         runMs = runStopwatch.ElapsedMilliseconds;
@@ -1675,9 +1687,17 @@ static string BuildDefaultOutputPath(string sourcePath)
     return Path.Combine(string.IsNullOrEmpty(dir) ? Directory.GetCurrentDirectory() : dir, name + ext);
 }
 
+static string GetHotExitFilePath(string sourcePath, string moduleName)
+{
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var hotDir = Path.Combine(repoRoot, "build", "hotstate");
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    return Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
+}
+
 static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, string entryName, out HotStatePlan plan)
 {
-    plan = new HotStatePlan(string.Empty, string.Empty, string.Empty);
+    plan = new HotStatePlan(string.Empty, string.Empty, string.Empty, string.Empty);
 
     var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
     if (state is null)
@@ -1732,6 +1752,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     var mapPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{hashHex}.state-map.txt");
     var snapshotPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{hashHex}.state-snap.bin");
     var defPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{hashHex}.exports.def");
+    var hotExitPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 
     var map = new StringBuilder();
     map.Append("STASIS_STATE_MAP 1\n");
@@ -1758,7 +1779,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     }
     File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
 
-    plan = new HotStatePlan(mapPath, snapshotPath, defPath);
+    plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath);
     return true;
 }
 
@@ -1770,6 +1791,8 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var debounce = TimeSpan.FromMilliseconds(75);
     var lastChange = DateTime.UtcNow;
     var pendingRestart = false;
+    var restartRequestedAt = DateTime.MinValue;
+    var hotExitPath = enableHotState && mode == "run" ? GetHotExitFilePath(fullPath, moduleName) : null;
 
     using var watcher = new FileSystemWatcher(dir, fileName)
     {
@@ -1856,6 +1879,19 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
                 if (enableHotState)
                 {
                     pendingRestart = true;
+                    restartRequestedAt = DateTime.UtcNow;
+                    if (!string.IsNullOrEmpty(hotExitPath) && child is not null && !child.HasExited)
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(hotExitPath)!);
+                            File.WriteAllText(hotExitPath, "1", Encoding.ASCII);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"warning: failed to signal hot-state exit: {ex.Message}");
+                        }
+                    }
                 }
                 else
                 {
@@ -1877,6 +1913,11 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         {
             child = StartWatchChild(exePath, childArgs);
             pendingRestart = false;
+            if (restartRequestedAt != DateTime.MinValue)
+            {
+                var latency = (DateTime.UtcNow - restartRequestedAt).TotalMilliseconds;
+                Console.Error.WriteLine($"HOTRELOAD restart latency={latency:0}ms");
+            }
         }
     }
 
