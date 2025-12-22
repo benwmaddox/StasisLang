@@ -13,7 +13,7 @@ struct FrameTimer {
 }
 
 function frame_timer_init(samples_ms: i32[]): void {
-    foreach (let _v, i in samples_ms) {
+    foreach (let v, i in samples_ms) {
         if (i < FRAME_TIMER_SAMPLES) {
             samples_ms[i] = 1;
         }
