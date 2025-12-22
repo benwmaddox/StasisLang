@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/frame_timer.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
@@ -68,7 +69,6 @@ const PI: f32 = 3.14159;
 // Timing
 const TARGET_FPS: i32 = 60;
 const FRAME_TIME_MS: i32 = 16;
-const FRAME_TIME_HISTORY: i32 = 120;
 
 const JIGGLE_THRESHOLD: i32 = 10;
 const JIGGLE_DEGREES: f32 = 5.0;
@@ -148,6 +148,7 @@ struct GameState {
     paddle: Paddle;
     cursor: Cursor;
     timers: Timers;
+    frame_timer: FrameTimer;
     phase: i32;
     wave: i32;
     score: i32;
@@ -155,20 +156,10 @@ struct GameState {
     max_balls_wave: i32;
     rng_state: i32;
     running: i32;
-    frame_times: i32[120];
-    frame_time_index: i32;
     sprites: BrickoutSprites;
 }
 
 global state: GameState;
-
-function reset_frame_times(): void {
-    let i: i32 = 0;
-    for (i = 0; i < FRAME_TIME_HISTORY; i = i + 1) {
-        state.frame_times[i] = 1;
-    }
-    state.frame_time_index = 0;
-}
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -275,7 +266,8 @@ function init_game(reset_progress: bool): void {
     state.timers.phase_timer = 0;
     state.timers.tick_time_ms = 0;
 
-    reset_frame_times();
+    frame_timer_init(state.frame_timer.samples_ms);
+    state.frame_timer.sample_index = frame_timer_reset_index();
 
     // Game state
     // Start immediately in battle; no setup pause.
@@ -286,7 +278,7 @@ function init_game(reset_progress: bool): void {
     // Initialize frame time tracking
     // Note: Frame times will be filled with first actual measurement
     // to provide accurate average from the start
-    state.frame_time_index = 0;
+    state.frame_timer.sample_index = frame_timer_reset_index();
 
     if (reset_progress) {
         state.wave = 1;
@@ -1013,27 +1005,6 @@ function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
     }
 }
 
-function compute_avg_frame_time(): f32 {
-    let sum: i32 = 0;
-    let i: i32 = 0;
-    for (i = 0; i < FRAME_TIME_HISTORY; i = i + 1) {
-        sum = sum + state.frame_times[i];
-    }
-    let sum_f: f32 = sum;
-    let count_f: f32 = FRAME_TIME_HISTORY;
-    return sum_f / count_f;
-}
-
-function compute_avg_frame_time_tenths(): i32 {
-    // Fixed-point average in 0.1ms units to avoid f32->i32 cast issues in some backends.
-    let sum: i32 = 0;
-    let i: i32 = 0;
-    for (i = 0; i < FRAME_TIME_HISTORY; i = i + 1) {
-        sum = sum + state.frame_times[i];
-    }
-    return (sum * 10) / FRAME_TIME_HISTORY;
-}
-
 function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
     // Draw a float with 1 decimal place (e.g., 3.5)
     let int_part: i32 = value;
@@ -1267,7 +1238,7 @@ function draw_ui(): void {
     draw_number(state.wave, SCREEN_W - 60.0, 10.0, 8.0);
 
     // Average frame time in bottom-left (in milliseconds with 1 decimal)
-    let avg_time_tenths: i32 = compute_avg_frame_time_tenths();
+    let avg_time_tenths: i32 = frame_timer_avg_tenths(state.frame_timer.samples_ms);
     draw_decimal_1_tenths(avg_time_tenths, 20.0, SCREEN_H - 30.0, 6.0);
     hud_draw_ms_logic(90.0, SCREEN_H - 28.0, 3.0);
 
@@ -1349,7 +1320,8 @@ function main(): i32 {
     state.running = 1;
 
     // Initialize frame time buffer with baseline value
-    reset_frame_times();
+    frame_timer_init(state.frame_timer.samples_ms);
+    state.frame_timer.sample_index = frame_timer_reset_index();
 
     let frame: i32 = 0;
     for (frame = 0; state.running == 1; frame = frame + 1) {
@@ -1381,11 +1353,8 @@ function main(): i32 {
             if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
 
             // Store in circular buffer for averaging
-            state.frame_times[state.frame_time_index] = state.timers.tick_time_ms;
-            state.frame_time_index = state.frame_time_index + 1;
-            if (state.frame_time_index > (FRAME_TIME_HISTORY - 1)) {
-                state.frame_time_index = 0;
-            }
+            state.frame_timer.sample_index =
+                frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
 
             end_frame();
             sync_frame_rate();
