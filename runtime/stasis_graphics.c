@@ -241,15 +241,6 @@ static void flush_lines(void) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDrawBuffer(GL_BACK);
 
-    if (g_debug_frame_counter < 5) {
-        SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
-        if (g_line_count > 0) {
-            SDL_Log("line0: (%.2f,%.2f)->(%.2f,%.2f) rgba=%.2f,%.2f,%.2f,%.2f",
-                g_lines[0].x1, g_lines[0].y1, g_lines[0].x2, g_lines[0].y2,
-                g_lines[0].r, g_lines[0].g, g_lines[0].b, g_lines[0].a);
-        }
-    }
-
     /* Build vertex buffer */
     int vtx_count = g_line_count * 2;
     for (int i = 0; i < g_line_count; i++) {
