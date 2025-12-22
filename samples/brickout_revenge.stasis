@@ -32,8 +32,8 @@ const SCREEN_H: f32 = 600.0;
 
 // Game constants
 const MAX_BRICKS: i32 = 50;
-const MAX_BALLS: i32 = 900;
-const PADDLE_Y: f32 = 570.0;
+const MAX_BALLS: i32 = 90;
+const PADDLE_Y: f32 = 30.0;
 const PADDLE_WIDTH: f32 = 100.0;
 const PADDLE_HEIGHT: f32 = 10.0;
 const BALL_RADIUS: f32 = 6.0;
@@ -196,7 +196,7 @@ function sign_f32(x: f32): f32 {
     return 0.0;
 }
 
-// Grid helpers - bricks are placed on a grid in the upper portion
+// Grid helpers - bricks are placed on a grid in the lower portion
 function grid_to_world_x(gx: i32): f32 {
     let gxf: f32 = gx;
     return 50.0 + gxf * (BRICK_WIDTH + 5.0);
@@ -204,7 +204,8 @@ function grid_to_world_x(gx: i32): f32 {
 
 function grid_to_world_y(gy: i32): f32 {
     let gyf: f32 = gy;
-    return 50.0 + gyf * (BRICK_HEIGHT + 5.0);
+    // Place bricks starting near the bottom and stack upward with the same spacing.
+    return SCREEN_H - 50.0 - BRICK_HEIGHT - gyf * (BRICK_HEIGHT + 5.0);
 }
 
 // Initialization
@@ -277,7 +278,7 @@ function init_game(reset_progress: bool): void {
 }
 
 function setup_default_bricks(): void {
-    // Stress test: Fill the top of the screen with bricks
+    // Stress test: Fill the bottom of the screen with bricks
     let brick_idx: i32 = 0;
     let row: i32 = 0;
     let col: i32 = 0;
@@ -390,7 +391,7 @@ function update_brick_attacks(delta_ms: i32): void {
     }
 }
 
-// Spawn a ball near the paddle, heading upward
+// Spawn a ball near the paddle, heading downward
 function spawn_ball(): void {
     foreach (let ball in state.balls) {
         if (!ball.active) {
@@ -399,12 +400,12 @@ function spawn_ball(): void {
             if (ball.x < 100.0) { ball.x = 100.0; }
             if (ball.x > SCREEN_W - 100.0) { ball.x = SCREEN_W - 100.0; }
 
-            ball.y = state.paddle.y - state.paddle.height / 2.0 - ball.radius - 2.0;
+            ball.y = state.paddle.y + state.paddle.height / 2.0 + ball.radius + 2.0;
             ball.vx = rand_range(-100.0, 100.0);
             let wf: f32 = state.wave;
             let speed_min: f32 = 150.0 + wf * 10.0;
             let speed_max: f32 = 250.0 + wf * 12.0;
-            ball.vy = 0.0 - rand_range(speed_min, speed_max);
+            ball.vy = rand_range(speed_min, speed_max);
             ball.radius = BALL_RADIUS;
             ball.damage = 1 + (state.wave / 4);
             ball.max_hp = (20 + (state.wave / 2)) * 10;
@@ -444,7 +445,7 @@ function update_balls(dt: f32): void {
             ball.x = ball.x + ball.vx * dt;
             ball.y = ball.y + ball.vy * dt;
 
-            // Wall bounces (left, right, top)
+            // Wall bounces (left, right, bottom)
             let bounced: bool = false;
             if (ball.x < ball.radius) {
                 ball.x = ball.radius;
@@ -456,9 +457,9 @@ function update_balls(dt: f32): void {
                 ball.vx = 0.0 - abs_f32(ball.vx);
                 bounced = true;
             }
-            if (ball.y < ball.radius) {
-                ball.y = ball.radius;
-                ball.vy = abs_f32(ball.vy);
+            if (ball.y > SCREEN_H - ball.radius) {
+                ball.y = SCREEN_H - ball.radius;
+                ball.vy = 0.0 - abs_f32(ball.vy);
                 bounced = true;
             }
             if (bounced) {
@@ -476,8 +477,8 @@ function update_balls(dt: f32): void {
                 }
             }
 
-            // Ball falls off bottom - deactivate
-            if (ball.y > SCREEN_H + ball.radius) {
+            // Ball flies past the top - deactivate
+            if (ball.y < (0.0 - ball.radius)) {
                 ball.active = false;
             }
         }
@@ -486,14 +487,14 @@ function update_balls(dt: f32): void {
 
 // Paddle AI - tracks nearest ball
 function update_paddle(dt: f32): void {
-    // Find nearest ball heading down
+    // Find nearest ball heading up toward the top paddle
     let nearest_x: f32 = state.paddle.x;
     let nearest_dist: f32 = 99999.0;
     let found: bool = false;
 
     foreach (let ball in state.balls) {
         if (ball.active) {
-            if (ball.vy > 0.0) {
+            if (ball.vy < 0.0) {
                 let dx: f32 = abs_f32(ball.x - state.paddle.x);
                 let dy: f32 = abs_f32(ball.y - state.paddle.y);
                 let dist: f32 = dx + dy;
@@ -532,7 +533,7 @@ function check_paddle_collisions(): void {
 
     foreach (let ball in state.balls) {
         if (ball.active) {
-            if (ball.vy > 0.0) {
+            if (ball.vy < 0.0) {
                 // Simple AABB check
                 let bx: f32 = ball.x;
                 let by: f32 = ball.y;
@@ -560,14 +561,14 @@ function check_paddle_collisions(): void {
                 if (hit_x) {
                     if (hit_y) {
                         // Bounce with angle based on hit position
-                        ball.vy = 0.0 - abs_f32(ball.vy);
+                        ball.vy = abs_f32(ball.vy);
 
                         // Offset determines angle
                         let offset: f32 = (bx - px) / (pw / 2.0);
                         ball.vx = offset * 200.0;
 
                         // Move ball out of paddle
-                        ball.y = top - br - 1.0;
+                        ball.y = bottom + br + 1.0;
                         ball.bounce_streak = ball.bounce_streak + 1;
                         if (ball.bounce_streak >= JIGGLE_THRESHOLD) {
                             ball.bounce_streak = 0;
@@ -823,8 +824,8 @@ function draw_bricks(): void {
 
             let cx: f32 = brick.x + brick.width / 2.0;
             let cy: f32 = brick.y + brick.height / 2.0;
-            let sx: f32 = brick.width / 64.0;
-            let sy: f32 = brick.height / 24.0;
+            let sx: f32 = brick.width / 160.0;  // sprite viewBox width
+            let sy: f32 = brick.height / 64.0;  // sprite viewBox height
             if (h == 0) {
                 // Fallback: line rectangle when sprites are unavailable
                 draw_rect(brick.x, brick.y, brick.width, brick.height, 1.0, 1.0, 1.0, 1.0);
@@ -1063,11 +1064,11 @@ function main(): i32 {
         return 1;
     }
 
-    spr_paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.stv");
-    spr_ball = gfx_load_sprite("assets_src/brickout-revenge/ball.stv");
-    spr_brick_basic = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.stv");
-    spr_brick_armored = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.stv");
-    spr_brick_reflector = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.stv");
+    spr_paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.svg");
+    spr_ball = gfx_load_sprite("assets_src/brickout-revenge/ball.svg");
+    spr_brick_basic = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.svg");
+    spr_brick_armored = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.svg");
+    spr_brick_reflector = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
 
     seed_rng(time());
     init_game(true);

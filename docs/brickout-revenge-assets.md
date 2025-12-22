@@ -14,7 +14,7 @@ Non-goals (initial version):
 
 ## Directory Layout
 
-- Source (editable): `assets_src/brickout-revenge/*.stv`
+- Source (editable): `assets_src/brickout-revenge/*.svg`
 - Cache (generated): `assets_cache/brickout-revenge/*.bin` (optional; future)
 
 The runtime always attempts to load from the source path you pass. If you later want to ship only baked assets, you can keep the same Stasis code and have the runtime fall back to cached/embedded bytes (not implemented yet).
@@ -42,38 +42,15 @@ Notes:
 - Stasis stores the returned `i32` handles in globals/struct fields (static memory friendly).
 - The runtime owns all allocations and GL resources; Stasis never sees pointers or variable-sized arrays.
 
-## Sprite Source Format: `.stv` (Stasis Tiny Vector)
+## Sprite Source Format: SVG (current)
 
-This is a minimal, ASCII-only, line-oriented format that is easy to parse and rasterize.
-
-Header:
-- First non-empty line must be: `stv 1`
-
-Commands:
-- `size <w> <h>`
-  - Required. Output sprite size in pixels.
-
-- `rgba <r> <g> <b> <a>`
-  - Sets current drawing color. Each component is a float in `[0..1]`.
-
-- `rect <x> <y> <w> <h>`
-  - Filled axis-aligned rectangle.
-
-- `circle <cx> <cy> <radius>`
-  - Filled circle.
-
-- `line <x1> <y1> <x2> <y2> <thickness>`
-  - Filled thick line (capsule).
-
-Parsing rules:
-- Whitespace-separated tokens.
-- Lines starting with `#` are comments.
-- Unknown commands are ignored (future-proofing).
+- Author sprites as standard SVG with explicit `width`/`height` or `viewBox` so rasterization is deterministic.
+- Keep shapes simple (rects/paths/lines) for predictable baking; gradients and light filters are OK if they rasterize well.
+- Animations (e.g., turret slit pulsing) are allowed but should stay lightweight to keep GPU uploads small.
+- Legacy `.stv` has been removed; author sprites directly in SVG.
 
 Rasterization:
-- CPU rasterization into an RGBA8 bitmap.
-- The runtime may use fixed supersampling (e.g. 2x) then downsample for simple antialiasing.
-- Baked sprites are packed into an atlas texture with mipmaps enabled for stable downscaling.
+- SVG is rasterized to RGBA8 (with the same supersampling/downsample step we used for `.stv`) then packed into the atlas with mipmaps.
 
 ## Hot Reload Model
 
@@ -86,19 +63,18 @@ Recommended usage pattern:
 - Load once during initialization (store handles in globals).
 - Call `gfx_poll_reload` once per frame for the small set of sprites you are actively using.
 
-## Breakout Revenge - Initial Sprite Set
+## Breakout Revenge - Sprite Set
 
-Suggested initial set (remade assets):
-- `assets_src/brickout-revenge/paddle.stv`
-- `assets_src/brickout-revenge/ball.stv`
-- `assets_src/brickout-revenge/brick_basic.stv`
-- `assets_src/brickout-revenge/brick_armored.stv`
-- `assets_src/brickout-revenge/brick_reflector.stv`
+Canonical sources (SVG):
+- `assets_src/brickout-revenge/paddle.svg`
+- `assets_src/brickout-revenge/ball.svg`
+- `assets_src/brickout-revenge/brick_basic.svg`
+- `assets_src/brickout-revenge/brick_armored.svg`
+- `assets_src/brickout-revenge/brick_reflector.svg`
 
 ## Next Steps (Later)
 
 - Add a cache format and on-disk cache in `assets_cache/` keyed by `(source-hash, scale, bake-version)`.
 - Add a `gfx_load_sprite_or_embedded(path, bytes_ptr, bytes_len)` path for shipping without sources.
-- Expand `.stv` to support strokes, gradients, and multi-layer compositing.
+- Remove any lingering references to `.stv` in tooling/tests if discovered.
 - Add animation metadata (timeline tweens) separate from the baked pixels, so most edits only update transforms, not textures.
-

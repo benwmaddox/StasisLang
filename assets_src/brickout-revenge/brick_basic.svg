@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <g id="base">
+    <rect width="160" height="64" rx="4" fill="#a45745"/>
+    <rect x="4" y="4" width="152" height="56" rx="3" fill="#c16550"/>
+    <path d="M0 32H160" stroke="#7a3d30" stroke-width="3"/>
+  </g>
+  <g id="turret">
+    <rect x="72" y="24" width="16" height="16" rx="2" fill="#3b1f1a">
+      <animate attributeName="opacity" values="1;0.8;1" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>

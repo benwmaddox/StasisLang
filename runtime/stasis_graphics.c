@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <ctype.h>
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <direct.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -23,6 +25,13 @@
 /* stb_truetype for font rendering */
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+
+/* nanosvg for SVG parsing/rasterization */
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVG_ALL_COLOR_KEYWORDS
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
 
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
@@ -85,8 +94,10 @@ static GLuint g_line_vbo = 0;
 static GLuint g_line_vao = 0;
 static GLint g_line_pos_loc = -1;
 static GLint g_line_color_loc = -1;
+static char g_asset_base[512] = {0};
+static char g_asset_env[512] = {0};
 
-/* Sprite atlas + batching (baked from .stv sources) */
+/* Sprite atlas + batching (baked from SVG sources) */
 #define MAX_SPRITES 256
 #define SPRITE_ATLAS_W 1024
 #define SPRITE_ATLAS_H 1024
@@ -285,9 +296,69 @@ static void flush_lines(void) {
     g_line_count = 0;
 }
 
+static void ensure_asset_base(void) {
+    if (g_asset_base[0] != 0) return;
+
+    /* Prefer explicit env override */
+    const char* env = getenv("STASIS_ASSET_ROOT");
+    if (env && *env) {
+        strncpy(g_asset_env, env, sizeof(g_asset_env) - 1);
+        g_asset_env[sizeof(g_asset_env) - 1] = 0;
+        strncpy(g_asset_base, g_asset_env, sizeof(g_asset_base) - 1);
+        g_asset_base[sizeof(g_asset_base) - 1] = 0;
+        return;
+    }
+#if defined(_WIN32)
+    _getcwd(g_asset_base, (int)sizeof(g_asset_base));
+#else
+    getcwd(g_asset_base, sizeof(g_asset_base));
+#endif
+}
+
+static int is_absolute_path(const char* path) {
+    if (!path || !*path) return 0;
+#if defined(_WIN32)
+    if (path[0] == '\\' || path[0] == '/') return 1;
+    if (isalpha((unsigned char)path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) return 1;
+    return 0;
+#else
+    return path[0] == '/';
+#endif
+}
+
+static int resolve_asset_path(const char* path, char* out, size_t out_size) {
+    if (!out || out_size < 2 || !path || !*path) return 0;
+    ensure_asset_base();
+    if (is_absolute_path(path)) {
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = 0;
+    } else {
+        snprintf(out, out_size, "%s/%s", g_asset_base, path);
+        out[out_size - 1] = 0;
+    }
+    for (char* p = out; *p; ++p) {
+        if (*p == '\\') *p = '/';
+    }
+    return 1;
+}
+
 static char* read_text_file(const char* path) {
+    ensure_asset_base();
+
     FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
+    char resolved[1024];
+
+    if (!f) {
+        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+            fprintf(stderr, "read_text_file: failed %s\n", path);
+            return NULL;
+        }
+        f = fopen(resolved, "rb");
+        if (!f) {
+            fprintf(stderr, "read_text_file: failed %s (also %s)\n", path, resolved);
+            return NULL;
+        }
+    }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -340,13 +411,21 @@ static GLuint link_program(GLuint vs, GLuint fs) {
 }
 
 static uint64_t get_file_mtime(const char* path) {
+    char resolved[1024];
+    const char* probe = path;
+    if (!is_absolute_path(path)) {
+        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+            return 0;
+        }
+        probe = resolved;
+    }
 #if defined(_WIN32)
     struct _stat st;
-    if (_stat(path, &st) != 0) return 0;
+    if (_stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #else
     struct stat st;
-    if (stat(path, &st) != 0) return 0;
+    if (stat(probe, &st) != 0) return 0;
     return (uint64_t)st.st_mtime;
 #endif
 }
@@ -624,112 +703,72 @@ static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     return h;
 }
 
-static int bake_stv_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
+/* SVG rasterization (paths, gradients, transforms) via NanoSVG */
+static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
     *out_h = 0;
 
-    char* text = read_text_file(path);
-    if (!text) return 0;
-
-    int w = 0, h = 0;
-    int saw_header = 0;
-    int ready = 0;
-    const int ss = 2;
-    int sw = 0;
-    int sh = 0;
-    unsigned char* sbuf = NULL;
-
-    float cr = 1.0f, cg = 1.0f, cb = 1.0f, ca = 1.0f;
-    for (char* p = text; *p; ) {
-        char* line = p;
-        while (*p && *p != '\n') p++;
-        if (*p == '\n') { *p = 0; p++; }
-        while (*line == ' ' || *line == '\t' || *line == '\r') line++;
-        if (*line == 0 || *line == '#') continue;
-
-        if (!saw_header) {
-            if (strncmp(line, "stv 1", 5) != 0) {
-                free(text);
-                return 0;
-            }
-            saw_header = 1;
-            continue;
-        }
-
-        if (!ready) {
-            if (strncmp(line, "size ", 5) == 0) {
-                if (sscanf(line + 5, "%d %d", &w, &h) == 2 && w > 0 && h > 0) {
-                    sw = w * ss;
-                    sh = h * ss;
-                    sbuf = (unsigned char*)calloc((size_t)sw * (size_t)sh * 4, 1);
-                    if (!sbuf) {
-                        free(text);
-                        return 0;
-                    }
-                    ready = 1;
-                }
-            }
-            continue;
-        }
-
-        if (strncmp(line, "rgba ", 5) == 0) {
-            (void)sscanf(line + 5, "%f %f %f %f", &cr, &cg, &cb, &ca);
-            continue;
-        }
-        if (strncmp(line, "rect ", 5) == 0) {
-            float x, y, rw, rh;
-            if (sscanf(line + 5, "%f %f %f %f", &x, &y, &rw, &rh) == 4) {
-                draw_rect_rgba(sbuf, sw, sh, (int)floorf(x * ss), (int)floorf(y * ss), (int)ceilf(rw * ss), (int)ceilf(rh * ss), cr, cg, cb, ca);
-            }
-            continue;
-        }
-        if (strncmp(line, "circle ", 7) == 0) {
-            float cx, cy, rad;
-            if (sscanf(line + 7, "%f %f %f", &cx, &cy, &rad) == 3) {
-                draw_circle_rgba(sbuf, sw, sh, cx * ss, cy * ss, rad * ss, cr, cg, cb, ca);
-            }
-            continue;
-        }
-        if (strncmp(line, "line ", 5) == 0) {
-            float x1, y1, x2, y2, t;
-            if (sscanf(line + 5, "%f %f %f %f %f", &x1, &y1, &x2, &y2, &t) == 5) {
-                draw_line_rgba(sbuf, sw, sh, x1 * ss, y1 * ss, x2 * ss, y2 * ss, t * ss, cr, cg, cb, ca);
-            }
-            continue;
-        }
-    }
-
-    if (!saw_header || !ready || w <= 0 || h <= 0 || !sbuf) {
-        if (sbuf) free(sbuf);
-        free(text);
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        fprintf(stderr, "bake_svg_to_rgba: bad path %s\n", path ? path : "(null)");
         return 0;
     }
 
-    unsigned char* out = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
-    if (!out) {
-        free(sbuf);
-        free(text);
+    NSVGimage* image = nsvgParseFromFile(resolved, "px", 96.0f);
+    if (!image) {
+        fprintf(stderr, "bake_svg_to_rgba: failed to parse %s\n", resolved);
         return 0;
     }
-    downsample_2x(out, w, h, sbuf, sw, sh);
-    free(sbuf);
-    free(text);
-    *out_pixels = out;
+
+    int w = (int)ceilf(image->width);
+    int h = (int)ceilf(image->height);
+    if (w <= 0 || h <= 0) {
+        fprintf(stderr, "bake_svg_to_rgba: invalid size %dx%d in %s\n", w, h, resolved);
+        nsvgDelete(image);
+        return 0;
+    }
+
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!rast) {
+        fprintf(stderr, "bake_svg_to_rgba: failed to create rasterizer for %s\n", resolved);
+        nsvgDelete(image);
+        return 0;
+    }
+
+    unsigned char* pixels = (unsigned char*)malloc((size_t)w * (size_t)h * 4u);
+    if (!pixels) {
+        fprintf(stderr, "bake_svg_to_rgba: OOM allocating %d x %d buffer for %s\n", w, h, resolved);
+        nsvgDeleteRasterizer(rast);
+        nsvgDelete(image);
+        return 0;
+    }
+    memset(pixels, 0, (size_t)w * (size_t)h * 4u);
+
+    float sx = (float)w / image->width;
+    float sy = (float)h / image->height;
+    float scale = sx < sy ? sx : sy;
+
+    nsvgRasterize(rast, image, 0.0f, 0.0f, scale, pixels, w, h, w * 4);
+
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(image);
+
+    *out_pixels = pixels;
     *out_w = w;
     *out_h = h;
     return 1;
 }
 
 /*
- * Debug helper: bake a .stv to RGBA on the CPU and return a deterministic 32-bit hash of the pixels.
+ * Debug helper: bake an SVG to RGBA on the CPU and return a deterministic 32-bit hash of the pixels.
  * Returns 0 on error (and logs).
  */
 STASIS_EXPORT int stasis_gfx_debug_bake_hash(const char* path) {
     if (!path || !*path) return 0;
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+    if (!bake_svg_to_rgba(path, &pixels, &w, &h)) {
         SDL_Log("gfx_debug_bake_hash: failed to bake %s", path);
         return 0;
     }
@@ -1511,7 +1550,7 @@ static int sprite_find_by_path(const char* path) {
 static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_stv_to_rgba(path, &pixels, &w, &h)) {
+    if (!bake_svg_to_rgba(path, &pixels, &w, &h)) {
         SDL_Log("gfx_load_sprite: failed to bake %s", path);
         return 0;
     }
@@ -1608,7 +1647,7 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
 }
 
 /*
- * Load and bake a sprite from a .stv file into the global atlas.
+ * Load and bake a sprite from an SVG file into the global atlas.
  * Returns an integer handle (stable for the lifetime of the process).
  */
 STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
@@ -1617,23 +1656,44 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
     if (!g_use_sdl_renderer && !g_gl_context) return 0;
     if (g_use_sdl_renderer && !g_renderer) return 0;
 
-    int existing = sprite_find_by_path(path);
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        SDL_Log("gfx_load_sprite: could not resolve %s", path);
+        return 0;
+    }
+
+    /* Debug: log path and cwd for easier troubleshooting */
+    char cwd[512];
+#if defined(_WIN32)
+    if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
+#else
+    if (getcwd(cwd, sizeof(cwd)) != NULL)
+#endif
+    {
+        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
+    }
+    else
+    {
+        fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
+    }
+
+    int existing = sprite_find_by_path(resolved);
     if (existing) return existing;
 
     for (int i = 0; i < MAX_SPRITES; i++) {
         if (!g_sprites[i].used) {
             SpriteEntry* e = &g_sprites[i];
             memset(e, 0, sizeof(*e));
-            e->path = stasis_strdup(path);
+            e->path = stasis_strdup(resolved);
             if (!e->path) return 0;
             e->used = 1;
-            if (!sprite_build_into_entry(e, path, 0)) {
+            if (!sprite_build_into_entry(e, resolved, 0)) {
                 free(e->path);
                 memset(e, 0, sizeof(*e));
                 return 0;
             }
             g_sprite_count++;
-            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", path, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
             return i + 1;
         }
     }
