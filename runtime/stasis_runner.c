@@ -20,6 +20,19 @@ typedef struct stasis_state_symbol
     uint32_t offset;
 } stasis_state_symbol;
 
+#ifdef _WIN32
+typedef struct stasis_hot_exit_args
+{
+    HMODULE lib;
+    const char *state_path;
+    uint64_t map_hash;
+    stasis_state_symbol *syms;
+    uint32_t sym_count;
+    uint32_t total_bytes;
+    const char *hot_exit_path;
+} stasis_hot_exit_args;
+#endif
+
 static char *stasis_strdup(const char *s)
 {
     size_t len = strlen(s);
@@ -38,7 +51,7 @@ static void print_usage(void)
     fprintf(stderr, "usage: stasis_runner <dll_path> [entry]\n");
     fprintf(stderr, "  entry defaults to run_tests (use main for run mode)\n");
     fprintf(stderr, "usage: stasis_runner --server\n");
-    fprintf(stderr, "usage: stasis_runner <dll_path> [entry] --state <snapshot_path> --state-map <map_path>\n");
+    fprintf(stderr, "usage: stasis_runner <dll_path> [entry] --state <snapshot_path> --state-map <map_path> [--hot-exit-file <path>]\n");
 }
 
 #ifdef _WIN32
@@ -273,6 +286,73 @@ static int save_state_snapshot(const char *path, uint64_t hash, const uint8_t *d
     return 0;
 }
 
+#ifdef _WIN32
+static DWORD WINAPI hot_exit_thread(LPVOID user_data)
+{
+    stasis_hot_exit_args *args = (stasis_hot_exit_args *)user_data;
+    if (!args || !args->hot_exit_path || args->hot_exit_path[0] == '\0')
+    {
+        return 0;
+    }
+
+    /* Clear stale triggers (best-effort). */
+    DeleteFileA(args->hot_exit_path);
+
+    for (;;)
+    {
+        DWORD attr = GetFileAttributesA(args->hot_exit_path);
+        if (attr != INVALID_FILE_ATTRIBUTES)
+        {
+            DeleteFileA(args->hot_exit_path);
+
+            uint8_t *save_data = (uint8_t *)malloc(args->total_bytes);
+            if (!save_data)
+            {
+                fprintf(stderr, "error: out of memory\n");
+                fflush(stderr);
+                ExitProcess(1);
+            }
+
+            LARGE_INTEGER freq;
+            LARGE_INTEGER t0;
+            LARGE_INTEGER t1;
+            QueryPerformanceFrequency(&freq);
+
+            QueryPerformanceCounter(&t0);
+            for (uint32_t i = 0; i < args->sym_count; i++)
+            {
+                FARPROC addr = GetProcAddress(args->lib, args->syms[i].name);
+                if (!addr)
+                {
+                    fprintf(stderr, "error: state symbol not exported: %s\n", args->syms[i].name);
+                    fflush(stderr);
+                    ExitProcess(1);
+                }
+                memcpy(save_data + args->syms[i].offset, (void *)addr, args->syms[i].size);
+            }
+            QueryPerformanceCounter(&t1);
+            long long save_copy_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
+
+            QueryPerformanceCounter(&t0);
+            int save_result = save_state_snapshot(args->state_path, args->map_hash, save_data, args->total_bytes);
+            QueryPerformanceCounter(&t1);
+            long long save_io_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
+            if (save_result != 0)
+            {
+                fflush(stderr);
+                ExitProcess(1);
+            }
+
+            fprintf(stderr, "HOTSTATE save: io=%lldus copy=%lldus bytes=%u symbols=%u (hot-exit)\n", save_io_us, save_copy_us, args->total_bytes, args->sym_count);
+            fflush(stderr);
+            ExitProcess(0);
+        }
+
+        Sleep(10);
+    }
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -419,6 +499,7 @@ int main(int argc, char **argv)
 
     const char *state_path = NULL;
     const char *state_map_path = NULL;
+    const char *hot_exit_path = NULL;
     for (int i = 2; i < argc; i++)
     {
         if (strcmp(argv[i], "--state") == 0 && i + 1 < argc)
@@ -429,6 +510,11 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--state-map") == 0 && i + 1 < argc)
         {
             state_map_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--hot-exit-file") == 0 && i + 1 < argc)
+        {
+            hot_exit_path = argv[++i];
             continue;
         }
     }
@@ -462,6 +548,7 @@ int main(int argc, char **argv)
     uint32_t total_bytes = 0;
     uint64_t map_hash = 0;
     uint8_t *restore_data = NULL;
+    stasis_hot_exit_args hot_exit_args = {0};
     if (state_path && state_map_path)
     {
         if (read_state_map(state_map_path, &map_hash, &syms, &sym_count, &total_bytes) != 0)
@@ -519,8 +606,26 @@ int main(int argc, char **argv)
         }
     }
 
+    HANDLE hot_exit_handle = NULL;
+    if (state_path && state_map_path && hot_exit_path && hot_exit_path[0] != '\0')
+    {
+        hot_exit_args.lib = lib;
+        hot_exit_args.state_path = state_path;
+        hot_exit_args.map_hash = map_hash;
+        hot_exit_args.syms = syms;
+        hot_exit_args.sym_count = sym_count;
+        hot_exit_args.total_bytes = total_bytes;
+        hot_exit_args.hot_exit_path = hot_exit_path;
+        hot_exit_handle = CreateThread(NULL, 0, hot_exit_thread, &hot_exit_args, 0, NULL);
+    }
+
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
+
+    if (hot_exit_handle)
+    {
+        CloseHandle(hot_exit_handle);
+    }
 
     if (state_path && state_map_path)
     {
