@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <!-- Base: wall (high HP) brick -->
+  <defs>
+    <filter id="soft">
+      <feGaussianBlur stdDeviation="1.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g id="base" filter="url(#soft)">
+    <rect width="160" height="64" rx="3" fill="#6a6a6a"/>
+    <rect x="4" y="4" width="152" height="56" rx="2" fill="#8a8a8a"/>
+    <path d="M0 32H160" stroke="#4a4a4a" stroke-width="4"/>
+    <rect x="0" y="0" width="160" height="64" rx="3" fill="none" stroke="#3a3a3a" stroke-width="2"/>
+  </g>
+  <g id="turret" filter="url(#soft)">
+    <rect x="72" y="16" width="16" height="16" rx="3" fill="#252020"/>
+    <rect x="76" y="24" width="8" height="20" rx="2" fill="#3b1f1a"/>
+    <rect x="78" y="12" width="4" height="10" fill="#c9c2b6"/>
+  </g>
+
+  <!-- Universal Lv2 delta -->
+  <g id="delta-lv2" fill="none">
+    <rect x="2" y="2" width="156" height="60" rx="4"
+          stroke="#ffffff" stroke-opacity=".25" stroke-width="2"/>
+    <rect x="6" y="10" width="8" height="44" fill="#000" opacity=".15"/>
+    <rect x="146" y="10" width="8" height="44" fill="#000" opacity=".15"/>
+  </g>
+
+  <!-- Type delta: steel band + bolts -->
+  <g id="wall-delta">
+    <rect x="0" y="28" width="160" height="8" fill="#000" opacity=".25"/>
+    <circle cx="40" cy="32" r="2" fill="#222"/>
+    <circle cx="120" cy="32" r="2" fill="#222"/>
+  </g>
+</svg>
