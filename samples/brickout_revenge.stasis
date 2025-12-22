@@ -149,9 +149,14 @@ struct GameState {
 global state: GameState;
 global spr_paddle: i32;
 global spr_ball: i32;
-global spr_brick_basic: i32;
-global spr_brick_armored: i32;
-global spr_brick_reflector: i32;
+global spr_brick_basic_base: i32;
+global spr_brick_basic_turret: i32;
+global spr_brick_basic_fx: i32;
+global spr_brick_armored_base: i32;
+global spr_brick_armored_turret: i32;
+global spr_brick_armored_fx: i32;
+global spr_brick_reflector_base: i32;
+global spr_brick_reflector_fx: i32;
 
 function reset_frame_times(): void {
     let i: i32 = 0;
@@ -819,28 +824,61 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
 }
 
 function draw_bricks(): void {
+    let now_ms: i32 = get_time_ms();
+    let t_mod: i32 = now_ms % 2000;
+    let t_f: f32 = t_mod;
+    let phase: f32 = (t_f / 2000.0) * 2.0 * PI;
+    let wave: f32 = sin_fast(phase);
+    let pulse: f32 = 0.5 + 0.5 * wave;
+    let fx_alpha: f32 = 0.10 + 0.20 * pulse;
+
     foreach (let brick in state.bricks) {
         if (brick.active) {
-            let h: i32 = spr_brick_basic;
+            let h_base: i32 = spr_brick_basic_base;
+            let h_turret: i32 = spr_brick_basic_turret;
+            let h_fx: i32 = spr_brick_basic_fx;
             if (brick.brick_type == BRICK_BASIC) {
-                h = spr_brick_basic;
+                h_base = spr_brick_basic_base;
+                h_turret = spr_brick_basic_turret;
+                h_fx = spr_brick_basic_fx;
             }
             if (brick.brick_type == BRICK_ARMORED) {
-                h = spr_brick_armored;
+                h_base = spr_brick_armored_base;
+                h_turret = spr_brick_armored_turret;
+                h_fx = spr_brick_armored_fx;
             }
             if (brick.brick_type == BRICK_REFLECTOR) {
-                h = spr_brick_reflector;
+                h_base = spr_brick_reflector_base;
+                h_turret = 0;
+                h_fx = spr_brick_reflector_fx;
             }
 
             let cx: f32 = brick.x + brick.width / 2.0;
             let cy: f32 = brick.y + brick.height / 2.0;
             let sx: f32 = brick.width / 160.0;  // sprite viewBox width
             let sy: f32 = brick.height / 64.0;  // sprite viewBox height
-            if (h == 0) {
-                // Fallback: line rectangle when sprites are unavailable
-                draw_rect(brick.x, brick.y, brick.width, brick.height, 1.0, 1.0, 1.0, 1.0);
-            } else {
-                gfx_draw_sprite(h, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+
+            if (h_base != 0) {
+                gfx_draw_sprite(h_base, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+            }
+
+            // Turret bob/pulse (driven by time; no SVG animation tags)
+            if (h_turret != 0) {
+                let seed: f32 = cx * 0.013 + cy * 0.021;
+                let wobble: f32 = sin_fast(phase + seed);
+                let oy: f32 = wobble * 1.4;
+                let rot: f32 = wobble * 0.05;
+                let a: f32 = 0.85 + 0.15 * (0.5 + 0.5 * wobble);
+                gfx_draw_sprite(h_turret, cx, cy + oy, sx, sy, rot, 1.0, 1.0, 1.0, a);
+            }
+
+            // Effects layer (pulse alpha)
+            if (h_fx != 0) {
+                let a: f32 = fx_alpha;
+                if (brick.brick_type == BRICK_REFLECTOR) {
+                    a = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
+                }
+                gfx_draw_sprite(h_fx, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, a);
             }
 
             // Shot tracer (tower attack feedback)
@@ -1248,9 +1286,14 @@ function draw_frame(): void {
     // Hot reload during development (no flags for now)
     if (spr_paddle == 0) { } else { gfx_poll_reload(spr_paddle); }
     if (spr_ball == 0) { } else { gfx_poll_reload(spr_ball); }
-    if (spr_brick_basic == 0) { } else { gfx_poll_reload(spr_brick_basic); }
-    if (spr_brick_armored == 0) { } else { gfx_poll_reload(spr_brick_armored); }
-    if (spr_brick_reflector == 0) { } else { gfx_poll_reload(spr_brick_reflector); }
+    if (spr_brick_basic_base == 0) { } else { gfx_poll_reload(spr_brick_basic_base); }
+    if (spr_brick_basic_turret == 0) { } else { gfx_poll_reload(spr_brick_basic_turret); }
+    if (spr_brick_basic_fx == 0) { } else { gfx_poll_reload(spr_brick_basic_fx); }
+    if (spr_brick_armored_base == 0) { } else { gfx_poll_reload(spr_brick_armored_base); }
+    if (spr_brick_armored_turret == 0) { } else { gfx_poll_reload(spr_brick_armored_turret); }
+    if (spr_brick_armored_fx == 0) { } else { gfx_poll_reload(spr_brick_armored_fx); }
+    if (spr_brick_reflector_base == 0) { } else { gfx_poll_reload(spr_brick_reflector_base); }
+    if (spr_brick_reflector_fx == 0) { } else { gfx_poll_reload(spr_brick_reflector_fx); }
 
     draw_bricks();
     draw_balls();
@@ -1285,9 +1328,14 @@ function main(): i32 {
 
     spr_paddle = gfx_load_sprite("assets_src/brickout-revenge/paddle.svg");
     spr_ball = gfx_load_sprite("assets_src/brickout-revenge/ball.svg");
-    spr_brick_basic = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.svg");
-    spr_brick_armored = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.svg");
-    spr_brick_reflector = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
+    spr_brick_basic_base = gfx_load_sprite("assets_src/brickout-revenge/brick_basic.svg");
+    spr_brick_basic_turret = gfx_load_sprite("assets_src/brickout-revenge/brick_basic_turret.svg");
+    spr_brick_basic_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_basic_fx.svg");
+    spr_brick_armored_base = gfx_load_sprite("assets_src/brickout-revenge/brick_armored.svg");
+    spr_brick_armored_turret = gfx_load_sprite("assets_src/brickout-revenge/brick_armored_turret.svg");
+    spr_brick_armored_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_armored_fx.svg");
+    spr_brick_reflector_base = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
+    spr_brick_reflector_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector_fx.svg");
 
     seed_rng(time());
     init_game(true);

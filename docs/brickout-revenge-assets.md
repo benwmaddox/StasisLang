@@ -9,7 +9,7 @@ Goals:
 - Support hot reload during development by swapping backing textures while keeping handles stable.
 
 Non-goals (initial version):
-- Full SVG/Flash feature parity (masks, blend modes, filters, shape morphs).
+- Full SVG feature parity (masks, blend modes, filters, SVG text, SMIL animation, shape morphs).
 - A general-purpose retained-mode scene graph in Stasis.
 
 ## Directory Layout
@@ -45,8 +45,8 @@ Notes:
 ## Sprite Source Format: SVG (current)
 
 - Author sprites as standard SVG with explicit `width`/`height` or `viewBox` so rasterization is deterministic.
-- Keep shapes simple (rects/paths/lines) for predictable baking; gradients and light filters are OK if they rasterize well.
-- Animations (e.g., turret slit pulsing) are allowed but should stay lightweight to keep GPU uploads small.
+- Keep shapes simple (rects/paths/lines) for predictable baking; gradients/opacity are OK.
+- Do not rely on SVG filters or SMIL animation tags; the runtime bakes a single frame. Animate by layering sprites and varying transforms/alpha in Stasis code.
 - Legacy `.stv` has been removed; author sprites directly in SVG.
 
 Rasterization:
@@ -68,9 +68,14 @@ Recommended usage pattern:
 Canonical sources (SVG):
 - `assets_src/brickout-revenge/paddle.svg`
 - `assets_src/brickout-revenge/ball.svg`
-- `assets_src/brickout-revenge/brick_basic.svg`
-- `assets_src/brickout-revenge/brick_armored.svg`
-- `assets_src/brickout-revenge/brick_reflector.svg`
+- `assets_src/brickout-revenge/brick_basic.svg` (base)
+- `assets_src/brickout-revenge/brick_basic_turret.svg` (layer)
+- `assets_src/brickout-revenge/brick_basic_fx.svg` (layer)
+- `assets_src/brickout-revenge/brick_armored.svg` (base)
+- `assets_src/brickout-revenge/brick_armored_turret.svg` (layer)
+- `assets_src/brickout-revenge/brick_armored_fx.svg` (layer)
+- `assets_src/brickout-revenge/brick_reflector.svg` (base)
+- `assets_src/brickout-revenge/brick_reflector_fx.svg` (layer)
 
 ## Next Steps (Later)
 

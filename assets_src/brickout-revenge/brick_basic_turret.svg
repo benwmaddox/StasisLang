@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <g id="turret">
+    <rect x="72" y="24" width="16" height="16" rx="2" fill="#3b1f1a"/>
+    <rect x="76" y="12" width="8" height="12" rx="2" fill="#c9c2b6"/>
+    <rect x="78" y="10" width="4" height="6" fill="#8f877b"/>
+  </g>
+</svg>
