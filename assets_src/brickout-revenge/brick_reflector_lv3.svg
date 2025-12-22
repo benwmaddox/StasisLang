@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <!-- Base: electric/reflector brick -->
+  <g id="base">
+    <rect width="160" height="64" rx="4" fill="#4a4f63"/>
+    <rect x="4" y="4" width="152" height="56" rx="3" fill="#646b87"/>
+  </g>
+
+  <!-- Universal Lv2 + Lv3 deltas -->
+  <g id="delta-lv2" fill="none">
+    <rect x="2" y="2" width="156" height="60" rx="4"
+          stroke="#ffffff" stroke-opacity=".25" stroke-width="2"/>
+    <rect x="6" y="10" width="8" height="44" fill="#000" opacity=".15"/>
+    <rect x="146" y="10" width="8" height="44" fill="#000" opacity=".15"/>
+  </g>
+  <g id="delta-lv3" fill="none">
+    <rect x="1" y="1" width="158" height="62" rx="4"
+          stroke="#ffffff" stroke-opacity=".4" stroke-width="3"/>
+    <rect x="20" y="6" width="120" height="6" fill="#000" opacity=".18"/>
+    <rect x="20" y="52" width="120" height="6" fill="#000" opacity=".18"/>
+  </g>
+
+  <!-- Type delta: electric core -->
+  <g id="electric-delta" stroke="#ffff9a" stroke-width="2" fill="none">
+    <path d="M60 18L80 32 70 46"/>
+    <path d="M100 18L80 32 90 46"/>
+    <circle cx="80" cy="32" r="8" fill="#ffff9a" opacity=".4"/>
+  </g>
+
+  <g id="glyph">
+    <rect x="72" y="18" width="16" height="28" rx="3" fill="none" stroke="#e6e6ff" stroke-width="2"/>
+  </g>
+</svg>
