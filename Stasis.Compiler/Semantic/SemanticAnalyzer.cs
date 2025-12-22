@@ -16,6 +16,8 @@ public sealed class SemanticAnalyzer
         { "f64", new PrimitiveTypeSymbol("f64") },
         { "bool", new PrimitiveTypeSymbol("bool") },
         { "string", new PrimitiveTypeSymbol("string") },
+        { "utf8", new PrimitiveTypeSymbol("utf8") },
+        { "ascii", new PrimitiveTypeSymbol("ascii") },
         { "void", new VoidTypeSymbol() }
     };
 
@@ -217,9 +219,10 @@ public sealed class SemanticAnalyzer
             var type = ResolveType(decl.Type);
             AddSymbol(decl.Name.Text, SymbolKind.Const, type, decl.Name.Span);
 
-            // Validate that the initializer is a compile-time constant expression
-            // For now, we allow any expression - more sophisticated constant folding can be added later
-            // TODO: Add validation that initializer is a literal or constant expression
+            if (decl.Initializer is not LiteralExpressionSyntax)
+            {
+                _diagnostics.Add(new Diagnostic("Const initializers must be literal values for now.", decl.Initializer.Span));
+            }
         }
     }
 
@@ -815,7 +818,7 @@ public sealed class SemanticAnalyzer
                 {
                     TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
                     TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
-                    TokenKind.StringLiteral => new PrimitiveTypeSymbol("string"),
+                    TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
                     TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                     _ => null
                 };
@@ -858,6 +861,14 @@ public sealed class SemanticAnalyzer
 
     private bool AreTypesCompatible(TypeSymbol target, TypeSymbol source)
     {
+        if (source is PrimitiveTypeSymbol sourceLiteral && sourceLiteral.PrimitiveName == "string_literal")
+        {
+            return target is PrimitiveTypeSymbol targetPrim
+                && (targetPrim.PrimitiveName == "string"
+                    || targetPrim.PrimitiveName == "utf8"
+                    || targetPrim.PrimitiveName == "ascii");
+        }
+
         // Exact type match
         if (target.GetType() == source.GetType())
         {

@@ -7,6 +7,7 @@ public sealed record ParameterSyntax(Token Name, TypeSyntax Type)
 
 public sealed record FunctionDeclarationSyntax(
     Token FunctionKeyword,
+    IReadOnlyList<Token> Attributes,
     Token Name,
     IReadOnlyList<ParameterSyntax> Parameters,
     TypeSyntax? ReturnType,

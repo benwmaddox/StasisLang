@@ -76,6 +76,10 @@ public sealed class Lexer
                     Advance();
                     AddToken(TokenKind.Dot, ".", 1);
                     break;
+                case '@':
+                    Advance();
+                    AddToken(TokenKind.At, "@", 1);
+                    break;
                 case '&':
                     Advance();
                     if (!IsAtEnd() && Current == '&')

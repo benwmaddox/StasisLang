@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 global rng_state: i32;
 
 function seed_rng(seed: i32): void {

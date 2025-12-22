@@ -2,6 +2,7 @@ bin/
 obj/
 **/bin/
 **/obj/
+**/target/
 TestResults/
 *.csproj.user
 .vs/

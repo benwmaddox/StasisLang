@@ -28,6 +28,7 @@ TopLevelItemList -> TopLevelItem TopLevelItemList
 
 ```
 TopLevelItem     -> StructDecl
+                  | ImportDecl
                   | EnumDecl
                   | GlobalDecl
                   | FunctionDecl
@@ -37,6 +38,12 @@ TopLevelItem     -> StructDecl
 ---
 
 # **2. Declarations**
+
+## 2.0 Import Declarations
+
+```
+ImportDecl       -> "import" StringLiteral ";"
+```
 
 ## 2.1 Struct Declarations
 
@@ -85,10 +92,16 @@ GlobalDecl       -> "global" Identifier ":" Type ";"
 
 ```
 FunctionDecl     -> ExportOpt
-                    "function" Identifier
+                    "function" AttributeListOpt Identifier
                     "(" ParamListOpt ")"
                     ReturnTypeOpt
                     Block
+```
+
+```
+AttributeListOpt -> Attribute AttributeListOpt
+                  | <empty>
+Attribute        -> "@" Identifier
 ```
 
 ```
