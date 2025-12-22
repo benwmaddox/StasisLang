@@ -387,7 +387,8 @@ public sealed class CraneliftFunctionBuilder
 
         _instructions.AppendLine($"{latchBlock}:");
         var nextIndex = NewValue();
-        _instructions.AppendLine($"    {nextIndex} = iadd {currentIndex}, {ConstI32(1)}");
+        var one = ConstI32(1);
+        _instructions.AppendLine($"    {nextIndex} = iadd {currentIndex}, {one}");
         _instructions.AppendLine($"    store {nextIndex}, {indexSlot}");
         _instructions.AppendLine($"    jump {condBlock}");
 
@@ -3768,13 +3769,68 @@ public sealed class CraneliftFunctionBuilder
             AssignmentExpressionSyntax assign => GetExpressionType(assign.Right),
             CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                             _symbols.TryGetValue(id.Identifier.Text, out var funcSym) => funcSym.Type,
-            MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumId =>
-                _symbols.TryGetValue($"{enumId.Identifier.Text}.{member.Member.Text}", out var memberSym) ? memberSym.Type : null,
+            MemberAccessExpressionSyntax member when TryGetMemberType(member, out var memberType) => memberType,
             ArrayAccessExpressionSyntax array when GetExpressionType(array.Receiver) is ArrayTypeSymbol arr => arr.ElementType,
             BinaryExpressionSyntax bin => GetBinaryResultType(bin),
             OperatorCallExpressionSyntax op => GetOperatorCallResultType(op),
             _ => null
         };
+    }
+
+    private bool TryGetMemberType(MemberAccessExpressionSyntax member, out TypeSymbol? memberType)
+    {
+        // Array length property returns i32.
+        var receiverType = GetExpressionType(member.Receiver);
+        if (member.Member.Text == "length" && receiverType is ArrayTypeSymbol)
+        {
+            memberType = new PrimitiveTypeSymbol("i32");
+            return true;
+        }
+
+        // Enum members are recorded in the symbol table (e.g., Color.Red).
+        if (member.Receiver is IdentifierExpressionSyntax enumId &&
+            _symbols.TryGetValue($"{enumId.Identifier.Text}.{member.Member.Text}", out var memberSym))
+        {
+            memberType = memberSym.Type;
+            return memberType is not null;
+        }
+
+        // Foreach element bindings know their struct element type.
+        if (member.Receiver is IdentifierExpressionSyntax iterId &&
+            _elementBindings.TryGetValue(iterId.Identifier.Text, out var binding) &&
+            binding.ElementType is NamedTypeSymbol iterStruct &&
+            _structs.TryGetValue(iterStruct.TypeName, out var iterStructDecl))
+        {
+            var field = iterStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+            if (field is not null)
+            {
+                memberType = ResolveType(field.Type);
+                return true;
+            }
+        }
+
+        // Globals/flattened structs.
+        if (TryResolveMemberBase(member.Receiver, out _, out var baseType) &&
+            baseType is NamedTypeSymbol named &&
+            _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
+            if (field is not null)
+            {
+                memberType = ResolveType(field.Type);
+                return true;
+            }
+        }
+
+        // Already-flattened member (struct field lowered to separate global).
+        if (TryResolveFlattenedMember(member, out _, out var flattenedType))
+        {
+            memberType = flattenedType;
+            return true;
+        }
+
+        memberType = null;
+        return false;
     }
 
     private TypeSymbol? GetOperatorCallResultType(OperatorCallExpressionSyntax op)
