@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -161,8 +162,11 @@ if (!ShouldSuppressWarnings() && backend == BackendType.Cranelift && selectedBac
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift native output is only implemented for Windows x64 currently.");
-        emitIrOnly = true;
+        if (!emitIrOnly)
+        {
+            Console.Error.WriteLine("warning: forcing --emit-ir mode since Cranelift native output is only implemented for Windows x64 currently.");
+            emitIrOnly = true;
+        }
     }
 }
 
@@ -723,11 +727,17 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
     if (isDll)
     {
         args.Add("-shared");
-        args.Add("-Wl,/NOIMPLIB");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            args.Add("-Wl,/NOIMPLIB");
+        }
     }
     args.Add("-o");
     args.Add($"\"{outputPath}\"");
-    args.Add("-Wl,/NOLOGO");
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        args.Add("-Wl,/NOLOGO");
+    }
 
     if (!string.IsNullOrWhiteSpace(optLevel))
     {
@@ -737,8 +747,11 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
     if (enableLto)
     {
         args.Add("-flto");
-        args.Add("-fuse-ld=lld");
-        args.Add("-Wl,/nodefaultlib:libucrt");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            args.Add("-fuse-ld=lld");
+            args.Add("-Wl,/nodefaultlib:libucrt");
+        }
     }
 
     // Reuse the existing link setup logic (libs, graphics runtime, Windows SDK libs).
@@ -796,27 +809,37 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
     if (isDll)
     {
         var exportName = entryName ?? (isTest ? "run_tests" : "main");
-        args.Add($"-Wl,/EXPORT:{exportName}");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            args.Add($"-Wl,/EXPORT:{exportName}");
+        }
     }
     else if (isTest || entryName is not null)
     {
         var entry = entryName ?? "run_tests";
-        args.Add($"-Wl,/entry:{entry}");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            args.Add($"-Wl,/entry:{entry}");
+        }
+        else
+        {
+            args.Add($"-Wl,-e,{entry}");
+        }
     }
 
-    if (!isDll)
+    if (!isDll && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         args.Add("-Wl,/subsystem:console");
         args.Add("-Wl,/ignore:4210");
         args.Add("-Wl,/STACK:8388608");
     }
 
-    if (linkingStaticGraphics)
+    if (linkingStaticGraphics && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         args.Add("-Wl,/NODEFAULTLIB:libcmt");
     }
 
-    var sdkRoot = GetLatestWindowsSdkLib();
+    var sdkRoot = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? GetLatestWindowsSdkLib() : null;
     if (sdkRoot is not null)
     {
         var ucrt = Path.Combine(sdkRoot, "ucrt", "x64");
@@ -999,7 +1022,10 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
 {
     var args = new List<string> { $"\"{llPath}\"", "-o", $"\"{exePath}\"" };
-    args.Add("-Wl,/NOLOGO");
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        args.Add("-Wl,/NOLOGO");
+    }
     var linkingStaticGraphics = false;
     args.Add("-Wno-override-module");
     if (!string.IsNullOrWhiteSpace(optLevel))
@@ -1199,33 +1225,14 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
 
 static bool DetectsGraphicsUsage(string source)
 {
-    // Check if source code uses graphics functions
-    // These are the key graphics API functions that indicate graphics usage
-    string[] graphicsFunctions = {
-        "init_window",
-        "begin_frame",
-        "end_frame",
-        "draw_line",
-        "clear(",
-        "gfx_load_sprite",
-        "gfx_draw_sprite",
-        "gfx_poll_reload",
-        "gfx_debug_bake_hash",
-        "should_quit",
-        "is_key_down",
-        "get_mouse_x",
-        "get_mouse_y",
-        "is_mouse_down"
-    };
-
-    foreach (var func in graphicsFunctions)
-    {
-        if (source.Contains(func))
-        {
-            return true;
-        }
-    }
-    return false;
+    // Detect direct calls to the graphics runtime API. Use a "not preceded by identifier char"
+    // check so we don't trigger on helpers like ascii_clear() in the stdlib.
+    return Regex.IsMatch(
+        source,
+        @"(?<![A-Za-z0-9_])" +
+        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down)" +
+        @"\s*\(",
+        RegexOptions.CultureInvariant);
 }
 
 static string? FindGraphicsLibrary(bool preferShared = false)

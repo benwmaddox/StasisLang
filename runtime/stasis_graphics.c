@@ -241,15 +241,6 @@ static void flush_lines(void) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDrawBuffer(GL_BACK);
 
-    if (g_debug_frame_counter < 5) {
-        SDL_Log("flush_lines frame %d: count=%d", g_debug_frame_counter, g_line_count);
-        if (g_line_count > 0) {
-            SDL_Log("line0: (%.2f,%.2f)->(%.2f,%.2f) rgba=%.2f,%.2f,%.2f,%.2f",
-                g_lines[0].x1, g_lines[0].y1, g_lines[0].x2, g_lines[0].y2,
-                g_lines[0].r, g_lines[0].g, g_lines[0].b, g_lines[0].a);
-        }
-    }
-
     /* Build vertex buffer */
     int vtx_count = g_line_count * 2;
     for (int i = 0; i < g_line_count; i++) {
@@ -1243,7 +1234,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
                 SDL_GL_DeleteContext(g_gl_context);
                 g_gl_context = NULL;
             } else {
-                SDL_GL_SetSwapInterval(1);
+                int swap_ok = SDL_GL_SetSwapInterval(1);
+                if (swap_ok != 0) {
+                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync): %s", SDL_GetError());
+                }
                 glViewport(0, 0, width, height);
                 glDisable(GL_SCISSOR_TEST);
                 glEnable(GL_BLEND);
@@ -1278,6 +1272,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             SDL_DestroyWindow(g_window);
             SDL_Quit();
             return 0;
+        }
+        if (SDL_RenderSetVSync(g_renderer, 1) != 0) {
+            SDL_Log("SDL_RenderSetVSync failed: %s", SDL_GetError());
         }
         SDL_RenderSetLogicalSize(g_renderer, width, height);
         SDL_RendererInfo info;
@@ -1547,6 +1544,14 @@ static int sprite_find_by_path(const char* path) {
     return 0;
 }
 
+static int gfx_should_log_sprite_loads(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+    const char* env = getenv("STASIS_GFX_LOG_SPRITES");
+    cached = (env && env[0] == '1') ? 1 : 0;
+    return cached;
+}
+
 static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
@@ -1662,19 +1667,21 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
         return 0;
     }
 
-    /* Debug: log path and cwd for easier troubleshooting */
-    char cwd[512];
+    if (gfx_should_log_sprite_loads()) {
+        /* Optional: debug logging for troubleshooting */
+        char cwd[512];
 #if defined(_WIN32)
-    if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
+        if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
 #else
-    if (getcwd(cwd, sizeof(cwd)) != NULL)
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
 #endif
-    {
-        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
-    }
-    else
-    {
-        fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
+        {
+            fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
+        }
+        else
+        {
+            fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
+        }
     }
 
     int existing = sprite_find_by_path(resolved);
@@ -1693,7 +1700,9 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
                 return 0;
             }
             g_sprite_count++;
-            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            if (gfx_should_log_sprite_loads()) {
+                SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            }
             return i + 1;
         }
     }
