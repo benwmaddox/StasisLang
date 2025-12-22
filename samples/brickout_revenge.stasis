@@ -1327,44 +1327,48 @@ function main(): i32 {
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
+    return 0;
+}
 
-    let frame: i32 = 0;
-    for (frame = 0; state.running == 1; frame = frame + 1) {
-        state.timers.frame_start = get_time_ms();
-
-        let quit: bool = should_quit();
-        if (quit) {
-            state.running = 0;
-        }
-
-        if (is_key_down(KEY_ESCAPE)) {
-            state.running = 0;
-        }
-
-        if (state.running == 1) {
-            begin_frame();
-            clear(0.05, 0.05, 0.15, 1.0);
-
-            let delta_ms: i32 = compute_delta_ms();
-            let delta_f: f32 = delta_ms;
-            let dt: f32 = delta_f / 1000.0;
-
-            update_game(dt, delta_ms);
-            draw_frame();
-
-            // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
-            let frame_end: i32 = get_time_ms();
-            state.timers.tick_time_ms = frame_end - state.timers.frame_start;
-            if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
-
-            // Store in circular buffer for averaging
-            state.frame_timer.sample_index =
-                frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
-
-            end_frame();
-            sync_frame_rate();
-        }
+function tick(): i32 {
+    if (state.running != 1) {
+        return 1;
     }
 
+    state.timers.frame_start = get_time_ms();
+
+    let quit: bool = should_quit();
+    if (quit) {
+        state.running = 0;
+    }
+
+    if (is_key_down(KEY_ESCAPE)) {
+        state.running = 0;
+    }
+
+    if (state.running != 1) {
+        return 1;
+    }
+
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
+
+    let delta_ms: i32 = compute_delta_ms();
+    let delta_f: f32 = delta_ms;
+    let dt: f32 = delta_f / 1000.0;
+
+    update_game(dt, delta_ms);
+    draw_frame();
+
+    // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
+    let frame_end: i32 = get_time_ms();
+    state.timers.tick_time_ms = frame_end - state.timers.frame_start;
+    if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
+
+    // Store in circular buffer for averaging
+    state.frame_timer.sample_index =
+        frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
+
+    end_frame();
     return 0;
 }
