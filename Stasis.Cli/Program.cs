@@ -1784,6 +1784,9 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var swapDir = Path.Combine(repoRoot, "build", "hotstate");
     var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA.dll");
     var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB.dll");
+    var pid = Environment.ProcessId;
+    var hotClifPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap.clif");
+    var hotObjPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap.obj");
     Directory.CreateDirectory(Path.GetDirectoryName(swapFile)!);
     try
     {
@@ -1882,15 +1885,13 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var hotDll = activeDll is null
             ? swapDllA
             : (string.Equals(activeDll, swapDllA, StringComparison.OrdinalIgnoreCase) ? swapDllB : swapDllA);
-        var clifPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
-        var objPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.obj");
-        File.WriteAllText(clifPath, result.Ir);
+        File.WriteAllText(hotClifPath, result.Ir);
         clifWriteMs = phase.ElapsedMilliseconds;
         phase.Restart();
 
         try
         {
-            var aotExit = RunCraneliftAot(aotTool, clifPath, objPath, moduleName, optLevel, out var spawnFallback, out var compileFallback);
+            var aotExit = RunCraneliftAot(aotTool, hotClifPath, hotObjPath, moduleName, optLevel, out var spawnFallback, out var compileFallback);
             aotSpawnMs = spawnFallback ?? 0;
             aotCompileMs = compileFallback;
             if (aotExit != 0)
@@ -1906,7 +1907,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             planMs = phase.ElapsedMilliseconds;
             phase.Restart();
 
-            var linkArgs = BuildClangArgsForObject(objPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
+            var linkArgs = BuildClangArgsForObject(hotObjPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
             if (OperatingSystem.IsWindows())
             {
                 // Hot-swap speed: skip expensive pruning/dedup; we don't care about DLL size for dev.
@@ -1964,13 +1965,20 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         finally
         {
-            if (File.Exists(clifPath))
+            try
             {
-                File.Delete(clifPath);
+                if (File.Exists(hotClifPath))
+                {
+                    File.Delete(hotClifPath);
+                }
+                if (File.Exists(hotObjPath))
+                {
+                    File.Delete(hotObjPath);
+                }
             }
-            if (File.Exists(objPath))
+            catch
             {
-                File.Delete(objPath);
+                // Best-effort cleanup.
             }
         }
     }
