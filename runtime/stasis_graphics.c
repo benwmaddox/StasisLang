@@ -1544,6 +1544,14 @@ static int sprite_find_by_path(const char* path) {
     return 0;
 }
 
+static int gfx_should_log_sprite_loads(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+    const char* env = getenv("STASIS_GFX_LOG_SPRITES");
+    cached = (env && env[0] == '1') ? 1 : 0;
+    return cached;
+}
+
 static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
@@ -1659,19 +1667,21 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
         return 0;
     }
 
-    /* Debug: log path and cwd for easier troubleshooting */
-    char cwd[512];
+    if (gfx_should_log_sprite_loads()) {
+        /* Optional: debug logging for troubleshooting */
+        char cwd[512];
 #if defined(_WIN32)
-    if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
+        if (_getcwd(cwd, (int)sizeof(cwd)) != NULL)
 #else
-    if (getcwd(cwd, sizeof(cwd)) != NULL)
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
 #endif
-    {
-        fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
-    }
-    else
-    {
-        fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
+        {
+            fprintf(stderr, "gfx_load_sprite: cwd=%s path=%s (resolved %s)\n", cwd, path, resolved);
+        }
+        else
+        {
+            fprintf(stderr, "gfx_load_sprite: path=%s (resolved %s)\n", path, resolved);
+        }
     }
 
     int existing = sprite_find_by_path(resolved);
@@ -1690,7 +1700,9 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path) {
                 return 0;
             }
             g_sprite_count++;
-            SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            if (gfx_should_log_sprite_loads()) {
+                SDL_Log("gfx_load_sprite: %s -> handle=%d (%s)", resolved, i + 1, g_use_sdl_renderer ? "sdl" : "gl");
+            }
             return i + 1;
         }
     }
