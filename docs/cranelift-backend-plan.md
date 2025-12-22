@@ -529,6 +529,7 @@ Source (.stasis)
 - Calling convention mismatch (`system_v` vs `windows_fastcall`) can cause runtime crashes even if linking succeeds.
 - External symbol naming and import libraries must match the Windows COFF toolchain expectations.
 - `test` mode currently uses `/entry:run_tests` on Windows; for Cranelift we may need a small CRT-aware entry stub for reliability.
+- TODO: Investigate float-to-int cast lowering/semantics in the Cranelift backend (observed `f32 -> i32` producing verifier-invalid IR like `sextend` on an `f32`, and/or wrong runtime values; repro: Brickout frame-time HUD previously pinned at `9999`).
 
 **Current status (2025-12-18):**
 
