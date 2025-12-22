@@ -1908,6 +1908,11 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             phase.Restart();
 
             var linkArgs = BuildClangArgsForObject(objPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
+            if (OperatingSystem.IsWindows())
+            {
+                // Hot-swap speed: skip expensive pruning/dedup; we don't care about DLL size for dev.
+                linkArgs += " -Wl,/OPT:NOREF -Wl,/OPT:NOICF -Wl,/DEBUG:NONE";
+            }
             var linkExit = RunProcess(clang, linkArgs, suppressOutput: true);
             linkMs = phase.ElapsedMilliseconds;
             phase.Restart();
