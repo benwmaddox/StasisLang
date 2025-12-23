@@ -29,6 +29,7 @@ var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
 var watch = false;
+var watchExplicit = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
@@ -44,10 +45,8 @@ while (cliArgs.Count > 0)
     switch (arg)
     {
         case "dev":
-            // Dev mode: optimized for iteration (watch + tick hot-swap when available).
-            devMode = true;
+            // Back-compat alias for the run dev workflow.
             mode = "run";
-            watch = true;
             break;
         case "build":
             mode = arg;
@@ -82,6 +81,7 @@ while (cliArgs.Count > 0)
             break;
         case "--watch":
             watch = true;
+            watchExplicit = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -163,10 +163,7 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
     Environment.Exit(1);
 }
 
-if (devMode)
-{
-    Environment.SetEnvironmentVariable("STASIS_PHASE_TIMING", "1");
-}
+devMode = mode == "run";
 
 // Set default backend based on mode if not explicitly specified
 var backend = selectedBackend ?? CodeGeneratorFactory.GetDefaultBackend(mode == "release");
@@ -240,6 +237,22 @@ if (mode == "format")
 }
 
 LlvmNativeLoader.EnsureLoaded();
+
+// Dev defaults: in run mode, auto-enable watch for tick-hosted games (or likely graphics programs),
+// and enable phase timing output when watching. (Explicit --watch always wins.)
+if (devMode && !watchExplicit && File.Exists(path))
+{
+    var sourceForDetect = File.ReadAllText(path);
+    if (DetectsTickUsage(sourceForDetect) || DetectsGraphicsUsage(sourceForDetect))
+    {
+        watch = true;
+    }
+}
+
+if (devMode && watch)
+{
+    Environment.SetEnvironmentVariable("STASIS_PHASE_TIMING", "1");
+}
 
 if (watch)
 {
@@ -2026,8 +2039,13 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     {
         if (runner is not null && runner.HasExited)
         {
+            if (runner.ExitCode == 0)
+            {
+                return 0;
+            }
+
             Console.Error.WriteLine($"error: runner exited with code {runner.ExitCode}");
-            break;
+            return 1;
         }
 
         try
@@ -2336,17 +2354,16 @@ static string QuoteArg(string arg) =>
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc dev <file> [--fps <1..240>] [--module <name>]");
+    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>]");
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");
-    Console.WriteLine("  stasisc run <file> [--watch] [--fps <1..240>] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
-    Console.WriteLine("Dev: 'dev' implies --watch and enables per-phase timing output; if your program defines `function tick()`, the host will hot-swap between ticks and preserve the global 'state' automatically (main() is not called again on swaps).");
+    Console.WriteLine("Run: for games that define `function tick()`, 'run' defaults to a dev loop (auto-watch + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
