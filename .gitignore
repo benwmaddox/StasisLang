@@ -38,3 +38,4 @@ samples/*_simple.stasis
 samples/**/stasis_graphics.dll
 samples/**/SDL2.dll
 samples/**/glew32.dll
+samples/**/build/

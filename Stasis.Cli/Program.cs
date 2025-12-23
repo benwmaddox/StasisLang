@@ -1839,7 +1839,20 @@ static string BuildDefaultOutputPath(string sourcePath)
     var dir = Path.GetDirectoryName(sourcePath);
     var name = Path.GetFileNameWithoutExtension(sourcePath);
     var ext = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty;
-    return Path.Combine(string.IsNullOrEmpty(dir) ? Directory.GetCurrentDirectory() : dir, name + ext);
+
+    var baseDir = string.IsNullOrEmpty(dir) ? Directory.GetCurrentDirectory() : dir;
+    var projectBuildDir = Path.Combine(baseDir, "build");
+    var hasProjectStructure =
+        Directory.Exists(Path.Combine(baseDir, "assets")) ||
+        Directory.Exists(Path.Combine(baseDir, "data")) ||
+        Directory.Exists(projectBuildDir);
+
+    if (hasProjectStructure)
+    {
+        return Path.Combine(projectBuildDir, name + ext);
+    }
+
+    return Path.Combine(baseDir, name + ext);
 }
 
 static string GetHotExitFilePath(string sourcePath, string moduleName)
