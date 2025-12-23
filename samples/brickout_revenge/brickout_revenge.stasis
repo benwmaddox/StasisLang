@@ -40,11 +40,12 @@ const BRICK_BASIC: i32 = 0;
 const BRICK_ARMORED: i32 = 1;
 const BRICK_REFLECTOR: i32 = 2;
 
-// Game phases
-const PHASE_SETUP: i32 = 0;
-const PHASE_BATTLE: i32 = 1;
-const PHASE_WIN: i32 = 2;
-const PHASE_LOSE: i32 = 3;
+enum Phase {
+    Setup,
+    Battle,
+    Win,
+    Lose
+}
 
 // Math
 const PI: f32 = 3.14159;
@@ -214,7 +215,7 @@ struct GameState {
     timers: Timers;
     frame_timer: FrameTimer;
     initialized: i32;
-    phase: i32;
+    phase: Phase;
     wave: i32;
     score: i32;
     balls_spawned: i32;
@@ -425,7 +426,7 @@ function init_game(reset_progress: bool): void {
 
     // Game state
     // Start immediately in battle; no setup pause.
-    state.phase = PHASE_BATTLE;
+    state.phase = Phase.Battle;
     state.balls_spawned = 0;
     state.running = 1;
 
@@ -903,7 +904,7 @@ function handle_setup_input(): void {
 
 // Update game logic
 function update_game(dt: f32, delta_ms: i32): void {
-    if (state.phase == PHASE_BATTLE) {
+    if (state.phase == Phase.Battle) {
         // Spawn balls periodically (stress test: no limit)
         state.timers.ball_spawn_cd = state.timers.ball_spawn_cd - delta_ms;
         if (state.timers.ball_spawn_cd < 0) {
@@ -923,7 +924,7 @@ function update_game(dt: f32, delta_ms: i32): void {
         let active_balls: i32 = count_active_balls();
 
         if (active_bricks == 0) {
-            state.phase = PHASE_LOSE; // All bricks destroyed = player loses
+            state.phase = Phase.Lose; // All bricks destroyed = player loses
             state.timers.phase_timer = 0;
         }
 
@@ -941,7 +942,7 @@ function update_game(dt: f32, delta_ms: i32): void {
 
     // Handle end phases (WIN or LOSE)
     let in_end_phase: bool = false;
-    if (state.phase == PHASE_LOSE) { in_end_phase = true; }
+    if (state.phase == Phase.Lose) { in_end_phase = true; }
 
     if (in_end_phase) {
         state.timers.phase_timer = state.timers.phase_timer + delta_ms;
@@ -1424,7 +1425,7 @@ function draw_ui(): void {
     hud_draw_bricks(sw - 190.0, sh - 32.0, 3.0);
     draw_number(active_bricks_count, sw - 80.0, sh - 30.0, 4.0);
 
-    if (state.phase == PHASE_LOSE) {
+    if (state.phase == Phase.Lose) {
         // "LOSE" indicator
         draw_rect(sw / 2.0 - 40.0, sh / 2.0 - 20.0, 80.0, 40.0, 1.0, 0.3, 0.3, 1.0);
     }
