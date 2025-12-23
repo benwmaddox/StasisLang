@@ -140,6 +140,72 @@ Treat SVG as a clean source format and drive most animation from code:
 - Keep a consistent `viewBox` contract per asset family so sizing stays predictable.
 - If an SVG looks good in a browser but fails to bake, reduce it to simple paths/rects/circles with solid fills/strokes.
 
+## Approaches That Work Well in Stasis (today)
+
+Stasis is opinionated: static global memory, deterministic layouts, and predictable performance. Lean into that.
+
+### Best fit genres and patterns
+
+- Arcade games with fixed entity budgets (brickout, flappy, shmups, top-down action).
+- Bullet-hell / particle-heavy games where "lots of simple things" is the core.
+- Deterministic simulations (replays, lockstep multiplayer later) driven by a stored RNG seed.
+- Grid/tile based games (tilemap + entity layer) with fixed-size arrays.
+- Data-oriented entity updates: arrays of positions, velocities, flags; update in tight loops.
+
+### Architecture patterns that scale
+
+- "One world struct": `state.world` contains all gameplay data; other sub-structs are systems (input, ui, metrics, audio).
+- Indices, not pointers: store `entity_id` indices and look up into arrays.
+- Fixed pools with free lists:
+  - `alive: i32[Max]`
+  - `next_free: i32[Max]` + `free_head: i32`
+  - This keeps allocation deterministic and fast.
+- Separation of concerns by update passes:
+  - gather input
+  - integrate movement
+  - resolve collisions
+  - apply damage/effects
+  - render
+- "Debug build overlay": keep a HUD that can show timing, counts, and a few key state values (toggleable).
+
+### Asset and rendering patterns that hold up
+
+- Make sprite sizing explicit in code:
+  - define logical widths/heights for gameplay (collision)
+  - define separate visual scaling (render)
+- Treat SVG as source, not a runtime scene graph:
+  - bake to atlas once, then render quads every frame
+  - do animation in code by choosing layers or applying offsets/rotations
+- Keep draw order and layers deterministic so issues are easy to reason about.
+
+## Approaches That Usually Fight Stasis (today)
+
+These are not impossible forever, but they are high friction given the current memory model, toolchain, and hot-swap workflow.
+
+### Avoid (or postpone) these patterns
+
+- Dynamic heap-style object graphs (linked lists, trees of nodes, "each entity is a heap object").
+- Variable-sized collections that grow/shrink constantly (lists/vectors/maps) for core gameplay.
+- String-heavy logic in the hot path (building lots of strings each tick, parsing text each frame).
+- Doing file IO, asset baking, or network calls in `tick()` (it will stall hot swap and destroy timings).
+- Large "engine inside the game" abstractions:
+  - deep inheritance-style OOP patterns
+  - dynamic dispatch per entity per frame
+  - reflection-like systems
+
+### Things to be cautious with
+
+- Frequent `state` layout changes during hot-swap sessions:
+  - reordering fields can break compatibility
+  - changing array sizes changes the snapshot size
+  - prefer adding new fields at the end and guarding with versioning
+- Complex SVG features:
+  - filters, masks, and SMIL animation often fail deterministic baking
+  - keep assets within the supported subset and animate via code
+- Over-reliance on "real time" deltas:
+  - prefer a fixed or clamped timestep for stable gameplay
+  - use frame timers only for metrics, not for core simulation behavior
+
 ## Coding Checklist for "Fun Fast"
 
 ### State and structure
