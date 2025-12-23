@@ -13,7 +13,6 @@ import "../../src/stdlib/sdl_scancodes.stasis";
 // - init_window(width: i32, height: i32, title: string) -> bool
 // - time() -> i64: returns unix timestamp for seeding PRNG
 // - get_time_ms() -> i32: millisecond clock
-// - sleep_ms(ms: i32): pause thread
 // - should_quit() -> bool: polls SDL quit events
 // - begin_frame(), end_frame(): bracket GPU work
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
@@ -91,7 +90,6 @@ struct BrickoutWaveConfig {
 }
 
 struct BrickoutTimingConfig {
-    frame_time_ms: i32;
     ball_spawn_cd_ms: i32;
     end_phase_restart_ms: i32;
 }
@@ -1384,15 +1382,6 @@ function compute_delta_ms(): i32 {
     if (delta_ms > 100) { delta_ms = 100; }
     state.timers.last_time = current_time;
     return delta_ms;
-}
-
-function sync_frame_rate(): void {
-    let frame_end: i32 = get_time_ms();
-    let elapsed: i32 = frame_end - state.timers.frame_start;
-    let sleep_time: i32 = state.config.timing.frame_time_ms - elapsed;
-    if (sleep_time > 0) {
-        sleep_ms(sleep_time);
-    }
 }
 
 function main(): i32 {

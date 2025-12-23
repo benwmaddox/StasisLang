@@ -26,6 +26,7 @@ _ReSharper.Caches/
 runtime/build/
 codevcpkg/
 build/hotstate/
+samples/**/stasis_graphics.lib
 
 # Debug/temp files
 nul
