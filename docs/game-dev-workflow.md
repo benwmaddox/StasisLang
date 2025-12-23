@@ -43,8 +43,10 @@ Reason: the hot-swap workflow copies `state` from the old module into the new mo
 
 ### 3) Use a sentinel to avoid clobbering restored state
 
-When using hot-swap, the host restores `state` *before* calling `main()`/`tick()`.
-If you always run `init_game(true)` unconditionally, you will overwrite the restored data.
+In the tick hot-swap workflow, `main()` is called once at process start, and hot swaps do not call `main()` again.
+That means swaps between ticks will not re-run your init code.
+
+However, if you use a workflow that restores `state` and then calls `main()` (eg. restart-based restore), `main()` can clobber restored data.
 
 Use a sentinel like:
 
@@ -113,7 +115,9 @@ On each code edit:
    - copies `state` out of the old DLL
    - `LoadLibraryA()` the new DLL
    - restores `state` into the new DLL
-   - continues calling `tick()`
+   - continues calling `tick()` (does not call `main()` on swap)
+
+This is a same-process swap: your game keeps running, and state stays in memory.
 
 ### Reading the timing logs
 
