@@ -1,6 +1,6 @@
 # Brickout Revenge - Graphics Asset Pipeline (Dev-First)
 
-This document defines a simple, dev-friendly way to author and hot-reload visuals for `samples/brickout_revenge.stasis` without adding CLI flags.
+This document defines a simple, dev-friendly way to author and hot-reload visuals for `samples/brickout_revenge/brickout_revenge.stasis` without adding CLI flags.
 
 Goals:
 - Author visuals as small vector-like source files.
@@ -14,7 +14,7 @@ Non-goals (initial version):
 
 ## Directory Layout
 
-- Source (editable): `assets_src/brickout-revenge/*.svg`
+- Source (editable): `samples/brickout_revenge/assets/*.svg`
 - Cache (generated): `assets_cache/brickout-revenge/*.bin` (optional; future)
 
 The runtime always attempts to load from the source path you pass. If you later want to ship only baked assets, you can keep the same Stasis code and have the runtime fall back to cached/embedded bytes (not implemented yet).
@@ -66,16 +66,16 @@ Recommended usage pattern:
 ## Breakout Revenge - Sprite Set
 
 Canonical sources (SVG):
-- `assets_src/brickout-revenge/paddle.svg`
-- `assets_src/brickout-revenge/ball.svg`
-- `assets_src/brickout-revenge/brick_basic.svg` (base)
-- `assets_src/brickout-revenge/brick_basic_turret.svg` (layer)
-- `assets_src/brickout-revenge/brick_basic_fx.svg` (layer)
-- `assets_src/brickout-revenge/brick_armored.svg` (base)
-- `assets_src/brickout-revenge/brick_armored_turret.svg` (layer)
-- `assets_src/brickout-revenge/brick_armored_fx.svg` (layer)
-- `assets_src/brickout-revenge/brick_reflector.svg` (base)
-- `assets_src/brickout-revenge/brick_reflector_fx.svg` (layer)
+- `samples/brickout_revenge/assets/paddle.svg`
+- `samples/brickout_revenge/assets/ball.svg`
+- `samples/brickout_revenge/assets/brick_basic.svg` (base)
+- `samples/brickout_revenge/assets/brick_basic_turret.svg` (layer)
+- `samples/brickout_revenge/assets/brick_basic_fx.svg` (layer)
+- `samples/brickout_revenge/assets/brick_armored.svg` (base)
+- `samples/brickout_revenge/assets/brick_armored_turret.svg` (layer)
+- `samples/brickout_revenge/assets/brick_armored_fx.svg` (layer)
+- `samples/brickout_revenge/assets/brick_reflector.svg` (base)
+- `samples/brickout_revenge/assets/brick_reflector_fx.svg` (layer)
 
 ## Next Steps (Later)
 

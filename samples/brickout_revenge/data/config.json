@@ -1,0 +1,78 @@
+{
+  "config": {
+    "screen": {
+      "w": 800,
+      "h": 600
+    },
+    "grid": {
+      "origin_x": 50.0,
+      "margin_bottom": 50.0,
+      "spacing": 5.0
+    },
+    "brick": {
+      "width": 60.0,
+      "height": 20.0
+    },
+    "paddle": {
+      "y": 30.0,
+      "width": 100.0,
+      "height": 10.0,
+      "speed": 400.0
+    },
+    "ball": {
+      "radius": 6.0,
+      "spawn_jitter_x": 30.0,
+      "clamp_margin_x": 100.0,
+      "vx_rand": 100.0,
+      "speed_min_base": 150.0,
+      "speed_min_per_wave": 10.0,
+      "speed_max_base": 250.0,
+      "speed_max_per_wave": 12.0,
+      "damage_base": 1,
+      "damage_wave_div": 4,
+      "hp_base": 20,
+      "hp_wave_div": 2,
+      "hp_scale": 10
+    },
+    "wave": {
+      "start_wave": 1,
+      "start_max_balls_wave": 5,
+      "max_balls_wave_add": 2,
+      "start_spawn_balls": 90
+    },
+    "timing": {
+      "frame_time_ms": 16,
+      "ball_spawn_cd_ms": 1000,
+      "end_phase_restart_ms": 3000
+    },
+    "fx": {
+      "jiggle_threshold": 10,
+      "jiggle_degrees": 5.0,
+      "paddle_aim_degrees": 15.0,
+      "paddle_bounce_vx_scale": 200.0
+    },
+    "tower_basic": {
+      "range": 140.0,
+      "cooldown_ms": 220,
+      "damage": 1,
+      "shot_fx_ms": 90
+    },
+    "tower_armored": {
+      "range": 160.0,
+      "cooldown_ms": 320,
+      "damage": 2,
+      "shot_fx_ms": 90
+    },
+    "tower_reflector": {
+      "range": 190.0,
+      "cooldown_ms": 180,
+      "damage": 1,
+      "shot_fx_ms": 90
+    },
+    "score": {
+      "ball_kill": 1,
+      "brick_kill": 10
+    }
+  }
+}
+
