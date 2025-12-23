@@ -52,7 +52,7 @@ static void print_usage(void)
     fprintf(stderr, "usage: stasis_runner <dll_path> [entry]\n");
     fprintf(stderr, "  entry defaults to run_tests (use main for run mode)\n");
     fprintf(stderr, "usage: stasis_runner --server\n");
-    fprintf(stderr, "usage: stasis_runner <dll_path> [entry] --state <snapshot_path> --state-map <map_path> [--hot-exit-file <path>]\n");
+    fprintf(stderr, "usage: stasis_runner <dll_path> [entry] --state-map <map_path> [--state <snapshot_path>] [--hot-exit-file <path>]\n");
 }
 
 #ifdef _WIN32
@@ -608,9 +608,9 @@ int main(int argc, char **argv)
         }
     }
 
-    if ((state_path != NULL) != (state_map_path != NULL))
+    if (state_path != NULL && state_map_path == NULL)
     {
-        fprintf(stderr, "error: --state and --state-map must be provided together.\n");
+        fprintf(stderr, "error: --state requires --state-map.\n");
         return 1;
     }
 
@@ -638,7 +638,7 @@ int main(int argc, char **argv)
     uint64_t map_hash = 0;
     uint8_t *restore_data = NULL;
     stasis_hot_exit_args hot_exit_args = {0};
-    if (state_path && state_map_path)
+    if (state_map_path)
     {
         if (read_state_map(state_map_path, &map_hash, &syms, &sym_count, &total_bytes) != 0)
         {
@@ -658,40 +658,43 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        LARGE_INTEGER freq;
-        LARGE_INTEGER t0;
-        LARGE_INTEGER t1;
-        QueryPerformanceFrequency(&freq);
-        QueryPerformanceCounter(&t0);
-        int load_result = load_state_snapshot(state_path, map_hash, total_bytes, &restore_data);
-        QueryPerformanceCounter(&t1);
-        long long restore_io_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
-        if (load_result == 1)
+        if (state_path)
         {
-            FreeLibrary(lib);
-            return 1;
-        }
-        if (load_result == 0)
-        {
+            LARGE_INTEGER freq;
+            LARGE_INTEGER t0;
+            LARGE_INTEGER t1;
+            QueryPerformanceFrequency(&freq);
             QueryPerformanceCounter(&t0);
-            for (uint32_t i = 0; i < sym_count; i++)
-            {
-                FARPROC addr = GetProcAddress(lib, syms[i].name);
-                if (!addr)
-                {
-                    fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
-                    FreeLibrary(lib);
-                    return 1;
-                }
-                memcpy((void *)addr, restore_data + syms[i].offset, syms[i].size);
-            }
+            int load_result = load_state_snapshot(state_path, map_hash, total_bytes, &restore_data);
             QueryPerformanceCounter(&t1);
-            long long restore_copy_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
-            fprintf(stderr, "HOTSTATE restore: io=%lldus copy=%lldus bytes=%u symbols=%u\n", restore_io_us, restore_copy_us, total_bytes, sym_count);
-        }
-        else
-        {
-            fprintf(stderr, "HOTSTATE restore: none\n");
+            long long restore_io_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
+            if (load_result == 1)
+            {
+                FreeLibrary(lib);
+                return 1;
+            }
+            if (load_result == 0)
+            {
+                QueryPerformanceCounter(&t0);
+                for (uint32_t i = 0; i < sym_count; i++)
+                {
+                    FARPROC addr = GetProcAddress(lib, syms[i].name);
+                    if (!addr)
+                    {
+                        fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+                        FreeLibrary(lib);
+                        return 1;
+                    }
+                    memcpy((void *)addr, restore_data + syms[i].offset, syms[i].size);
+                }
+                QueryPerformanceCounter(&t1);
+                long long restore_copy_us = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
+                fprintf(stderr, "HOTSTATE restore: io=%lldus copy=%lldus bytes=%u symbols=%u\n", restore_io_us, restore_copy_us, total_bytes, sym_count);
+            }
+            else
+            {
+                fprintf(stderr, "HOTSTATE restore: none\n");
+            }
         }
     }
 
@@ -760,7 +763,7 @@ int main(int argc, char **argv)
                             long long save_us = 0;
                             long long load_us = 0;
                             long long restore_us = 0;
-                            if (state_path && state_map_path)
+                            if (state_map_path)
                             {
                                 buffer = (uint8_t *)malloc(total_bytes);
                                 if (!buffer)
@@ -910,6 +913,10 @@ int main(int argc, char **argv)
 
         fprintf(stderr, "HOTSTATE save: io=%lldus copy=%lldus bytes=%u symbols=%u\n", save_io_us, save_copy_us, total_bytes, sym_count);
         free(save_data);
+    }
+
+    if (state_map_path)
+    {
         free(restore_data);
         for (uint32_t i = 0; i < sym_count; i++)
         {

@@ -43,8 +43,10 @@ Reason: the hot-swap workflow copies `state` from the old module into the new mo
 
 ### 3) Use a sentinel to avoid clobbering restored state
 
-When using hot-swap, the host restores `state` *before* calling `main()`/`tick()`.
-If you always run `init_game(true)` unconditionally, you will overwrite the restored data.
+In the tick hot-swap workflow, `main()` is called once at process start, and hot swaps do not call `main()` again.
+That means swaps between ticks will not re-run your init code.
+
+However, if you use a workflow that restores `state` and then calls `main()` (eg. restart-based restore), `main()` can clobber restored data.
 
 Use a sentinel like:
 
@@ -76,7 +78,7 @@ Keep SVGs within the supported subset described in `docs/svg-migration-plan.md`.
 
 Goal: change something, feel it immediately, keep the game running.
 
-- Keep `.\stasis.bat run ... --watch --hot-state --fps ...` running.
+- Keep `.\stasis.bat run ... --fps ...` running.
 - Make a small code change (movement, cooldown, damage, camera), save, and keep playing.
 - Change SVGs and rely on `gfx_poll_reload(...)` to refresh art without recompiling.
 - When a change makes the game less fun, revert immediately and try a different direction.
@@ -92,9 +94,9 @@ Goal: converge on one "fun slice" and validate it is stable.
 
 ### Recommended commands
 
-Run with hot-swap (Windows + Cranelift):
+Run with hot reload (Windows + Cranelift + `tick()`):
 
-`.\stasis.bat run .\samples\your_game.stasis --backend cranelift --hot-state --watch --fps 60`
+`.\stasis.bat run .\samples\your_game.stasis --fps 60`
 
 Tips:
 
@@ -108,12 +110,13 @@ On each code edit:
 
 1) CLI compiles to CLIF and AOTs to `.obj`.
 2) CLI links a new `.dll`.
-3) CLI writes a "swap file" containing the new DLL path.
-4) Runner sees the swap request between ticks:
+3) Runner hot-swaps between ticks:
    - copies `state` out of the old DLL
    - `LoadLibraryA()` the new DLL
    - restores `state` into the new DLL
-   - continues calling `tick()`
+   - continues calling `tick()` (does not call `main()` on swap)
+
+This is a same-process swap: your game keeps running, and state stays in memory.
 
 ### Reading the timing logs
 
@@ -318,3 +321,12 @@ This keeps examples and docs aligned with the spec and assets:
 - Hot swapping assumes compatible `state` layout between swaps.
 - If you change struct layout often, expect occasional "restart required" moments; design your `state` so core gameplay stays stable and experimental data stays in a separate sub-struct.
 - When in doubt: keep the hot-swap loop for *gameplay iteration*, and occasionally do a full restart when you change fundamentals.
+
+## Flags You Should (and Should Not) Care About
+
+For day-to-day game iteration, you should not need any special "state file" arguments.
+The CLI and runner handle the mechanics internally.
+
+- Prefer `stasisc run <file>` / `.\stasis.bat run <file>` for hot reload.
+- Use `--fps` to set the host pacing.
+- Use `--hot-state` only if you are experimenting with restart-based snapshot/restore across separate process runs.
