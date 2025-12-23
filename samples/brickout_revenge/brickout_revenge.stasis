@@ -123,6 +123,7 @@ struct BrickoutScoreConfig {
 }
 
 struct BrickoutConfig {
+    magic: i32;
     screen: BrickoutScreenConfig;
     grid: BrickoutGridConfig;
     brick: BrickoutBrickConfig;
@@ -268,74 +269,6 @@ function sign_f32(x: f32): f32 {
     if (x < 0.0) { return -1.0; }
     if (x > 0.0) { return 1.0; }
     return 0.0;
-}
-
-function ensure_config_defaults(): void {
-    // If JSON data binding didn't run (e.g. non-runner builds), keep reasonable defaults.
-    if (state.config.screen.w > 0) {
-        return;
-    }
-
-    state.config.screen.w = 800;
-    state.config.screen.h = 600;
-
-    state.config.grid.origin_x = 50.0;
-    state.config.grid.margin_bottom = 50.0;
-    state.config.grid.spacing = 5.0;
-
-    state.config.brick.width = 60.0;
-    state.config.brick.height = 20.0;
-
-    state.config.paddle.y = 30.0;
-    state.config.paddle.width = 100.0;
-    state.config.paddle.height = 10.0;
-    state.config.paddle.speed = 400.0;
-
-    state.config.ball.radius = 6.0;
-    state.config.ball.spawn_jitter_x = 30.0;
-    state.config.ball.clamp_margin_x = 100.0;
-    state.config.ball.vx_rand = 100.0;
-    state.config.ball.speed_min_base = 150.0;
-    state.config.ball.speed_min_per_wave = 10.0;
-    state.config.ball.speed_max_base = 250.0;
-    state.config.ball.speed_max_per_wave = 12.0;
-    state.config.ball.damage_base = 1;
-    state.config.ball.damage_wave_div = 4;
-    state.config.ball.hp_base = 20;
-    state.config.ball.hp_wave_div = 2;
-    state.config.ball.hp_scale = 10;
-
-    state.config.wave.start_wave = 1;
-    state.config.wave.start_max_balls_wave = 5;
-    state.config.wave.max_balls_wave_add = 2;
-    state.config.wave.start_spawn_balls = MAX_BALLS;
-
-    state.config.timing.frame_time_ms = 16;
-    state.config.timing.ball_spawn_cd_ms = 1000;
-    state.config.timing.end_phase_restart_ms = 3000;
-
-    state.config.fx.jiggle_threshold = 10;
-    state.config.fx.jiggle_degrees = 5.0;
-    state.config.fx.paddle_aim_degrees = 15.0;
-    state.config.fx.paddle_bounce_vx_scale = 200.0;
-
-    state.config.tower_basic.range = 140.0;
-    state.config.tower_basic.cooldown_ms = 220;
-    state.config.tower_basic.damage = 1;
-    state.config.tower_basic.shot_fx_ms = 90;
-
-    state.config.tower_armored.range = 160.0;
-    state.config.tower_armored.cooldown_ms = 320;
-    state.config.tower_armored.damage = 2;
-    state.config.tower_armored.shot_fx_ms = 90;
-
-    state.config.tower_reflector.range = 190.0;
-    state.config.tower_reflector.cooldown_ms = 180;
-    state.config.tower_reflector.damage = 1;
-    state.config.tower_reflector.shot_fx_ms = 90;
-
-    state.config.score.ball_kill = 1;
-    state.config.score.brick_kill = 10;
 }
 
 function apply_config_live(): void {
@@ -1470,7 +1403,20 @@ function sync_frame_rate(): void {
 }
 
 function main(): i32 {
-    ensure_config_defaults();
+    // Require JSON data binding: this sample expects to be run under the native runner so
+    // `samples/brickout_revenge/data/config.json` is applied to `state.config` before main().
+    if (state.config.magic != 1337) {
+        print_string("error: brickout config.json not bound (expected state.config.magic == 1337)\n");
+        print_string("run: .\\stasis.bat run samples/brickout_revenge/brickout_revenge.stasis --backend cranelift --graphics\n");
+        return 1;
+    }
+
+    print_string("Brickout config loaded (magic=1337)\n");
+    print_string("screen.w=");
+    print_int(state.config.screen.w);
+    print_string(" screen.h=");
+    print_int(state.config.screen.h);
+    print_string("\n");
 
     let init_ok: bool = init_window(state.config.screen.w, state.config.screen.h, "Brickout Revenge");
     if (!init_ok) {
