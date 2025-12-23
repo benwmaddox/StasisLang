@@ -267,7 +267,7 @@ public class LoweringTests
     {
         var ir = LowerWithDiagnostics("""
             function demo(): i32 {
-                return gfx_debug_bake_hash("assets_src/brickout-revenge/paddle.svg");
+                return gfx_debug_bake_hash("samples/brickout_revenge/assets/paddle.svg");
             }
             """, allowSemanticDiagnostics: true, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false, HeadlessGraphics: false)).Ir;
 
