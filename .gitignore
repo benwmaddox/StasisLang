@@ -35,3 +35,6 @@ samples/*_test*.stasis
 samples/*test*.stasis
 samples/*_old.stasis
 samples/*_simple.stasis
+samples/**/stasis_graphics.dll
+samples/**/SDL2.dll
+samples/**/glew32.dll
