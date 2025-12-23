@@ -845,8 +845,9 @@ public sealed class SemanticAnalyzer
                         return memberSymbol.Type;
                     }
                 }
-                // For struct field access, would need more complex type resolution
-                return null;
+
+                // Struct field access (including nested chains like state.ship.weapon.x)
+                return ResolveMemberAccessType(member, scope);
             case BinaryExpressionSyntax bin when bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual
                 or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual:
                 // Comparison operators return bool
@@ -857,6 +858,55 @@ public sealed class SemanticAnalyzer
             default:
                 return null;
         }
+    }
+
+    private TypeSymbol? ResolveMemberAccessType(MemberAccessExpressionSyntax member, IReadOnlyDictionary<string, Symbol> scope)
+    {
+        var chain = new List<string>();
+        ExpressionSyntax current = member;
+        while (current is MemberAccessExpressionSyntax m)
+        {
+            chain.Add(m.Member.Text);
+            current = m.Receiver;
+        }
+
+        if (current is not IdentifierExpressionSyntax rootId)
+        {
+            return null;
+        }
+
+        if (!scope.TryGetValue(rootId.Identifier.Text, out var rootSym) &&
+            !_symbols.TryGetValue(rootId.Identifier.Text, out rootSym))
+        {
+            return null;
+        }
+
+        var currentType = rootSym.Type;
+        chain.Reverse();
+
+        foreach (var memberName in chain)
+        {
+            if (currentType is not NamedTypeSymbol named)
+            {
+                return null;
+            }
+
+            if (!_structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                // Not a struct type (could be an enum or unknown)
+                return null;
+            }
+
+            var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, memberName, StringComparison.Ordinal));
+            if (field is null)
+            {
+                return null;
+            }
+
+            currentType = ResolveType(field.Type);
+        }
+
+        return currentType;
     }
 
     private bool AreTypesCompatible(TypeSymbol target, TypeSymbol source)

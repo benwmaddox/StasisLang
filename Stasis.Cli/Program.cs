@@ -1786,6 +1786,52 @@ static string GetHotExitFilePath(string sourcePath, string moduleName)
     return Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 }
 
+static string? FindDataBindingJson(string sourcePath, string repoRoot)
+{
+    static string? FirstJsonInDir(string dir)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return null;
+        }
+
+        var preferred = Path.Combine(dir, "config.json");
+        if (File.Exists(preferred))
+        {
+            return preferred;
+        }
+
+        return Directory.GetFiles(dir, "*.json", SearchOption.TopDirectoryOnly)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    var sourceDir = Path.GetDirectoryName(sourcePath);
+    if (!string.IsNullOrEmpty(sourceDir))
+    {
+        var inLocalDataDir = FirstJsonInDir(Path.Combine(sourceDir, "data"));
+        if (!string.IsNullOrEmpty(inLocalDataDir))
+        {
+            return inLocalDataDir;
+        }
+
+        var inLocalDir = FirstJsonInDir(sourceDir);
+        if (!string.IsNullOrEmpty(inLocalDir))
+        {
+            return inLocalDir;
+        }
+    }
+
+    var srcBaseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var inRepoDataDir = FirstJsonInDir(Path.Combine(repoRoot, "data", srcBaseName));
+    if (!string.IsNullOrEmpty(inRepoDataDir))
+    {
+        return inRepoDataDir;
+    }
+
+    return null;
+}
+
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
@@ -1960,18 +2006,11 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 var entry = $"{moduleName}__main";
                 var runnerArgs = $"\"{hotDll}\" {entry} --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
 
-                // Look for data binding JSON file (data/<baseName>/*.json)
-                var srcBaseName = Path.GetFileNameWithoutExtension(sourcePath);
-                var dataDir = Path.Combine(repoRoot, "data", srcBaseName);
-                if (Directory.Exists(dataDir))
+                var dataFile = FindDataBindingJson(sourcePath, repoRoot);
+                if (!string.IsNullOrEmpty(dataFile))
                 {
-                    var dataFiles = Directory.GetFiles(dataDir, "*.json");
-                    if (dataFiles.Length > 0)
-                    {
-                        var dataFile = dataFiles[0]; // Use first JSON file found
-                        runnerArgs += $" --data-bind \"{dataFile}\" \"{plan.StructMetaPath}\"";
-                        Console.WriteLine($"Data binding: {dataFile}");
-                    }
+                    runnerArgs += $" --data-bind \"{dataFile}\" \"{plan.StructMetaPath}\"";
+                    Console.WriteLine($"Data binding: {dataFile}");
                 }
 
                 var psi = new ProcessStartInfo

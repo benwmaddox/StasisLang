@@ -584,9 +584,10 @@ int stasis_data_poll(int handle) {
     if (current_mtime != binding->last_mtime) {
         binding->last_mtime = current_mtime;
         if (apply_data_file(binding)) {
-            fprintf(stderr, "DATABIND: reloaded %s apply_us=%llu fields=%d\n",
+            double apply_ms = (double)binding->last_apply_ns / 1000000.0;
+            fprintf(stderr, "DATABIND: reloaded %s apply_ms=%.1f fields=%d\n",
                     binding->json_file_path,
-                    (unsigned long long)(binding->last_apply_ns / 1000ULL),
+                    apply_ms,
                     binding->field_count);
             return 1;
         } else {
