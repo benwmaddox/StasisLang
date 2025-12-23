@@ -79,6 +79,7 @@ Keep SVGs within the supported subset described in `docs/svg-migration-plan.md`.
 Goal: change something, feel it immediately, keep the game running.
 
 - Keep `.\stasis.bat run ... --watch --hot-state --fps ...` running.
+- Keep `.\stasis.bat dev ... --fps ...` running.
 - Make a small code change (movement, cooldown, damage, camera), save, and keep playing.
 - Change SVGs and rely on `gfx_poll_reload(...)` to refresh art without recompiling.
 - When a change makes the game less fun, revert immediately and try a different direction.
@@ -96,7 +97,7 @@ Goal: converge on one "fun slice" and validate it is stable.
 
 Run with hot reload (Windows + Cranelift + `tick()`):
 
-`.\stasis.bat run .\samples\your_game.stasis --watch --fps 60`
+`.\stasis.bat dev .\samples\your_game.stasis --fps 60`
 
 Tips:
 
@@ -327,6 +328,6 @@ This keeps examples and docs aligned with the spec and assets:
 For day-to-day game iteration, you should not need any special "state file" arguments.
 The CLI and runner handle the mechanics internally.
 
-- Use `--watch` to enable hot reload.
+- Prefer `stasisc dev <file>` / `.\stasis.bat dev <file>` for hot reload.
 - Use `--fps` to set the host pacing.
 - Use `--hot-state` only if you are experimenting with restart-based snapshot/restore across separate process runs.

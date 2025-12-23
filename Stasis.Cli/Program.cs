@@ -21,6 +21,7 @@ if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
 }
 
 var mode = "run";
+var devMode = false;
 string? path = null;
 var includeTests = false;
 var moduleName = "module";
@@ -42,6 +43,12 @@ while (cliArgs.Count > 0)
     var arg = cliArgs.Dequeue();
     switch (arg)
     {
+        case "dev":
+            // Dev mode: optimized for iteration (watch + tick hot-swap when available).
+            devMode = true;
+            mode = "run";
+            watch = true;
+            break;
         case "build":
             mode = arg;
             break;
@@ -154,6 +161,11 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
 {
     Console.Error.WriteLine($"error: invalid --opt-level '{optLevel}'. Use 0,1,2,3,s,z.");
     Environment.Exit(1);
+}
+
+if (devMode)
+{
+    Environment.SetEnvironmentVariable("STASIS_PHASE_TIMING", "1");
 }
 
 // Set default backend based on mode if not explicitly specified
@@ -2324,16 +2336,19 @@ static string QuoteArg(string arg) =>
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--watch] [--hot-state] [--fps <1..240>] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc dev <file> [--fps <1..240>] [--module <name>]");
+    Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
+    Console.WriteLine();
+    Console.WriteLine("Other commands:");
+    Console.WriteLine("  stasisc run <file> [--watch] [--fps <1..240>] [--module <name>] [--with-tests] [--emit-ir] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc release <file> [--module <name>] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
+    Console.WriteLine();
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
-    Console.WriteLine("Watch: use --watch to re-run on file changes (run/test only).");
+    Console.WriteLine("Dev: 'dev' implies --watch and enables per-phase timing output; if your program defines `function tick()`, the host will hot-swap between ticks and preserve the global 'state' automatically (main() is not called again on swaps).");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
-    Console.WriteLine("Tick hosting: if your program defines `function tick()` and you run with --watch, the host will hot-swap between ticks and preserve the global 'state' automatically (main() is not called again on swaps).");
-    Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
+    Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
 }
