@@ -1932,7 +1932,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             if (startRunner)
             {
                 var entry = $"{moduleName}__main";
-                var runnerArgs = $"\"{hotDll}\" {entry} --state \"{plan.SnapshotPath}\" --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
+                var runnerArgs = $"\"{hotDll}\" {entry} --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
                 var psi = new ProcessStartInfo
                 {
                     FileName = runnerPath,
@@ -2333,7 +2333,7 @@ static void PrintUsage()
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Watch: use --watch to re-run on file changes (run/test only).");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across runs, enabling simple stateful restart experiments.");
-    Console.WriteLine("Tick hosting: if your program defines `function tick()`, the runner will call `main()` once then call `tick()` at `--fps` (host paced) and can hot-swap between ticks in --watch + --hot-state mode.");
+    Console.WriteLine("Tick hosting: if your program defines `function tick()`, the runner will call `main()` once then call `tick()` at `--fps` (host paced); hot swaps between ticks do not call `main()` again.");
     Console.WriteLine("Graphics: use --graphics to enable SDL2/OpenGL graphics runtime. Specify --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
