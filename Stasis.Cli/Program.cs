@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
@@ -1958,6 +1959,21 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             {
                 var entry = $"{moduleName}__main";
                 var runnerArgs = $"\"{hotDll}\" {entry} --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
+
+                // Look for data binding JSON file (data/<baseName>/*.json)
+                var srcBaseName = Path.GetFileNameWithoutExtension(sourcePath);
+                var dataDir = Path.Combine(repoRoot, "data", srcBaseName);
+                if (Directory.Exists(dataDir))
+                {
+                    var dataFiles = Directory.GetFiles(dataDir, "*.json");
+                    if (dataFiles.Length > 0)
+                    {
+                        var dataFile = dataFiles[0]; // Use first JSON file found
+                        runnerArgs += $" --data-bind \"{dataFile}\" \"{plan.StructMetaPath}\"";
+                        Console.WriteLine($"Data binding: {dataFile}");
+                    }
+                }
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = runnerPath,
@@ -2086,7 +2102,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
 static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, bool excludeSpriteFields, out HotStatePlan plan)
 {
-    plan = new HotStatePlan(string.Empty, string.Empty, string.Empty, string.Empty);
+    plan = new HotStatePlan(string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
     if (exportedFunctions.Count == 0)
     {
         Console.Error.WriteLine("error: --hot-state requires at least one exported function.");
@@ -2101,8 +2117,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     }
 
     var entries = state.Fields
-        .Where(f => !excludeSpriteFields || !f.Name.StartsWith("state_sprites_", StringComparison.Ordinal))
-        .Select(f => (Name: f.Name, Size: f.Size))
+        .Where(f => !excludeSpriteFields || !f.Name.StartsWith("state__sprites__", StringComparison.Ordinal))
         .ToArray();
 
     if (entries.Length == 0)
@@ -2113,10 +2128,10 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
 
     var totalBytes = 0;
     ulong hash = 14695981039346656037UL; // FNV-1a 64 offset basis
-    foreach (var (name, size) in entries)
+    foreach (var entry in entries)
     {
-        totalBytes += size;
-        var nameBytes = Encoding.UTF8.GetBytes(name);
+        totalBytes += entry.Size;
+        var nameBytes = Encoding.UTF8.GetBytes(entry.Name);
         foreach (var b in nameBytes)
         {
             hash ^= b;
@@ -2127,7 +2142,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
 
         unchecked
         {
-            var u = (uint)size;
+            var u = (uint)entry.Size;
             for (var i = 0; i < 4; i++)
             {
                 hash ^= (byte)(u & 0xFF);
@@ -2151,11 +2166,11 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     var map = new StringBuilder();
     map.Append("STASIS_STATE_MAP 1\n");
     map.Append($"hash={hashHex} count={entries.Length} bytes={totalBytes}\n");
-    foreach (var (name, size) in entries)
+    foreach (var entry in entries)
     {
-        map.Append(name);
+        map.Append(entry.Name);
         map.Append(' ');
-        map.Append(size);
+        map.Append(entry.Size);
         map.Append('\n');
     }
     File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
@@ -2168,16 +2183,64 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
         def.Append(fn);
         def.Append('\n');
     }
-    foreach (var (name, _) in entries)
+    foreach (var entry in entries)
     {
         def.Append("  ");
-        def.Append(name);
+        def.Append(entry.Name);
         def.Append(" DATA\n");
     }
     File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
 
-    plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath);
+    // Emit struct metadata JSON for data binding
+    var structMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.struct-meta.json");
+    EmitStructMetadataJson(structMetaPath, state, entries);
+
+    plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath, structMetaPath);
     return true;
+}
+
+static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyList<FieldLayout> entries)
+{
+    var fields = new List<object>();
+    var globalPrefix = state.Name + "__";
+    foreach (var entry in entries)
+    {
+        // Prefer non-lowered, source-style JSON paths (e.g. balance.speed) while keeping the
+        // lowered symbol name for DLL lookup (e.g. state__balance__speed).
+        //
+        // Notes:
+        // - For the hot-state workflow, we're binding to the global named `state`, so we drop
+        //   the `state__` prefix from JSON paths.
+        // - `__` encodes struct nesting in lowered symbol names; JSON paths use `.`.
+        var jsonPath = entry.Name;
+        if (jsonPath.StartsWith(globalPrefix, StringComparison.Ordinal))
+        {
+            jsonPath = jsonPath.Substring(globalPrefix.Length);
+        }
+        jsonPath = jsonPath.Replace("__", ".", StringComparison.Ordinal);
+
+        fields.Add(new
+        {
+            name = entry.Name,        // Flattened symbol name (for DLL lookup)
+            jsonPath = jsonPath,      // Preferred JSON path (non-lowered)
+            offset = entry.Offset,
+            size = entry.Size,
+            type = entry.Type.ToString().ToLowerInvariant(),
+            arrayCount = entry.ArrayCount
+        });
+    }
+
+    var metadata = new
+    {
+        version = 1,
+        globalName = state.Name,
+        totalSize = state.Size,
+        fields = fields
+    };
+
+    var options = new JsonSerializerOptions { WriteIndented = true };
+    var json = JsonSerializer.Serialize(metadata, options);
+    File.WriteAllText(path, json, Encoding.UTF8);
 }
 
 static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps)

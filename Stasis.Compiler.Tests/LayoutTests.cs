@@ -27,13 +27,13 @@ public class LayoutTests
         Assert.Collection(global.Fields,
             f =>
             {
-                Assert.Equal("Player_hp", f.Name);
+                Assert.Equal("Player__hp", f.Name);
                 Assert.Equal(0, f.Offset);
                 Assert.Equal(2, f.Size);
             },
             f =>
             {
-                Assert.Equal("Player_score", f.Name);
+                Assert.Equal("Player__score", f.Name);
                 Assert.Equal(4, f.Offset); // aligned to 4 after 2 bytes
                 Assert.Equal(8, f.Size);
             });
