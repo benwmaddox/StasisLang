@@ -406,7 +406,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                     {
                         var fieldType = ResolveType(field.Type, symbols);
                         var elemType = typeMapper.Map(fieldType);
-                        builder.DefineGlobalArray($"{structDecl.Name.Text}_{field.Identifier.Text}", elemType, structCount);
+                        builder.DefineGlobalArray($"{structDecl.Name.Text}__{field.Identifier.Text}", elemType, structCount);
                     }
                     break;
                 case ArrayTypeSyntax arrayType:
@@ -697,7 +697,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         var typeMapper = builder.TypeMapper;
         foreach (var field in structDecl.Fields)
         {
-            var fieldName = $"{globalName}_{field.Identifier.Text}";
+            var fieldName = $"{globalName}__{field.Identifier.Text}";
             switch (field.Type)
             {
                 case ArrayTypeSyntax arrayType when arrayType.ElementType is NamedTypeSyntax nestedNamed &&
@@ -708,7 +708,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                         {
                             var nestedFieldType = ResolveType(nestedField.Type, symbols);
                             var nestedElemType = typeMapper.Map(nestedFieldType);
-                            var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
+                            var nestedName = $"{fieldName}__{nestedField.Identifier.Text}";
                             if (nestedFieldType is ArrayTypeSymbol nestedArray &&
                                 nestedArray.ElementType is PrimitiveTypeSymbol prim &&
                                 HeaderSizeFor(prim.PrimitiveName) > 0)

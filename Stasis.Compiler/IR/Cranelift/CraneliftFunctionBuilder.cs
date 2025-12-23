@@ -2562,7 +2562,7 @@ public sealed class CraneliftFunctionBuilder
             return false;
         }
 
-        arrayName = $"{baseName}_{member.Member.Text}";
+        arrayName = $"{baseName}__{member.Member.Text}";
         return true;
     }
 
@@ -2934,7 +2934,7 @@ public sealed class CraneliftFunctionBuilder
         var elemType = ResolveType(arrayType.ElementType);
         var clifElemType = _typeMapper.Map(elemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}_{memberAccess.Member.Text}";
+        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
         _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -2974,7 +2974,7 @@ public sealed class CraneliftFunctionBuilder
             var elemType = ResolveType(field.Type);
             var clifElemType = _typeMapper.Map(elemType);
             var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}_{fieldName}";
+            var baseName = $"{structDecl.Name.Text}__{fieldName}";
 
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3017,7 +3017,7 @@ public sealed class CraneliftFunctionBuilder
                 var elemType = ResolveType(field.Type);
                 var clifElemType = _typeMapper.Map(elemType);
                 var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
+                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
 
                 var baseAddr = NewValue();
                 _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3171,7 +3171,7 @@ public sealed class CraneliftFunctionBuilder
         var clifElemType = _typeMapper.Map(elemType);
         value = CoerceAssignmentValue(value, valueType, elemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}_{memberAccess.Member.Text}";
+        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
         _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3233,7 +3233,7 @@ public sealed class CraneliftFunctionBuilder
             var clifElemType = _typeMapper.Map(elemType);
             value = CoerceAssignmentValue(value, valueType, elemType);
             var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}_{fieldName}";
+            var baseName = $"{structDecl.Name.Text}__{fieldName}";
 
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3274,7 +3274,7 @@ public sealed class CraneliftFunctionBuilder
                 var clifElemType = _typeMapper.Map(elemType);
                 value = CoerceAssignmentValue(value, valueType, elemType);
                 var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
+                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
 
                 var baseAddr = NewValue();
                 _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3445,7 +3445,7 @@ public sealed class CraneliftFunctionBuilder
             return false;
         }
 
-        flattenedName = $"{baseName}_{member.Member.Text}";
+        flattenedName = $"{baseName}__{member.Member.Text}";
         return true;
     }
 

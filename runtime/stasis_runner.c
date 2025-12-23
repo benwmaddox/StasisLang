@@ -11,6 +11,8 @@
 #include <unistd.h>
 #endif
 
+#include "stasis_data.h"
+
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 
@@ -53,6 +55,7 @@ static void print_usage(void)
     fprintf(stderr, "  entry defaults to run_tests (use main for run mode)\n");
     fprintf(stderr, "usage: stasis_runner --server\n");
     fprintf(stderr, "usage: stasis_runner <dll_path> [entry] --state-map <map_path> [--state <snapshot_path>] [--hot-exit-file <path>]\n");
+    fprintf(stderr, "       --data-bind <json_path> <struct_meta_path>  Register data hot-reload binding\n");
 }
 
 #ifdef _WIN32
@@ -425,6 +428,8 @@ static DWORD WINAPI hot_exit_thread(LPVOID user_data)
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     enable_vt_processing(GetStdHandle(STD_OUTPUT_HANDLE));
     enable_vt_processing(GetStdHandle(STD_ERROR_HANDLE));
 #endif
@@ -570,6 +575,8 @@ int main(int argc, char **argv)
     const char *state_map_path = NULL;
     const char *hot_exit_path = NULL;
     const char *swap_file_path = NULL;
+    const char *data_bind_json = NULL;
+    const char *data_bind_meta = NULL;
     int fps = 60;
     for (int i = 2; i < argc; i++)
     {
@@ -606,6 +613,12 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--data-bind") == 0 && i + 2 < argc)
+        {
+            data_bind_json = argv[++i];
+            data_bind_meta = argv[++i];
+            continue;
+        }
     }
 
     if (state_path != NULL && state_map_path == NULL)
@@ -622,6 +635,19 @@ int main(int argc, char **argv)
     {
         fprintf(stderr, "error: failed to load %s\n", dll_path);
         return 1;
+    }
+
+    /* Set DLL handle for data binding system */
+    stasis_data_set_dll(lib);
+
+    /* Register data binding if specified */
+    if (data_bind_json && data_bind_meta)
+    {
+        int handle = stasis_data_bind(data_bind_json, data_bind_meta);
+        if (handle == 0)
+        {
+            fprintf(stderr, "warning: failed to register data binding\n");
+        }
     }
 
     FARPROC symbol = GetProcAddress(lib, entry_name);
@@ -828,8 +854,14 @@ int main(int argc, char **argv)
                             FreeLibrary(lib);
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
+
+                            /* Update DLL handle for data binding system */
+                            stasis_data_set_dll(new_lib);
                         }
                     }
+
+            /* Poll data bindings for changes (fast path: just checks mtimes) */
+            stasis_data_poll_all();
 
             int tick_result = tick();
             if (tick_result != 0)

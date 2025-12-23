@@ -46,7 +46,8 @@ public sealed class LayoutPlanner
                 var count = int.TryParse(arrayType.SizeToken?.Text, out var parsed) ? parsed : 1;
                 var bytes = fieldSize * count;
                 _offset = Align(_offset, fieldSize);
-                fields.Add(new FieldLayout($"{structDecl.Name.Text}_{field.Identifier.Text}", _offset, bytes));
+                var fieldType = GetFieldType(field.Type);
+                fields.Add(new FieldLayout($"{structDecl.Name.Text}__{field.Identifier.Text}", _offset, bytes, fieldType, count));
                 _offset += bytes;
                 size += bytes;
             }
@@ -64,7 +65,8 @@ public sealed class LayoutPlanner
         {
             var bytes = SizeOf(primitiveNamed);
             _offset = Align(_offset, bytes);
-            fields.Add(new FieldLayout(global.Name.Text, _offset, bytes));
+            var fieldType = GetFieldType(primitiveNamed);
+            fields.Add(new FieldLayout(global.Name.Text, _offset, bytes, fieldType));
             _offset += bytes;
             size = bytes;
         }
@@ -74,7 +76,8 @@ public sealed class LayoutPlanner
             var count = int.TryParse(arrayPrim.SizeToken?.Text, out var parsed) ? parsed : 1;
             var bytes = elemSize * count;
             _offset = Align(_offset, elemSize);
-            fields.Add(new FieldLayout(global.Name.Text, _offset, bytes));
+            var fieldType = GetFieldType(prim);
+            fields.Add(new FieldLayout(global.Name.Text, _offset, bytes, fieldType, count));
             _offset += bytes;
             size = bytes;
         }
@@ -101,7 +104,8 @@ public sealed class LayoutPlanner
                 var count = int.TryParse(arrayType.SizeToken?.Text, out var parsed) ? parsed : 1;
                 var bytes = fieldSize * count;
                 _offset = Align(_offset, fieldSize);
-                fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}_{nestedField.Identifier.Text}", _offset, bytes));
+                var fieldType = GetFieldType(nestedField.Type);
+                fields.Add(new FieldLayout($"{globalName}__{field.Identifier.Text}__{nestedField.Identifier.Text}", _offset, bytes, fieldType, count));
                 _offset += bytes;
                 totalBytes += bytes;
             }
@@ -111,7 +115,7 @@ public sealed class LayoutPlanner
             // Nested struct instance → recursively flatten (e.g., ship: Ship inside GameState)
             foreach (var nestedField in structInstance.Fields)
             {
-                var nestedBytes = PlanStructField($"{globalName}_{field.Identifier.Text}", structInstance.Name.Text, nestedField, ref fields);
+                var nestedBytes = PlanStructField($"{globalName}__{field.Identifier.Text}", structInstance.Name.Text, nestedField, ref fields);
                 totalBytes += nestedBytes;
             }
         }
@@ -119,14 +123,43 @@ public sealed class LayoutPlanner
         {
             // Scalar or primitive array field
             var bytes = SizeOf(field.Type);
-            var divisor = field.Type is ArrayTypeSyntax arr && int.TryParse(arr.SizeToken?.Text, out var cnt) && cnt > 0 ? cnt : 1;
+            var arrayCount = 1;
+            if (field.Type is ArrayTypeSyntax arr && int.TryParse(arr.SizeToken?.Text, out var cnt) && cnt > 0)
+            {
+                arrayCount = cnt;
+            }
+            var divisor = arrayCount;
             _offset = Align(_offset, bytes > 0 ? (bytes / divisor) : 4);
-            fields.Add(new FieldLayout($"{globalName}_{field.Identifier.Text}", _offset, bytes));
+            var fieldType = GetFieldType(field.Type);
+            fields.Add(new FieldLayout($"{globalName}__{field.Identifier.Text}", _offset, bytes, fieldType, arrayCount));
             _offset += bytes;
             totalBytes = bytes;
         }
 
         return totalBytes;
+    }
+
+    private static FieldType GetFieldType(TypeSyntax type)
+    {
+        var typeName = type switch
+        {
+            NamedTypeSyntax named => named.Name,
+            ArrayTypeSyntax array when array.ElementType is NamedTypeSyntax elem => elem.Name,
+            _ => ""
+        };
+
+        return typeName switch
+        {
+            "bool" => FieldType.Bool,
+            "u8" => FieldType.U8,
+            "u16" => FieldType.U16,
+            "u32" => FieldType.U32,
+            "i32" => FieldType.I32,
+            "f32" => FieldType.F32,
+            "f64" => FieldType.F64,
+            "string" or "utf8" or "ascii" => FieldType.String,
+            _ => FieldType.Unknown
+        };
     }
 
     private int SizeOf(TypeSyntax type)
