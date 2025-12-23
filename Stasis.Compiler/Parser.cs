@@ -91,6 +91,13 @@ public sealed class Parser
             while (true)
             {
                 var memberName = Consume(TokenKind.Identifier, "Expected enum member name.");
+                Token? equalsToken = null;
+                Token? valueToken = null;
+                if (Match(TokenKind.Equal))
+                {
+                    equalsToken = Previous;
+                    valueToken = Consume(TokenKind.IntegerLiteral, "Expected integer literal after '=' in enum member.");
+                }
                 Token? trailingComma = null;
                 if (Match(TokenKind.Comma))
                 {
@@ -105,7 +112,7 @@ public sealed class Parser
                     }
                 }
 
-                members.Add(new EnumMemberSyntax(memberName, trailingComma));
+                members.Add(new EnumMemberSyntax(memberName, equalsToken, valueToken, trailingComma));
 
                 if (Current.Kind == TokenKind.RBrace || IsAtEnd())
                 {

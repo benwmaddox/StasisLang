@@ -1,5 +1,6 @@
 import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
+import "../../src/stdlib/sdl_scancodes.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
@@ -22,23 +23,15 @@ import "../../src/stdlib/frame_timer.stasis";
 // - gfx_poll_reload(handle: i32) -> bool
 // - is_key_down(scancode: i32) -> bool
 
-// SDL Scancodes
-const KEY_SPACE: i32 = 44;
-const KEY_ESCAPE: i32 = 41;
-const KEY_LEFT: i32 = 80;
-const KEY_RIGHT: i32 = 79;
-const KEY_UP: i32 = 82;
-const KEY_DOWN: i32 = 81;
-const KEY_RETURN: i32 = 40;
-
 // Pool sizes (compile-time; keep in sync with the array sizes below)
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
 
-// Brick types
-const BRICK_BASIC: i32 = 0;
-const BRICK_ARMORED: i32 = 1;
-const BRICK_REFLECTOR: i32 = 2;
+enum BrickType {
+    Basic,
+    Armored,
+    Reflector
+}
 
 enum Phase {
     Setup,
@@ -164,7 +157,7 @@ struct Brick {
     height: f32;
     hp: i32;
     max_hp: i32;
-    brick_type: i32;
+    brick_type: BrickType;
     attack_cd_ms: i32;
     shot_fx_ms: i32;
     shot_tx: f32;
@@ -183,7 +176,7 @@ struct Paddle {
 struct Cursor {
     grid_x: i32;
     grid_y: i32;
-    brick_type: i32;
+    brick_type: BrickType;
 }
 
 struct Timers {
@@ -314,7 +307,7 @@ function init_game(reset_progress: bool): void {
         brick.y = 0.0;
         brick.width = state.config.brick.width;
         brick.height = state.config.brick.height;
-        brick.brick_type = BRICK_BASIC;
+        brick.brick_type = BrickType.Basic;
         brick.attack_cd_ms = 0;
         brick.shot_fx_ms = 0;
         brick.shot_tx = 0.0;
@@ -346,7 +339,7 @@ function init_game(reset_progress: bool): void {
     // Init cursor
     state.cursor.grid_x = 3;
     state.cursor.grid_y = 3;
-    state.cursor.brick_type = BRICK_BASIC;
+    state.cursor.brick_type = BrickType.Basic;
 
     // Init timers
     state.timers.last_time = get_time_ms();
@@ -398,17 +391,17 @@ function setup_default_bricks(): void {
                 let brick_hp: i32 = 10 + (next_rand() % 21);
 
                 if (type_selector == 0) {
-                    state.bricks[brick_idx].brick_type = BRICK_BASIC;
+                    state.bricks[brick_idx].brick_type = BrickType.Basic;
                     state.bricks[brick_idx].hp = brick_hp;
                     state.bricks[brick_idx].max_hp = brick_hp;
                 }
                 if (type_selector == 1) {
-                    state.bricks[brick_idx].brick_type = BRICK_ARMORED;
+                    state.bricks[brick_idx].brick_type = BrickType.Armored;
                     state.bricks[brick_idx].hp = brick_hp;
                     state.bricks[brick_idx].max_hp = brick_hp;
                 }
                 if (type_selector == 2) {
-                    state.bricks[brick_idx].brick_type = BRICK_REFLECTOR;
+                    state.bricks[brick_idx].brick_type = BrickType.Reflector;
                     state.bricks[brick_idx].hp = brick_hp;
                     state.bricks[brick_idx].max_hp = brick_hp;
                 }
@@ -442,13 +435,13 @@ function update_brick_attacks(delta_ms: i32): void {
                 let dmg: i32 = state.config.tower_basic.damage;
                 let shot_fx_ms: i32 = state.config.tower_basic.shot_fx_ms;
 
-                if (brick.brick_type == BRICK_ARMORED) {
+                if (brick.brick_type == BrickType.Armored) {
                     range = state.config.tower_armored.range;
                     cd = state.config.tower_armored.cooldown_ms;
                     dmg = state.config.tower_armored.damage;
                     shot_fx_ms = state.config.tower_armored.shot_fx_ms;
                 }
-                if (brick.brick_type == BRICK_REFLECTOR) {
+                if (brick.brick_type == BrickType.Reflector) {
                     range = state.config.tower_reflector.range;
                     cd = state.config.tower_reflector.cooldown_ms;
                     dmg = state.config.tower_reflector.damage;
@@ -817,7 +810,7 @@ function check_brick_collisions(): void {
                             ball.bounce_streak = 0;
 
                             // Reflector type adds randomness
-                            if (brick.brick_type == BRICK_REFLECTOR) {
+                            if (brick.brick_type == BrickType.Reflector) {
                                 ball.vx = ball.vx + rand_range(-50.0, 50.0);
                                 ball.vy = ball.vy + rand_range(-50.0, 50.0);
                             }
@@ -938,17 +931,17 @@ function draw_bricks(): void {
             let h_base: i32 = state.sprites.brick_basic_base;
             let h_turret: i32 = state.sprites.brick_basic_turret;
             let h_fx: i32 = state.sprites.brick_basic_fx;
-            if (brick.brick_type == BRICK_BASIC) {
+            if (brick.brick_type == BrickType.Basic) {
                 h_base = state.sprites.brick_basic_base;
                 h_turret = state.sprites.brick_basic_turret;
                 h_fx = state.sprites.brick_basic_fx;
             }
-            if (brick.brick_type == BRICK_ARMORED) {
+            if (brick.brick_type == BrickType.Armored) {
                 h_base = state.sprites.brick_armored_base;
                 h_turret = state.sprites.brick_armored_turret;
                 h_fx = state.sprites.brick_armored_fx;
             }
-            if (brick.brick_type == BRICK_REFLECTOR) {
+            if (brick.brick_type == BrickType.Reflector) {
                 h_base = state.sprites.brick_reflector_base;
                 h_turret = 0;
                 h_fx = state.sprites.brick_reflector_fx;
@@ -976,7 +969,7 @@ function draw_bricks(): void {
             // Effects layer (pulse alpha)
             if (h_fx != 0) {
                 let a: f32 = fx_alpha;
-                if (brick.brick_type == BRICK_REFLECTOR) {
+                if (brick.brick_type == BrickType.Reflector) {
                     a = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
                 }
                 gfx_draw_sprite(h_fx, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, a);
@@ -989,8 +982,8 @@ function draw_bricks(): void {
                 let sr: f32 = 1.0;
                 let sg: f32 = 0.4;
                 let sb: f32 = 0.2;
-                if (brick.brick_type == BRICK_ARMORED) { sr = 0.6; sg = 0.8; sb = 1.0; }
-                if (brick.brick_type == BRICK_REFLECTOR) { sr = 0.7; sg = 0.3; sb = 1.0; }
+                if (brick.brick_type == BrickType.Armored) { sr = 0.6; sg = 0.8; sb = 1.0; }
+                if (brick.brick_type == BrickType.Reflector) { sr = 0.7; sg = 0.3; sb = 1.0; }
                 draw_line(cx, cy, brick.shot_tx, brick.shot_ty, sr, sg, sb, alpha);
             }
 
@@ -1466,7 +1459,7 @@ function tick(): i32 {
         state.running = 0;
     }
 
-    if (is_key_down(KEY_ESCAPE)) {
+    if (is_key_down(Scancode.Escape)) {
         state.running = 0;
     }
 

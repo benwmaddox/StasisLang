@@ -1106,19 +1106,29 @@ public sealed class ModuleLowerer
                 case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumIdExpr && _enums.ContainsKey(enumIdExpr.Identifier.Text):
                     // Enum member access (e.g., State.Idle)
                     var enumDecl = _enums[enumIdExpr.Identifier.Text];
-                    var memberIndex = -1;
+                    var memberValue = -1;
+                    var nextValue = 0;
                     for (int i = 0; i < enumDecl.Members.Count; i++)
                     {
-                        if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        var m = enumDecl.Members[i];
+                        var assigned = nextValue;
+                        if (m.ValueToken is not null && int.TryParse(m.ValueToken.Text, out var explicitValue))
                         {
-                            memberIndex = i;
+                            assigned = explicitValue;
+                        }
+
+                        if (string.Equals(m.Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        {
+                            memberValue = assigned;
                             break;
                         }
+
+                        nextValue = assigned + 1;
                     }
 
-                    if (memberIndex >= 0)
+                    if (memberValue >= 0)
                     {
-                        return ConstI32(memberIndex);
+                        return ConstI32(memberValue);
                     }
 
                     AddDiagnostic($"Enum '{enumIdExpr.Identifier.Text}' does not have a member '{member.Member.Text}'.", member.Span);

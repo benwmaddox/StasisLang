@@ -2717,19 +2717,29 @@ public sealed class CraneliftFunctionBuilder
         else if (member.Receiver is IdentifierExpressionSyntax enumId &&
                  _enums.TryGetValue(enumId.Identifier.Text, out var enumDecl))
         {
-            var memberIndex = -1;
+            var memberValue = -1;
+            var nextValue = 0;
             for (int i = 0; i < enumDecl.Members.Count; i++)
             {
-                if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                var m = enumDecl.Members[i];
+                var assigned = nextValue;
+                if (m.ValueToken is not null && int.TryParse(m.ValueToken.Text, out var explicitValue))
                 {
-                    memberIndex = i;
+                    assigned = explicitValue;
+                }
+
+                if (string.Equals(m.Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                {
+                    memberValue = assigned;
                     break;
                 }
+
+                nextValue = assigned + 1;
             }
 
-            if (memberIndex >= 0)
+            if (memberValue >= 0)
             {
-                _instructions.AppendLine($"    {result} = iconst.i32 {memberIndex}");
+                _instructions.AppendLine($"    {result} = iconst.i32 {memberValue}");
                 return result;
             }
 
