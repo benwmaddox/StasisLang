@@ -267,7 +267,7 @@ function init_game(reset_progress: bool): void {
     state.timers.tick_time_ms = 0;
 
     frame_timer_init(state.frame_timer.samples_ms);
-    state.frame_timer.sample_index = frame_timer_reset_index();
+    state.frame_timer.sample_index = 0;
 
     // Game state
     // Start immediately in battle; no setup pause.
@@ -278,7 +278,7 @@ function init_game(reset_progress: bool): void {
     // Initialize frame time tracking
     // Note: Frame times will be filled with first actual measurement
     // to provide accurate average from the start
-    state.frame_timer.sample_index = frame_timer_reset_index();
+    state.frame_timer.sample_index = 0;
 
     if (reset_progress) {
         state.wave = 1;
@@ -1321,7 +1321,7 @@ function main(): i32 {
 
     // Initialize frame time buffer with baseline value
     frame_timer_init(state.frame_timer.samples_ms);
-    state.frame_timer.sample_index = frame_timer_reset_index();
+    state.frame_timer.sample_index = 0;
 
     let frame: i32 = 0;
     for (frame = 0; state.running == 1; frame = frame + 1) {
