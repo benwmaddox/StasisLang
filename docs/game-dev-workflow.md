@@ -94,9 +94,9 @@ Goal: converge on one "fun slice" and validate it is stable.
 
 ### Recommended commands
 
-Run with hot-swap (Windows + Cranelift):
+Run with hot reload (Windows + Cranelift + `tick()`):
 
-`.\stasis.bat run .\samples\your_game.stasis --backend cranelift --hot-state --watch --fps 60`
+`.\stasis.bat run .\samples\your_game.stasis --watch --fps 60`
 
 Tips:
 
@@ -110,8 +110,7 @@ On each code edit:
 
 1) CLI compiles to CLIF and AOTs to `.obj`.
 2) CLI links a new `.dll`.
-3) CLI writes a "swap file" containing the new DLL path.
-4) Runner sees the swap request between ticks:
+3) Runner hot-swaps between ticks:
    - copies `state` out of the old DLL
    - `LoadLibraryA()` the new DLL
    - restores `state` into the new DLL
@@ -322,3 +321,12 @@ This keeps examples and docs aligned with the spec and assets:
 - Hot swapping assumes compatible `state` layout between swaps.
 - If you change struct layout often, expect occasional "restart required" moments; design your `state` so core gameplay stays stable and experimental data stays in a separate sub-struct.
 - When in doubt: keep the hot-swap loop for *gameplay iteration*, and occasionally do a full restart when you change fundamentals.
+
+## Flags You Should (and Should Not) Care About
+
+For day-to-day game iteration, you should not need any special "state file" arguments.
+The CLI and runner handle the mechanics internally.
+
+- Use `--watch` to enable hot reload.
+- Use `--fps` to set the host pacing.
+- Use `--hot-state` only if you are experimenting with restart-based snapshot/restore across separate process runs.
