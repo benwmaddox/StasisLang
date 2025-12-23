@@ -1372,3 +1372,4 @@ function tick(): i32 {
     end_frame();
     return 0;
 }
+
