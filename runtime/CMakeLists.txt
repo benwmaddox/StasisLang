@@ -73,7 +73,7 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
 endif()
 
 if(STASIS_BUILD_RUNNER)
-    add_executable(stasis_runner stasis_runner.c)
+    add_executable(stasis_runner stasis_runner.c stasis_data.c cJSON.c)
     if(WIN32)
         target_compile_definitions(stasis_runner PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()

@@ -1,0 +1,8 @@
+{
+    "balance":  {
+                    "damage":  1,
+                    "spawn_rate":  0.11,
+                    "health":  123,
+                    "speed":  123
+                }
+}
