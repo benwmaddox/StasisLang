@@ -330,8 +330,8 @@ function main(): i32 {
         }
         else
         {
-            Assert.Contains("global state_ship_weapon_x", result.Ir);
-            Assert.Contains("global_value state_ship_weapon_x", result.Ir);
+            Assert.Contains("global state__ship__weapon__x", result.Ir);
+            Assert.Contains("global_value state__ship__weapon__x", result.Ir);
             Assert.DoesNotContain("TODO:", result.Ir);
         }
     }
