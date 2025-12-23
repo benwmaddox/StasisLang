@@ -3,6 +3,10 @@ import "../../src/stdlib/frame_timer.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
+//
+// Live tuning:
+// - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --backend cranelift --graphics`
+// - Edit: `samples/brickout_revenge/data/config.json` (hot-reloaded between ticks)
 
 // External runtime APIs
 // - init_window(width: i32, height: i32, title: string) -> bool
@@ -267,7 +271,7 @@ function sign_f32(x: f32): f32 {
 
 function ensure_config_defaults(): void {
     // If JSON data binding didn't run (e.g. non-runner builds), keep reasonable defaults.
-    if (state.config.ball.damage_wave_div > 0) {
+    if (state.config.screen.w > 0) {
         return;
     }
 
@@ -331,6 +335,25 @@ function ensure_config_defaults(): void {
 
     state.config.score.ball_kill = 1;
     state.config.score.brick_kill = 10;
+}
+
+function apply_config_live(): void {
+    // Apply a subset of config values every tick so hot-reload edits take effect immediately.
+    //
+    // Note: This is dev-only behavior; it trades determinism/stability for iteration speed.
+    state.paddle.y = state.config.paddle.y;
+    state.paddle.width = state.config.paddle.width;
+    state.paddle.height = state.config.paddle.height;
+    state.paddle.speed = state.config.paddle.speed;
+
+    foreach (let brick in state.bricks) {
+        brick.width = state.config.brick.width;
+        brick.height = state.config.brick.height;
+    }
+
+    foreach (let ball in state.balls) {
+        ball.radius = state.config.ball.radius;
+    }
 }
 
 // Grid helpers - bricks are placed on a grid in the lower portion
@@ -1486,6 +1509,8 @@ function tick(): i32 {
     if (state.running != 1) {
         return 1;
     }
+
+    apply_config_live();
 
     state.timers.frame_start = get_time_ms();
 
