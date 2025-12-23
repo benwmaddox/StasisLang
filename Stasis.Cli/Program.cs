@@ -1299,7 +1299,33 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
     {
         Directory.CreateDirectory(targetDir);
 
-        var candidates = new List<string>();
+        var dllCandidates = new List<string>();
+
+        void AddGraphicsDllCandidate(string? path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            {
+                return;
+            }
+
+            var ext = Path.GetExtension(path);
+            if (ext.Equals(".dll", StringComparison.OrdinalIgnoreCase) ||
+                ext.Equals(".so", StringComparison.OrdinalIgnoreCase) ||
+                ext.Equals(".dylib", StringComparison.OrdinalIgnoreCase))
+            {
+                dllCandidates.Add(path);
+                return;
+            }
+
+            if (ext.Equals(".lib", StringComparison.OrdinalIgnoreCase))
+            {
+                var dllGuess = Path.ChangeExtension(path, ".dll");
+                if (File.Exists(dllGuess))
+                {
+                    dllCandidates.Add(dllGuess);
+                }
+            }
+        }
 
         // Prefer explicit lib path (derive DLL alongside .lib)
         if (!string.IsNullOrEmpty(graphicsLibPath))
@@ -1311,30 +1337,18 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
                 return;
             }
 
-            if (Path.GetExtension(graphicsLibPath).Equals(".lib", StringComparison.OrdinalIgnoreCase))
-            {
-                var dllGuess = Path.ChangeExtension(graphicsLibPath, ".dll");
-                if (File.Exists(dllGuess))
-                {
-                    candidates.Add(dllGuess);
-                }
-            }
-
-            if (File.Exists(graphicsLibPath) && Path.GetExtension(graphicsLibPath).Equals(".dll", StringComparison.OrdinalIgnoreCase))
-            {
-                candidates.Add(graphicsLibPath);
-            }
+            AddGraphicsDllCandidate(graphicsLibPath);
         }
 
-        // Fall back to search helper
-        var foundDll = FindGraphicsLibrary(preferShared: true);
-        if (!string.IsNullOrEmpty(foundDll))
+        // Fall back to a direct shared-DLL search (do not return import libs).
+        var foundSharedDll = FindGraphicsSharedLibrary();
+        if (!string.IsNullOrEmpty(foundSharedDll))
         {
-            candidates.Add(foundDll);
+            dllCandidates.Add(foundSharedDll);
         }
 
-        // Copy primary graphics DLL + common deps if present in the same directory
-        foreach (var src in candidates)
+        // Copy primary graphics shared lib + common deps if present in the same directory
+        foreach (var src in dllCandidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var fileName = Path.GetFileName(src);
             if (string.IsNullOrEmpty(fileName))
@@ -1367,6 +1381,56 @@ static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLi
     {
         // Best-effort; missing copies will surface as runtime load errors.
     }
+}
+
+static string? FindGraphicsSharedLibrary()
+{
+    var searchPaths = new List<string>();
+
+    // Check relative to the CLI executable
+    var exeDir = AppContext.BaseDirectory;
+    searchPaths.Add(exeDir);
+    searchPaths.Add(Path.Combine(exeDir, "runtime"));
+
+    // Prefer workspace runtime outputs before falling back to cwd root
+    var cwd = Directory.GetCurrentDirectory();
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
+    searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(Path.Combine(cwd, "build"));
+    searchPaths.Add(cwd);
+
+    string[] candidates;
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        candidates = new[] { "stasis_graphics.dll" };
+    }
+    else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+    {
+        candidates = new[] { "libstasis_graphics.dylib" };
+    }
+    else
+    {
+        candidates = new[] { "libstasis_graphics.so" };
+    }
+
+    foreach (var dir in searchPaths)
+    {
+        foreach (var name in candidates)
+        {
+            var candidate = Path.Combine(dir, name);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    return null;
 }
 
 static bool DetectsGraphicsUsage(string source)
