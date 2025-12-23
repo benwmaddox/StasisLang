@@ -12,14 +12,19 @@ struct FrameTimer {
     sample_index: i32;
 }
 
-function frame_timer_init(samples_ms: i32[]): void {
-    let i: i32 = 0;
-    for (i = 0; i < FRAME_TIMER_SAMPLES; i = i + 1) {
-        samples_ms[i] = 1;
+function frame_timer_reset_index(): i32 {
+    return 0;
+}
+
+function frame_timer_init(samples_ms: i32[120]): void {
+    foreach (let v, i in samples_ms) {
+        if (i < FRAME_TIMER_SAMPLES) {
+            samples_ms[i] = 1;
+        }
     }
 }
 
-function frame_timer_push(samples_ms: i32[], sample_index: i32, value_ms: i32): i32 {
+function frame_timer_push(samples_ms: i32[120], sample_index: i32, value_ms: i32): i32 {
     let idx: i32 = sample_index;
     if (idx < 0) { idx = 0; }
     if (idx > (FRAME_TIMER_SAMPLES - 1)) { idx = 0; }
@@ -30,7 +35,7 @@ function frame_timer_push(samples_ms: i32[], sample_index: i32, value_ms: i32): 
     return idx;
 }
 
-function frame_timer_avg_tenths(samples_ms: i32[]): i32 {
+function frame_timer_avg_tenths(samples_ms: i32[120]): i32 {
     // Fixed-point average in 0.1ms units to avoid f32->i32 cast issues in some backends.
     let sum: i32 = 0;
     let i: i32 = 0;
@@ -40,7 +45,7 @@ function frame_timer_avg_tenths(samples_ms: i32[]): i32 {
     return (sum * 10) / FRAME_TIMER_SAMPLES;
 }
 
-function frame_timer_max(samples_ms: i32[]): i32 {
+function frame_timer_max(samples_ms: i32[120]): i32 {
     // Returns the max sample value across the full sample window.
     let max_v: i32 = 0;
     let i: i32 = 0;

@@ -149,6 +149,7 @@ struct GameState {
     cursor: Cursor;
     timers: Timers;
     frame_timer: FrameTimer;
+    initialized: i32;
     phase: i32;
     wave: i32;
     score: i32;
@@ -1311,55 +1312,64 @@ function main(): i32 {
     state.sprites.brick_reflector_base = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector.svg");
     state.sprites.brick_reflector_fx = gfx_load_sprite("assets_src/brickout-revenge/brick_reflector_fx.svg");
 
-    seed_rng(time());
-    init_game(true);
-    setup_default_bricks();
-    start_wave();
+    if (state.initialized == 0) {
+        seed_rng(time());
+        init_game(true);
+        setup_default_bricks();
+        start_wave();
+
+        // Initialize frame time buffer with baseline value
+        frame_timer_init(state.frame_timer.samples_ms);
+        state.frame_timer.sample_index = frame_timer_reset_index();
+
+        state.initialized = 1;
+    }
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
-
-    // Initialize frame time buffer with baseline value
-    frame_timer_init(state.frame_timer.samples_ms);
-    state.frame_timer.sample_index = 0;
-
-    let frame: i32 = 0;
-    for (frame = 0; state.running == 1; frame = frame + 1) {
-        state.timers.frame_start = get_time_ms();
-
-        let quit: bool = should_quit();
-        if (quit) {
-            state.running = 0;
-        }
-
-        if (is_key_down(KEY_ESCAPE)) {
-            state.running = 0;
-        }
-
-        if (state.running == 1) {
-            begin_frame();
-            clear(0.05, 0.05, 0.15, 1.0);
-
-            let delta_ms: i32 = compute_delta_ms();
-            let delta_f: f32 = delta_ms;
-            let dt: f32 = delta_f / 1000.0;
-
-            update_game(dt, delta_ms);
-            draw_frame();
-
-            // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
-            let frame_end: i32 = get_time_ms();
-            state.timers.tick_time_ms = frame_end - state.timers.frame_start;
-            if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
-
-            // Store in circular buffer for averaging
-            state.frame_timer.sample_index =
-                frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
-
-            end_frame();
-            sync_frame_rate();
-        }
-    }
-
     return 0;
 }
+
+function tick(): i32 {
+    if (state.running != 1) {
+        return 1;
+    }
+
+    state.timers.frame_start = get_time_ms();
+
+    let quit: bool = should_quit();
+    if (quit) {
+        state.running = 0;
+    }
+
+    if (is_key_down(KEY_ESCAPE)) {
+        state.running = 0;
+    }
+
+    if (state.running != 1) {
+        return 1;
+    }
+
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
+
+    let delta_ms: i32 = compute_delta_ms();
+    let delta_f: f32 = delta_ms;
+    let dt: f32 = delta_f / 1000.0;
+
+    update_game(dt, delta_ms);
+    draw_frame();
+
+    // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
+    let frame_end: i32 = get_time_ms();
+    state.timers.tick_time_ms = frame_end - state.timers.frame_start;
+    if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
+
+    // Store in circular buffer for averaging
+    state.frame_timer.sample_index =
+        frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
+
+    end_frame();
+    return 0;
+}
+

@@ -25,6 +25,7 @@ _ReSharper.Caches/
 *.dylib
 runtime/build/
 codevcpkg/
+build/hotstate/
 
 # Debug/temp files
 nul
