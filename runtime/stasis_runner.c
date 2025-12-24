@@ -434,6 +434,16 @@ int main(int argc, char **argv)
     enable_vt_processing(GetStdHandle(STD_ERROR_HANDLE));
 #endif
 
+    const char *dll_path = NULL;
+    const char *entry_name = NULL;
+    const char *state_path = NULL;
+    const char *state_map_path = NULL;
+    const char *hot_exit_path = NULL;
+    const char *swap_file_path = NULL;
+    const char *data_bind_json = NULL;
+    const char *data_bind_meta = NULL;
+    int fps = 60;
+
     if (argc >= 2 && strcmp(argv[1], "--server") == 0)
     {
         char line[256];
@@ -474,51 +484,51 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            char *dll_path = (char *)malloc(dll_len + 1);
-            char *entry_name = (char *)malloc(entry_len + 1);
-            if (!dll_path || !entry_name)
+            char *req_dll_path = (char *)malloc(dll_len + 1);
+            char *req_entry_name = (char *)malloc(entry_len + 1);
+            if (!req_dll_path || !req_entry_name)
             {
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 fprintf(stderr, "ERR out of memory\n");
                 fflush(stderr);
                 continue;
             }
 
-            if (fread(dll_path, 1, dll_len, stdin) != dll_len ||
-                fread(entry_name, 1, entry_len, stdin) != entry_len)
+            if (fread(req_dll_path, 1, dll_len, stdin) != dll_len ||
+                fread(req_entry_name, 1, entry_len, stdin) != entry_len)
             {
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 fprintf(stderr, "ERR failed to read request\n");
                 fflush(stderr);
                 continue;
             }
 
-            dll_path[dll_len] = '\0';
-            entry_name[entry_len] = '\0';
+            req_dll_path[dll_len] = '\0';
+            req_entry_name[entry_len] = '\0';
 
-            set_runtime_dir(dll_path);
+            set_runtime_dir(req_dll_path);
 
 #ifdef _WIN32
-            HMODULE lib = LoadLibraryA(dll_path);
+            HMODULE lib = LoadLibraryA(req_dll_path);
             if (!lib)
             {
                 fprintf(stderr, "ERR failed to load\n");
                 fflush(stderr);
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 continue;
             }
 
-            FARPROC symbol = GetProcAddress(lib, entry_name);
+            FARPROC symbol = GetProcAddress(lib, req_entry_name);
             if (!symbol)
             {
                 fprintf(stderr, "ERR entrypoint not found\n");
                 fflush(stderr);
                 FreeLibrary(lib);
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 continue;
             }
 
@@ -526,24 +536,24 @@ int main(int argc, char **argv)
             int result = entry();
             FreeLibrary(lib);
 #else
-            void *lib = dlopen(dll_path, RTLD_NOW);
+            void *lib = dlopen(req_dll_path, RTLD_NOW);
             if (!lib)
             {
                 fprintf(stderr, "ERR failed to load\n");
                 fflush(stderr);
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 continue;
             }
 
-            void *symbol = dlsym(lib, entry_name);
+            void *symbol = dlsym(lib, req_entry_name);
             if (!symbol)
             {
                 fprintf(stderr, "ERR entrypoint not found\n");
                 fflush(stderr);
                 dlclose(lib);
-                free(dll_path);
-                free(entry_name);
+                free(req_dll_path);
+                free(req_entry_name);
                 continue;
             }
 
@@ -552,8 +562,8 @@ int main(int argc, char **argv)
             dlclose(lib);
 #endif
 
-            free(dll_path);
-            free(entry_name);
+            free(req_dll_path);
+            free(req_entry_name);
 
             fprintf(stderr, "OK %d\n", result);
             fflush(stderr);
@@ -571,13 +581,6 @@ int main(int argc, char **argv)
     const char *dll_path = argv[1];
     const char *entry_name = argc >= 3 ? argv[2] : "run_tests";
 
-    const char *state_path = NULL;
-    const char *state_map_path = NULL;
-    const char *hot_exit_path = NULL;
-    const char *swap_file_path = NULL;
-    const char *data_bind_json = NULL;
-    const char *data_bind_meta = NULL;
-    int fps = 60;
     for (int i = 2; i < argc; i++)
     {
         if (strcmp(argv[i], "--state") == 0 && i + 1 < argc)
