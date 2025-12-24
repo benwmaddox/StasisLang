@@ -194,3 +194,14 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
   - Minimal “copy assets to app storage on first run” strategy.
 - [ ] CI:
   - Add a GitHub Actions job that builds the APK (no emulator required initially).
+
+## 5) Task: Smoke-run all samples
+
+### Goals
+- Regularly run every `.stasis` program under `samples/` (and `examples/` if relevant) to catch bitrot.
+- For each sample: either fix it to run/build again, or explicitly update/retire it.
+
+### Milestones (concrete steps)
+- [ ] Enumerate all sample entrypoints and decide per-file run mode (build-only vs run vs test).
+- [ ] Create a repeatable local command/script that runs the suite.
+- [ ] Fix or update any failing samples (prefer isolated PRs).
