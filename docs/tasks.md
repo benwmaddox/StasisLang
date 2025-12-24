@@ -5,6 +5,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 ## Inbox
 
 - [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
+- [ ] Support compiling Markdown code blocks: allow `stasis build`/`stasis test` to accept `.md` inputs, extract ```stasis fenced blocks (and/or a `stasis` info string), and compile/test them so docs + samples stay valid.
 
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
