@@ -652,6 +652,166 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerCount(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_count");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_count", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerId(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_id");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_id", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerIsDown(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_is_down");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_is_down", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerWentDown(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_went_down");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_went_down", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerWentUp(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_went_up");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_went_up", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerXPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_x_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_x_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerYPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_y_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_y_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerDxPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_dx_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_dx_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerDyPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_dy_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_dy_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerXN(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_x_n");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_x_n", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputPointerYN(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_pointer_y_n");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_pointer_y_n", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputDroppedPointers(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_dropped_pointers");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_dropped_pointers", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputViewportXPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_viewport_x_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_viewport_x_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputViewportYPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_viewport_y_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_viewport_y_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputViewportWPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_viewport_w_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_viewport_w_px", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisInputViewportHPx(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_input_viewport_h_px");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_input_viewport_h_px", fnType);
+        return (fn, fnType);
+    }
+
     // ============================================================
     // Standard Library: C library string function declarations
     // ============================================================
@@ -834,6 +994,24 @@ public sealed class ModuleLowerer
             "list_directory",
             "dir_list_entry_is_dir",
             "dir_list_entry_copy_name",
+
+            // Input snapshot (mouse + touch)
+            "input_pointer_count",
+            "input_pointer_id",
+            "input_pointer_is_down",
+            "input_pointer_went_down",
+            "input_pointer_went_up",
+            "input_pointer_x_px",
+            "input_pointer_y_px",
+            "input_pointer_dx_px",
+            "input_pointer_dy_px",
+            "input_pointer_x_n",
+            "input_pointer_y_n",
+            "input_dropped_pointers",
+            "input_viewport_x_px",
+            "input_viewport_y_px",
+            "input_viewport_w_px",
+            "input_viewport_h_px",
 
             // Standard Library: char_* module
             "char_is_digit",
@@ -1988,6 +2166,250 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisShouldQuit(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "should_quit.call");
+                    }
+                case "input_pointer_count":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_pointer_count expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerCount(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_pointer_count.call");
+                    }
+                case "input_pointer_id":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_id expects (idx: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerId(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_id.call");
+                    }
+                case "input_pointer_is_down":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_is_down expects (idx: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerIsDown(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_is_down.call");
+                    }
+                case "input_pointer_went_down":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_went_down expects (idx: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerWentDown(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_went_down.call");
+                    }
+                case "input_pointer_went_up":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_went_up expects (idx: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerWentUp(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_went_up.call");
+                    }
+                case "input_pointer_x_px":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_x_px expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerXPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_x_px.call");
+                    }
+                case "input_pointer_y_px":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_y_px expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerYPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_y_px.call");
+                    }
+                case "input_pointer_dx_px":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_dx_px expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerDxPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_dx_px.call");
+                    }
+                case "input_pointer_dy_px":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_dy_px expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerDyPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_dy_px.call");
+                    }
+                case "input_pointer_x_n":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_x_n expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerXN(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_x_n.call");
+                    }
+                case "input_pointer_y_n":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("input_pointer_y_n expects (idx: i32).", span);
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputPointerYN(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { idx }, "input_pointer_y_n.call");
+                    }
+                case "input_dropped_pointers":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_dropped_pointers expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputDroppedPointers(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_dropped_pointers.call");
+                    }
+                case "input_viewport_x_px":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_viewport_x_px expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputViewportXPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_viewport_x_px.call");
+                    }
+                case "input_viewport_y_px":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_viewport_y_px expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputViewportYPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_viewport_y_px.call");
+                    }
+                case "input_viewport_w_px":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_viewport_w_px expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputViewportWPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_viewport_w_px.call");
+                    }
+                case "input_viewport_h_px":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("input_viewport_h_px expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisInputViewportHPx(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "input_viewport_h_px.call");
                     }
                 case "get_window_size":
                     {

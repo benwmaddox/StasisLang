@@ -14,6 +14,22 @@ EXPORTS
     stasis_get_startup_test_error
     stasis_get_startup_test_success
     stasis_set_postfx
+    stasis_input_pointer_count
+    stasis_input_pointer_id
+    stasis_input_pointer_is_down
+    stasis_input_pointer_went_down
+    stasis_input_pointer_went_up
+    stasis_input_pointer_x_px
+    stasis_input_pointer_y_px
+    stasis_input_pointer_dx_px
+    stasis_input_pointer_dy_px
+    stasis_input_pointer_x_n
+    stasis_input_pointer_y_n
+    stasis_input_dropped_pointers
+    stasis_input_viewport_x_px
+    stasis_input_viewport_y_px
+    stasis_input_viewport_w_px
+    stasis_input_viewport_h_px
     stasis_gfx_load_sprite
     stasis_gfx_draw_sprite
     stasis_gfx_poll_reload
