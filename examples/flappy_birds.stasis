@@ -78,7 +78,9 @@ function main(): i32 {
     init_assets();
     reset();
 
-    while (!should_quit()) {
+    // Stasis does not currently support `while`; use a `for` as a conditional loop.
+    let loop: i32 = 0;
+    for (loop = 0; !should_quit(); loop = 0) {
         let do_flap: bool = is_key_down(KEY_SPACE);
         if (!step(do_flap)) {
             reset();
