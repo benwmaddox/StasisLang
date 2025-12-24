@@ -5,6 +5,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 ## Inbox
 
 - [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
+- [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
