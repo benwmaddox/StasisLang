@@ -154,6 +154,19 @@ public sealed class Parser
         }
 
         var functionKeyword = Consume(TokenKind.FunctionKeyword, "Expected 'function'.");
+        var attributes = new List<Token>();
+        while (Match(TokenKind.At))
+        {
+            var attr = Consume(TokenKind.Identifier, "Expected attribute name after '@'.");
+            if (attributes.Count < 10)
+            {
+                attributes.Add(attr);
+            }
+            else
+            {
+                _diagnostics.Add(new Diagnostic("Functions may have at most 10 attributes.", attr.Span));
+            }
+        }
         var name = Consume(TokenKind.Identifier, "Expected function name.");
         Consume(TokenKind.LParen, "Expected '(' after function name.");
         var parameters = ParseParameterList();
@@ -165,7 +178,7 @@ public sealed class Parser
         }
 
         var body = ParseBlock();
-        return new FunctionDeclarationSyntax(functionKeyword, name, parameters, returnType, body, exportKeyword);
+        return new FunctionDeclarationSyntax(functionKeyword, attributes, name, parameters, returnType, body, exportKeyword);
     }
 
     private TestDeclarationSyntax ParseTest()

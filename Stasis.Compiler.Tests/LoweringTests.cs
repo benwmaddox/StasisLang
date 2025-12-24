@@ -267,7 +267,7 @@ public class LoweringTests
     {
         var ir = LowerWithDiagnostics("""
             function demo(): i32 {
-                return gfx_debug_bake_hash("assets_src/brickout-revenge/paddle.stv");
+                return gfx_debug_bake_hash("samples/brickout_revenge/assets/paddle.svg");
             }
             """, allowSemanticDiagnostics: true, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false, HeadlessGraphics: false)).Ir;
 
@@ -414,6 +414,21 @@ public class LoweringTests
         // Should contain fptosi instruction for f32 -> i32 conversion
         Assert.Contains("fptosi float", ir);
         Assert.Contains("to i32", ir);
+    }
+
+    [Fact]
+    public void StringLiteral_UsesUtf8HeaderPayloadOffset()
+    {
+        var ir = Lower("""
+            function main(): i32 {
+                print_string("hi");
+                return 0;
+            }
+            """);
+
+        Assert.Contains("@str_", ir);
+        Assert.Contains("getelementptr", ir);
+        Assert.Contains("i32 8", ir);
     }
 
     [Fact]

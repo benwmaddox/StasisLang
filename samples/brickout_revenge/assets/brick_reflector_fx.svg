@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <g id="effects" stroke="#f5f58a" stroke-width="2" fill="none">
+    <path d="M40 18L60 30 50 46"/>
+    <path d="M120 18L100 34 110 46"/>
+    <path d="M80 12L92 32 80 52 68 32Z" opacity=".25"/>
+  </g>
+</svg>

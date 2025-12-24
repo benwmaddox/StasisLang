@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Test struct instance global with AoS → SoA transformation
 
 struct Ship {

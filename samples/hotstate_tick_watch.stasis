@@ -1,0 +1,21 @@
+struct WatchState {
+    ticks: i32;
+}
+
+global state: WatchState;
+
+function main(): i32 {
+    print_string("init tick watch\n");
+    return 0;
+}
+
+function tick(): i32 {
+    state.ticks = state.ticks + 1;
+    if (state.ticks % 5 == 0) {
+        print_string("ticks=");
+        print_int(state.ticks);
+        print_char(10);
+    }
+    return 0;
+}
+

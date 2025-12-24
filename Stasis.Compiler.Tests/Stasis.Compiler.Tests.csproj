@@ -32,4 +32,8 @@
     <None Include="..\tools\git-hooks\pre-push" Link="hooks\pre-push" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

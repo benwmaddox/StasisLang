@@ -1,0 +1,326 @@
+// Stasis standard library (stub).
+// Import explicitly: import "src/stdlib/stdlib.stasis";
+
+function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
+    if (dst_max <= 0) {
+        return 0;
+    }
+
+    let i: i32 = 0;
+    let limit: i32 = dst_max - 1;
+    for (i = 0; i < limit; i = i + 1) {
+        let b: i32 = src[i];
+        if (b == 0) {
+            str_set(dst, i, 0);
+            return i;
+        }
+        dst[i] = b;
+    }
+
+    str_set(dst, i, 0);
+    return i;
+}
+
+function ascii_is_digit(b: u8): bool {
+    return char_is_digit(b);
+}
+
+function ascii_is_alpha(b: u8): bool {
+    return char_is_alpha(b);
+}
+
+function ascii_is_alnum(b: u8): bool {
+    return char_is_alnum(b);
+}
+
+function ascii_is_space(b: u8): bool {
+    return char_is_space(b);
+}
+
+function ascii_is_upper(b: u8): bool {
+    return char_is_upper(b);
+}
+
+function ascii_is_lower(b: u8): bool {
+    return char_is_lower(b);
+}
+
+function ascii_is_hex(b: u8): bool {
+    return char_is_hex(b);
+}
+
+function ascii_is_print(b: u8): bool {
+    return char_is_print(b);
+}
+
+function ascii_is_ascii(b: u8): bool {
+    return b < 128;
+}
+
+function ascii_to_upper(b: u8): u8 {
+    return char_to_upper(b);
+}
+
+function ascii_to_lower(b: u8): u8 {
+    return char_to_lower(b);
+}
+
+function ascii_to_digit(b: u8): i32 {
+    return char_to_digit(b);
+}
+
+function ascii_from_digit(d: i32): u8 {
+    return char_from_digit(d);
+}
+
+function ascii_to_hex(b: u8): i32 {
+    return char_to_hex(b);
+}
+
+function ascii_from_hex(d: i32): u8 {
+    return char_from_hex(d);
+}
+
+function ascii_len(s: ascii[]): i32 {
+    let b0: i32 = s[-4];
+    let b1: i32 = s[-3];
+    let b2: i32 = s[-2];
+    let b3: i32 = s[-1];
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+function ascii_set_len(s: ascii[], len: i32) {
+    let value: i32 = len;
+    if (value < 0) {
+        value = 0;
+    }
+    let b0: i32 = value % 256;
+    let b1: i32 = (value / 256) % 256;
+    let b2: i32 = (value / 65536) % 256;
+    let b3: i32 = (value / 16777216) % 256;
+    s[-4] = b0;
+    s[-3] = b1;
+    s[-2] = b2;
+    s[-1] = b3;
+}
+
+function ascii_is_empty(s: ascii[]): bool {
+    return ascii_len(s) == 0;
+}
+
+function ascii_get(s: ascii[], index: i32): u8 {
+    return s[index];
+}
+
+function ascii_set(s: ascii[], index: i32, b: u8) {
+    s[index] = b;
+    if (b == 0) {
+        ascii_set_len(s, index);
+        return;
+    }
+    if (index >= ascii_len(s)) {
+        ascii_set_len(s, index + 1);
+    }
+}
+
+function ascii_recount(s: ascii[]): i32 {
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        if (s[i] == 0) {
+            ascii_set_len(s, i);
+            return i;
+        }
+    }
+    return 0;
+}
+
+function ascii_clear(s: ascii[]) {
+    s[0] = 0;
+    ascii_set_len(s, 0);
+}
+
+function ascii_copy(dst: ascii[], src: ascii[]): i32 {
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        let b: i32 = src[i];
+        dst[i] = b;
+        if (b == 0) {
+            ascii_set_len(dst, i);
+            return i;
+        }
+    }
+    return 0;
+}
+
+function ascii_append(dst: ascii[], src: ascii[]): i32 {
+    let base: i32 = ascii_len(dst);
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        let b: i32 = src[i];
+        if (b == 0) {
+            dst[base + i] = 0;
+            ascii_set_len(dst, base + i);
+            return base + i;
+        }
+        dst[base + i] = b;
+    }
+    return base;
+}
+
+function ascii_append_byte(dst: ascii[], b: u8): i32 {
+    let base: i32 = ascii_len(dst);
+    dst[base] = b;
+    if (b == 0) {
+        ascii_set_len(dst, base);
+        return base;
+    }
+    dst[base + 1] = 0;
+    ascii_set_len(dst, base + 1);
+    return base + 1;
+}
+
+function ascii_cmp(a: ascii[], b: ascii[]): i32 {
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        let av: i32 = a[i];
+        let bv: i32 = b[i];
+        if (av < bv) {
+            return -1;
+        }
+        if (av > bv) {
+            return 1;
+        }
+        if (av == 0) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+function ascii_eq(a: ascii[], b: ascii[]): bool {
+    return ascii_cmp(a, b) == 0;
+}
+
+function ascii_find_byte(s: ascii[], b: u8): i32 {
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        let cur: i32 = s[i];
+        if (cur == b) {
+            return i;
+        }
+        if (cur == 0) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+function ascii_find_last_byte(s: ascii[], b: u8): i32 {
+    let i: i32 = 0;
+    let last: i32 = -1;
+    for (i = 0; 1; i = i + 1) {
+        let cur: i32 = s[i];
+        if (cur == b) {
+            last = i;
+        }
+        if (cur == 0) {
+            return last;
+        }
+    }
+    return last;
+}
+
+function ascii_starts_with(s: ascii[], prefix: ascii[]): bool {
+    let i: i32 = 0;
+    for (i = 0; 1; i = i + 1) {
+        let p: i32 = prefix[i];
+        if (p == 0) {
+            return true;
+        }
+        let v: i32 = s[i];
+        if (v == 0) {
+            return false;
+        }
+        if (v != p) {
+            return false;
+        }
+    }
+    return false;
+}
+
+function ascii_ends_with(s: ascii[], suffix: ascii[]): bool {
+    let len_s: i32 = ascii_len(s);
+    let len_suf: i32 = ascii_len(suffix);
+    if (len_suf > len_s) {
+        return false;
+    }
+    let start: i32 = len_s - len_suf;
+    let i: i32 = 0;
+    for (i = 0; i < len_suf; i = i + 1) {
+        if (s[start + i] != suffix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function ascii_find(s: ascii[], needle: ascii[]): i32 {
+    let len_s: i32 = ascii_len(s);
+    let len_n: i32 = ascii_len(needle);
+    if (len_n == 0) {
+        return 0;
+    }
+    if (len_n > len_s) {
+        return -1;
+    }
+    let i: i32 = 0;
+    let j: i32 = 0;
+    for (i = 0; i <= len_s - len_n; i = i + 1) {
+        for (j = 0; j < len_n; j = j + 1) {
+            if (s[i + j] != needle[j]) {
+                j = len_n;
+            }
+        }
+        if (j == len_n) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function ascii_contains(s: ascii[], needle: ascii[]): bool {
+    return ascii_find(s, needle) >= 0;
+}
+
+function mem_copy(dst: u8[], src: u8[], count: i32) {
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        dst[i] = src[i];
+    }
+}
+
+function mem_set(dst: u8[], value: u8, count: i32) {
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        dst[i] = value;
+    }
+}
+
+function mem_zero(dst: u8[], count: i32) {
+    mem_set(dst, 0, count);
+}
+
+function mem_cmp(a: u8[], b: u8[], count: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        let av: i32 = a[i];
+        let bv: i32 = b[i];
+        if (av < bv) {
+            return -1;
+        }
+        if (av > bv) {
+            return 1;
+        }
+    }
+    return 0;
+}

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64">
+  <g id="base">
+    <rect width="160" height="64" rx="4" fill="#4a4f63"/>
+    <rect x="4" y="4" width="152" height="56" rx="3" fill="#646b87"/>
+  </g>
+  <g id="glyph">
+    <rect x="72" y="18" width="16" height="28" rx="3" fill="none" stroke="#e6e6ff" stroke-width="2"/>
+  </g>
+</svg>

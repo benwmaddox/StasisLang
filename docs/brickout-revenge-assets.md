@@ -1,6 +1,6 @@
 # Brickout Revenge - Graphics Asset Pipeline (Dev-First)
 
-This document defines a simple, dev-friendly way to author and hot-reload visuals for `samples/brickout_revenge.stasis` without adding CLI flags.
+This document defines a simple, dev-friendly way to author and hot-reload visuals for `samples/brickout_revenge/brickout_revenge.stasis` without adding CLI flags.
 
 Goals:
 - Author visuals as small vector-like source files.
@@ -9,12 +9,12 @@ Goals:
 - Support hot reload during development by swapping backing textures while keeping handles stable.
 
 Non-goals (initial version):
-- Full SVG/Flash feature parity (masks, blend modes, filters, shape morphs).
+- Full SVG feature parity (masks, blend modes, filters, SVG text, SMIL animation, shape morphs).
 - A general-purpose retained-mode scene graph in Stasis.
 
 ## Directory Layout
 
-- Source (editable): `assets_src/brickout-revenge/*.stv`
+- Source (editable): `samples/brickout_revenge/assets/*.svg`
 - Cache (generated): `assets_cache/brickout-revenge/*.bin` (optional; future)
 
 The runtime always attempts to load from the source path you pass. If you later want to ship only baked assets, you can keep the same Stasis code and have the runtime fall back to cached/embedded bytes (not implemented yet).
@@ -42,38 +42,15 @@ Notes:
 - Stasis stores the returned `i32` handles in globals/struct fields (static memory friendly).
 - The runtime owns all allocations and GL resources; Stasis never sees pointers or variable-sized arrays.
 
-## Sprite Source Format: `.stv` (Stasis Tiny Vector)
+## Sprite Source Format: SVG (current)
 
-This is a minimal, ASCII-only, line-oriented format that is easy to parse and rasterize.
-
-Header:
-- First non-empty line must be: `stv 1`
-
-Commands:
-- `size <w> <h>`
-  - Required. Output sprite size in pixels.
-
-- `rgba <r> <g> <b> <a>`
-  - Sets current drawing color. Each component is a float in `[0..1]`.
-
-- `rect <x> <y> <w> <h>`
-  - Filled axis-aligned rectangle.
-
-- `circle <cx> <cy> <radius>`
-  - Filled circle.
-
-- `line <x1> <y1> <x2> <y2> <thickness>`
-  - Filled thick line (capsule).
-
-Parsing rules:
-- Whitespace-separated tokens.
-- Lines starting with `#` are comments.
-- Unknown commands are ignored (future-proofing).
+- Author sprites as standard SVG with explicit `width`/`height` or `viewBox` so rasterization is deterministic.
+- Keep shapes simple (rects/paths/lines) for predictable baking; gradients/opacity are OK.
+- Do not rely on SVG filters or SMIL animation tags; the runtime bakes a single frame. Animate by layering sprites and varying transforms/alpha in Stasis code.
+- Legacy `.stv` has been removed; author sprites directly in SVG.
 
 Rasterization:
-- CPU rasterization into an RGBA8 bitmap.
-- The runtime may use fixed supersampling (e.g. 2x) then downsample for simple antialiasing.
-- Baked sprites are packed into an atlas texture with mipmaps enabled for stable downscaling.
+- SVG is rasterized to RGBA8 (with the same supersampling/downsample step we used for `.stv`) then packed into the atlas with mipmaps.
 
 ## Hot Reload Model
 
@@ -86,19 +63,23 @@ Recommended usage pattern:
 - Load once during initialization (store handles in globals).
 - Call `gfx_poll_reload` once per frame for the small set of sprites you are actively using.
 
-## Breakout Revenge - Initial Sprite Set
+## Breakout Revenge - Sprite Set
 
-Suggested initial set (remade assets):
-- `assets_src/brickout-revenge/paddle.stv`
-- `assets_src/brickout-revenge/ball.stv`
-- `assets_src/brickout-revenge/brick_basic.stv`
-- `assets_src/brickout-revenge/brick_armored.stv`
-- `assets_src/brickout-revenge/brick_reflector.stv`
+Canonical sources (SVG):
+- `samples/brickout_revenge/assets/paddle.svg`
+- `samples/brickout_revenge/assets/ball.svg`
+- `samples/brickout_revenge/assets/brick_basic.svg` (base)
+- `samples/brickout_revenge/assets/brick_basic_turret.svg` (layer)
+- `samples/brickout_revenge/assets/brick_basic_fx.svg` (layer)
+- `samples/brickout_revenge/assets/brick_armored.svg` (base)
+- `samples/brickout_revenge/assets/brick_armored_turret.svg` (layer)
+- `samples/brickout_revenge/assets/brick_armored_fx.svg` (layer)
+- `samples/brickout_revenge/assets/brick_reflector.svg` (base)
+- `samples/brickout_revenge/assets/brick_reflector_fx.svg` (layer)
 
 ## Next Steps (Later)
 
 - Add a cache format and on-disk cache in `assets_cache/` keyed by `(source-hash, scale, bake-version)`.
 - Add a `gfx_load_sprite_or_embedded(path, bytes_ptr, bytes_len)` path for shipping without sources.
-- Expand `.stv` to support strokes, gradients, and multi-layer compositing.
+- Remove any lingering references to `.stv` in tooling/tests if discovered.
 - Add animation metadata (timeline tweens) separate from the baked pixels, so most edits only update transforms, not textures.
-

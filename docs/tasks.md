@@ -1,99 +1,179 @@
-﻿# Remaining Compiler Tasks (C# + LLVMSharp)
+# Tasks
 
-## Completed
-- Phases 0-6: repo bootstrap, lexing, parsing, AST/symbols, semantics, layout planning, and LLVM builder with native loading + smoke tests.
-- Phase 7: lowering & codegen — control-flow lowering (`if`/`for`/`foreach`), operator-method comparisons/unary/boolean coercion, layout-driven SoA globals and field access via `LayoutPlan`, diagnostics for bad operator arity/unsupported targets/invalid field access, with IR coverage tests.
-- Phase 8: testing harness integration — IR emits `run_tests`; lowering options allow omitting tests/harness for production; `stasisc` CLI defaults to production and `--with-tests` enables harness emission.
-- Phase 9: CLI & UX — `stasisc` CLI with `run`/`test` commands, LLVM IR emission, snapshot tests for CLI stdout/stderr/exit codes. SDL2 graphics support with Asteroids demo game.
-- Phase 10: CI/CD hardening — GitHub Actions matrix (ubuntu/windows) with NuGet cache, format/build/test gates, sample IR artifacts, and platform-agnostic CLI snapshot tests.
-- Phase 10.5: Constants & Structured Globals — `const` keyword with compile-time evaluation, automatic AoS→SoA transformation for nested struct instances, full support for deeply nested member access (`state.ship.x`, `state.asteroids[i].field`), refactored Asteroids sample to single-struct pattern.
+This file is a lightweight, persistent checklist of upcoming work. It complements the more detailed design docs in `docs/`.
 
-## Phase 10.5: Constants & Structured Globals
+## Inbox
 
-### ✅ Constant Support (COMPLETED)
-- ✅ Add `const` keyword for compile-time constant declarations (numeric, boolean, string literals).
-- ✅ Lex/parse: `const NAME: type = value;` syntax at module scope; disallow in functions.
-- ✅ Semantics: validate constants are initialized with literal values; disallow mutation attempts.
-- ✅ Lowering: emit literal constants as LLVM `constant` globals.
-- ✅ Error handling: diagnose attempts to assign to constants ("Cannot assign to constant 'X'. Constants are immutable.").
-- ✅ Diagnostics: warn when multiple global declarations detected ("Multiple global declarations detected (N found). Consider consolidating state into a single global struct for better organization.").
+- [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
 
-### ✅ Structured Global State (COMPLETED)
-- ✅ Diagnostics: warn when declaring multiple top-level `global` variables.
-- ✅ Layout planner handles `global state: GameState` (struct instances)
-- ✅ Automatic AoS→SoA transformation: `state.asteroids: Asteroid[8]` → `state_asteroids_x[]`, `state_asteroids_y[]`
-- ✅ Support `state.field` syntax for scalar fields (read/write)
-- ✅ Support `state.ship.x` syntax for nested struct instance fields (read/write)
-- ✅ Support `state.array[i].field` syntax for nested struct array element fields (read/write)
-- ✅ Flattened global emission with correct types
-- ✅ Semantic validator accepts all nested member access patterns
+## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
-**Current Status**: Struct instance globals fully work! Layout planner correctly flattens nested structs (both instances and arrays) and applies SoA transformation. IR lowering handles all member access patterns including deeply nested access like `state.ship.x` and `state.asteroids[i].x`.
+### Goals
+- Cross-platform sound output for games and interactive samples (desktop first, then web/mobile).
+- Low-latency, stable audio with clear underrun diagnostics.
+- Simple mental model for Stasis programs: "game produces samples; platform plays them".
 
-### ✅ Migration & Samples (COMPLETED)
-- ✅ Refactored `samples/asteroids.stasis`:
-  - ✅ Converted SDL scancodes, screen dimensions, math constants, and limits to `const` declarations.
-  - ✅ Consolidated ship/asteroid/bullet/game state into a single nested struct with automatic SoA transformation.
-  - ✅ Removed `init_constants()` function since constants are now declared inline.
-  - ✅ Updated all function bodies to reference `state.ship.x` instead of `ship_x`, etc.
-- ⏭ Update other samples (`basic.stasis`, `tests.stasis`, etc.) to follow the structured state pattern if needed.
-- ✅ Tests: constant folding in IR works, nested field access lowering works, diagnostics for multiple globals/constant mutation work.
+### Non-goals (initially)
+- Full DAW-style audio graph, MIDI, effects chains, or streaming compressed formats.
+- Perfect sample-accurate synchronization with rendering (we can iterate later).
 
-### Follow-ups
-- Document the structured globals pattern in `docs/spec.md` and `AGENTS.md` so contributors understand the design rationale (simpler layout, clearer ownership, easier serialization).
-- Consider future extensions: allow multiple named global structs if use cases arise (e.g., `global input: InputState; global physics: PhysicsState;`), but start with single-struct restriction to validate the pattern.
+### Constraints and assumptions
+- Stasis core principle: deterministic behavior and explicit memory writes. The runtime may be "real-time" but should make nondeterminism explicit (device timing, underruns).
+- Current runtime already depends on SDL2 for graphics; SDL2 audio is a reasonable first backend for desktop.
+- WASM target likely needs WebAudio; mobile taps/input will likely come via the same event bridge as graphics.
 
-## Phase 11: LLVM Execution Path
-- Implement end-to-end IR emission runnable via `lli` for sample programs (function calls, arithmetic, control flow, globals).
-- Add minimal runtime stubs if needed; ensure production defaults link/execute without tests.
-- Verify: sample Stasis programs run under `lli` with expected stdout/return codes; golden IR snapshots for samples.
-- Add integration test that compiles Stasis `test` declarations, emits `run_tests`, and executes via `lli` to verify harness exit code.
+### Proposed architecture (inspired by Handmade Hero)
+- Keep a strict split between:
+  - Platform layer: opens audio device, owns the real-time callback, manages a ring buffer, and reports timing.
+  - Game layer (Stasis program): generates PCM samples into a provided buffer each frame (or in response to "need more samples").
+- Use pull-based playback with an internal ring buffer:
+  - Real-time audio callback pulls from ring buffer.
+  - Main/game thread pushes generated samples into ring buffer.
+  - If callback can't pull enough, output silence and record an underrun counter.
+- Choose a canonical internal sample format:
+  - Start with `f32` stereo interleaved (LRLR...), 48kHz nominal.
+  - Allow device conversion (SDL can do this); keep internal format stable for Stasis.
 
-## Phase 12: Expression & Locals Refresh
-- Switch assignment syntax to infix `=` and move expressions to a Pratt parser (assignment right-associative; logical ops stay infix).
-- Keep arithmetic/comparison as operator-method calls; emit diagnostics for legacy `.=` usage. Allow infix arithmetic/comparison with TypeScript precedence and compound assignment, but only one assignment per expression.
-- Allow stack locals for primitive scalars and struct references (indices) while keeping struct storage global-only.
-- Refresh docs/samples/tests to the new syntax; ensure lowering/semantics match updated rules.
+### Stasis-facing API shape
+- Add a minimal built-in/stdlib surface that does not leak platform details:
+  - `audio_is_available() -> bool`
+  - `audio_get_format() -> { sample_rate: int, channels: int }`
+  - `audio_push_f32_interleaved(samples_ptr: *f32, frame_count: int) -> int` (returns frames accepted)
+  - `audio_get_underruns() -> int`
+- Consider a higher-level helper pattern for games:
+  - A "mixer" function called by the host each frame that fills a buffer: `game_get_sound_samples(out: *f32, frame_count: int)`
+  - The host decides `frame_count` based on queued latency and target safety margin.
 
-### Follow-ups
-- Add clarity on the new assignment rules (single assignment per expression, compound variants) to `docs/spec.md` and `AGENTS.md` so contributors understand the guarded Pratt parser expectations.
-- Ensure `samples/sudoku.stasis` and other fixtures follow the new syntax (no `>=`/ternary tokens) and include explicit tests that exercise the Pratt parser changes.
+### Desktop backend plan (SDL2)
+- Add an SDL2 audio device wrapper in `runtime/`:
+  - Open device with desired spec (48kHz, stereo, `AUDIO_F32SYS`).
+  - Provide callback that drains from ring buffer.
+  - Expose "queued frames" and "underruns" counters for diagnostics.
+- Threading:
+  - Use a lock-free ring buffer if possible; otherwise a minimal mutex around ring operations (keep callback time small).
+  - Keep allocations out of the callback.
 
-## CLI Quality-of-Life
-- `stasis test` with no path (or `--all`) should discover and run all `.stasis` files under the working directory.
-- `stasis release` builds optimized binaries via clang (defaults `-O3` + LTO); `build` remains unoptimized unless `--opt-level`/`--lto` are provided.
+### Web/WASM backend plan (WebAudio)
+- Implement an audio worklet that pulls from a SharedArrayBuffer ring buffer:
+  - Main thread (or worker) pushes frames written by the Stasis program.
+  - Worklet pulls frames; on underrun outputs zero.
+- Bridge surface:
+  - Same Stasis-facing API as desktop, implemented via host glue.
+  - Keep format stable (`f32` stereo), adapt to device sample rate with a simple resampler only if required (start by assuming 48kHz).
 
-### Follow-ups
-- Document the discovery behavior of `stasis test` and the per-file compile/test timing (`test-time` vs `total-time`) in the README or a CLI reference so users understand what’s running.
+### Milestones (concrete steps)
+- [ ] Write `docs/audio-plan.md` with API, timing model, and examples.
+- [ ] Implement `runtime` ring buffer + counters (no SDL yet), add a small C test harness that simulates push/pull.
+- [ ] Wire SDL2 audio playback on Windows (and Linux/macOS if already supported).
+- [ ] Expose minimal C ABI functions for the managed CLI/runner to call.
+- [ ] Add a tiny Stasis sample that outputs a sine wave and prints underrun stats.
+- [ ] Add WebAudio backend plan (and optionally first implementation) behind a feature flag.
 
-## String literals and printing
-- Add first-class string literal support to the frontend (lex/parse), carry type info through symbols/sema, and lower string constants to immutable global buffers (null-terminated `i8` arrays).
-- Expose a `print(string)`/`puts`-style intrinsic in lowering: map a Stasis `string` to `i8*` in LLVM, emit globals for literals, and generate `printf("%s", ptr)`/`puts(ptr)` calls.
-- Update samples and tests to use string printing instead of manual `print_char` sequences; add negative tests for unterminated/invalid escapes.
-- Follow-ups: convert `samples/sudoku.stasis` prompts/labels/messages to string literals once lowering + `print(string)`/`puts` land; add Stasis-side tests that string-based prompts render and CLI tests that they appear.
-- Ensure spec/AGENTS mention the new built-ins (`print_string`, `print`, `read_line`, etc.) and capture the expectation that string input/output is now first-class (including a plan for Elm-style diagnostics when strings fail to parse).
+### Acceptance criteria
+- `stasis run samples/audio_sine.stasis` plays stable audio for 60s with 0 underruns on a typical dev machine.
+- When forced to underrun (e.g., artificial sleep), runtime reports underruns deterministically and outputs silence (no crash).
 
-## Phase 13: Diagnostics & Samples
-- Improve diagnostic clarity (Elm-style) by describing expected message structure, pointer to source spans, and user-friendly hints in `docs/spec.md`; link this guidance from AGENTS so formatter/resilience work can reference it.
-- Update `samples/sudoku.stasis` to:
-  - Use string-based prompts instead of numeric char sequences.
-  - Support a random seed (prompt input) to generate reproducible puzzles.
-  - Include Stasis-level tests for the seed parser and random puzzle generator to prevent regressions.
-- Record that `stasis test` must skip blocking IO-heavy tests on CI while still allowing the CLI to run interactive suites locally; add this to the tasks so future CI work can ramp in the right direction.
+## 2) Plan: Unified input for mouse + mobile taps (Brickout Revenge)
 
-## Sudoku CLI Mini-Game (Stasis)
-- Design: CLI-driven Sudoku (fixed 9x9 puzzle) fully authored in Stasis; interactive loop via CLI `run` command.
-- Language/runtime gaps to close:
-  - Add string literal lowering to immutable `i8*` buffers and expose `puts/printf` for user-facing text.
-  - Add basic stdin support (e.g., host shim for numeric input or readline) and a minimal formatting helper for board rendering.
-  - CLI flag `stasis play-sudoku` that wires console I/O to the Stasis program (bridge host I/O to LLVM intrinsics).
-- Game logic:
-  - Stasis sample defines board storage (global arrays), helpers (indexing, validity checks), backtracking solver, and commands to place numbers.
-  - Main loop: render board, prompt for row/col/value, validate move, allow quit/reset; exit code 0 on solved, nonzero on abort/error.
-  - Tests: host-side CLI test drives scripted input; Stasis-side tests validate solver correctness on the seed puzzle.
-- Deliverables:
-  - `samples/sudoku.stasis` playable program + solver.
-  - CLI documentation in README for Sudoku mode and controls.
-  - Integration test ensuring Sudoku sample builds/solves via CLI.
-  - Follow-ups: replace char-by-char prints with strings in `samples/sudoku.stasis` and add regression tests once string support is implemented.
+### Goals
+- Single input model that supports:
+  - Mouse pointer (move, left/right buttons, wheel optional).
+  - Touch (single and multi-touch) mapped to pointer(s).
+  - Mobile taps as first-class (tap-to-shoot/activate) for Brickout Revenge.
+- Deterministic "input snapshot per frame" consumed by Stasis code.
 
+### Proposed input model
+- Build a frame-based input snapshot:
+  - `InputFrame` contains a fixed-size array of pointers (e.g., 8).
+  - Each pointer has: `id`, `is_down`, `went_down`, `went_up`, `x`, `y`, `dx`, `dy`.
+  - For desktop mouse, pointer `id=0` is the cursor; buttons update `is_down` for "primary".
+  - For touch, each contact maps to a pointer slot with stable `id` while down.
+- Normalize coordinates:
+  - Provide both pixel coordinates and normalized [0,1] coordinates relative to the game viewport.
+  - Store the viewport scale/offset used by the renderer so input matches what the player sees.
+
+### Platform backends
+- Desktop (SDL2):
+  - Consume SDL events: mouse motion/buttons, touch events if available.
+  - Convert events into `InputFrame` updates.
+- Web/mobile (WASM):
+  - Prefer Pointer Events (`pointerdown/move/up/cancel`) so mouse/touch/pen share a path.
+  - Keep a JS-side map from `pointerId` to pointer slot index.
+  - Handle page scroll/zoom by preventing default on the canvas as appropriate.
+
+### Stasis-facing API shape
+- Minimal:
+  - `input_get_frame() -> InputFrame*` (or copy-by-value if the language supports it cleanly)
+  - `input_get_viewport() -> { x, y, w, h }`
+- Optional helpers:
+  - `input_primary_pointer()` (returns best-effort pointer for "tap or click").
+  - `input_was_tapped()` for simple UI interactions (derived from went_down/went_up with distance threshold).
+
+### Brickout Revenge-specific needs
+- Paddle control:
+  - Mouse move or finger drag sets paddle target position.
+  - Tap to launch ball or activate powerup.
+- UI:
+  - Tap targets require stable hit testing; rely on normalized coordinates and viewport mapping.
+
+### Milestones (concrete steps)
+- [ ] Write `docs/input-plan.md` defining `InputFrame` and coordinate conventions.
+- [ ] Implement SDL input collection into an `InputFrame` struct in `runtime/`.
+- [ ] Expose C ABI to managed CLI/runner and to the Stasis program.
+- [ ] Add a simple sample that draws pointer positions and prints went_down/went_up.
+- [ ] Add web/mobile glue plan (Pointer Events) and implement when WASM target is wired.
+
+### Acceptance criteria
+- Desktop: mouse click/drag updates pointer state correctly at 60fps.
+- Mobile/WASM: tap and drag on canvas works; no coordinate mismatch with rendering.
+
+## 3) Plan: Mini sample - Aquarium (fish swim, feed, interact)
+
+### Goals
+- A compact, friendly sample that exercises:
+  - Deterministic update loop, SoA-friendly entity storage, and rendering.
+  - Input interactions (tap/click to drop food, drag to "stir" water).
+  - Optional audio (bubbles, plop, ambient loop) once audio exists.
+- Serves as a reference for "game-like" code structure in Stasis.
+
+### Core mechanics (minimal and fun)
+- Fish:
+  - Swim with simple steering (wander + boundary avoidance).
+  - When food exists, seek nearest food within radius.
+  - When close enough, consume food and reduce hunger.
+- Food pellets:
+  - Spawn at pointer position, fall downward, slowly sink/settle.
+  - Expire after N seconds if not eaten.
+- Interaction:
+  - Tap/click: spawn food.
+  - Drag: apply a small velocity field impulse near the pointer ("stir") to push fish/pellets.
+
+### Data and memory layout (SoA-friendly)
+- Store fish attributes in parallel arrays:
+  - `fish_x[]`, `fish_y[]`, `fish_vx[]`, `fish_vy[]`, `fish_hunger[]`, etc.
+- Store pellets similarly with a max count and free list or compact-remove.
+- Keep everything in static global memory; no hidden allocation.
+
+### Rendering plan
+- Use the existing graphics runtime:
+  - Simple sprites or procedural shapes (triangles for fish, circles for pellets).
+  - Background gradient + a few bubbles for life.
+- Assets:
+  - Start procedural; optionally add a small set of assets under `docs/assets/` or `examples/` later.
+  - Reference existing docs: `docs/underwater-assets.md`.
+
+### Audio plan (when available)
+- One-shot sounds:
+  - "plop" on food spawn, "chomp" on eat.
+- Loop:
+  - Soft ambient bubble loop mixed at low volume.
+
+### Milestones (concrete steps)
+- [ ] Write `docs/aquarium-sample-plan.md` with mechanics, data layout, and rendering primitives.
+- [ ] Add `samples/aquarium.stasis` implementing fish + pellets + input spawning.
+- [ ] Add a tiny config under `samples/aquarium/data/config.json` if needed (and keep it deterministic).
+- [ ] Hook audio events once task (1) lands.
+
+### Acceptance criteria
+- `stasis run samples/aquarium.stasis --graphics` shows fish moving and responding to food taps/clicks.
+- The sample is deterministic given a fixed seed and produces stable behavior across runs.
