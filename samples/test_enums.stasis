@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Test enum functionality in Stasis
 
 enum State {

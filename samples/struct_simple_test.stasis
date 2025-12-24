@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Simpler test - just scalar fields
 
 struct GameState {

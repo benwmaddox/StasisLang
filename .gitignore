@@ -2,6 +2,7 @@ bin/
 obj/
 **/bin/
 **/obj/
+**/target/
 TestResults/
 *.csproj.user
 .vs/
@@ -26,6 +27,8 @@ _ReSharper.Caches/
 *.dylib
 runtime/build/
 codevcpkg/
+build/hotstate/
+build/aot/
 
 # Debug/temp files
 nul

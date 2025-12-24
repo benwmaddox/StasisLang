@@ -1,3 +1,5 @@
+import "../src/stdlib/stdlib.stasis";
+
 // Test optional parentheses for if and for statements
 
 function test_if_without_parens(): i32 {
