@@ -3,9 +3,15 @@
  * SDL2 + OpenGL backend for vector graphics rendering
  */
 
-#include <GL/glew.h>
 #include <SDL.h>
+#if defined(__ANDROID__) && !defined(STASIS_GRAPHICS_SDL_ONLY)
+#define STASIS_GRAPHICS_SDL_ONLY 1
+#endif
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+#include <GL/glew.h>
 #include <SDL_opengl.h>
+#endif
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -63,12 +69,14 @@ static int g_window_prev_width = 800;
 static int g_window_prev_height = 600;
 static bool g_window_resized = false;
 static bool g_postfx_enabled = false;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
 static GLint g_postfx_depth_loc = -1;
 static GLint g_postfx_intensity_loc = -1;
 static GLint g_postfx_surface_loc = -1;
 static GLint g_postfx_color_loc = -1;
+#endif
 static float g_postfx_strength = 0.0f;
 static float g_postfx_phase = 0.0f;
 static float g_postfx_speed = 0.0f;
@@ -92,11 +100,13 @@ static int g_debug_frame_counter = 0;
 static bool g_force_debug_overlay = false;
 
 /* Simple shader + buffer for line rendering */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_line_program = 0;
 static GLuint g_line_vbo = 0;
 static GLuint g_line_vao = 0;
 static GLint g_line_pos_loc = -1;
 static GLint g_line_color_loc = -1;
+#endif
 static char g_asset_base[512] = {0};
 static char g_asset_env[512] = {0};
 
@@ -131,6 +141,7 @@ typedef struct {
 static SpriteEntry g_sprites[MAX_SPRITES];
 static int g_sprite_count = 0;
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_sprite_program = 0;
 static GLuint g_sprite_vbo = 0;
 static GLuint g_sprite_vao = 0;
@@ -143,6 +154,7 @@ static GLuint g_sprite_atlas_tex = 0;
 static int g_sprite_atlas_cursor_x = SPRITE_ATLAS_PAD;
 static int g_sprite_atlas_cursor_y = SPRITE_ATLAS_PAD;
 static int g_sprite_atlas_row_h = 0;
+#endif
 
 static SpriteVertex g_sprite_vertices[MAX_SPRITE_VERTS];
 static int g_sprite_vert_count = 0;
@@ -160,6 +172,7 @@ static float screen_to_ndc_y(float y) {
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
                                     float r, float g, float b, float a);
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void) {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -292,6 +305,7 @@ static void flush_lines(void) {
 
     g_line_count = 0;
 }
+#endif
 
 static void ensure_asset_base(void) {
     if (g_asset_base[0] != 0) return;
@@ -374,6 +388,7 @@ static char* read_text_file(const char* path) {
     return data;
 }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint compile_shader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
@@ -406,6 +421,7 @@ static GLuint link_program(GLuint vs, GLuint fs) {
     }
     return prog;
 }
+#endif
 
 static uint64_t get_file_mtime(const char* path) {
     char resolved[1024];
@@ -436,6 +452,7 @@ static char* stasis_strdup(const char* s) {
 #endif
 }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static int atlas_alloc(int w, int h, int* out_x, int* out_y) {
     if (w <= 0 || h <= 0) return 0;
     if (w + SPRITE_ATLAS_PAD * 2 > SPRITE_ATLAS_W) return 0;
@@ -535,6 +552,7 @@ static void ensure_sprite_program(void) {
         glGenBuffers(1, &g_sprite_vbo);
     }
 }
+#endif
 
 static void blend_px_premult(unsigned char* dst, int sr, int sg, int sb, int sa) {
     int inv = 255 - sa;
@@ -850,6 +868,7 @@ STASIS_EXPORT int stasis_gfx_debug_bake_hash(const char* path) {
     return (int)h32;
 }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void) {
     if (g_sprite_vert_count == 0) return;
     ensure_sprite_program();
@@ -986,6 +1005,7 @@ static void render_postfx(void) {
 
     glUseProgram(0);
 }
+#endif
 
 /*
  * Startup Render Verification
@@ -1008,6 +1028,7 @@ typedef struct {
 static RenderTestResult g_last_test_result = {0};
 
 /* Test OpenGL rendering by drawing a known pattern and reading it back */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static int verify_opengl_rendering(int width, int height) {
     RenderTestResult* result = &g_last_test_result;
     memset(result, 0, sizeof(*result));
@@ -1114,6 +1135,7 @@ static int verify_opengl_rendering(int width, int height) {
         return 0;
     }
 }
+#endif
 
 /* Test SDL renderer by drawing a known pattern and reading it back */
 static int verify_sdl_rendering(SDL_Renderer* renderer, int width, int height) {
@@ -1280,7 +1302,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
     bool want_sdl = (force_sdl && strcmp(force_sdl, "0") != 0);
+#if defined(STASIS_GRAPHICS_SDL_ONLY)
+    want_sdl = true;
+#endif
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {
         /* Request OpenGL 2.1 compatibility profile for immediate mode */
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -1289,6 +1315,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     }
+#endif
 
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
@@ -1306,6 +1333,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 
     /* Try GL first unless overridden */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {
         g_gl_context = SDL_GL_CreateContext(g_window);
         if (g_gl_context) {
@@ -1344,6 +1372,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             }
         }
     }
+#endif
 
     if (g_gl_context == NULL) {
         g_use_sdl_renderer = true;
@@ -1478,12 +1507,16 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
         /* Update window dimensions to match fullscreen size */
         SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
         if (!g_use_sdl_renderer) {
             glViewport(0, 0, g_window_width, g_window_height);
             setup_ortho();
         } else {
             SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
         }
+#else
+        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+#endif
     }
 
     return (result == 0) ? 1 : 0;
@@ -1520,10 +1553,15 @@ STASIS_EXPORT void stasis_end_frame(void) {
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
     } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
         flush_lines();
         flush_sprites();
         render_postfx();
         SDL_GL_SwapWindow(g_window);
+#else
+        /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
+        g_line_count = 0;
+#endif
     }
 
     /* Poll events */
@@ -1559,12 +1597,16 @@ STASIS_EXPORT void stasis_end_frame(void) {
                         }
                     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
                     if (!g_use_sdl_renderer) {
                         glViewport(0, 0, g_window_width, g_window_height);
                         setup_ortho();
                     } else {
                         SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
                     }
+#else
+                    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+#endif
                 }
                 break;
             default:
@@ -1583,8 +1625,12 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
         SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
         SDL_RenderClear(g_renderer);
     } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
         glClearColor(r, g, b, a);
         glClear(GL_COLOR_BUFFER_BIT);
+#else
+        (void)r; (void)g; (void)b; (void)a;
+#endif
     }
 }
 
@@ -1611,6 +1657,7 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
         return;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (g_line_count >= MAX_LINES) {
         flush_lines();
     }
@@ -1624,6 +1671,10 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
     g_lines[g_line_count].b = b;
     g_lines[g_line_count].a = a;
     g_line_count++;
+#else
+    (void)x1; (void)y1; (void)x2; (void)y2;
+    (void)r; (void)g; (void)b; (void)a;
+#endif
 }
 
 static SpriteEntry* sprite_get(int handle) {
@@ -1709,6 +1760,7 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
         return 1;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     ensure_sprite_atlas();
     if (g_sprite_atlas_tex == 0) {
         free(pixels);
@@ -1749,6 +1801,10 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
     e->v1 = (float)(ay + h) / (float)SPRITE_ATLAS_H;
     e->mtime = get_file_mtime(path);
     return 1;
+#else
+    free(pixels);
+    return 0;
+#endif
 }
 
 /*
@@ -1814,6 +1870,7 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
         return 1;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     ensure_sprite_atlas();
     if (g_sprite_atlas_tex == 0) {
         free(pixels);
@@ -1863,6 +1920,10 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
     e->mtime = get_file_mtime(path);
     e->needs_reraster = 0;
     return 1;
+#else
+    free(pixels);
+    return 0;
+#endif
 }
 
 /*
@@ -2101,6 +2162,7 @@ STASIS_EXPORT int stasis_gfx_window_resized(void) {
  * Cleanup and shutdown
  */
 STASIS_EXPORT void stasis_shutdown(void) {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (g_postfx_program) {
         glDeleteProgram(g_postfx_program);
         g_postfx_program = 0;
@@ -2121,6 +2183,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
         glDeleteTextures(1, &g_sprite_atlas_tex);
         g_sprite_atlas_tex = 0;
     }
+#endif
     for (int i = 0; i < MAX_SPRITES; i++) {
         if (g_sprites[i].used) {
             if (g_sprites[i].sdl_tex) {
@@ -2330,6 +2393,7 @@ STASIS_EXPORT void stasis_copy_dir_entry_name(const unsigned char* names, int32_
 
 /* ===== FONT RENDERING WITH STB_TRUETYPE ===== */
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 #define MAX_FONTS 8
 #define FONT_ATLAS_SIZE 512
 #define FONT_FIRST_CHAR 32
@@ -2512,3 +2576,28 @@ STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
 
     return pos_x;
 }
+#else
+STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
+    (void)path;
+    (void)font_size;
+    return 0;
+}
+
+STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y,
+                                    float r, float g, float b, float a) {
+    (void)font_handle;
+    (void)text;
+    (void)x;
+    (void)y;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)a;
+}
+
+STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
+    (void)font_handle;
+    (void)text;
+    return 0.0f;
+}
+#endif
