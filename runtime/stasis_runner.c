@@ -578,8 +578,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    const char *dll_path = argv[1];
-    const char *entry_name = argc >= 3 ? argv[2] : "run_tests";
+    dll_path = argv[1];
+    entry_name = argc >= 3 ? argv[2] : "run_tests";
 
     for (int i = 2; i < argc; i++)
     {
