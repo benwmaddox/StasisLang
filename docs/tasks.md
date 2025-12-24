@@ -13,6 +13,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
 - [ ] Follow through: execute `docs/self-hosted-compiler-plan.md` (bootstrap milestones).
 - [ ] Follow through: execute `docs/svg-migration-plan.md` (finish SVG pipeline + validation).
+- [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
