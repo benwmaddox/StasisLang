@@ -64,7 +64,10 @@ The library exports these functions for Stasis programs:
 | `stasis_is_key_down(scancode)` | Check if key is pressed |
 | `stasis_get_time_ms()` | Get time in milliseconds |
 | `stasis_sleep_ms(ms)` | Sleep for milliseconds |
-| `stasis_should_quit()` | Check if window should close |
+| `stasis_should_quit()` | Pump input/events (once per frame) and report quit state |
+| `stasis_input_pointer_count()` | Number of pointers tracked this frame (mouse + active touches) |
+| `stasis_input_pointer_*` | Pointer snapshot queries (pos, deltas, edge flags) |
+| `stasis_input_viewport_*_px` | Viewport rectangle (currently full window) |
 
 ## SDL Scancodes
 

@@ -1376,7 +1376,7 @@ static bool DetectsGraphicsUsage(string source)
     return Regex.IsMatch(
         source,
         @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|time|get_time_ms|sleep_ms)" +
+        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|input_pointer_count|input_pointer_id|input_pointer_is_down|input_pointer_went_down|input_pointer_went_up|input_pointer_x_px|input_pointer_y_px|input_pointer_dx_px|input_pointer_dy_px|input_pointer_x_n|input_pointer_y_n|input_dropped_pointers|input_viewport_x_px|input_viewport_y_px|input_viewport_w_px|input_viewport_h_px|time|get_time_ms|sleep_ms)" +
         @"\s*\(",
         RegexOptions.CultureInvariant);
 }

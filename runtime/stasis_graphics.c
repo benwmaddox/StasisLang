@@ -72,6 +72,300 @@ static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
 static bool g_postfx_force_disable = false;
 
+/* ============================================================
+ * Input snapshot (mouse + touch) - per-frame deterministic view
+ * ============================================================ */
+
+#define STASIS_MAX_POINTERS 8
+
+typedef struct {
+    int id; /* 0 for mouse; 1.. for touch slots */
+    int is_down;
+    int went_down;
+    int went_up;
+    float x_px;
+    float y_px;
+    float dx_px;
+    float dy_px;
+    float x_n;
+    float y_n;
+} StasisPointer;
+
+typedef struct {
+    StasisPointer pointers[STASIS_MAX_POINTERS];
+    int pointer_count;      /* 1 (mouse) + active touches */
+    int dropped_pointers;   /* touches dropped due to capacity */
+    int viewport_x_px;
+    int viewport_y_px;
+    int viewport_w_px;
+    int viewport_h_px;
+} StasisInputFrame;
+
+static StasisInputFrame g_input_frame;
+static int g_events_pumped_this_frame = 0;
+static float g_prev_x_px[STASIS_MAX_POINTERS];
+static float g_prev_y_px[STASIS_MAX_POINTERS];
+static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
+static int g_finger_active[STASIS_MAX_POINTERS - 1];
+
+static int stasis_input_valid_index(int idx) {
+    return idx >= 0 && idx < STASIS_MAX_POINTERS;
+}
+
+static float stasis_clampf(float v, float minv, float maxv) {
+    if (v < minv) return minv;
+    if (v > maxv) return maxv;
+    return v;
+}
+
+static void stasis_update_pointer_norm(int idx) {
+    if (!stasis_input_valid_index(idx)) return;
+
+    int vw = g_input_frame.viewport_w_px;
+    int vh = g_input_frame.viewport_h_px;
+    if (vw <= 0 || vh <= 0) {
+        g_input_frame.pointers[idx].x_n = 0.0f;
+        g_input_frame.pointers[idx].y_n = 0.0f;
+        return;
+    }
+
+    g_input_frame.pointers[idx].x_n = stasis_clampf(g_input_frame.pointers[idx].x_px / (float)vw, 0.0f, 1.0f);
+    g_input_frame.pointers[idx].y_n = stasis_clampf(g_input_frame.pointers[idx].y_px / (float)vh, 0.0f, 1.0f);
+}
+
+static void stasis_set_pointer_pos_px(int idx, float x, float y) {
+    if (!stasis_input_valid_index(idx)) return;
+
+    float vx = (float)g_input_frame.viewport_x_px;
+    float vy = (float)g_input_frame.viewport_y_px;
+    float vw = (float)g_input_frame.viewport_w_px;
+    float vh = (float)g_input_frame.viewport_h_px;
+
+    x -= vx;
+    y -= vy;
+
+    if (vw > 0.0f) x = stasis_clampf(x, 0.0f, vw);
+    if (vh > 0.0f) y = stasis_clampf(y, 0.0f, vh);
+
+    g_input_frame.pointers[idx].x_px = x;
+    g_input_frame.pointers[idx].y_px = y;
+    stasis_update_pointer_norm(idx);
+}
+
+static int stasis_find_finger_slot(SDL_FingerID fingerId) {
+    for (int i = 0; i < STASIS_MAX_POINTERS - 1; i++) {
+        if (g_finger_active[i] && g_finger_ids[i] == fingerId) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int stasis_alloc_finger_slot(SDL_FingerID fingerId) {
+    int existing = stasis_find_finger_slot(fingerId);
+    if (existing >= 0) return existing;
+
+    for (int i = 0; i < STASIS_MAX_POINTERS - 1; i++) {
+        if (!g_finger_active[i]) {
+            g_finger_active[i] = 1;
+            g_finger_ids[i] = fingerId;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void stasis_release_finger_slot(SDL_FingerID fingerId) {
+    int slot = stasis_find_finger_slot(fingerId);
+    if (slot >= 0) {
+        g_finger_active[slot] = 0;
+    }
+}
+
+static void stasis_pump_events(void) {
+    if (!g_window) return;
+
+    /* Snapshot "previous tick" positions for deltas. */
+    for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
+        g_prev_x_px[i] = g_input_frame.pointers[i].x_px;
+        g_prev_y_px[i] = g_input_frame.pointers[i].y_px;
+        g_input_frame.pointers[i].dx_px = 0.0f;
+        g_input_frame.pointers[i].dy_px = 0.0f;
+        g_input_frame.pointers[i].went_down = 0;
+        g_input_frame.pointers[i].went_up = 0;
+        g_input_frame.pointers[i].id = i; /* stable slot id */
+    }
+
+    g_input_frame.dropped_pointers = 0;
+    g_input_frame.viewport_x_px = 0;
+    g_input_frame.viewport_y_px = 0;
+    g_input_frame.viewport_w_px = g_window_width;
+    g_input_frame.viewport_h_px = g_window_height;
+
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+            case SDL_QUIT:
+                g_should_quit = true;
+                break;
+            case SDL_KEYDOWN:
+                if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    g_should_quit = true;
+                }
+                break;
+            case SDL_WINDOWEVENT:
+                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+
+                    if (!g_use_sdl_renderer) {
+                        glViewport(0, 0, g_window_width, g_window_height);
+                        setup_ortho();
+                    } else {
+                        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+                    }
+                }
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    g_input_frame.pointers[0].went_down = 1;
+                }
+                break;
+            case SDL_MOUSEBUTTONUP:
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    g_input_frame.pointers[0].went_up = 1;
+                }
+                break;
+            case SDL_FINGERDOWN:
+                {
+                    int slot = stasis_alloc_finger_slot(event.tfinger.fingerId);
+                    if (slot < 0) {
+                        g_input_frame.dropped_pointers++;
+                        break;
+                    }
+                    int idx = slot + 1;
+                    g_input_frame.pointers[idx].is_down = 1;
+                    g_input_frame.pointers[idx].went_down = 1;
+                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                }
+                break;
+            case SDL_FINGERMOTION:
+                {
+                    int slot = stasis_find_finger_slot(event.tfinger.fingerId);
+                    if (slot < 0) break;
+                    int idx = slot + 1;
+                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                }
+                break;
+            case SDL_FINGERUP:
+                {
+                    int slot = stasis_find_finger_slot(event.tfinger.fingerId);
+                    if (slot < 0) break;
+                    int idx = slot + 1;
+                    g_input_frame.pointers[idx].is_down = 0;
+                    g_input_frame.pointers[idx].went_up = 1;
+                    stasis_release_finger_slot(event.tfinger.fingerId);
+                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /* Mouse position and button state (left button = primary). */
+    int mx = 0, my = 0;
+    Uint32 buttons = SDL_GetMouseState(&mx, &my);
+    stasis_set_pointer_pos_px(0, (float)mx, (float)my);
+    g_input_frame.pointers[0].is_down = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
+
+    /* Compute deltas from previous tick positions. */
+    for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
+        g_input_frame.pointers[i].dx_px = g_input_frame.pointers[i].x_px - g_prev_x_px[i];
+        g_input_frame.pointers[i].dy_px = g_input_frame.pointers[i].y_px - g_prev_y_px[i];
+    }
+
+    g_input_frame.pointer_count = 1; /* mouse slot */
+    for (int i = 0; i < STASIS_MAX_POINTERS - 1; i++) {
+        if (g_finger_active[i]) {
+            g_input_frame.pointer_count++;
+        }
+    }
+}
+
+STASIS_EXPORT int stasis_input_pointer_count(void) {
+    return g_window ? g_input_frame.pointer_count : 0;
+}
+
+STASIS_EXPORT int stasis_input_pointer_id(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return -1;
+    return g_input_frame.pointers[idx].id;
+}
+
+STASIS_EXPORT int stasis_input_pointer_is_down(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0;
+    return g_input_frame.pointers[idx].is_down ? 1 : 0;
+}
+
+STASIS_EXPORT int stasis_input_pointer_went_down(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0;
+    return g_input_frame.pointers[idx].went_down ? 1 : 0;
+}
+
+STASIS_EXPORT int stasis_input_pointer_went_up(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0;
+    return g_input_frame.pointers[idx].went_up ? 1 : 0;
+}
+
+STASIS_EXPORT float stasis_input_pointer_x_px(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].x_px;
+}
+
+STASIS_EXPORT float stasis_input_pointer_y_px(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].y_px;
+}
+
+STASIS_EXPORT float stasis_input_pointer_dx_px(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].dx_px;
+}
+
+STASIS_EXPORT float stasis_input_pointer_dy_px(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].dy_px;
+}
+
+STASIS_EXPORT float stasis_input_pointer_x_n(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].x_n;
+}
+
+STASIS_EXPORT float stasis_input_pointer_y_n(int idx) {
+    if (!g_window || !stasis_input_valid_index(idx)) return 0.0f;
+    return g_input_frame.pointers[idx].y_n;
+}
+
+STASIS_EXPORT int stasis_input_dropped_pointers(void) {
+    return g_window ? g_input_frame.dropped_pointers : 0;
+}
+
+STASIS_EXPORT int stasis_input_viewport_x_px(void) {
+    return g_window ? g_input_frame.viewport_x_px : 0;
+}
+
+STASIS_EXPORT int stasis_input_viewport_y_px(void) {
+    return g_window ? g_input_frame.viewport_y_px : 0;
+}
+
+STASIS_EXPORT int stasis_input_viewport_w_px(void) {
+    return g_window ? g_input_frame.viewport_w_px : 0;
+}
+
+STASIS_EXPORT int stasis_input_viewport_h_px(void) {
+    return g_window ? g_input_frame.viewport_h_px : 0;
+}
+
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
 typedef struct {
@@ -1292,6 +1586,13 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
+    g_events_pumped_this_frame = 0;
+    memset(&g_input_frame, 0, sizeof(g_input_frame));
+    memset(g_finger_active, 0, sizeof(g_finger_active));
+    memset(g_finger_ids, 0, sizeof(g_finger_ids));
+    for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
+        g_input_frame.pointers[i].id = i;
+    }
 
     /* Run startup render verification only when explicitly enabled. */
     const char* run_test = SDL_getenv("STASIS_RUN_RENDER_TEST");
@@ -1411,6 +1712,10 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
+    if (!g_events_pumped_this_frame) {
+        stasis_pump_events();
+        g_events_pumped_this_frame = 1;
+    }
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
@@ -1444,37 +1749,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
         SDL_GL_SwapWindow(g_window);
     }
 
-    /* Poll events */
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        switch (event.type) {
-            case SDL_QUIT:
-                g_should_quit = true;
-                break;
-            case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_ESCAPE) {
-                    g_should_quit = true;
-                }
-                break;
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    /* Update window dimensions when resized */
-                    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
-
-                    if (!g_use_sdl_renderer) {
-                        glViewport(0, 0, g_window_width, g_window_height);
-                        setup_ortho();
-                    } else {
-                        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
-                    }
-                }
-                break;
-            default:
-                break;
-        }
-    }
-
     g_debug_frame_counter++;
+    g_events_pumped_this_frame = 0;
 }
 
 /*
@@ -1840,6 +2116,10 @@ STASIS_EXPORT void stasis_set_postfx(float strength, float phase, float speed, f
  * Check if window should close
  */
 STASIS_EXPORT int stasis_should_quit(void) {
+    if (!g_events_pumped_this_frame) {
+        stasis_pump_events();
+        g_events_pumped_this_frame = 1;
+    }
     return g_should_quit ? 1 : 0;
 }
 
