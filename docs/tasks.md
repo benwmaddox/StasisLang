@@ -5,6 +5,14 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 ## Inbox
 
 - [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
+- [ ] Follow through: implement `docs/audio-plan.md` (desktop SDL2 audio MVP first).
+- [ ] Follow through: implement `docs/input-plan.md` (pointer snapshot, mouse + touch/taps).
+- [ ] Follow through: implement `docs/aquarium-sample-plan.md` (add `samples/aquarium.stasis`).
+- [ ] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).
+- [ ] Follow through: execute `docs/cranelift-backend-plan.md` (close remaining backend gaps).
+- [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
+- [ ] Follow through: execute `docs/self-hosted-compiler-plan.md` (bootstrap milestones).
+- [ ] Follow through: execute `docs/svg-migration-plan.md` (finish SVG pipeline + validation).
 - [ ] Support compiling Markdown code blocks: allow `stasis build`/`stasis test` to accept `.md` inputs, extract ```stasis fenced blocks (and/or a `stasis` info string), and compile/test them so docs + samples stay valid.
 
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
