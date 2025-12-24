@@ -7,7 +7,6 @@ import "../src/stdlib/stdlib.stasis";
 // - init_window(width: i32, height: i32, title: string) -> bool: creates the SDL window/context.
 // - time() -> i64: returns unix timestamp seconds for seeding the PRNG.
 // - get_time_ms() -> i32: millisecond-resolution clock used for timing logic.
-// - sleep_ms(ms: i32): pauses the thread to pace the frame loop.
 // - should_quit() -> bool: polls SDL events for quit requests.
 // - begin_frame(), end_frame(): bracket GPU work for the graphics backend.
 // - clear(r: f32, g: f32, b: f32, a: f32): clears the frame buffer.
@@ -40,7 +39,7 @@ const LEVEL_START_DELAY_MS: i32 = 15000;
 const PI: f32 = 3.14159;
 // Trig helpers: sin/cos keep the precise LLVM intrinsics; sin_fast/cos_fast enable fast-math for faster, less accurate gameplay math.
 
-// FPS control
+// FPS control (host-controlled in tick mode)
 const TARGET_FPS: i32 = 60;
 const FRAME_TIME_MS: i32 = 16; // 1000ms / 60fps ≈ 16.67ms
 
@@ -242,19 +241,6 @@ function wrap_position(px: f32, max: f32): f32 {
         result = result - max;
     }
     return result;
-}
-
-function sync_frame_rate(): void {
-    // Calculate elapsed time and sleep if ahead of schedule
-    let frame_end_time: i32 = get_time_ms();
-    let frame_elapsed: i32 = frame_end_time - state.timers.frame_start_time;
-    let sleep_time: i32 = FRAME_TIME_MS - frame_elapsed;
-
-    // Only sleep if we have time left in the frame budget
-    if (sleep_time > 0) {
-        sleep_ms(sleep_time);
-    }
-    // If sleep_time <= 0, we're behind schedule - skip sleep and continue
 }
 
 function update_ship(dt: f32): void {
@@ -906,36 +892,33 @@ function main(): i32 {
     state.timers.last_time = get_time_ms();
     state.timers.fire_cooldown = 0;
     state.running = 1;
+    return 0;
+}
 
-    let frame: i32 = 0;
-    for (frame = 0; state.running == 1; frame = frame + 1) {
-        // Record frame start time for FPS control
-        state.timers.frame_start_time = get_time_ms();
-
-        let quit: bool = should_quit();
-        if (quit) {
-            state.running = 0;
-        }
-
-        if (state.running == 1) {
-            begin_frame();
-            clear(0.0, 0.0, 0.1, 1.0);
-
-            // Calculate delta time
-            let delta_ms: i32 = compute_delta_ms();
-            let delta_ms_f: f32 = delta_ms;
-            let dt: f32 = delta_ms_f / 1000.0;
-
-            handle_fire_input(delta_ms);
-            update_sim(dt, delta_ms);
-            draw_frame();
-
-            end_frame();
-
-            // FPS control: sleep for remaining frame time if ahead of schedule
-            sync_frame_rate();
-        }
+function tick(): i32 {
+    if (state.running != 1) {
+        return 1;
     }
+
+    let quit: bool = should_quit();
+    if (quit) {
+        state.running = 0;
+        return 1;
+    }
+
+    begin_frame();
+    clear(0.0, 0.0, 0.1, 1.0);
+
+    // Calculate delta time
+    let delta_ms: i32 = compute_delta_ms();
+    let delta_ms_f: f32 = delta_ms;
+    let dt: f32 = delta_ms_f / 1000.0;
+
+    handle_fire_input(delta_ms);
+    update_sim(dt, delta_ms);
+    draw_frame();
+
+    end_frame();
 
     return 0;
 }

@@ -69,11 +69,20 @@ EnumDecl         -> "enum" Identifier "{" EnumMemberList "}"
 ```
 
 ```
-EnumMemberList   -> Identifier EnumMemberRest
+EnumMemberList   -> EnumMember EnumMemberRest
 ```
 
 ```
-EnumMemberRest   -> "," Identifier EnumMemberRest
+EnumMember       -> Identifier EnumValueOpt
+```
+
+```
+EnumValueOpt     -> "=" IntegerLiteral
+                  | <empty>
+```
+
+```
+EnumMemberRest   -> "," EnumMember EnumMemberRest
                   | ","     (* optional trailing comma *)
                   | <empty>
 ```

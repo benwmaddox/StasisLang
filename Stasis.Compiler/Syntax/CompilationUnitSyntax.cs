@@ -15,10 +15,10 @@ public sealed record StructFieldSyntax(Token Identifier, TypeSyntax Type, Token 
 public sealed record StructDeclarationSyntax(Token StructKeyword, Token Name, IReadOnlyList<StructFieldSyntax> Fields, Token CloseBrace)
     : DeclarationSyntax(new SourceSpan(StructKeyword.Span.Start, CloseBrace.Span.End - StructKeyword.Span.Start));
 
-public sealed record EnumMemberSyntax(Token Identifier, Token? TrailingComma)
-    : SyntaxNode(TrailingComma is null
-        ? Identifier.Span
-        : new SourceSpan(Identifier.Span.Start, TrailingComma.Span.End - Identifier.Span.Start));
+public sealed record EnumMemberSyntax(Token Identifier, Token? EqualsToken, Token? ValueToken, Token? TrailingComma)
+    : SyntaxNode(new SourceSpan(
+        Identifier.Span.Start,
+        (TrailingComma ?? ValueToken ?? Identifier).Span.End - Identifier.Span.Start));
 
 public sealed record EnumDeclarationSyntax(Token EnumKeyword, Token Name, IReadOnlyList<EnumMemberSyntax> Members, Token CloseBrace)
     : DeclarationSyntax(new SourceSpan(EnumKeyword.Span.Start, CloseBrace.Span.End - EnumKeyword.Span.Start));

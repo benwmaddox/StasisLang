@@ -911,6 +911,17 @@ fn emit_inst(
         return Ok(());
     }
 
+    if let Some(rest) = rhs.strip_prefix("fcvt_to_sint_sat.")
+    {
+        let ty_str = rest.split_whitespace().next().context("missing fcvt type")?;
+        let value_str = rest[ty_str.len()..].trim();
+        let src = *values.get(&parse_value_id(value_str)?).context("unknown fcvt_to_sint_sat source")?;
+        let ty = parse_type(ty_str)?;
+        let v = builder.ins().fcvt_to_sint_sat(ty, src);
+        values.insert(dst_id, v);
+        return Ok(());
+    }
+
     if let Some(rest) = rhs.strip_prefix("bint.i32 ")
     {
         let src = *values.get(&parse_value_id(rest.trim())?).context("unknown bint source")?;

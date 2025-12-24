@@ -98,7 +98,9 @@ public sealed class CraneliftFunctionBuilder
         // Ensure we have a return
         if (!EndsWithReturn(function.Body))
         {
-            var returnType = functionSymbol.Type;
+            var returnType = function.ReturnType is null
+                ? new VoidTypeSymbol()
+                : ResolveType(function.ReturnType);
             if (returnType is VoidTypeSymbol)
             {
                 _instructions.AppendLine("    return");
@@ -902,8 +904,15 @@ public sealed class CraneliftFunctionBuilder
         return nonCmp;
     }
 
-    private bool IsVoidFunction(string name) =>
-        _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
+    private bool IsVoidFunction(string name)
+    {
+        if (_functions.TryGetValue(name, out var func))
+        {
+            return func.ReturnType is null || ResolveType(func.ReturnType) is VoidTypeSymbol;
+        }
+
+        return _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
+    }
 
     private bool IsBuiltinFunction(string name)
     {
@@ -926,6 +935,8 @@ public sealed class CraneliftFunctionBuilder
             "cos" => true,
             "sin_fast" => true,
             "cos_fast" => true,
+            "i32_to_f32" => true,
+            "f32_to_i32" => true,
             "init_window" => true,
             "begin_frame" => true,
             "end_frame" => true,
@@ -934,6 +945,9 @@ public sealed class CraneliftFunctionBuilder
             "gfx_load_sprite" => true,
             "gfx_draw_sprite" => true,
             "gfx_poll_reload" => true,
+            "gfx_window_width" => true,
+            "gfx_window_height" => true,
+            "gfx_window_resized" => true,
             "gfx_debug_bake_hash" => true,
             "is_key_down" => true,
             "should_quit" => true,
@@ -1037,6 +1051,10 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSinCos(arguments, isSin: true);
             case "cos_fast":
                 return LowerSinCos(arguments, isSin: false);
+            case "i32_to_f32":
+                return LowerI32ToF32(arguments);
+            case "f32_to_i32":
+                return LowerF32ToI32(arguments);
             case "init_window":
                 return LowerInitWindow(arguments);
             case "begin_frame":
@@ -1053,6 +1071,12 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGfxDrawSprite(arguments);
             case "gfx_poll_reload":
                 return LowerGfxPollReload(arguments);
+            case "gfx_window_width":
+                return LowerGfxWindowWidth(arguments);
+            case "gfx_window_height":
+                return LowerGfxWindowHeight(arguments);
+            case "gfx_window_resized":
+                return LowerGfxWindowResized(arguments);
             case "gfx_debug_bake_hash":
                 return LowerGfxDebugBakeHash(arguments);
             case "is_key_down":
@@ -1466,15 +1490,6 @@ public sealed class CraneliftFunctionBuilder
 
         var arg = arguments[0];
         var raw = LowerExpression(arg);
-        var argType = GetExpressionType(arg);
-        if (argType is PrimitiveTypeSymbol p && p.PrimitiveName == "u8")
-        {
-            var extended = NewValue();
-            _instructions.AppendLine($"    {extended} = uextend.i32 {raw}");
-            value = extended;
-            return true;
-        }
-
         value = raw;
         return true;
     }
@@ -1642,6 +1657,38 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string LowerI32ToF32(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic("i32_to_f32 expects a single i32 argument.", new SourceSpan(0, 0)));
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f32const 0.0");
+            return zero;
+        }
+
+        var arg = LowerExpression(arguments[0]);
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = fcvt_from_sint.f32 {arg}");
+        return result;
+    }
+
+    private string LowerF32ToI32(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            _diagnostics.Add(new Diagnostic("f32_to_i32 expects a single f32 argument.", new SourceSpan(0, 0)));
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = iconst.i32 0");
+            return zero;
+        }
+
+        var arg = LowerExpression(arguments[0]);
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = fcvt_to_sint_sat.i32 {arg}");
+        return result;
+    }
+
     private string LowerInitWindow(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_init_window", "init_window expects (width: i32, height: i32, title: string).", arguments, 3);
 
@@ -1658,13 +1705,22 @@ public sealed class CraneliftFunctionBuilder
         LowerExternalCallVoid("stasis_draw_line", "draw_line expects 8 arguments (x1,y1,x2,y2,r,g,b,a).", arguments, 8);
 
     private string LowerGfxLoadSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
-        LowerExternalCallValue("stasis_gfx_load_sprite", "gfx_load_sprite expects (path: string).", arguments, 1);
+        LowerExternalCallValue("stasis_gfx_load_sprite", "gfx_load_sprite expects (path, max_w, max_h).", arguments, 3);
 
     private string LowerGfxDrawSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
-        LowerExternalCallVoid("stasis_gfx_draw_sprite", "gfx_draw_sprite expects (handle,x,y,sx,sy,rot,r,g,b,a).", arguments, 10);
+        LowerExternalCallVoid("stasis_gfx_draw_sprite", "gfx_draw_sprite expects (handle,x,y,w,h,rot_degrees,a).", arguments, 7);
 
     private string LowerGfxPollReload(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_poll_reload", "gfx_poll_reload expects (handle: i32).", arguments, 1);
+
+    private string LowerGfxWindowWidth(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_window_width", "gfx_window_width expects no arguments.", arguments, 0);
+
+    private string LowerGfxWindowHeight(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_window_height", "gfx_window_height expects no arguments.", arguments, 0);
+
+    private string LowerGfxWindowResized(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_window_resized", "gfx_window_resized expects no arguments.", arguments, 0);
 
     private string LowerGfxDebugBakeHash(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_debug_bake_hash", "gfx_debug_bake_hash expects (path: string).", arguments, 1);
@@ -2765,19 +2821,29 @@ public sealed class CraneliftFunctionBuilder
         else if (member.Receiver is IdentifierExpressionSyntax enumId &&
                  _enums.TryGetValue(enumId.Identifier.Text, out var enumDecl))
         {
-            var memberIndex = -1;
+            var memberValue = -1;
+            var nextValue = 0;
             for (int i = 0; i < enumDecl.Members.Count; i++)
             {
-                if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                var m = enumDecl.Members[i];
+                var assigned = nextValue;
+                if (m.ValueToken is not null && int.TryParse(m.ValueToken.Text, out var explicitValue))
                 {
-                    memberIndex = i;
+                    assigned = explicitValue;
+                }
+
+                if (string.Equals(m.Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                {
+                    memberValue = assigned;
                     break;
                 }
+
+                nextValue = assigned + 1;
             }
 
-            if (memberIndex >= 0)
+            if (memberValue >= 0)
             {
-                _instructions.AppendLine($"    {result} = iconst.i32 {memberIndex}");
+                _instructions.AppendLine($"    {result} = iconst.i32 {memberValue}");
                 return result;
             }
 

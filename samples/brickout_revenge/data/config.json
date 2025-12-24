@@ -42,7 +42,6 @@
       "start_spawn_balls": 90
     },
     "timing": {
-      "frame_time_ms": 16,
       "ball_spawn_cd_ms": 1000,
       "end_phase_restart_ms": 3000
     },
