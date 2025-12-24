@@ -201,18 +201,36 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         if (builtins.Contains("gfx_load_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.R64);
+                CraneliftTypeMapper.ClifType.R64,  // path
+                CraneliftTypeMapper.ClifType.I32,  // max_w
+                CraneliftTypeMapper.ClifType.I32); // max_h
         }
 
         if (builtins.Contains("gfx_draw_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_draw_sprite", CraneliftTypeMapper.ClifType.Void,
-                CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+                CraneliftTypeMapper.ClifType.I32,  // handle
+                CraneliftTypeMapper.ClifType.I32,  // x
+                CraneliftTypeMapper.ClifType.I32,  // y
+                CraneliftTypeMapper.ClifType.I32,  // w
+                CraneliftTypeMapper.ClifType.I32,  // h
+                CraneliftTypeMapper.ClifType.I32,  // rot_degrees
+                CraneliftTypeMapper.ClifType.I32); // a
+        }
+
+        if (builtins.Contains("gfx_window_width"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_width", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_window_height"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_height", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_window_resized"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_resized", CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("gfx_poll_reload"))
