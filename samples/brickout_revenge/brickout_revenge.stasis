@@ -17,9 +17,12 @@ import "../../src/stdlib/sdl_scancodes.stasis";
 // - begin_frame(), end_frame(): bracket GPU work
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
-// - gfx_load_sprite(path: string) -> i32
-// - gfx_draw_sprite(handle: i32, x: f32, y: f32, sx: f32, sy: f32, rot: f32, r: f32, g: f32, b: f32, a: f32)
+// - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
+// - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32)
 // - gfx_poll_reload(handle: i32) -> bool
+// - gfx_window_width() -> i32
+// - gfx_window_height() -> i32
+// - gfx_window_resized() -> bool
 // - is_key_down(scancode: i32) -> bool
 
 // Pool sizes (compile-time; keep in sync with the array sizes below)
@@ -234,7 +237,7 @@ function next_rand(): i32 {
 
 function rand_float(max: f32): f32 {
     let r: i32 = next_rand() % 1000;
-    let rf: f32 = r;
+    let rf: f32 = i32_to_f32(r);
     return (rf / 1000.0) * max;
 }
 
@@ -283,14 +286,14 @@ function apply_config_live(): void {
 
 // Grid helpers - bricks are placed on a grid in the lower portion
 function grid_to_world_x(gx: i32): f32 {
-    let gxf: f32 = gx;
+    let gxf: f32 = i32_to_f32(gx);
     return state.config.grid.origin_x + gxf * (state.config.brick.width + state.config.grid.spacing);
 }
 
 function grid_to_world_y(gy: i32): f32 {
-    let gyf: f32 = gy;
+    let gyf: f32 = i32_to_f32(gy);
     // Place bricks starting near the bottom and stack upward with the same spacing.
-    let sh: f32 = state.config.screen.h;
+    let sh: f32 = i32_to_f32(state.config.screen.h);
     return sh - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
 }
 
@@ -327,7 +330,7 @@ function init_game(reset_progress: bool): void {
     }
 
     // Init paddle
-    let sw: f32 = state.config.screen.w;
+    let sw: f32 = i32_to_f32(state.config.screen.w);
     state.paddle.x = sw / 2.0;
     state.paddle.y = state.config.paddle.y;
     state.paddle.width = state.config.paddle.width;
@@ -455,7 +458,9 @@ function update_brick_attacks(delta_ms: i32): void {
 
                 foreach (let ball, i in state.balls) {
                     if (ball.active) {
-                        let d2v: f32 = dist2(bx, by, ball.x, ball.y);
+                        let ballx: f32 = ball.x;
+                        let bally: f32 = ball.y;
+                        let d2v: f32 = dist2(bx, by, ballx, bally);
                         if (d2v < best_d2) {
                             if (d2v <= range2) {
                                 best_d2 = d2v;
@@ -485,7 +490,7 @@ function update_brick_attacks(delta_ms: i32): void {
 
 // Spawn a ball near the paddle, heading downward
 function spawn_ball(): void {
-    let sw: f32 = state.config.screen.w;
+    let sw: f32 = i32_to_f32(state.config.screen.w);
     foreach (let ball in state.balls) {
         if (!ball.active) {
             ball.active = true;
@@ -496,10 +501,11 @@ function spawn_ball(): void {
             if (ball.x > sw - margin) { ball.x = sw - margin; }
 
             ball.radius = state.config.ball.radius;
-            ball.y = state.paddle.y + state.paddle.height / 2.0 + ball.radius + 2.0;
+            let ph: f32 = state.paddle.height;
+            ball.y = state.paddle.y + ph / 2.0 + ball.radius + 2.0;
             let vr: f32 = state.config.ball.vx_rand;
             ball.vx = rand_range(0.0 - vr, vr);
-            let wf: f32 = state.wave;
+            let wf: f32 = i32_to_f32(state.wave);
             let speed_min: f32 = state.config.ball.speed_min_base + wf * state.config.ball.speed_min_per_wave;
             let speed_max: f32 = state.config.ball.speed_max_base + wf * state.config.ball.speed_max_per_wave;
             ball.vy = rand_range(speed_min, speed_max);
@@ -539,8 +545,8 @@ function count_active_balls(): i32 {
 
 // Physics update
 function update_balls(dt: f32): void {
-    let sw: f32 = state.config.screen.w;
-    let sh: f32 = state.config.screen.h;
+    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sh: f32 = i32_to_f32(state.config.screen.h);
     foreach (let ball in state.balls) {
         if (ball.active) {
             // Move ball
@@ -624,7 +630,7 @@ function update_paddle(dt: f32): void {
 
     // Clamp paddle to screen
     let half_w: f32 = state.paddle.width / 2.0;
-    let sw: f32 = state.config.screen.w;
+    let sw: f32 = i32_to_f32(state.config.screen.w);
     state.paddle.x = clamp_f32(state.paddle.x, half_w, sw - half_w);
 }
 
@@ -904,8 +910,8 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
     let prev_y: f32 = cy;
 
     for (i = 1; i < (segments + 1); i = i + 1) {
-        let fi: f32 = i;
-        let seg_f: f32 = segments;
+        let fi: f32 = i32_to_f32(i);
+        let seg_f: f32 = i32_to_f32(segments);
         let angle: f32 = (fi / seg_f) * 2.0 * PI;
         let px: f32 = cx + cos_fast(angle) * radius;
         let py: f32 = cy + sin_fast(angle) * radius;
@@ -918,7 +924,7 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
 function draw_bricks(): void {
     let now_ms: i32 = get_time_ms();
     let t_mod: i32 = now_ms % 2000;
-    let t_f: f32 = t_mod;
+    let t_f: f32 = i32_to_f32(t_mod);
     let phase: f32 = (t_f / 2000.0) * 2.0 * PI;
     let wave: f32 = sin_fast(phase);
     let pulse: f32 = 0.5 + 0.5 * wave;
@@ -945,44 +951,49 @@ function draw_bricks(): void {
                 h_fx = state.sprites.brick_reflector_fx;
             }
 
-            let cx: f32 = brick.x + brick.width / 2.0;
-            let cy: f32 = brick.y + brick.height / 2.0;
-            let sx: f32 = brick.width / 160.0;  // sprite viewBox width
-            let sy: f32 = brick.height / 64.0;  // sprite viewBox height
+            let cx: i32 = f32_to_i32(brick.x + brick.width / 2.0);
+            let cy: i32 = f32_to_i32(brick.y + brick.height / 2.0);
 
             if (h_base != 0) {
-                gfx_draw_sprite(h_base, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+                gfx_draw_sprite(h_base, cx, cy, f32_to_i32(brick.width), f32_to_i32(brick.height), 0, 255);
             }
 
             // Turret bob/pulse (driven by time; no SVG animation tags)
             if (h_turret != 0) {
-                let seed: f32 = cx * 0.013 + cy * 0.021;
+                let cxf: f32 = i32_to_f32(cx);
+                let cyf: f32 = i32_to_f32(cy);
+                let seed: f32 = cxf * 0.013 + cyf * 0.021;
                 let wobble: f32 = sin_fast(phase + seed);
-                let oy: f32 = wobble * 1.4;
-                let rot: f32 = wobble * 0.05;
-                let a: f32 = 0.85 + 0.15 * (0.5 + 0.5 * wobble);
-                gfx_draw_sprite(h_turret, cx, cy + oy, sx, sy, rot, 1.0, 1.0, 1.0, a);
+                let oy: i32 = f32_to_i32(wobble * 1.4);
+                let rot_deg: i32 = f32_to_i32(wobble * 3.0);  // ~0.05 radians = ~3 degrees
+                let a: i32 = f32_to_i32((0.85 + 0.15 * (0.5 + 0.5 * wobble)) * 255.0);
+                gfx_draw_sprite(h_turret, cx, cy + oy, f32_to_i32(brick.width), f32_to_i32(brick.height), rot_deg, a);
             }
 
             // Effects layer (pulse alpha)
             if (h_fx != 0) {
-                let a: f32 = fx_alpha;
+                let a_f: f32 = fx_alpha;
                 if (brick.brick_type == BrickType.Reflector) {
-                    a = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
+                    a_f = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
                 }
-                gfx_draw_sprite(h_fx, cx, cy, sx, sy, 0.0, 1.0, 1.0, 1.0, a);
+                let a: i32 = f32_to_i32(a_f * 255.0);
+                gfx_draw_sprite(h_fx, cx, cy, f32_to_i32(brick.width), f32_to_i32(brick.height), 0, a);
             }
 
             // Shot tracer (tower attack feedback)
             if (brick.shot_fx_ms > 0) {
-                let a: f32 = brick.shot_fx_ms;
+                let a: f32 = i32_to_f32(brick.shot_fx_ms);
                 let alpha: f32 = a / 90.0;
                 let sr: f32 = 1.0;
                 let sg: f32 = 0.4;
                 let sb: f32 = 0.2;
                 if (brick.brick_type == BrickType.Armored) { sr = 0.6; sg = 0.8; sb = 1.0; }
                 if (brick.brick_type == BrickType.Reflector) { sr = 0.7; sg = 0.3; sb = 1.0; }
-                draw_line(cx, cy, brick.shot_tx, brick.shot_ty, sr, sg, sb, alpha);
+                let cxf: f32 = i32_to_f32(cx);
+                let cyf: f32 = i32_to_f32(cy);
+                let txf: f32 = brick.shot_tx;
+                let tyf: f32 = brick.shot_ty;
+                draw_line(cxf, cyf, txf, tyf, sr, sg, sb, alpha);
             }
 
             // Draw HP indicator for armored
@@ -998,22 +1009,30 @@ function draw_bricks(): void {
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            let scale: f32 = (ball.radius * 2.0) / 32.0;
+            let diameter: i32 = f32_to_i32(ball.radius * 2.0);
+            let bxi: i32 = f32_to_i32(ball.x);
+            let byi: i32 = f32_to_i32(ball.y);
             if (state.sprites.ball == 0) {
-                draw_circle(ball.x, ball.y, ball.radius, 1.0, 0.3, 1.0, 1.0);
+                let bx: f32 = ball.x;
+                let by: f32 = ball.y;
+                let br: f32 = ball.radius;
+                draw_circle(bx, by, br, 1.0, 0.3, 1.0, 1.0);
             } else {
-                gfx_draw_sprite(state.sprites.ball, ball.x, ball.y, scale, scale, 0.0, 1.0, 1.0, 1.0, 1.0);
+                gfx_draw_sprite(state.sprites.ball, bxi, byi, diameter, diameter, 0, 255);
             }
 
             // Ball HP bar
             if (ball.max_hp > 0) {
                 if (ball.hp < ball.max_hp) {
-                    let hp_f: f32 = ball.hp;
-                    let max_f: f32 = ball.max_hp;
+                    let hp_f: f32 = i32_to_f32(ball.hp);
+                    let max_f: f32 = i32_to_f32(ball.max_hp);
                     let t: f32 = hp_f / max_f;
-                    let y: f32 = ball.y - ball.radius - 10.0;
-                    draw_line(ball.x - 16.0, y, ball.x + 16.0, y, 0.2, 0.2, 0.2, 0.9);
-                    draw_line(ball.x - 16.0, y, ball.x - 16.0 + 32.0 * t, y, 0.9, 0.3, 0.9, 0.9);
+                    let bx: f32 = ball.x;
+                    let by: f32 = ball.y;
+                    let br: f32 = ball.radius;
+                    let y: f32 = by - br - 10.0;
+                    draw_line(bx - 16.0, y, bx + 16.0, y, 0.2, 0.2, 0.2, 0.9);
+                    draw_line(bx - 16.0, y, bx - 16.0 + 32.0 * t, y, 0.9, 0.3, 0.9, 0.9);
                 }
             }
         }
@@ -1021,14 +1040,18 @@ function draw_balls(): void {
 }
 
 function draw_paddle(): void {
-    let sx: f32 = state.paddle.width / 128.0;
-    let sy: f32 = state.paddle.height / 24.0;
     if (state.sprites.paddle == 0) {
-        let px: f32 = state.paddle.x - state.paddle.width / 2.0;
-        let py: f32 = state.paddle.y - state.paddle.height / 2.0;
-        draw_filled_rect(px, py, state.paddle.width, state.paddle.height, 0.3, 1.0, 1.0, 1.0);
+        let half_w: f32 = state.paddle.width / 2.0;
+        let half_h: f32 = state.paddle.height / 2.0;
+        let px: f32 = state.paddle.x - half_w;
+        let py: f32 = state.paddle.y - half_h;
+        let pw: f32 = state.paddle.width;
+        let ph: f32 = state.paddle.height;
+        draw_filled_rect(px, py, pw, ph, 0.3, 1.0, 1.0, 1.0);
     } else {
-        gfx_draw_sprite(state.sprites.paddle, state.paddle.x, state.paddle.y, sx, sy, 0.0, 1.0, 1.0, 1.0, 1.0);
+        let pxi: i32 = f32_to_i32(state.paddle.x);
+        let pyi: i32 = f32_to_i32(state.paddle.y);
+        gfx_draw_sprite(state.sprites.paddle, pxi, pyi, f32_to_i32(state.paddle.width), f32_to_i32(state.paddle.height), 0, 255);
     }
 }
 
@@ -1104,10 +1127,10 @@ function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
 
 function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
     // Draw a float with 1 decimal place (e.g., 3.5)
-    let int_part: i32 = value;
-    let int_part_f: f32 = int_part;
+    let int_part: i32 = f32_to_i32(value);
+    let int_part_f: f32 = i32_to_f32(int_part);
     let decimal_f: f32 = (value - int_part_f) * 10.0;
-    let decimal_part: i32 = decimal_f;
+    let decimal_part: i32 = f32_to_i32(decimal_f);
 
     // Draw integer part
     draw_number(int_part, x, y, scale);
@@ -1118,7 +1141,7 @@ function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
     if (int_part > 99) { int_digits = 3; }
 
     let spacing: f32 = scale * 1.5;
-    let int_width: f32 = int_digits;
+    let int_width: f32 = i32_to_f32(int_digits);
     let decimal_x: f32 = x + int_width * spacing;
 
     // Draw decimal point (small filled square)
@@ -1145,7 +1168,7 @@ function draw_decimal_1_tenths(value_tenths: i32, x: f32, y: f32, scale: f32): v
     if (int_part > 999) { int_digits = 4; }
 
     let spacing: f32 = scale * 1.5;
-    let int_width: f32 = int_digits;
+    let int_width: f32 = i32_to_f32(int_digits);
     let decimal_x: f32 = x + int_width * spacing;
 
     // Draw decimal point (small filled square)
@@ -1328,8 +1351,8 @@ function hud_draw_bricks(x: f32, y: f32, s: f32): void {
 }
 
 function draw_ui(): void {
-    let sw: f32 = state.config.screen.w;
-    let sh: f32 = state.config.screen.h;
+    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sh: f32 = i32_to_f32(state.config.screen.h);
     // Score in top-left
     draw_number(state.score, 20.0, 10.0, 8.0);
 
@@ -1405,16 +1428,16 @@ function main(): i32 {
         return 1;
     }
 
-    state.sprites.paddle = gfx_load_sprite("samples/brickout_revenge/assets/paddle.svg");
-    state.sprites.ball = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg");
-    state.sprites.brick_basic_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic.svg");
-    state.sprites.brick_basic_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_turret.svg");
-    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg");
-    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg");
-    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg");
-    state.sprites.brick_armored_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_fx.svg");
-    state.sprites.brick_reflector_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector.svg");
-    state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg");
+    state.sprites.paddle = gfx_load_sprite("samples/brickout_revenge/assets/paddle.svg", 128, 24);
+    state.sprites.ball = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 32, 32);
+    state.sprites.brick_basic_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic.svg", 160, 64);
+    state.sprites.brick_basic_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg", 160, 64);
+    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg", 160, 64);
+    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_armored_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_fx.svg", 160, 64);
+    state.sprites.brick_reflector_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector.svg", 160, 64);
+    state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == 0) {
         seed_rng(time());
@@ -1460,7 +1483,7 @@ function tick(): i32 {
     clear(0.05, 0.05, 0.15, 1.0);
 
     let delta_ms: i32 = compute_delta_ms();
-    let delta_f: f32 = delta_ms;
+    let delta_f: f32 = i32_to_f32(delta_ms);
     let dt: f32 = delta_f / 1000.0;
 
     update_game(dt, delta_ms);

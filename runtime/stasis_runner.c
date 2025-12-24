@@ -59,6 +59,158 @@ static void print_usage(void)
 }
 
 #ifdef _WIN32
+static int get_self_exe_path(char *out, size_t out_size)
+{
+    if (!out || out_size < 2)
+    {
+        return 0;
+    }
+    DWORD len = GetModuleFileNameA(NULL, out, (DWORD)(out_size - 1));
+    if (len == 0 || len >= out_size)
+    {
+        out[0] = '\0';
+        return 0;
+    }
+    out[len] = '\0';
+    return 1;
+}
+#else
+static int get_self_exe_path(char *out, size_t out_size)
+{
+    (void)out;
+    (void)out_size;
+    return 0;
+}
+#endif
+
+static int path_dirname(const char *path, char *out, size_t out_size)
+{
+    if (!path || !*path || !out || out_size < 2)
+    {
+        return 0;
+    }
+
+    size_t len = strlen(path);
+    if (len >= out_size)
+    {
+        return 0;
+    }
+
+    strncpy(out, path, out_size - 1);
+    out[out_size - 1] = '\0';
+
+    char *slash = strrchr(out, '\\');
+    char *fslash = strrchr(out, '/');
+    char *sep = slash > fslash ? slash : fslash;
+    if (!sep)
+    {
+        out[0] = '.';
+        out[1] = '\0';
+        return 1;
+    }
+
+    *sep = '\0';
+    return 1;
+}
+
+static int path_basename_no_ext(const char *path, char *out, size_t out_size)
+{
+    if (!path || !*path || !out || out_size < 2)
+    {
+        return 0;
+    }
+
+    const char *base = path;
+    const char *slash = strrchr(path, '\\');
+    const char *fslash = strrchr(path, '/');
+    if (slash && (!fslash || slash > fslash))
+    {
+        base = slash + 1;
+    }
+    else if (fslash)
+    {
+        base = fslash + 1;
+    }
+
+    size_t len = strlen(base);
+    if (len >= out_size)
+    {
+        len = out_size - 1;
+    }
+    strncpy(out, base, len);
+    out[len] = '\0';
+
+    char *dot = strrchr(out, '.');
+    if (dot)
+    {
+        *dot = '\0';
+    }
+
+    return 1;
+}
+
+static int path_join2(const char *a, const char *b, char *out, size_t out_size)
+{
+    if (!a || !b || !out || out_size < 2)
+    {
+        return 0;
+    }
+
+    size_t alen = strlen(a);
+    size_t blen = strlen(b);
+    if (alen + 1 + blen + 1 > out_size)
+    {
+        return 0;
+    }
+
+    strncpy(out, a, out_size - 1);
+    out[out_size - 1] = '\0';
+    if (alen > 0 && a[alen - 1] != '\\' && a[alen - 1] != '/')
+    {
+        out[alen] = '\\';
+        out[alen + 1] = '\0';
+    }
+    strncat(out, b, out_size - strlen(out) - 1);
+    return 1;
+}
+
+static int path_parent_dir(const char *dir, char *out, size_t out_size)
+{
+    if (!dir || !*dir || !out || out_size < 2)
+    {
+        return 0;
+    }
+
+    size_t len = strlen(dir);
+    if (len >= out_size)
+    {
+        return 0;
+    }
+    strncpy(out, dir, out_size - 1);
+    out[out_size - 1] = '\0';
+
+    /* Trim trailing separators */
+    while (len > 0 && (out[len - 1] == '\\' || out[len - 1] == '/'))
+    {
+        out[len - 1] = '\0';
+        len--;
+    }
+
+    char *slash = strrchr(out, '\\');
+    char *fslash = strrchr(out, '/');
+    char *sep = slash > fslash ? slash : fslash;
+    if (!sep)
+    {
+        out[0] = '.';
+        out[1] = '\0';
+        return 1;
+    }
+
+    *sep = '\0';
+    return 1;
+}
+
+#ifdef _WIN32
 static void enable_vt_processing(HANDLE handle)
 {
     DWORD mode = 0;
@@ -564,12 +716,123 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        print_usage();
-        return 1;
+        /* Self-hosted mode: infer DLL and entry from executable name. */
+        char self_path[2048];
+        char exe_dir[2048];
+        char base_name[512];
+        static char dll_path_buf[2048];
+        static char entry_name_buf[512];
+        static char meta_path_buf[2048];
+        static char json_path_buf[2048];
+
+        self_path[0] = '\0';
+        exe_dir[0] = '\0';
+        base_name[0] = '\0';
+        dll_path_buf[0] = '\0';
+        entry_name_buf[0] = '\0';
+        meta_path_buf[0] = '\0';
+        json_path_buf[0] = '\0';
+
+#ifdef _WIN32
+        if (!get_self_exe_path(self_path, sizeof(self_path)))
+        {
+            print_usage();
+            return 1;
+        }
+#else
+        /* Best effort: use argv[0] */
+        strncpy(self_path, argv[0], sizeof(self_path) - 1);
+        self_path[sizeof(self_path) - 1] = '\0';
+#endif
+
+        if (!path_dirname(self_path, exe_dir, sizeof(exe_dir)) ||
+            !path_basename_no_ext(self_path, base_name, sizeof(base_name)))
+        {
+            print_usage();
+            return 1;
+        }
+
+        /* Set STASIS_ASSET_ROOT to the repo root when running from within the repo. */
+        const char *existing_root = getenv("STASIS_ASSET_ROOT");
+        if (!existing_root || !*existing_root)
+        {
+            char probe_dir[2048];
+            char probe_file[2048];
+            strncpy(probe_dir, exe_dir, sizeof(probe_dir) - 1);
+            probe_dir[sizeof(probe_dir) - 1] = '\0';
+
+            for (int depth = 0; depth < 12; depth++)
+            {
+                if (path_join2(probe_dir, "stasis.bat", probe_file, sizeof(probe_file)) && file_exists(probe_file))
+                {
+#ifdef _WIN32
+                    SetEnvironmentVariableA("STASIS_ASSET_ROOT", probe_dir);
+#else
+                    setenv("STASIS_ASSET_ROOT", probe_dir, 1);
+#endif
+                    break;
+                }
+
+                char next_dir[2048];
+                if (!path_parent_dir(probe_dir, next_dir, sizeof(next_dir)))
+                {
+                    break;
+                }
+                if (strcmp(next_dir, probe_dir) == 0)
+                {
+                    break;
+                }
+                strncpy(probe_dir, next_dir, sizeof(probe_dir) - 1);
+                probe_dir[sizeof(probe_dir) - 1] = '\0';
+            }
+        }
+
+        /* Default DLL and entry: <base>.dll and <base>__main */
+        if (!path_join2(exe_dir, base_name, dll_path_buf, sizeof(dll_path_buf)))
+        {
+            print_usage();
+            return 1;
+        }
+        strncat(dll_path_buf, ".dll", sizeof(dll_path_buf) - strlen(dll_path_buf) - 1);
+        snprintf(entry_name_buf, sizeof(entry_name_buf), "%s__main", base_name);
+
+        if (!file_exists(dll_path_buf))
+        {
+            fprintf(stderr, "error: inferred dll not found: %s\n", dll_path_buf);
+            print_usage();
+            return 1;
+        }
+
+        dll_path = dll_path_buf;
+        entry_name = entry_name_buf;
+
+        /* Auto data binding if struct meta + config.json are present. */
+        if (path_join2(exe_dir, base_name, meta_path_buf, sizeof(meta_path_buf)))
+        {
+            strncat(meta_path_buf, ".struct-meta.json", sizeof(meta_path_buf) - strlen(meta_path_buf) - 1);
+            if (file_exists(meta_path_buf))
+            {
+                /* Prefer ../data/config.json relative to <sample>/build */
+                char parent_dir[2048];
+                char data_dir[2048];
+                if (path_parent_dir(exe_dir, parent_dir, sizeof(parent_dir)) &&
+                    path_join2(parent_dir, "data", data_dir, sizeof(data_dir)) &&
+                    path_join2(data_dir, "config.json", json_path_buf, sizeof(json_path_buf)) &&
+                    file_exists(json_path_buf))
+                {
+                    data_bind_json = json_path_buf;
+                    data_bind_meta = meta_path_buf;
+                    fprintf(stderr, "Data binding: %s\n", data_bind_json);
+                }
+            }
+        }
     }
 
-    const char *dll_path = argv[1];
-    const char *entry_name = argc >= 3 ? argv[2] : "run_tests";
+    if (dll_path == NULL)
+    {
+        dll_path = argv[1];
+        entry_name = argc >= 3 ? argv[2] : "run_tests";
+    }
 
     const char *state_path = NULL;
     const char *state_map_path = NULL;

@@ -61,6 +61,24 @@ jobs:
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
 
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build Cranelift AOT tool
+        run: cargo build --release --manifest-path tools/cranelift-aot/Cargo.toml
+
+      - name: Build samples with Cranelift (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/basic.stasis
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/tests.stasis
+
+      - name: Build samples with LLVM (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build --backend llvm samples/basic.stasis
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build --backend llvm samples/tests.stasis
+
       - name: Emit sample IR artifacts
         if: matrix.os == 'ubuntu-latest'
         run: |
