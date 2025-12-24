@@ -201,18 +201,36 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         if (builtins.Contains("gfx_load_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.R64);
+                CraneliftTypeMapper.ClifType.R64,  // path
+                CraneliftTypeMapper.ClifType.I32,  // max_w
+                CraneliftTypeMapper.ClifType.I32); // max_h
         }
 
         if (builtins.Contains("gfx_draw_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_draw_sprite", CraneliftTypeMapper.ClifType.Void,
-                CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32,
-                CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
+                CraneliftTypeMapper.ClifType.I32,  // handle
+                CraneliftTypeMapper.ClifType.I32,  // x
+                CraneliftTypeMapper.ClifType.I32,  // y
+                CraneliftTypeMapper.ClifType.I32,  // w
+                CraneliftTypeMapper.ClifType.I32,  // h
+                CraneliftTypeMapper.ClifType.I32,  // rot_degrees
+                CraneliftTypeMapper.ClifType.I32); // a
+        }
+
+        if (builtins.Contains("gfx_window_width"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_width", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_window_height"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_height", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_window_resized"))
+        {
+            builder.DeclareExternal("stasis_gfx_window_resized", CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("gfx_poll_reload"))
@@ -483,12 +501,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             if (!symbols.TryGetValue(func.Name.Text, out var symbol))
                 continue;
 
-            var returnType = symbol.Type != null
-                ? typeMapper.Map(symbol.Type)
-                : CraneliftTypeMapper.ClifType.I32;
+            var returnTypeSymbol = func.ReturnType is null
+                ? new VoidTypeSymbol()
+                : ResolveType(func.ReturnType, symbols);
+            var returnType = NormalizeFunctionType(typeMapper.Map(returnTypeSymbol));
 
             var paramTypes = func.Parameters
-                .Select(p => typeMapper.Map(ResolveType(p.Type, symbols)))
+                .Select(p => NormalizeFunctionType(typeMapper.Map(ResolveType(p.Type, symbols))))
                 .ToArray();
 
             var attributes = GetFunctionAttributes(func);
@@ -536,6 +555,16 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     private static List<string> GetFunctionAttributes(FunctionDeclarationSyntax func) =>
         func.Attributes.Select(a => a.Text).ToList();
+
+    private static CraneliftTypeMapper.ClifType NormalizeFunctionType(CraneliftTypeMapper.ClifType type) =>
+        type switch
+        {
+            CraneliftTypeMapper.ClifType.I8 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.I16 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.B1 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.R64 => CraneliftTypeMapper.ClifType.I64,
+            _ => type
+        };
 
     private static void EmitTestHarness(
         CompilationUnitSyntax compilationUnit,

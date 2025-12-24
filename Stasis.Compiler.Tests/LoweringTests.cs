@@ -217,18 +217,17 @@ public class LoweringTests
     public void Lowers_integer_extended_comparisons_to_icmp()
     {
         var ir = Lower("""
-            function cmp(a: i32, b: i32): i32 {
-                let x: i32 = a != b;
-                let y: i32 = a <= b;
-                let z: i32 = a >= b;
-                return x + y + z;
+            function cmp(a: i32, b: i32): bool {
+                let x: bool = a != b;
+                let y: bool = a <= b;
+                let z: bool = a >= b;
+                return x;
             }
             """);
 
         Assert.Contains("icmp ne", ir);
         Assert.Contains("icmp sle", ir);
         Assert.Contains("icmp sge", ir);
-        Assert.Contains("zext i1", ir);
     }
 
     [Fact]
@@ -248,18 +247,17 @@ public class LoweringTests
     public void Lowers_float_extended_comparisons_to_fcmp()
     {
         var ir = Lower("""
-            function cmp(a: f32, b: f32): i32 {
-                let x: i32 = a != b;
-                let y: i32 = a <= b;
-                let z: i32 = a >= b;
-                return x + y + z;
+            function cmp(a: f32, b: f32): bool {
+                let x: bool = a != b;
+                let y: bool = a <= b;
+                let z: bool = a >= b;
+                return x;
             }
             """);
 
         Assert.Contains("fcmp one", ir);
         Assert.Contains("fcmp ole", ir);
         Assert.Contains("fcmp oge", ir);
-        Assert.Contains("zext i1", ir);
     }
 
     [Fact]
@@ -387,11 +385,11 @@ public class LoweringTests
     }
 
     [Fact]
-    public void Lowers_i32_to_f32_assignment_with_sitofp()
+    public void Lowers_i32_to_f32_with_explicit_conversion()
     {
         var ir = Lower("""
             function convert(x: i32): f32 {
-                let result: f32 = x;
+                let result: f32 = i32_to_f32(x);
                 return result;
             }
             """);
@@ -402,11 +400,11 @@ public class LoweringTests
     }
 
     [Fact]
-    public void Lowers_f32_to_i32_assignment_with_fptosi()
+    public void Lowers_f32_to_i32_with_explicit_conversion()
     {
         var ir = Lower("""
             function convert(x: f32): i32 {
-                let result: i32 = x;
+                let result: i32 = f32_to_i32(x);
                 return result;
             }
             """);
@@ -432,14 +430,14 @@ public class LoweringTests
     }
 
     [Fact]
-    public void Lowers_i32_to_f32_in_loop()
+    public void Lowers_i32_to_f32_in_loop_with_explicit_conversion()
     {
         var ir = Lower("""
             function sum_as_float(): f32 {
                 let i: i32 = 0;
                 let total: f32 = 0.0;
                 for (i = 0; i.<(5); i = i.+(1)) {
-                    let if32: f32 = i;
+                    let if32: f32 = i32_to_f32(i);
                     total = total.+(if32);
                 }
                 return total;
