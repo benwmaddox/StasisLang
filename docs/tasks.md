@@ -2,6 +2,10 @@
 
 This file is a lightweight, persistent checklist of upcoming work. It complements the more detailed design docs in `docs/`.
 
+## Inbox
+
+- [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
+
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
 ### Goals
@@ -173,4 +177,3 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 ### Acceptance criteria
 - `stasis run samples/aquarium.stasis --graphics` shows fish moving and responding to food taps/clicks.
 - The sample is deterministic given a fixed seed and produces stable behavior across runs.
-
