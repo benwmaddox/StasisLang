@@ -23,6 +23,7 @@ _ReSharper.Caches/
 *.exe
 *.so
 *.dylib
+**/stasis_graphics.lib
 runtime/build/
 codevcpkg/
 build/hotstate/
