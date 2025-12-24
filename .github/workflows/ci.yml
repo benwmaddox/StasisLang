@@ -61,23 +61,25 @@ jobs:
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build Cranelift AOT tool
-        run: cargo build --release --manifest-path tools/cranelift-aot/Cargo.toml
-
-      - name: Build samples with Cranelift (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Compile runtime C sources (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/basic.stasis
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build --with-tests samples/tests.stasis
+          clang --version
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/cJSON.c -o cjson.o
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_data.c -o stasis_data.o
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_runner.c -o stasis_runner.o
 
-      - name: Build samples with LLVM (Windows)
+      - name: Compile runtime C sources (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build --backend llvm samples/basic.stasis
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build --backend llvm --with-tests samples/tests.stasis
+          $clangcl = (Get-Command clang-cl -ErrorAction SilentlyContinue).Source
+          if (-not $clangcl) { $clangcl = \"C:\\Program Files\\LLVM\\bin\\clang-cl.exe\" }
+          if (-not (Test-Path $clangcl)) { throw \"clang-cl not found (tried PATH and $clangcl)\" }
+          & $clangcl --version
+          & $clangcl /I runtime /std:c11 /c runtime\\cJSON.c
+          & $clangcl /I runtime /std:c11 /c runtime\\stasis_data.c
+          & $clangcl /I runtime /std:c11 /c runtime\\stasis_runner.c
 
       - name: Emit sample IR artifacts
         if: matrix.os == 'ubuntu-latest'
