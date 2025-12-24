@@ -62,7 +62,7 @@ jobs:
         run: dotnet test Stasis.sln -c Release --no-build
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build Cranelift AOT tool
         run: cargo build --release --manifest-path tools/cranelift-aot/Cargo.toml
