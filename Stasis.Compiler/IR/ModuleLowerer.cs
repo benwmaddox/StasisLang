@@ -523,7 +523,7 @@ public sealed class ModuleLowerer
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_load_sprite");
         var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, false);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr, LLVMTypeRef.Int32, LLVMTypeRef.Int32 }, false);
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_gfx_load_sprite", fnType);
@@ -536,15 +536,12 @@ public sealed class ModuleLowerer
         var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[]
         {
             LLVMTypeRef.Int32, // handle
-            LLVMTypeRef.Float, // x
-            LLVMTypeRef.Float, // y
-            LLVMTypeRef.Float, // sx
-            LLVMTypeRef.Float, // sy
-            LLVMTypeRef.Float, // rot
-            LLVMTypeRef.Float, // r
-            LLVMTypeRef.Float, // g
-            LLVMTypeRef.Float, // b
-            LLVMTypeRef.Float  // a
+            LLVMTypeRef.Int32, // x
+            LLVMTypeRef.Int32, // y
+            LLVMTypeRef.Int32, // w
+            LLVMTypeRef.Int32, // h
+            LLVMTypeRef.Int32, // rot_degrees
+            LLVMTypeRef.Int32  // a
         }, false);
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
@@ -559,6 +556,36 @@ public sealed class ModuleLowerer
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_gfx_poll_reload", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxWindowWidth(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_window_width");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_window_width", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxWindowHeight(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_window_height");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_window_height", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxWindowResized(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_window_resized");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_window_resized", fnType);
         return (fn, fnType);
     }
 
@@ -968,6 +995,10 @@ public sealed class ModuleLowerer
             "sin_fast",
             "cos_fast",
 
+            // Type conversion
+            "i32_to_f32",
+            "f32_to_i32",
+
             // Legacy system (to be renamed)
             "time",
             "get_time_ms",
@@ -982,6 +1013,9 @@ public sealed class ModuleLowerer
             "gfx_load_sprite",
             "gfx_draw_sprite",
             "gfx_poll_reload",
+            "gfx_window_width",
+            "gfx_window_height",
+            "gfx_window_resized",
             "gfx_debug_bake_hash",
             "set_postfx",
             "is_key_down",
@@ -1284,19 +1318,29 @@ public sealed class ModuleLowerer
                 case MemberAccessExpressionSyntax member when member.Receiver is IdentifierExpressionSyntax enumIdExpr && _enums.ContainsKey(enumIdExpr.Identifier.Text):
                     // Enum member access (e.g., State.Idle)
                     var enumDecl = _enums[enumIdExpr.Identifier.Text];
-                    var memberIndex = -1;
+                    var memberValue = -1;
+                    var nextValue = 0;
                     for (int i = 0; i < enumDecl.Members.Count; i++)
                     {
-                        if (string.Equals(enumDecl.Members[i].Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        var m = enumDecl.Members[i];
+                        var assigned = nextValue;
+                        if (m.ValueToken is not null && int.TryParse(m.ValueToken.Text, out var explicitValue))
                         {
-                            memberIndex = i;
+                            assigned = explicitValue;
+                        }
+
+                        if (string.Equals(m.Identifier.Text, member.Member.Text, StringComparison.Ordinal))
+                        {
+                            memberValue = assigned;
                             break;
                         }
+
+                        nextValue = assigned + 1;
                     }
 
-                    if (memberIndex >= 0)
+                    if (memberValue >= 0)
                     {
-                        return ConstI32(memberIndex);
+                        return ConstI32(memberValue);
                     }
 
                     AddDiagnostic($"Enum '{enumIdExpr.Identifier.Text}' does not have a member '{member.Member.Text}'.", member.Span);
@@ -1716,9 +1760,10 @@ public sealed class ModuleLowerer
             {
                 baseName = TryResolveGlobalName(globalId.Identifier.Text);
             }
-            else if (expr is MemberAccessExpressionSyntax member && member.Receiver is IdentifierExpressionSyntax recv)
+            else if (expr is MemberAccessExpressionSyntax member)
             {
-                baseName = $"{recv.Identifier.Text}_{member.Member.Text}";
+                // Handle nested member access like state.frame_timer.samples_ms
+                baseName = BuildFlattenedMemberPath(member);
             }
 
             if (string.IsNullOrEmpty(baseName))
@@ -1932,6 +1977,26 @@ public sealed class ModuleLowerer
                         }
                         return call;
                     }
+                case "i32_to_f32":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("i32_to_f32 expects a single i32 argument.", span);
+                            return ConstF32(0);
+                        }
+                        var arg = LowerExpression(builder, args[0], locals);
+                        return builder.BuildSIToFP(arg, LLVMTypeRef.Float, "i32tof32");
+                    }
+                case "f32_to_i32":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("f32_to_i32 expects a single f32 argument.", span);
+                            return ConstI32(0);
+                        }
+                        var arg = LowerExpression(builder, args[0], locals);
+                        return builder.BuildFPToSI(arg, LLVMTypeRef.Int32, "f32toi32");
+                    }
                 case "time":
                     {
                         if (args.Count != 0)
@@ -2026,25 +2091,25 @@ public sealed class ModuleLowerer
                     }
                 case "gfx_load_sprite":
                     {
-                        if (args.Count != 1)
+                        if (args.Count != 3)
                         {
-                            AddDiagnostic("gfx_load_sprite expects a path string.", span);
+                            AddDiagnostic("gfx_load_sprite expects (path, max_w, max_h).", span);
                             return ConstI32(0);
                         }
 
-                        var path = LowerExpression(builder, args[0], locals);
+                        var loweredArgs = args.Select(arg => LowerExpression(builder, arg, locals)).ToArray();
 
                         if (_headlessGraphics)
                             return ConstI32(1);
 
                         var (fn, fnType) = GetOrDeclareStasisGfxLoadSprite(_moduleBuilder);
-                        return builder.BuildCall2(fnType, fn, new[] { path }, "gfx_load_sprite.call");
+                        return builder.BuildCall2(fnType, fn, loweredArgs, "gfx_load_sprite.call");
                     }
                 case "gfx_draw_sprite":
                     {
-                        if (args.Count != 10)
+                        if (args.Count != 7)
                         {
-                            AddDiagnostic("gfx_draw_sprite expects (handle,x,y,sx,sy,rot,r,g,b,a).", span);
+                            AddDiagnostic("gfx_draw_sprite expects (handle,x,y,w,h,rot_degrees,a).", span);
                             return ConstI32(0);
                         }
 
@@ -2072,6 +2137,48 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisGfxPollReload(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, new[] { handle }, "gfx_poll_reload.call");
+                    }
+                case "gfx_window_width":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("gfx_window_width expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(800);
+
+                        var (fn2, fnType2) = GetOrDeclareStasisGfxWindowWidth(_moduleBuilder);
+                        return builder.BuildCall2(fnType2, fn2, Array.Empty<LLVMValueRef>(), "gfx_window_width.call");
+                    }
+                case "gfx_window_height":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("gfx_window_height expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(600);
+
+                        var (fn2, fnType2) = GetOrDeclareStasisGfxWindowHeight(_moduleBuilder);
+                        return builder.BuildCall2(fnType2, fn2, Array.Empty<LLVMValueRef>(), "gfx_window_height.call");
+                    }
+                case "gfx_window_resized":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("gfx_window_resized expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn2, fnType2) = GetOrDeclareStasisGfxWindowResized(_moduleBuilder);
+                        return builder.BuildCall2(fnType2, fn2, Array.Empty<LLVMValueRef>(), "gfx_window_resized.call");
                     }
                 case "gfx_debug_bake_hash":
                     {
@@ -3949,6 +4056,33 @@ public sealed class ModuleLowerer
             // Handle simple array[i] pattern
             if (arr.Receiver is IdentifierExpressionSyntax id)
             {
+                // Check if it's a local array (e.g., function parameter)
+                if (locals.TryGetValue(id.Identifier.Text, out var local) && local.SemanticType is ArrayTypeSymbol localArrayType)
+                {
+                    var index = LowerExpression(builder, arr.Index, locals);
+                    elemType = _moduleBuilder.TypeMapper.Map(localArrayType.ElementType);
+
+                    // For array descriptors (struct { ptr, ... }), extract the pointer first
+                    if (local.IsArrayDescriptor && local.ArrayLayout is not null)
+                    {
+                        // Load the descriptor struct
+                        var descriptor = builder.BuildLoad2(local.Type, local.Value, "arrdesc");
+                        // Extract the pointer (first field)
+                        var basePtr = builder.BuildExtractValue(descriptor, 0, "arrptr");
+                        // Calculate element address
+                        ptr = builder.BuildGEP2(elemType, basePtr, new[] { index }, "elemaddr");
+                        return true;
+                    }
+
+                    // Simple pointer case
+                    var basePtrSimple = local.IsAddress
+                        ? builder.BuildLoad2(local.Type, local.Value, "arrbase")
+                        : local.Value;
+
+                    ptr = builder.BuildGEP2(elemType, basePtrSimple, new[] { index }, "elemaddr");
+                    return true;
+                }
+
                 if (_symbols.TryGetValue(id.Identifier.Text, out var sym) && (sym.Kind == SymbolKind.Global || sym.Kind == SymbolKind.Const) && sym.Type is ArrayTypeSymbol arrayType)
                 {
                     var zero = ConstI32(0);
@@ -4675,6 +4809,9 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
 
         private LLVMValueRef ConstI64(long value) =>
             LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)value, true);
+
+        private LLVMValueRef ConstF32(float value) =>
+            LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, value);
 
         /// <summary>
         /// Converts a value to the target type if needed (e.g., i32 -> f32 or f32 -> i32).

@@ -75,6 +75,10 @@ public sealed class SemanticAnalyzer
         AddSymbol("sin_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
         AddSymbol("cos_fast", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
 
+        // Type conversion functions
+        AddSymbol("i32_to_f32", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("f32_to_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
         // Legacy system functions (to be renamed to sys_*)
         AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
@@ -89,6 +93,9 @@ public sealed class SemanticAnalyzer
         AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
@@ -601,13 +608,43 @@ public sealed class SemanticAnalyzer
             or TokenKind.EqualEqual
             or TokenKind.BangEqual)
         {
+            var leftType = ResolveExpressionType(bin.Left, scope);
+            var rightType = ResolveExpressionType(bin.Right, scope);
+
+            // For arithmetic operators, check for type mismatches (no implicit conversions)
+            if (kind is TokenKind.Plus or TokenKind.Minus or TokenKind.Star or TokenKind.Slash or TokenKind.Percent)
+            {
+                if (leftType is PrimitiveTypeSymbol leftPrim && rightType is PrimitiveTypeSymbol rightPrim)
+                {
+                    // Check for mixed integer/float operations - require explicit conversion
+                    if (IsIntegerType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                    }
+                    else if (IsFloatType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                    }
+                }
+            }
+
             // For comparison operators, check type compatibility
             if (kind is TokenKind.EqualEqual or TokenKind.BangEqual
                 or TokenKind.Less or TokenKind.LessEqual
                 or TokenKind.Greater or TokenKind.GreaterEqual)
             {
-                var leftType = ResolveExpressionType(bin.Left, scope);
-                var rightType = ResolveExpressionType(bin.Right, scope);
+                // Check for mixed integer/float comparisons
+                if (leftType is PrimitiveTypeSymbol leftPrim && rightType is PrimitiveTypeSymbol rightPrim)
+                {
+                    if (IsIntegerType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                    }
+                    else if (IsFloatType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                    }
+                }
 
                 // Check if either side is an enum type
                 if (leftType is NamedTypeSymbol leftNamed && _symbols.TryGetValue(leftNamed.TypeName, out var leftSymbol) && leftSymbol.Kind == SymbolKind.Enum)
@@ -850,6 +887,8 @@ public sealed class SemanticAnalyzer
                     return globalSym.Type;
                 }
                 return null;
+            case ParenthesizedExpressionSyntax paren:
+                return ResolveExpressionType(paren.Expression, scope);
             case MemberAccessExpressionSyntax member:
                 // Check if this is an enum member access (e.g., State.Idle)
                 if (member.Receiver is IdentifierExpressionSyntax enumId &&
@@ -870,9 +909,25 @@ public sealed class SemanticAnalyzer
                 or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual:
                 // Comparison operators return bool
                 return new PrimitiveTypeSymbol("bool");
-            case BinaryExpressionSyntax:
-                // Arithmetic operators - would need proper type inference
-                return new PrimitiveTypeSymbol("i32");
+            case BinaryExpressionSyntax bin:
+                {
+                    // Infer arithmetic result type from operands
+                    var leftType = ResolveExpressionType(bin.Left, scope);
+                    var rightType = ResolveExpressionType(bin.Right, scope);
+
+                    // If either operand is f32/f64, result is float
+                    if (leftType is PrimitiveTypeSymbol leftPrim && IsFloatType(leftPrim.PrimitiveName))
+                    {
+                        return leftType;
+                    }
+                    if (rightType is PrimitiveTypeSymbol rightPrim && IsFloatType(rightPrim.PrimitiveName))
+                    {
+                        return rightType;
+                    }
+
+                    // Default to left operand type, or i32 if unknown
+                    return leftType ?? new PrimitiveTypeSymbol("i32");
+                }
             default:
                 return null;
         }
@@ -937,16 +992,12 @@ public sealed class SemanticAnalyzer
                     || targetPrim.PrimitiveName == "ascii");
         }
 
-        // Exact type match
+        // Exact type match required - no implicit numeric conversions
         if (target.GetType() == source.GetType())
         {
             if (target is PrimitiveTypeSymbol targetPrim && source is PrimitiveTypeSymbol sourcePrim)
             {
-                // Allow implicit conversions between numeric primitives
-                if (IsNumericType(targetPrim.PrimitiveName) && IsNumericType(sourcePrim.PrimitiveName))
-                {
-                    return true;
-                }
+                // Require exact type match for primitives - use explicit conversions (i32_to_f32, f32_to_i32)
                 return string.Equals(targetPrim.PrimitiveName, sourcePrim.PrimitiveName, StringComparison.Ordinal);
             }
             if (target is NamedTypeSymbol targetNamed && source is NamedTypeSymbol sourceNamed)
@@ -981,7 +1032,17 @@ public sealed class SemanticAnalyzer
 
     private bool IsNumericType(string typeName)
     {
-        return typeName is "i32" or "u8" or "u16" or "u32" or "f32" or "f64" or "bool";
+        return typeName is "i32" or "u8" or "u16" or "u32" or "f32" or "f64";
+    }
+
+    private bool IsIntegerType(string typeName)
+    {
+        return typeName is "i32" or "u8" or "u16" or "u32";
+    }
+
+    private bool IsFloatType(string typeName)
+    {
+        return typeName is "f32" or "f64";
     }
 
     private string FormatType(TypeSymbol type)

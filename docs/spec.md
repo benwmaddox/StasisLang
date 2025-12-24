@@ -176,9 +176,15 @@ State.Run → 2
 State.Fall → 3
 ```
 
+Enum members may optionally specify an explicit integer value. When a member has an explicit value, subsequent members without an explicit value continue counting upward from that value:
+
+```stasis
+enum Scancode { Escape = 41, Space = 44, Left = 80 }
+```
+
 **Enum semantics:**
 - Members are accessed via dot notation: `EnumName.MemberName`
-- Members are implicitly assigned values 0, 1, 2, ... in declaration order
+- Members are implicitly assigned values 0, 1, 2, ... in declaration order unless overridden with `= <int>`
 - The first member (value 0) is the default value for uninitialized enum variables
 - Each enum member becomes a compile-time constant in the symbol table
 

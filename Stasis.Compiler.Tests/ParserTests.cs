@@ -315,6 +315,24 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_enum_with_explicit_values()
+    {
+        var source = """
+            enum Key { Escape = 41, Space = 44, Left = 80, Right = 79, }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var enumDecl = Assert.IsType<EnumDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal(4, enumDecl.Members.Count);
+        Assert.Equal("Escape", enumDecl.Members[0].Identifier.Text);
+        Assert.Equal("41", enumDecl.Members[0].ValueToken?.Text);
+        Assert.Equal("Space", enumDecl.Members[1].Identifier.Text);
+        Assert.Equal("44", enumDecl.Members[1].ValueToken?.Text);
+    }
+
+    [Fact]
     public void Parses_enum_member_access()
     {
         var source = """
