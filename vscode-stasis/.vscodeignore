@@ -1,0 +1,7 @@
+.vscode/**
+**/*.ts
+tsconfig.json
+node_modules/**
+server/**
+!server/stasis-lsp*
+
