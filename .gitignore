@@ -26,7 +26,7 @@ _ReSharper.Caches/
 runtime/build/
 codevcpkg/
 build/hotstate/
-samples/**/stasis_graphics.lib
+build/aot/
 
 # Debug/temp files
 nul
@@ -35,7 +35,3 @@ samples/*_test*.stasis
 samples/*test*.stasis
 samples/*_old.stasis
 samples/*_simple.stasis
-samples/**/stasis_graphics.dll
-samples/**/SDL2.dll
-samples/**/glew32.dll
-samples/**/build/
