@@ -174,3 +174,23 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - `stasis run samples/aquarium.stasis --graphics` shows fish moving and responding to food taps/clicks.
 - The sample is deterministic given a fixed seed and produces stable behavior across runs.
 
+## 4) Plan: Start building for Android
+
+### Goals
+- Produce an Android APK that can run a Stasis program (initially: a tiny sample with render + input).
+- Keep the build reproducible (documented toolchain versions and commands).
+- Reuse the existing runtime approach where practical (SDL2 for window/input/audio on Android).
+
+### Milestones (concrete steps)
+- [ ] Write `docs/android-build-plan.md` covering toolchain choices, packaging, and CI.
+- [ ] Add an Android host layer:
+  - Java/Kotlin Activity + NativeActivity or SDL2 entrypoint (pick one).
+  - JNI bridge for file IO, asset root, and logging.
+- [ ] Build pipeline:
+  - NDK + CMake build for `runtime/` pieces needed on device.
+  - `dotnet publish` strategy for the compiler/runner side (likely host build on desktop; Android app just runs produced artifacts).
+- [ ] Asset packaging:
+  - Decide how `STASIS_ASSET_ROOT` maps to Android assets/storage.
+  - Minimal “copy assets to app storage on first run” strategy.
+- [ ] CI:
+  - Add a GitHub Actions job that builds the APK (no emulator required initially).
