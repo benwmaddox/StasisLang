@@ -26,6 +26,7 @@ _ReSharper.Caches/
 runtime/build/
 codevcpkg/
 build/hotstate/
+build/aot/
 
 # Debug/temp files
 nul

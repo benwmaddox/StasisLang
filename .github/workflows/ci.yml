@@ -61,6 +61,26 @@ jobs:
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
 
+      - name: Compile runtime C sources (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          clang --version
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/cJSON.c -o cjson.o
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_data.c -o stasis_data.o
+          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_runner.c -o stasis_runner.o
+
+      - name: Compile runtime C sources (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $clangcl = (Get-Command clang-cl -ErrorAction SilentlyContinue).Source
+          if (-not $clangcl) { $clangcl = \"C:\\Program Files\\LLVM\\bin\\clang-cl.exe\" }
+          if (-not (Test-Path $clangcl)) { throw \"clang-cl not found (tried PATH and $clangcl)\" }
+          & $clangcl --version
+          & $clangcl /I runtime /std:c11 /c runtime\\cJSON.c
+          & $clangcl /I runtime /std:c11 /c runtime\\stasis_data.c
+          & $clangcl /I runtime /std:c11 /c runtime\\stasis_runner.c
+
       - name: Emit sample IR artifacts
         if: matrix.os == 'ubuntu-latest'
         run: |
