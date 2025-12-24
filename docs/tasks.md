@@ -205,3 +205,5 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Enumerate all sample entrypoints and decide per-file run mode (build-only vs run vs test).
 - [ ] Create a repeatable local command/script that runs the suite.
 - [ ] Fix or update any failing samples (prefer isolated PRs).
+- Notes:
+  - `examples/flappy_birds_core.stasis` is a library module (no `main`/`test`) and should be skipped by the smoke suite.
