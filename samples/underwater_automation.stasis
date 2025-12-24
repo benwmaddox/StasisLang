@@ -4,7 +4,7 @@ import "../src/stdlib/stdlib.stasis";
 // Single global struct holds all state; arrays are AoS for compiler compatibility.
 
 // External runtime APIs:
-// init_window, time, get_time_ms, sleep_ms, should_quit,
+// init_window, time, get_time_ms, should_quit,
 // begin_frame, end_frame, clear, draw_line, is_key_down, set_postfx
 
 const KEY_ESCAPE: i32 = 41;
@@ -24,7 +24,6 @@ const MAX_MODULES: i32 = 32;
 const MAX_UNITS: i32 = 200;
 
 const TARGET_FPS: i32 = 60;
-const FRAME_TIME_MS: i32 = 16;
 const SPAWN_INTERVAL_MS: i32 = 900;
 
 const TILE_EMPTY: i32 = 0;
@@ -730,42 +729,39 @@ function main(): i32 {
     seed_rng(time());
     init_state();
 
-    let frame_counter: i32 = 0;
-    for (frame_counter = 0; state.running; frame_counter = frame_counter + 1) {
-        state.frame_start_ms = get_time_ms();
-        handle_input();
-        if (should_quit()) {
-            state.exit_reason = 2;
-            state.running = false;
-        }
+    return 0;
+}
 
-        let now_ms: i32 = get_time_ms();
-        let delta_ms: i32 = now_ms - state.last_tick_ms;
-        if (delta_ms < 1) {
-            delta_ms = 1;
-        }
-        if (delta_ms > 120) {
-            delta_ms = 120;
-        }
-        state.last_tick_ms = now_ms;
-
-        step_sim(delta_ms);
-        render();
-
-        let frame_end_ms: i32 = get_time_ms();
-        let elapsed_ms: i32 = frame_end_ms - state.frame_start_ms;
-        let sleep_for_ms: i32 = FRAME_TIME_MS - elapsed_ms;
-        if (sleep_for_ms > 0) {
-            sleep_ms(sleep_for_ms);
-        }
+function tick(): i32 {
+    if (!state.running) {
+        print_string("underwater exit reason=");
+        print_int(state.exit_reason);
+        print_string(" code=");
+        print_int(8000 + state.exit_reason);
+        print_string("\n");
+        return 1;
     }
 
-    print_string("underwater exit reason=");
-    print_int(state.exit_reason);
-    print_string(" code=");
-    print_int(8000 + state.exit_reason);
-    print_string("\n");
-    sleep_ms(250);
+    state.frame_start_ms = get_time_ms();
+    handle_input();
+    if (should_quit()) {
+        state.exit_reason = 2;
+        state.running = false;
+        return 0;
+    }
+
+    let now_ms: i32 = get_time_ms();
+    let delta_ms: i32 = now_ms - state.last_tick_ms;
+    if (delta_ms < 1) {
+        delta_ms = 1;
+    }
+    if (delta_ms > 120) {
+        delta_ms = 120;
+    }
+    state.last_tick_ms = now_ms;
+
+    step_sim(delta_ms);
+    render();
 
     return 0;
 }
