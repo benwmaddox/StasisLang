@@ -98,7 +98,9 @@ public sealed class CraneliftFunctionBuilder
         // Ensure we have a return
         if (!EndsWithReturn(function.Body))
         {
-            var returnType = functionSymbol.Type;
+            var returnType = function.ReturnType is null
+                ? new VoidTypeSymbol()
+                : ResolveType(function.ReturnType);
             if (returnType is VoidTypeSymbol)
             {
                 _instructions.AppendLine("    return");
@@ -902,8 +904,15 @@ public sealed class CraneliftFunctionBuilder
         return nonCmp;
     }
 
-    private bool IsVoidFunction(string name) =>
-        _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
+    private bool IsVoidFunction(string name)
+    {
+        if (_functions.TryGetValue(name, out var func))
+        {
+            return func.ReturnType is null || ResolveType(func.ReturnType) is VoidTypeSymbol;
+        }
+
+        return _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
+    }
 
     private bool IsBuiltinFunction(string name)
     {
@@ -1433,15 +1442,6 @@ public sealed class CraneliftFunctionBuilder
 
         var arg = arguments[0];
         var raw = LowerExpression(arg);
-        var argType = GetExpressionType(arg);
-        if (argType is PrimitiveTypeSymbol p && p.PrimitiveName == "u8")
-        {
-            var extended = NewValue();
-            _instructions.AppendLine($"    {extended} = uextend.i32 {raw}");
-            value = extended;
-            return true;
-        }
-
         value = raw;
         return true;
     }

@@ -501,12 +501,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             if (!symbols.TryGetValue(func.Name.Text, out var symbol))
                 continue;
 
-            var returnType = symbol.Type != null
-                ? typeMapper.Map(symbol.Type)
-                : CraneliftTypeMapper.ClifType.I32;
+            var returnTypeSymbol = func.ReturnType is null
+                ? new VoidTypeSymbol()
+                : ResolveType(func.ReturnType, symbols);
+            var returnType = NormalizeFunctionType(typeMapper.Map(returnTypeSymbol));
 
             var paramTypes = func.Parameters
-                .Select(p => typeMapper.Map(ResolveType(p.Type, symbols)))
+                .Select(p => NormalizeFunctionType(typeMapper.Map(ResolveType(p.Type, symbols))))
                 .ToArray();
 
             var attributes = GetFunctionAttributes(func);
@@ -554,6 +555,16 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     private static List<string> GetFunctionAttributes(FunctionDeclarationSyntax func) =>
         func.Attributes.Select(a => a.Text).ToList();
+
+    private static CraneliftTypeMapper.ClifType NormalizeFunctionType(CraneliftTypeMapper.ClifType type) =>
+        type switch
+        {
+            CraneliftTypeMapper.ClifType.I8 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.I16 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.B1 => CraneliftTypeMapper.ClifType.I32,
+            CraneliftTypeMapper.ClifType.R64 => CraneliftTypeMapper.ClifType.I64,
+            _ => type
+        };
 
     private static void EmitTestHarness(
         CompilationUnitSyntax compilationUnit,
