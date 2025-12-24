@@ -1440,7 +1440,7 @@ static bool DetectsGraphicsUsage(string source)
     return Regex.IsMatch(
         source,
         @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|time|get_time_ms|sleep_ms)" +
+        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|time|get_time_ms|sleep_ms)" +
         @"\s*\(",
         RegexOptions.CultureInvariant);
 }
