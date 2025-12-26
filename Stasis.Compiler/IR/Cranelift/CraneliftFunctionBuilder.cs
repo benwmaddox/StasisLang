@@ -942,13 +942,17 @@ public sealed class CraneliftFunctionBuilder
             "end_frame" => true,
             "clear" => true,
             "draw_line" => true,
+            "draw_lines_f32" => true,
             "gfx_load_sprite" => true,
             "gfx_draw_sprite" => true,
+            "gfx_draw_sprites_i32" => true,
             "gfx_poll_reload" => true,
             "gfx_window_width" => true,
             "gfx_window_height" => true,
             "gfx_window_resized" => true,
             "gfx_debug_bake_hash" => true,
+            "gfx_debug_enable_hash" => true,
+            "gfx_debug_get_frame_hash" => true,
             "is_key_down" => true,
             "should_quit" => true,
             "get_window_size" => true,
@@ -1049,10 +1053,14 @@ public sealed class CraneliftFunctionBuilder
                 return LowerClear(arguments);
             case "draw_line":
                 return LowerDrawLine(arguments);
+            case "draw_lines_f32":
+                return LowerDrawLinesF32(arguments);
             case "gfx_load_sprite":
                 return LowerGfxLoadSprite(arguments);
             case "gfx_draw_sprite":
                 return LowerGfxDrawSprite(arguments);
+            case "gfx_draw_sprites_i32":
+                return LowerGfxDrawSpritesI32(arguments);
             case "gfx_poll_reload":
                 return LowerGfxPollReload(arguments);
             case "gfx_window_width":
@@ -1063,6 +1071,10 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGfxWindowResized(arguments);
             case "gfx_debug_bake_hash":
                 return LowerGfxDebugBakeHash(arguments);
+            case "gfx_debug_enable_hash":
+                return LowerGfxDebugEnableHash(arguments);
+            case "gfx_debug_get_frame_hash":
+                return LowerGfxDebugGetFrameHash(arguments);
             case "is_key_down":
                 return LowerIsKeyDown(arguments);
             case "should_quit":
@@ -1656,11 +1668,17 @@ public sealed class CraneliftFunctionBuilder
     private string LowerDrawLine(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallVoid("stasis_draw_line", "draw_line expects 8 arguments (x1,y1,x2,y2,r,g,b,a).", arguments, 8);
 
+    private string LowerDrawLinesF32(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_draw_lines_f32", "draw_lines_f32 expects (lines: f32[], count: i32).", arguments, 2);
+
     private string LowerGfxLoadSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_load_sprite", "gfx_load_sprite expects (path, max_w, max_h).", arguments, 3);
 
     private string LowerGfxDrawSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallVoid("stasis_gfx_draw_sprite", "gfx_draw_sprite expects (handle,x,y,w,h,rot_degrees,a).", arguments, 7);
+
+    private string LowerGfxDrawSpritesI32(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_draw_sprites_i32", "gfx_draw_sprites_i32 expects (cmds: i32[], count: i32).", arguments, 2);
 
     private string LowerGfxPollReload(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_poll_reload", "gfx_poll_reload expects (handle: i32).", arguments, 1);
@@ -1676,6 +1694,12 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerGfxDebugBakeHash(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_debug_bake_hash", "gfx_debug_bake_hash expects (path: string).", arguments, 1);
+
+    private string LowerGfxDebugEnableHash(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_debug_enable_hash", "gfx_debug_enable_hash expects (enabled: i32).", arguments, 1);
+
+    private string LowerGfxDebugGetFrameHash(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_debug_get_frame_hash", "gfx_debug_get_frame_hash expects no arguments.", arguments, 0);
 
     private string LowerIsKeyDown(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_is_key_down", "is_key_down expects (scancode: i32).", arguments, 1);

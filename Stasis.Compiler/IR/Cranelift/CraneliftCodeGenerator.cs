@@ -198,6 +198,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.F32, CraneliftTypeMapper.ClifType.F32);
         }
 
+        if (builtins.Contains("draw_lines_f32"))
+        {
+            builder.DeclareExternal("stasis_draw_lines_f32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
         if (builtins.Contains("gfx_load_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,
@@ -216,6 +223,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32,  // h
                 CraneliftTypeMapper.ClifType.I32,  // rot_degrees
                 CraneliftTypeMapper.ClifType.I32); // a
+        }
+
+        if (builtins.Contains("gfx_draw_sprites_i32"))
+        {
+            builder.DeclareExternal("stasis_gfx_draw_sprites_i32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("gfx_window_width"))
@@ -243,6 +257,17 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         {
             builder.DeclareExternal("stasis_gfx_debug_bake_hash", CraneliftTypeMapper.ClifType.I32,
                 CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("gfx_debug_enable_hash"))
+        {
+            builder.DeclareExternal("stasis_gfx_debug_enable_hash", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_debug_get_frame_hash"))
+        {
+            builder.DeclareExternal("stasis_gfx_debug_get_frame_hash", CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("is_key_down"))
@@ -962,8 +987,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
             or "time" or "get_time_ms" or "sleep_ms"
             or "sin" or "cos" or "sin_fast" or "cos_fast"
-            or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line"
-            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_poll_reload" or "gfx_debug_bake_hash"
+            or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line" or "draw_lines_f32"
+            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_poll_reload" or "gfx_debug_bake_hash"
+            or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
             or "load_font" or "draw_text" or "measure_text" or "set_postfx"
             or "list_directory" or "dir_list_entry_is_dir" or "dir_list_entry_copy_name"
