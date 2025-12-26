@@ -519,6 +519,17 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisDrawLinesF32(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_draw_lines_f32");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_draw_lines_f32", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxLoadSprite(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_load_sprite");
@@ -546,6 +557,17 @@ public sealed class ModuleLowerer
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_gfx_draw_sprite", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDrawSpritesI32(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_draw_sprites_i32");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_draw_sprites_i32", fnType);
         return (fn, fnType);
     }
 
@@ -597,6 +619,26 @@ public sealed class ModuleLowerer
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_gfx_debug_bake_hash", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugEnableHash(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_enable_hash");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_debug_enable_hash", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugGetFrameHash(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_get_frame_hash");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_debug_get_frame_hash", fnType);
         return (fn, fnType);
     }
 
@@ -850,13 +892,17 @@ public sealed class ModuleLowerer
             "end_frame",
             "clear",
             "draw_line",
+            "draw_lines_f32",
             "gfx_load_sprite",
             "gfx_draw_sprite",
+            "gfx_draw_sprites_i32",
             "gfx_poll_reload",
             "gfx_window_width",
             "gfx_window_height",
             "gfx_window_resized",
             "gfx_debug_bake_hash",
+            "gfx_debug_enable_hash",
+            "gfx_debug_get_frame_hash",
             "set_postfx",
             "is_key_down",
             "should_quit",
@@ -1911,6 +1957,26 @@ public sealed class ModuleLowerer
                         builder.BuildCall2(fnType, fn, loweredArgs, "");
                         return ConstI32(0);
                     }
+                case "draw_lines_f32":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("draw_lines_f32 expects (lines, count).", span);
+                            return ConstI32(0);
+                        }
+
+                        var lines = LowerExpression(builder, args[0], locals);
+                        var count = LowerExpression(builder, args[1], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisDrawLinesF32(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var cast = builder.BuildBitCast(lines, i8Ptr, "draw_lines_f32.ptr");
+                        builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
+                        return ConstI32(0);
+                    }
                 case "gfx_load_sprite":
                     {
                         if (args.Count != 3)
@@ -1942,6 +2008,26 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisGfxDrawSprite(_moduleBuilder);
                         builder.BuildCall2(fnType, fn, loweredArgs, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_draw_sprites_i32":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("gfx_draw_sprites_i32 expects (cmds, count).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmds = LowerExpression(builder, args[0], locals);
+                        var count = LowerExpression(builder, args[1], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDrawSpritesI32(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var cast = builder.BuildBitCast(cmds, i8Ptr, "gfx_draw_sprites_i32.ptr");
+                        builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
                         return ConstI32(0);
                     }
                 case "gfx_poll_reload":
@@ -2017,6 +2103,37 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisGfxDebugBakeHash(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, new[] { path }, "gfx_debug_bake_hash.call");
+                    }
+                case "gfx_debug_enable_hash":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("gfx_debug_enable_hash expects (enabled).", span);
+                            return ConstI32(0);
+                        }
+
+                        var enabled = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDebugEnableHash(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, new[] { enabled }, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_debug_get_frame_hash":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("gfx_debug_get_frame_hash expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDebugGetFrameHash(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "gfx_debug_get_frame_hash.call");
                     }
                 case "set_postfx":
                     {

@@ -700,6 +700,58 @@ static uint32_t fnv1a_32(const unsigned char* data, size_t len) {
     return h;
 }
 
+static uint32_t fnv1a_mix_u32(uint32_t h, uint32_t v) {
+    h ^= (v >> 0) & 0xFFu; h *= 16777619u;
+    h ^= (v >> 8) & 0xFFu; h *= 16777619u;
+    h ^= (v >> 16) & 0xFFu; h *= 16777619u;
+    h ^= (v >> 24) & 0xFFu; h *= 16777619u;
+    return h;
+}
+
+/* Debug: per-frame draw-call hash (for verifying batch vs per-call equivalence). */
+static int g_debug_hash_checked_env = 0;
+static int g_debug_hash_enabled = 0;
+static uint32_t g_debug_frame_hash = 0;
+
+static void gfx_debug_hash_check_env(void) {
+    if (g_debug_hash_checked_env) return;
+    g_debug_hash_checked_env = 1;
+    const char* env = getenv("STASIS_GFX_DEBUG_HASH");
+    g_debug_hash_enabled = (env && env[0] == '1') ? 1 : 0;
+}
+
+static void gfx_debug_hash_reset_if_enabled(void) {
+    gfx_debug_hash_check_env();
+    if (!g_debug_hash_enabled) return;
+    g_debug_frame_hash = 2166136261u;
+}
+
+static void gfx_debug_hash_i32(int32_t v) {
+    if (!g_debug_hash_enabled) return;
+    g_debug_frame_hash = fnv1a_mix_u32(g_debug_frame_hash, (uint32_t)v);
+}
+
+static void gfx_debug_hash_f32(float v) {
+    if (!g_debug_hash_enabled) return;
+    uint32_t bits = 0;
+    memcpy(&bits, &v, sizeof(bits));
+    g_debug_frame_hash = fnv1a_mix_u32(g_debug_frame_hash, bits);
+}
+
+STASIS_EXPORT void stasis_gfx_debug_enable_hash(int enabled) {
+    g_debug_hash_checked_env = 1;
+    g_debug_hash_enabled = enabled ? 1 : 0;
+    if (g_debug_hash_enabled) {
+        g_debug_frame_hash = 2166136261u;
+    }
+}
+
+STASIS_EXPORT int stasis_gfx_debug_get_frame_hash(void) {
+    gfx_debug_hash_check_env();
+    if (!g_debug_hash_enabled) return 0;
+    return (int)g_debug_frame_hash;
+}
+
 /* SVG rasterization (paths, gradients, transforms) via NanoSVG */
 static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
@@ -1493,6 +1545,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
+    gfx_debug_hash_reset_if_enabled();
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
@@ -1579,6 +1632,10 @@ STASIS_EXPORT void stasis_end_frame(void) {
  * Clear screen with color
  */
 STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
+    gfx_debug_hash_f32(r);
+    gfx_debug_hash_f32(g);
+    gfx_debug_hash_f32(b);
+    gfx_debug_hash_f32(a);
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
         SDL_RenderClear(g_renderer);
@@ -1594,6 +1651,14 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
  */
 STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
                                     float r, float g, float b, float a) {
+    gfx_debug_hash_f32(x1);
+    gfx_debug_hash_f32(y1);
+    gfx_debug_hash_f32(x2);
+    gfx_debug_hash_f32(y2);
+    gfx_debug_hash_f32(r);
+    gfx_debug_hash_f32(g);
+    gfx_debug_hash_f32(b);
+    gfx_debug_hash_f32(a);
     if (g_use_sdl_renderer) {
         if (g_line_count >= MAX_LINES) {
             /* Cap silently */
@@ -1624,6 +1689,26 @@ STASIS_EXPORT void stasis_draw_line(float x1, float y1, float x2, float y2,
     g_lines[g_line_count].b = b;
     g_lines[g_line_count].a = a;
     g_line_count++;
+}
+
+/*
+ * Batched line submission.
+ * lines: array of 8*f32 per line: x1,y1,x2,y2,r,g,b,a
+ */
+STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
+    if (!lines || line_count <= 0) return;
+    for (int i = 0; i < line_count; i++) {
+        const int base = i * 8;
+        stasis_draw_line(
+            lines[base + 0],
+            lines[base + 1],
+            lines[base + 2],
+            lines[base + 3],
+            lines[base + 4],
+            lines[base + 5],
+            lines[base + 6],
+            lines[base + 7]);
+    }
 }
 
 static SpriteEntry* sprite_get(int handle) {
@@ -1938,6 +2023,13 @@ STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
  */
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
                                           int rot_degrees, int a) {
+    gfx_debug_hash_i32(handle);
+    gfx_debug_hash_i32(x);
+    gfx_debug_hash_i32(y);
+    gfx_debug_hash_i32(w);
+    gfx_debug_hash_i32(h);
+    gfx_debug_hash_i32(rot_degrees);
+    gfx_debug_hash_i32(a);
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
@@ -2021,6 +2113,25 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     v[4] = (SpriteVertex){ p3x, p3y, u0, v1, af, af, af, af };
     v[5] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
     g_sprite_vert_count += 6;
+}
+
+/*
+ * Batched sprite submission.
+ * cmds: array of 7*i32 per sprite: handle,x,y,w,h,rot_degrees,a
+ */
+STASIS_EXPORT void stasis_gfx_draw_sprites_i32(const int32_t* cmds, int sprite_count) {
+    if (!cmds || sprite_count <= 0) return;
+    for (int i = 0; i < sprite_count; i++) {
+        const int base = i * 7;
+        stasis_gfx_draw_sprite(
+            cmds[base + 0],
+            cmds[base + 1],
+            cmds[base + 2],
+            cmds[base + 3],
+            cmds[base + 4],
+            cmds[base + 5],
+            cmds[base + 6]);
+    }
 }
 
 /*
