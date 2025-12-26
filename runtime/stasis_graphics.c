@@ -2194,6 +2194,26 @@ STASIS_EXPORT void stasis_shutdown(void) {
             memset(&g_sprites[i], 0, sizeof(g_sprites[i]));
         }
     }
+
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (g_fonts[i].active) {
+            if (g_fonts[i].sdl_texture) {
+                SDL_DestroyTexture(g_fonts[i].sdl_texture);
+                g_fonts[i].sdl_texture = NULL;
+            }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+            if (g_fonts[i].atlas_texture) {
+                glDeleteTextures(1, &g_fonts[i].atlas_texture);
+                g_fonts[i].atlas_texture = 0;
+            }
+#endif
+            if (g_fonts[i].ttf_buffer) {
+                free(g_fonts[i].ttf_buffer);
+                g_fonts[i].ttf_buffer = NULL;
+            }
+            g_fonts[i].active = false;
+        }
+    }
     if (g_gl_context) {
         SDL_GL_DeleteContext(g_gl_context);
         g_gl_context = NULL;
@@ -2393,7 +2413,6 @@ STASIS_EXPORT void stasis_copy_dir_entry_name(const unsigned char* names, int32_
 
 /* ===== FONT RENDERING WITH STB_TRUETYPE ===== */
 
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 #define MAX_FONTS 8
 #define FONT_ATLAS_SIZE 512
 #define FONT_FIRST_CHAR 32
@@ -2407,7 +2426,10 @@ typedef struct {
     int ascent, descent, line_gap;
 
     /* Baked bitmap atlas */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     GLuint atlas_texture;
+#endif
+    SDL_Texture* sdl_texture;
     stbtt_bakedchar char_data[FONT_NUM_CHARS];
     int font_size;
 } StasisFont;
@@ -2417,6 +2439,7 @@ static StasisFont g_fonts[MAX_FONTS];
 /* Load a TrueType font from disk */
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     if (!path || font_size <= 0) return 0;
+    if (!g_window) return 0;
 
     /* Find free slot */
     int slot = -1;
@@ -2455,6 +2478,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     /* Initialize font */
     StasisFont* font = &g_fonts[slot];
+    memset(font, 0, sizeof(*font));
     if (!stbtt_InitFont(&font->font_info, ttf_buffer, 0)) {
         free(ttf_buffer);
         SDL_Log("stasis_load_font: stbtt_InitFont failed for %s", path);
@@ -2485,15 +2509,64 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
         return 0;
     }
 
-    /* Upload to GPU */
-    glGenTextures(1, &font->atlas_texture);
-    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
-                 0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    font->sdl_texture = NULL;
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer) {
+            free(atlas_bitmap);
+            free(ttf_buffer);
+            return 0;
+        }
+
+        const size_t rgba_size = (size_t)FONT_ATLAS_SIZE * (size_t)FONT_ATLAS_SIZE * 4u;
+        unsigned char* rgba = (unsigned char*)malloc(rgba_size);
+        if (!rgba) {
+            free(atlas_bitmap);
+            free(ttf_buffer);
+            return 0;
+        }
+
+        for (int i = 0; i < FONT_ATLAS_SIZE * FONT_ATLAS_SIZE; i++) {
+            unsigned char a = atlas_bitmap[i];
+            rgba[i * 4 + 0] = 255;
+            rgba[i * 4 + 1] = 255;
+            rgba[i * 4 + 2] = 255;
+            rgba[i * 4 + 3] = a;
+        }
+
+        SDL_Texture* tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC,
+            FONT_ATLAS_SIZE, FONT_ATLAS_SIZE);
+        if (!tex) {
+            free(rgba);
+            free(atlas_bitmap);
+            free(ttf_buffer);
+            return 0;
+        }
+
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        if (SDL_UpdateTexture(tex, NULL, rgba, FONT_ATLAS_SIZE * 4) != 0) {
+            SDL_DestroyTexture(tex);
+            free(rgba);
+            free(atlas_bitmap);
+            free(ttf_buffer);
+            return 0;
+        }
+
+        free(rgba);
+        font->sdl_texture = tex;
+    } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        /* Upload to GPU (OpenGL path) */
+        glGenTextures(1, &font->atlas_texture);
+        glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                     0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#endif
+    }
 
     free(atlas_bitmap);
 
@@ -2512,10 +2585,61 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
     if (!font->active || !text) return;
 
     if (g_use_sdl_renderer) {
-        /* SDL renderer path - not implemented for fonts */
+        if (!font->sdl_texture) return;
+
+        SDL_SetTextureBlendMode(font->sdl_texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(font->sdl_texture,
+            (Uint8)(r < 0.0f ? 0 : (r > 1.0f ? 255 : (int)(r * 255.0f))),
+            (Uint8)(g < 0.0f ? 0 : (g > 1.0f ? 255 : (int)(g * 255.0f))),
+            (Uint8)(b < 0.0f ? 0 : (b > 1.0f ? 255 : (int)(b * 255.0f))));
+        SDL_SetTextureAlphaMod(font->sdl_texture,
+            (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f))));
+
+        float pos_x = x;
+        float pos_y = y;
+        const float start_x = x;
+
+        while (*text) {
+            unsigned char ch = (unsigned char)*text;
+            if (ch == '\r') {
+                text++;
+                continue;
+            }
+            if (ch == '\n') {
+                pos_x = start_x;
+                pos_y += (float)font->font_size;
+                text++;
+                continue;
+            }
+
+            if (ch >= FONT_FIRST_CHAR && ch < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
+                stbtt_aligned_quad quad;
+                stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                    (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 0);
+
+                SDL_Rect src;
+                src.x = (int)(quad.s0 * (float)FONT_ATLAS_SIZE);
+                src.y = (int)(quad.t0 * (float)FONT_ATLAS_SIZE);
+                src.w = (int)((quad.s1 - quad.s0) * (float)FONT_ATLAS_SIZE);
+                src.h = (int)((quad.t1 - quad.t0) * (float)FONT_ATLAS_SIZE);
+
+                SDL_FRect dst;
+                dst.x = quad.x0;
+                dst.y = quad.y0;
+                dst.w = quad.x1 - quad.x0;
+                dst.h = quad.y1 - quad.y0;
+
+                if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
+                    SDL_RenderCopyF(g_renderer, font->sdl_texture, &src, &dst);
+                }
+            }
+
+            text++;
+        }
         return;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     /* OpenGL path */
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2552,6 +2676,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 
     glDisable(GL_TEXTURE_2D);
     glColor4f(1, 1, 1, 1);
+#endif
 }
 
 /* Measure text width for layout */
@@ -2566,38 +2691,17 @@ STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
 
     while (*text) {
         int c = (unsigned char)*text;
+        if (c == '\r' || c == '\n') {
+            text++;
+            continue;
+        }
         if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
             stbtt_aligned_quad quad;
             stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
-                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 1);
+                              c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
         }
         text++;
     }
 
     return pos_x;
 }
-#else
-STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
-    (void)path;
-    (void)font_size;
-    return 0;
-}
-
-STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y,
-                                    float r, float g, float b, float a) {
-    (void)font_handle;
-    (void)text;
-    (void)x;
-    (void)y;
-    (void)r;
-    (void)g;
-    (void)b;
-    (void)a;
-}
-
-STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
-    (void)font_handle;
-    (void)text;
-    return 0.0f;
-}
-#endif
