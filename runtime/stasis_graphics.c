@@ -96,7 +96,7 @@ typedef struct {
 
 typedef struct {
     StasisPointer pointers[STASIS_MAX_POINTERS];
-    int pointer_count;      /* 1 (mouse) + active touches */
+    int pointer_count;      /* 1 + highest pointer slot in use (mouse + touch slots; may include inactive holes) */
     int dropped_pointers;   /* touches dropped due to capacity */
     int viewport_x_px;
     int viewport_y_px;
@@ -306,12 +306,15 @@ static void stasis_pump_events(void) {
         g_input_frame.pointers[i].dy_px = g_input_frame.pointers[i].y_px - g_prev_y_px[i];
     }
 
-    g_input_frame.pointer_count = 1; /* mouse slot */
+    /* Report up to the highest slot that is active or had a transition this frame. */
+    int max_idx = 0; /* mouse slot */
     for (int i = 0; i < STASIS_MAX_POINTERS - 1; i++) {
-        if (g_finger_active[i]) {
-            g_input_frame.pointer_count++;
+        int idx = i + 1;
+        if (g_finger_active[i] || g_input_frame.pointers[idx].went_down || g_input_frame.pointers[idx].went_up) {
+            if (idx > max_idx) max_idx = idx;
         }
     }
+    g_input_frame.pointer_count = max_idx + 1;
 }
 
 STASIS_EXPORT int stasis_input_pointer_count(void) {
