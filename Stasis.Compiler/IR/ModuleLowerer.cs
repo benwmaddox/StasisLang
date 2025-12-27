@@ -1965,8 +1965,16 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        var lines = LowerExpression(builder, args[0], locals);
+                        var lines = LowerArrayPointer(builder, args[0], locals);
+                        if (lines.Handle == IntPtr.Zero)
+                            lines = LowerExpression(builder, args[0], locals);
                         var count = LowerExpression(builder, args[1], locals);
+
+                        if (lines.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("draw_lines_f32 expects an array/pointer for 'lines'.", span);
+                            return ConstI32(0);
+                        }
 
                         if (_headlessGraphics)
                             return ConstI32(0);
@@ -2018,8 +2026,16 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        var cmds = LowerExpression(builder, args[0], locals);
+                        var cmds = LowerArrayPointer(builder, args[0], locals);
+                        if (cmds.Handle == IntPtr.Zero)
+                            cmds = LowerExpression(builder, args[0], locals);
                         var count = LowerExpression(builder, args[1], locals);
+
+                        if (cmds.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("gfx_draw_sprites_i32 expects an array/pointer for 'cmds'.", span);
+                            return ConstI32(0);
+                        }
 
                         if (_headlessGraphics)
                             return ConstI32(0);
