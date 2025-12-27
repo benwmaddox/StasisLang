@@ -45,6 +45,7 @@ New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 Push-Location $buildDir
 try {
     & cmake .. -G Ninja `
+        -DCMAKE_BUILD_TYPE="$Configuration" `
         -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\\scripts\\buildsystems\\vcpkg.cmake" `
         -DVCPKG_TARGET_TRIPLET="$Triplet" `
         -DSTASIS_GRAPHICS_SDL_ONLY=ON `
@@ -52,7 +53,7 @@ try {
         -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
         -DSTASIS_BUILD_RUNNER=OFF
 
-    & cmake --build . --config $Configuration
+    & cmake --build .
 }
 finally {
     Pop-Location
