@@ -2229,8 +2229,16 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
 
-                        var samples = LowerExpression(builder, args[0], locals);
+                        var samples = LowerArrayPointer(builder, args[0], locals);
+                        if (samples.Handle == IntPtr.Zero)
+                            samples = LowerExpression(builder, args[0], locals);
                         var frames = LowerExpression(builder, args[1], locals);
+
+                        if (samples.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("audio_push_f32_interleaved expects an array/pointer for 'samples'.", span);
+                            return ConstI32(0);
+                        }
 
                         if (_headlessGraphics)
                             return ConstI32(0);
