@@ -237,7 +237,12 @@ if (mode == "format")
     return;
 }
 
-LlvmNativeLoader.EnsureLoaded();
+// Only load LLVM native libraries when using the LLVM backend.
+// This keeps Cranelift run/test/build usable on machines where LLVM is unavailable or too heavy to load.
+if (backend == BackendType.Llvm)
+{
+    LlvmNativeLoader.EnsureLoaded();
+}
 
 // Dev defaults: in run mode, auto-enable watch for tick-hosted games (or likely graphics programs),
 // and enable phase timing output when watching. (Explicit --watch always wins.)
