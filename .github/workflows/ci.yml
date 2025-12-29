@@ -65,7 +65,10 @@ jobs:
       - name: Run test script (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: .\\test.bat
+        run: |
+          .\\build.bat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\\test.bat
 
       - name: Compile runtime C sources (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
