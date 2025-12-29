@@ -208,8 +208,8 @@ function setup_depth_bands(): void {
         for (x = 0; x < MAP_W; x = x + 1) {
             let idx: i32 = tile_index(x, y);
             state.tiles[idx].depth = depth;
-            let depth_ratio: f32 = i32_to_f32(y);
-            let map_height: f32 = i32_to_f32(MAP_H);
+            let depth_ratio: f32 = y;
+            let map_height: f32 = MAP_H;
             state.tiles[idx].light = 0.15 + (depth_ratio / map_height) * 0.35;
         }
     }
@@ -409,7 +409,7 @@ function apply_module(i: i32, module_type: i32, depth: i32): void {
 }
 
 function update_units(delta_ms: i32): void {
-    let dt: f32 = i32_to_f32(delta_ms);
+    let dt: f32 = delta_ms;
     dt = dt / 1000.0;
 
     let i: i32 = 0;
@@ -468,7 +468,7 @@ function update_lighting(delta_ms: i32): void {
                 noise_seed = 0 - noise_seed;
             }
             noise_seed = noise_seed % 97;
-            let flicker: f32 = i32_to_f32(noise_seed);
+            let flicker: f32 = noise_seed;
             flicker = flicker / 97.0;
             flicker = 0.04 + flicker * 0.08;
 
@@ -482,7 +482,7 @@ function update_lighting(delta_ms: i32): void {
         }
     }
 
-    let dt_seconds: f32 = i32_to_f32(delta_ms);
+    let dt_seconds: f32 = delta_ms;
     dt_seconds = dt_seconds / 1000.0;
     state.postfx_phase = state.postfx_phase + dt_seconds * state.postfx_speed;
     if (state.postfx_phase > 100000.0) {
@@ -506,12 +506,12 @@ function step_sim(delta_ms: i32): void {
 }
 
 function to_screen_x(grid_x: i32): f32 {
-    let gx: f32 = i32_to_f32(grid_x);
+    let gx: f32 = grid_x;
     return gx * CELL + 40.0;
 }
 
 function to_screen_y(grid_y: i32): f32 {
-    let gy: f32 = i32_to_f32(grid_y);
+    let gy: f32 = grid_y;
     return SCREEN_H - (gy * CELL + 80.0);
 }
 
@@ -605,7 +605,7 @@ function draw_units(): void {
                 if (state.units[i].kind == UNIT_PAYLOAD) {
                     r = 0.94; g = 0.82; b = 0.42;
                 }
-                let depth_as_float: f32 = i32_to_f32(depth);
+                let depth_as_float: f32 = depth;
                 let depth_mix: f32 = depth_as_float / 2.0;
                 r = r * (0.8 + 0.2 * depth_mix);
                 g = g * (0.8 + 0.2 * depth_mix);
@@ -617,7 +617,7 @@ function draw_units(): void {
 
                 let sx: f32 = to_screen_x(state.units[i].x);
                 let sy: f32 = to_screen_y(y_row);
-                let y_row_float: f32 = i32_to_f32(y_row);
+                let y_row_float: f32 = y_row;
                 let frac: f32 = state.units[i].y - y_row_float;
                 let offset: f32 = frac * CELL;
 
@@ -641,7 +641,7 @@ function draw_overlay(): void {
     }
     let i: i32 = 0;
     for (i = 0; i < delivered; i = i + 1) {
-        let payload_index: f32 = i32_to_f32(i);
+        let payload_index: f32 = i;
         let payload_bar_x: f32 = 40.0 + payload_index * 10.0;
         draw_line(payload_bar_x, SCREEN_H - 30.0, payload_bar_x + 6.0, SCREEN_H - 30.0, 0.95, 0.85, 0.45, 1.0);
     }

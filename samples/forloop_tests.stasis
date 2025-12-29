@@ -73,7 +73,7 @@ test assign_f32_in_loop(): bool {
     let i: i32 = 0;
     let value: f32 = 0.0;
     for (i = 0; i < 5; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         value = if32;
     }
     // After loop, value should be 4.0
@@ -84,7 +84,7 @@ test i32_to_f32_conversion_in_loop(): bool {
     let i: i32 = 0;
     let sum: f32 = 0.0;
     for (i = 0; i < 5; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         sum = sum + if32;
     }
     // 0+1+2+3+4 = 10
@@ -95,7 +95,7 @@ test calculation_with_converted_value(): bool {
     let i: i32 = 0;
     let result: f32 = 0.0;
     for (i = 0; i < 3; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         result = 100.0 + if32 * 50.0;
     }
     // After i=0: result = 100
@@ -127,7 +127,7 @@ test accumulator_f32(): bool {
     let curr: f32 = 0.0;
     prev = 0.0;
     for (i = 1; i < 5; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         curr = prev + if32;
         prev = curr;
     }
@@ -141,7 +141,7 @@ test prev_curr_pattern_like_asteroids(): bool {
     let last_prev: f32 = 0.0;
     prev_x = 100.0;
     for (i = 1; i < 4; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         curr_x = 100.0 + if32 * 30.0;
         last_prev = prev_x;
         prev_x = curr_x;
@@ -176,7 +176,7 @@ test division_in_loop(): bool {
     let i: i32 = 0;
     let result: f32 = 0.0;
     for (i = 0; i < 4; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         result = if32 / 4.0;
     }
     // After i=3: result = 3/4 = 0.75
@@ -189,7 +189,7 @@ test angle_calculation_like_asteroids(): bool {
     let PI: f32 = 3.14159;
     angle = 0.0;
     for (i = 1; i < 5; i = i + 1) {
-        let if32: f32 = i32_to_f32(i);
+        let if32: f32 = i;
         angle = (if32 / 8.0) * 2.0 * PI;
     }
     // After i=4: angle = (4/8) * 2 * PI = PI

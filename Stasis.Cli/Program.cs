@@ -339,7 +339,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         // Auto-detect graphics usage if not explicitly enabled
-        if (!enableGraphics && mode != "test" && DetectsGraphicsUsage(source))
+        if (!enableGraphics && DetectsGraphicsUsage(source))
         {
             enableGraphics = true;
         }
@@ -1123,39 +1123,9 @@ static string? FindRepoRoot()
 static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     // lli doesn't support external libraries easily, so use clang when graphics is enabled
-    if (!enableGraphics && TryFindTool("lli", out var lli))
+    if (!enableGraphics && TryFindTool("lli", out var llvmInterpreter))
     {
-        var lliExit = RunProcess(lli, mode == "test" ? $"-entry-function=run_tests \"{llPath}\"" : $"\"{llPath}\"");
-        if (lliExit == 0)
-        {
-            return 0;
-        }
-
-        // Retry with clang for stability if lli fails (e.g., SIGSEGV on some inputs).
-        if (TryFindTool("clang", out var clangPath))
-        {
-            var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
-            try
-            {
-                var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
-                var clangExit = RunProcess(clangPath, args, suppressOutput: true);
-                if (clangExit != 0)
-                {
-                    return clangExit;
-                }
-
-                return RunProcess(exePath, string.Empty);
-            }
-            finally
-            {
-                if (File.Exists(exePath))
-                {
-                    File.Delete(exePath);
-                }
-            }
-        }
-
-        return lliExit;
+        return ExecuteWithLlvmInterpreter(llvmInterpreter, mode, llPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
     }
 
     if (TryFindTool("clang", out var clang))
@@ -1345,6 +1315,57 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     }
 
     return string.Join(" ", args);
+}
+
+static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    var interpreterArguments = mode == "test"
+        ? $"-entry-function=run_tests \"{llvmIrPath}\""
+        : $"\"{llvmIrPath}\"";
+    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments);
+    if (interpreterExitCode == 0)
+    {
+        return 0;
+    }
+
+    // Retry with clang for stability if the interpreter fails (e.g., SIGSEGV on some inputs).
+    if (TryExecuteWithClangFallback(mode, llvmIrPath, optLevel, enableLto, enableGraphics, graphicsLibPath, out var clangExitCode))
+    {
+        return clangExitCode;
+    }
+
+    return interpreterExitCode;
+}
+
+static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, out int exitCode)
+{
+    if (!TryFindTool("clang", out var clangPath))
+    {
+        exitCode = 1;
+        return false;
+    }
+
+    var executablePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+    try
+    {
+        var clangArguments = BuildClangArgs(llvmIrPath, executablePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
+        var clangExitCode = RunProcess(clangPath, clangArguments, suppressOutput: true);
+        if (clangExitCode != 0)
+        {
+            exitCode = clangExitCode;
+            return true;
+        }
+
+        exitCode = RunProcess(executablePath, string.Empty);
+        return true;
+    }
+    finally
+    {
+        if (File.Exists(executablePath))
+        {
+            File.Delete(executablePath);
+        }
+    }
 }
 
 static void CopyGraphicsRuntimeDependencies(string targetDir, string? graphicsLibPath)
@@ -2639,7 +2660,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
-            var effectiveGraphics = enableGraphics;
+            var effectiveGraphics = enableGraphics || item.UsesGraphics;
             var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, effectiveGraphics, backend, useLowerLock, allowReachabilityFallback);
             await resultChannel.Writer.WriteAsync(result);
         }
