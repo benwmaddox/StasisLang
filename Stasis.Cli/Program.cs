@@ -1122,8 +1122,52 @@ static string? FindRepoRoot()
     return null;
 }
 
-static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string? cachedExecutablePath = null, bool keepExecutable = false)
 {
+    var cachedExecutableUsed = false;
+    if (!string.IsNullOrWhiteSpace(cachedExecutablePath))
+    {
+        if (File.Exists(cachedExecutablePath))
+        {
+            cachedExecutableUsed = true;
+        }
+        else if (TryFindTool("clang", out var clangForCache))
+        {
+            var args = BuildClangArgs(llPath, cachedExecutablePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
+            var exit = RunProcess(clangForCache, args, suppressOutput: true);
+            if (exit != 0)
+            {
+                return exit;
+            }
+
+            cachedExecutableUsed = true;
+        }
+    }
+
+    if (cachedExecutableUsed)
+    {
+        var cachedExecutableDirectory = Path.GetDirectoryName(cachedExecutablePath);
+        if (enableGraphics && !string.IsNullOrEmpty(cachedExecutableDirectory))
+        {
+            CopyGraphicsRuntimeDependencies(cachedExecutableDirectory, graphicsLibPath);
+        }
+
+        return RunProcess(cachedExecutablePath!, string.Empty, psi =>
+        {
+            if (enableGraphics)
+            {
+                var runTest = Environment.GetEnvironmentVariable("STASIS_RUN_RENDER_TEST");
+                if (string.IsNullOrEmpty(runTest) || runTest == "0")
+                {
+                    if (Environment.GetEnvironmentVariable("STASIS_SKIP_RENDER_TEST") is null)
+                    {
+                        psi.Environment["STASIS_SKIP_RENDER_TEST"] = "1";
+                    }
+                }
+            }
+        });
+    }
+
     // lli doesn't support external libraries easily, so use clang when graphics is enabled
     if (!enableGraphics && TryFindTool("lli", out var llvmInterpreter))
     {
@@ -1168,7 +1212,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
         }
         finally
         {
-            if (File.Exists(exePath))
+            if (!keepExecutable && File.Exists(exePath))
             {
                 File.Delete(exePath);
             }
@@ -2875,6 +2919,24 @@ static string ComputeSha256Hex(string value)
     return builder.ToString();
 }
 
+static string? TryGetCachedExecutablePath(CompileResult result)
+{
+    if (result.Backend != BackendType.Llvm || !result.IsCacheArtifact || string.IsNullOrEmpty(result.ArtifactPath))
+    {
+        return null;
+    }
+
+    var cacheDirectory = Path.GetDirectoryName(result.ArtifactPath);
+    var cacheFileName = Path.GetFileNameWithoutExtension(result.ArtifactPath);
+    if (string.IsNullOrEmpty(cacheDirectory) || string.IsNullOrEmpty(cacheFileName))
+    {
+        return null;
+    }
+
+    var extension = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty;
+    return Path.Combine(cacheDirectory, cacheFileName + extension);
+}
+
 
 static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, bool allowReachabilityFallback, bool enableTestCache)
 {
@@ -3046,7 +3108,9 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     }
     else
     {
-        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
+        var cachedExecutablePath = TryGetCachedExecutablePath(result);
+        var keepExecutable = !string.IsNullOrEmpty(cachedExecutablePath);
+        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, cachedExecutablePath, keepExecutable);
     }
     testStopwatch.Stop();
     var total = result.CompileMilliseconds + testStopwatch.ElapsedMilliseconds;
