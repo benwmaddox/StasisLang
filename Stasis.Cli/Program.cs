@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -283,7 +284,8 @@ if (runAllInDirectory && mode == "test")
     }
 
     var allowReachabilityFallback = mode != "release";
-    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback);
+    var enableTestCache = true;
+    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache);
     Environment.Exit(overallExit);
 }
 
@@ -2624,10 +2626,10 @@ static void PrintUsage()
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool useLowerLock = true, int lowerDegree = 1) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, useLowerLock, lowerDegree).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool useLowerLock, int lowerDegree)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -2639,7 +2641,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
         await gate.WaitAsync();
         try
         {
-            var prep = PrepareForLower(file, emitIrOnly, backend);
+            var prep = PrepareForLower(file, includeTests, moduleName, emitIrOnly, backend, enableTestCache, enableGraphics);
             if (prep.Prepared is not null)
             {
                 await prepChannel.Writer.WriteAsync(prep.Prepared);
@@ -2661,7 +2663,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
             var effectiveGraphics = enableGraphics || item.UsesGraphics;
-            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, effectiveGraphics, backend, useLowerLock, allowReachabilityFallback);
+            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, effectiveGraphics, backend, useLowerLock, allowReachabilityFallback, enableTestCache);
             await resultChannel.Writer.WriteAsync(result);
         }
     })).ToArray();
@@ -2683,38 +2685,49 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     return exitCode;
 }
 
-static PrepareResult PrepareForLower(string path, bool emitIrOnly, BackendType backend)
+static PrepareResult PrepareForLower(string path, bool includeTests, string moduleName, bool emitIrOnly, BackendType backend, bool enableTestCache, bool enableGraphics)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
     try
     {
-    var source = LoadSourceWithImports(path, out var importDiagnostics, out var importSource);
-    if (importDiagnostics.Count > 0)
-    {
-        PrintDiagnostics(importDiagnostics, importSource, path);
-        return new PrepareResult(null, new CompileResult(path, importSource, false, false, backend, null, null, importDiagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
-    }
+        var source = LoadSourceWithImports(path, out var importDiagnostics, out var importSource);
+        if (importDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(importDiagnostics, importSource, path);
+            return new PrepareResult(null, new CompileResult(path, importSource, false, false, backend, null, null, importDiagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
+        }
         var usesGraphics = DetectsGraphicsUsage(source);
+        var effectiveGraphics = enableGraphics || usesGraphics;
+        TestCacheLocation? testCacheLocation = null;
+        if (enableTestCache)
+        {
+            testCacheLocation = CreateTestCacheLocation(path, source, backend, moduleName, includeTests, emitIrOnly, effectiveGraphics);
+            var cachedResult = TryLoadTestCache(testCacheLocation, source, backend, moduleName, includeTests, emitIrOnly, effectiveGraphics);
+            if (cachedResult is not null)
+            {
+                return new PrepareResult(null, cachedResult);
+            }
+        }
         var parse = Parser.Parse(source);
         diagnostics.AddRange(parse.Diagnostics);
         var hasTests = parse.CompilationUnit.Declarations.OfType<TestDeclarationSyntax>().Any();
 
         if (parse.Diagnostics.Count > 0 || (!hasTests && !emitIrOnly))
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {
-            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds));
+            return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         stopwatch.Stop();
-        return new PrepareResult(new PreparedForLower(path, source, parse.CompilationUnit, sema, layout, hasTests, usesGraphics, stopwatch.ElapsedMilliseconds), null);
+        return new PrepareResult(new PreparedForLower(path, source, parse.CompilationUnit, sema, layout, hasTests, usesGraphics, stopwatch.ElapsedMilliseconds, testCacheLocation), null);
     }
     finally
     {
@@ -2732,13 +2745,132 @@ static string LoadSourceWithImports(string path, out List<Diagnostic> importDiag
     return result.ExpandedSource;
 }
 
+const int TestCacheVersion = 1;
 
-static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock, bool allowReachabilityFallback)
+static string GetTestCacheDirectory()
+{
+    var currentDirectory = Directory.GetCurrentDirectory();
+    return Path.Combine(currentDirectory, ".stasis_cache", "test");
+}
+
+static TestCacheLocation CreateTestCacheLocation(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, bool usesGraphics)
+{
+    var cacheDirectory = GetTestCacheDirectory();
+    Directory.CreateDirectory(cacheDirectory);
+    var cacheKey = ComputeTestCacheKey(path, source, backend, moduleName, includeTests, emitIrOnly, usesGraphics);
+    var extension = backend == BackendType.Cranelift ? "clif" : "ll";
+    var artifactPath = Path.Combine(cacheDirectory, $"{cacheKey}.{extension}");
+    var entryPath = Path.Combine(cacheDirectory, $"{cacheKey}.json");
+    var sourceHash = ComputeSha256Hex(source);
+    return new TestCacheLocation(cacheKey, artifactPath, entryPath, sourceHash);
+}
+
+static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, bool usesGraphics)
+{
+    if (!File.Exists(cacheLocation.EntryPath))
+    {
+        return null;
+    }
+
+    TestCacheEntry? entry;
+    try
+    {
+        var json = File.ReadAllText(cacheLocation.EntryPath);
+        entry = JsonSerializer.Deserialize<TestCacheEntry>(json);
+    }
+    catch
+    {
+        return null;
+    }
+
+    if (entry is null ||
+        entry.Version != TestCacheVersion ||
+        !string.Equals(entry.CacheKey, cacheLocation.CacheKey, StringComparison.Ordinal) ||
+        !string.Equals(entry.SourceHash, cacheLocation.SourceHash, StringComparison.Ordinal) ||
+        entry.Backend != backend ||
+        !string.Equals(entry.ModuleName, moduleName, StringComparison.Ordinal) ||
+        entry.IncludeTests != includeTests ||
+        entry.EmitIrOnly != emitIrOnly ||
+        entry.UsesGraphics != usesGraphics)
+    {
+        return null;
+    }
+
+    if (!File.Exists(entry.ArtifactPath))
+    {
+        return null;
+    }
+
+    return new CompileResult(entry.FilePath, source, entry.HasTests, entry.UsesGraphics, backend, entry.ArtifactPath, null, new List<Diagnostic>(), emitIrOnly, 0, true);
+}
+
+static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, bool usesGraphics)
+{
+    if (prep.TestCacheLocation is null)
+    {
+        return;
+    }
+
+    var cacheDirectory = Path.GetDirectoryName(prep.TestCacheLocation.EntryPath);
+    if (!string.IsNullOrEmpty(cacheDirectory))
+    {
+        Directory.CreateDirectory(cacheDirectory);
+    }
+
+    var entry = new TestCacheEntry(
+        TestCacheVersion,
+        prep.TestCacheLocation.CacheKey,
+        prep.FilePath,
+        prep.TestCacheLocation.ArtifactPath,
+        prep.TestCacheLocation.SourceHash,
+        prep.HasTests,
+        usesGraphics,
+        backend,
+        moduleName,
+        includeTests,
+        emitIrOnly);
+
+    var options = new JsonSerializerOptions { WriteIndented = true };
+    var json = JsonSerializer.Serialize(entry, options);
+    File.WriteAllText(prep.TestCacheLocation.EntryPath, json, Encoding.UTF8);
+}
+
+static string ComputeTestCacheKey(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, bool usesGraphics)
+{
+    var fullPath = Path.GetFullPath(path);
+    var identity = new StringBuilder();
+    identity.Append("version=").Append(TestCacheVersion).Append('\n');
+    identity.Append("backend=").Append(backend).Append('\n');
+    identity.Append("module=").Append(moduleName).Append('\n');
+    identity.Append("includeTests=").Append(includeTests).Append('\n');
+    identity.Append("emitIrOnly=").Append(emitIrOnly).Append('\n');
+    identity.Append("usesGraphics=").Append(usesGraphics).Append('\n');
+    identity.Append("path=").Append(fullPath).Append('\n');
+    identity.Append("source=").Append(source);
+    return ComputeSha256Hex(identity.ToString());
+}
+
+static string ComputeSha256Hex(string value)
+{
+    var bytes = Encoding.UTF8.GetBytes(value);
+    using var sha256 = SHA256.Create();
+    var hash = sha256.ComputeHash(bytes);
+    var builder = new StringBuilder(hash.Length * 2);
+    foreach (var hashByte in hash)
+    {
+        builder.Append(hashByte.ToString("x2"));
+    }
+    return builder.ToString();
+}
+
+
+static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, bool enableGraphics, BackendType backend, bool useLowerLock, bool allowReachabilityFallback, bool enableTestCache)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
     string? tempArtifact = null;
     string? irForOutput = null;
+    var isCacheArtifact = false;
 
     try
     {
@@ -2758,13 +2890,25 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 
             if (emitIrOnly || result.Diagnostics.Count > 0)
             {
-                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, false);
             }
 
-            tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+            if (enableTestCache && prep.TestCacheLocation is not null)
+            {
+                tempArtifact = prep.TestCacheLocation.ArtifactPath;
+                isCacheArtifact = true;
+            }
+            else
+            {
+                tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+            }
             File.WriteAllText(tempArtifact, result.Ir);
+            if (isCacheArtifact && prep.TestCacheLocation is not null)
+            {
+                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, enableGraphics);
+            }
 
-            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, isCacheArtifact);
         }
         else
         {
@@ -2789,13 +2933,25 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 
             if (emitIrOnly || lower.Diagnostics.Count > 0)
             {
-                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+                return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, false);
             }
 
-            tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+            if (enableTestCache && prep.TestCacheLocation is not null)
+            {
+                tempArtifact = prep.TestCacheLocation.ArtifactPath;
+                isCacheArtifact = true;
+            }
+            else
+            {
+                tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+            }
             File.WriteAllText(tempArtifact, lower.Ir);
+            if (isCacheArtifact && prep.TestCacheLocation is not null)
+            {
+                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, enableGraphics);
+            }
 
-            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds);
+            return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, isCacheArtifact);
         }
     }
     finally
@@ -2884,16 +3040,19 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     var total = result.CompileMilliseconds + testStopwatch.ElapsedMilliseconds;
     Console.WriteLine($"Total time={total}ms");
 
-    try
+    if (!result.IsCacheArtifact)
     {
-        if (File.Exists(result.ArtifactPath))
+        try
         {
-            File.Delete(result.ArtifactPath);
+            if (File.Exists(result.ArtifactPath))
+            {
+                File.Delete(result.ArtifactPath);
+            }
         }
-    }
-    catch
-    {
-        // Best-effort cleanup
+        catch
+        {
+            // Best-effort cleanup
+        }
     }
 
     return executeExit;
@@ -3223,7 +3382,8 @@ sealed record CompileResult(
     string? IrForOutput,
     List<Diagnostic> Diagnostics,
     bool EmitIrOnly,
-    long CompileMilliseconds);
+    long CompileMilliseconds,
+    bool IsCacheArtifact);
 
 sealed record PreparedForLower(
     string FilePath,
@@ -3233,6 +3393,26 @@ sealed record PreparedForLower(
     LayoutPlan Layout,
     bool HasTests,
     bool UsesGraphics,
-    long PrepMilliseconds);
+    long PrepMilliseconds,
+    TestCacheLocation? TestCacheLocation);
 
 sealed record PrepareResult(PreparedForLower? Prepared, CompileResult? Result);
+
+sealed record TestCacheLocation(
+    string CacheKey,
+    string ArtifactPath,
+    string EntryPath,
+    string SourceHash);
+
+sealed record TestCacheEntry(
+    int Version,
+    string CacheKey,
+    string FilePath,
+    string ArtifactPath,
+    string SourceHash,
+    bool HasTests,
+    bool UsesGraphics,
+    BackendType Backend,
+    string ModuleName,
+    bool IncludeTests,
+    bool EmitIrOnly);
