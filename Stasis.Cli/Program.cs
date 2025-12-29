@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -1913,6 +1914,21 @@ static string GetObjectFileExtension()
     return OperatingSystem.IsWindows() ? ".obj" : ".o";
 }
 
+static string GetCompilerCacheSalt()
+{
+    var assembly = typeof(Program).Assembly;
+    var version = assembly.GetName().Version?.ToString() ?? "unknown";
+    var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+    var location = assembly.Location;
+    if (string.IsNullOrEmpty(location) || !File.Exists(location))
+    {
+        return $"{version}:{informationalVersion}";
+    }
+
+    var lastWriteTicks = File.GetLastWriteTimeUtc(location).Ticks;
+    return $"{version}:{informationalVersion}:{lastWriteTicks}";
+}
+
 static int RunCraneliftAot(string aotTool, string clifPath, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
 {
     var target = GetCraneliftTargetTriple();
@@ -2803,10 +2819,11 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         var effectiveGraphics = enableGraphics || usesGraphics;
         TestCacheLocation? testCacheLocation = null;
         var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;
+        var compilerCacheSalt = GetCompilerCacheSalt();
         if (enableTestCache)
         {
-            testCacheLocation = CreateTestCacheLocation(path, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, effectiveGraphics, craneliftTargetTriple);
-            var cachedResult = TryLoadTestCache(testCacheLocation, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, effectiveGraphics, craneliftTargetTriple);
+            testCacheLocation = CreateTestCacheLocation(path, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, effectiveGraphics, craneliftTargetTriple, compilerCacheSalt);
+            var cachedResult = TryLoadTestCache(testCacheLocation, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, effectiveGraphics, craneliftTargetTriple, compilerCacheSalt);
             if (cachedResult is not null)
             {
                 return new PrepareResult(null, cachedResult);
@@ -2856,11 +2873,11 @@ static string GetTestCacheDirectory()
     return Path.Combine(currentDirectory, ".stasis_cache", "test");
 }
 
-static TestCacheLocation CreateTestCacheLocation(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple)
+static TestCacheLocation CreateTestCacheLocation(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
 {
     var cacheDirectory = GetTestCacheDirectory();
     Directory.CreateDirectory(cacheDirectory);
-    var cacheKey = ComputeTestCacheKey(path, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, usesGraphics, craneliftTargetTriple);
+    var cacheKey = ComputeTestCacheKey(path, source, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, usesGraphics, craneliftTargetTriple, compilerCacheSalt);
     var extension = backend == BackendType.Cranelift ? "clif" : "ll";
     var artifactPath = Path.Combine(cacheDirectory, $"{cacheKey}.{extension}");
     var entryPath = Path.Combine(cacheDirectory, $"{cacheKey}.json");
@@ -2868,7 +2885,7 @@ static TestCacheLocation CreateTestCacheLocation(string path, string source, Bac
     return new TestCacheLocation(cacheKey, artifactPath, entryPath, sourceHash);
 }
 
-static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple)
+static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
 {
     if (!File.Exists(cacheLocation.EntryPath))
     {
@@ -2899,6 +2916,7 @@ static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string s
         !string.Equals(entry.GraphicsLibPath, graphicsLibPath, StringComparison.Ordinal) ||
         entry.UseCraneliftRunner != useCraneliftRunner ||
         !string.Equals(entry.CraneliftTargetTriple, craneliftTargetTriple, StringComparison.Ordinal) ||
+        !string.Equals(entry.CompilerCacheSalt, compilerCacheSalt, StringComparison.Ordinal) ||
         entry.UsesGraphics != usesGraphics)
     {
         return null;
@@ -2912,7 +2930,7 @@ static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string s
     return new CompileResult(entry.FilePath, source, entry.HasTests, entry.UsesGraphics, backend, entry.ArtifactPath, null, new List<Diagnostic>(), emitIrOnly, 0, true);
 }
 
-static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple)
+static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
 {
     if (prep.TestCacheLocation is null)
     {
@@ -2941,14 +2959,15 @@ static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, stri
         enableLto,
         graphicsLibPath,
         useCraneliftRunner,
-        craneliftTargetTriple);
+        craneliftTargetTriple,
+        compilerCacheSalt);
 
     var options = new JsonSerializerOptions { WriteIndented = true };
     var json = JsonSerializer.Serialize(entry, options);
     File.WriteAllText(prep.TestCacheLocation.EntryPath, json, Encoding.UTF8);
 }
 
-static string ComputeTestCacheKey(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple)
+static string ComputeTestCacheKey(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
 {
     var fullPath = Path.GetFullPath(path);
     var identity = new StringBuilder();
@@ -2962,6 +2981,7 @@ static string ComputeTestCacheKey(string path, string source, BackendType backen
     identity.Append("graphicsLibPath=").Append(graphicsLibPath ?? string.Empty).Append('\n');
     identity.Append("useCraneliftRunner=").Append(useCraneliftRunner).Append('\n');
     identity.Append("craneliftTargetTriple=").Append(craneliftTargetTriple ?? string.Empty).Append('\n');
+    identity.Append("compilerCacheSalt=").Append(compilerCacheSalt).Append('\n');
     identity.Append("usesGraphics=").Append(usesGraphics).Append('\n');
     identity.Append("path=").Append(fullPath).Append('\n');
     identity.Append("source=").Append(source);
@@ -3008,6 +3028,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
     string? irForOutput = null;
     var isCacheArtifact = false;
     var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;
+    var compilerCacheSalt = GetCompilerCacheSalt();
 
     try
     {
@@ -3042,7 +3063,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
             File.WriteAllText(tempArtifact, result.Ir);
             if (isCacheArtifact && prep.TestCacheLocation is not null)
             {
-                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, enableGraphics, craneliftTargetTriple);
+                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, enableGraphics, craneliftTargetTriple, compilerCacheSalt);
             }
 
             return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, isCacheArtifact);
@@ -3085,7 +3106,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
             File.WriteAllText(tempArtifact, lower.Ir);
             if (isCacheArtifact && prep.TestCacheLocation is not null)
             {
-                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, enableGraphics, craneliftTargetTriple);
+                WriteTestCacheEntry(prep, backend, moduleName, includeTests, emitIrOnly, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, enableGraphics, craneliftTargetTriple, compilerCacheSalt);
             }
 
             return new CompileResult(prep.FilePath, prep.Source, prep.HasTests, enableGraphics, backend, tempArtifact, irForOutput, diagnostics, emitIrOnly, prep.PrepMilliseconds + stopwatch.ElapsedMilliseconds, isCacheArtifact);
@@ -3559,4 +3580,5 @@ sealed record TestCacheEntry(
     bool EnableLto,
     string? GraphicsLibPath,
     bool UseCraneliftRunner,
-    string? CraneliftTargetTriple);
+    string? CraneliftTargetTriple,
+    string CompilerCacheSalt);
