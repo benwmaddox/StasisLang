@@ -13,6 +13,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <time.h>
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -2193,7 +2194,23 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
  * Get current time in milliseconds
  */
 STASIS_EXPORT int stasis_get_time_ms(void) {
+#if defined(_WIN32)
+    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return 0;
+        }
+    }
     return (int)SDL_GetTicks();
+#else
+    if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
+        return (int)SDL_GetTicks();
+    }
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return (int)((now.tv_sec * 1000) + (now.tv_nsec / 1000000));
+#endif
 }
 
 /*
@@ -2201,7 +2218,21 @@ STASIS_EXPORT int stasis_get_time_ms(void) {
  */
 STASIS_EXPORT void stasis_sleep_ms(int ms) {
     if (ms > 0) {
+        if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
+            SDL_Delay((Uint32)ms);
+            return;
+        }
+#if defined(_WIN32)
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return;
+        }
         SDL_Delay((Uint32)ms);
+#else
+        struct timespec delay;
+        delay.tv_sec = ms / 1000;
+        delay.tv_nsec = (ms % 1000) * 1000000;
+        nanosleep(&delay, NULL);
+#endif
     }
 }
 
