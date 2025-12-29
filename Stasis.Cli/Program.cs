@@ -339,7 +339,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         // Auto-detect graphics usage if not explicitly enabled
-        if (!enableGraphics && DetectsGraphicsUsage(source))
+        if (!enableGraphics && mode != "test" && DetectsGraphicsUsage(source))
         {
             enableGraphics = true;
         }
@@ -1125,7 +1125,37 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
     // lli doesn't support external libraries easily, so use clang when graphics is enabled
     if (!enableGraphics && TryFindTool("lli", out var lli))
     {
-        return RunProcess(lli, mode == "test" ? $"-entry-function=run_tests \"{llPath}\"" : $"\"{llPath}\"");
+        var lliExit = RunProcess(lli, mode == "test" ? $"-entry-function=run_tests \"{llPath}\"" : $"\"{llPath}\"");
+        if (lliExit == 0)
+        {
+            return 0;
+        }
+
+        // Retry with clang for stability if lli fails (e.g., SIGSEGV on some inputs).
+        if (TryFindTool("clang", out var clangPath))
+        {
+            var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+            try
+            {
+                var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath);
+                var clangExit = RunProcess(clangPath, args, suppressOutput: true);
+                if (clangExit != 0)
+                {
+                    return clangExit;
+                }
+
+                return RunProcess(exePath, string.Empty);
+            }
+            finally
+            {
+                if (File.Exists(exePath))
+                {
+                    File.Delete(exePath);
+                }
+            }
+        }
+
+        return lliExit;
     }
 
     if (TryFindTool("clang", out var clang))
@@ -1419,8 +1449,8 @@ static string? FindGraphicsSharedLibrary()
     // Prefer workspace runtime outputs before falling back to cwd root
     var cwd = Directory.GetCurrentDirectory();
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
-    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
@@ -1464,7 +1494,7 @@ static bool DetectsGraphicsUsage(string source)
     return Regex.IsMatch(
         source,
         @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|time|get_time_ms|sleep_ms)" +
+        @"(init_window|begin_frame|end_frame|draw_line|clear|gfx_load_sprite|gfx_draw_sprite|gfx_poll_reload|gfx_debug_bake_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|get_time_ms|sleep_ms)" +
         @"\s*\(",
         RegexOptions.CultureInvariant);
 }
@@ -1485,8 +1515,8 @@ static string? FindGraphicsLibrary(bool preferShared = false)
     // Prefer workspace runtime outputs before falling back to cwd root
     var cwd = Directory.GetCurrentDirectory();
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
-    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
     searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
@@ -1538,8 +1568,8 @@ static string? FindGraphicsLibrary(bool preferShared = false)
         {
             candidates = new[]
             {
-                "libstasis_graphics_static.a",
-                "libstasis_graphics.dylib"
+                "libstasis_graphics.dylib",
+                "libstasis_graphics_static.a"
             };
         }
     }
@@ -1561,8 +1591,8 @@ static string? FindGraphicsLibrary(bool preferShared = false)
         {
             candidates = new[]
             {
-                "libstasis_graphics_static.a",
-                "libstasis_graphics.so"
+                "libstasis_graphics.so",
+                "libstasis_graphics_static.a"
             };
         }
     }
@@ -2609,7 +2639,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
     {
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
-            var effectiveGraphics = enableGraphics || item.UsesGraphics;
+            var effectiveGraphics = enableGraphics;
             var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, effectiveGraphics, backend, useLowerLock, allowReachabilityFallback);
             await resultChannel.Writer.WriteAsync(result);
         }
@@ -2892,7 +2922,13 @@ static bool LikelyContainsTestBlock(string path)
 {
     foreach (var line in File.ReadLines(path))
     {
-        if (line.Contains("test", StringComparison.Ordinal))
+        var trimmed = line.AsSpan().TrimStart();
+        if (trimmed.StartsWith("//", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        if (Regex.IsMatch(line, @"^\s*test\b", RegexOptions.CultureInvariant))
         {
             return true;
         }
