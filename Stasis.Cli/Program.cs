@@ -895,21 +895,28 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         var libPath = graphicsLibPath ?? FindGraphicsLibrary(preferShared: isDll);
         if (!string.IsNullOrEmpty(libPath))
         {
-            var libFile = Path.GetFileName(libPath);
-            var isStaticLib = libFile != null && libFile.Contains("static", StringComparison.OrdinalIgnoreCase);
-            if (isStaticLib)
+            var libraryFile = Path.GetFileName(libPath);
+            var isStaticLibrary = libraryFile != null && libraryFile.Contains("static", StringComparison.OrdinalIgnoreCase);
+            if (isStaticLibrary)
             {
                 linkingStaticGraphics = true;
             }
 
             args.Add($"\"{libPath}\"");
-            var libDir = Path.GetDirectoryName(libPath);
-            if (!string.IsNullOrEmpty(libDir))
+            var libraryDirectory = Path.GetDirectoryName(libPath);
+            if (!string.IsNullOrEmpty(libraryDirectory))
             {
-                args.Add($"-L\"{libDir}\"");
+                args.Add($"-L\"{libraryDirectory}\"");
             }
 
-            if (isStaticLib)
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+                !isStaticLibrary &&
+                !string.IsNullOrEmpty(libraryDirectory))
+            {
+                args.Add($"-Wl,-rpath,\"{libraryDirectory}\"");
+            }
+
+            if (isStaticLibrary)
             {
                 args.Add("-lSDL2main");
                 args.Add("-lSDL2-static");
@@ -998,6 +1005,11 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         args.Add("-lucrt");
         args.Add("-lvcruntime");
         args.Add("-loldnames");
+    }
+
+    if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        args.Add("-lm");
     }
 
     return string.Join(" ", args);
@@ -1195,18 +1207,18 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         var libPath = graphicsLibPath ?? FindGraphicsLibrary();
         if (!string.IsNullOrEmpty(libPath))
         {
-            var libDir = Path.GetDirectoryName(libPath);
-            var libFile = Path.GetFileName(libPath);
-            var isStaticLib = libFile != null && libFile.Contains("static", StringComparison.OrdinalIgnoreCase);
-            linkingStaticGraphics = isStaticLib;
+            var libraryDirectory = Path.GetDirectoryName(libPath);
+            var libraryFile = Path.GetFileName(libPath);
+            var isStaticLibrary = libraryFile != null && libraryFile.Contains("static", StringComparison.OrdinalIgnoreCase);
+            linkingStaticGraphics = isStaticLibrary;
 
-            if (!string.IsNullOrEmpty(libDir))
+            if (!string.IsNullOrEmpty(libraryDirectory))
             {
-                args.Add($"-L\"{libDir}\"");
+                args.Add($"-L\"{libraryDirectory}\"");
             }
 
             // When a full path is known, pass it directly so clang doesn't guess the name
-            if (!string.IsNullOrEmpty(libFile))
+            if (!string.IsNullOrEmpty(libraryFile))
             {
                 args.Add($"\"{libPath}\"");
             }
@@ -1215,8 +1227,15 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
                 args.Add("-lstasis_graphics");
             }
 
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+                !isStaticLibrary &&
+                !string.IsNullOrEmpty(libraryDirectory))
+            {
+                args.Add($"-Wl,-rpath,\"{libraryDirectory}\"");
+            }
+
             // If we are linking the static runtime, pull in its static deps for a single EXE.
-            if (isStaticLib && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            if (isStaticLibrary && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 args.Add("-lSDL2main");
                 args.Add("-lSDL2-static");
@@ -1288,6 +1307,11 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     else if (isTest)
     {
         args.Add("-Wl,-e,run_tests");
+    }
+
+    if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        args.Add("-lm");
     }
 
     return string.Join(" ", args);
