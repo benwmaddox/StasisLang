@@ -179,6 +179,19 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void InputPointerCount_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                return input_pointer_count();
+            }
+            """);
+
+        Assert.Contains("call %stasis_input_pointer_count", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
     public void AudioGetSampleRate_UsesRuntimeHook()
     {
         var ir = CompileCraneliftIr("""
@@ -188,6 +201,19 @@ public class CraneliftBackendConfirmationTests
             """);
 
         Assert.Contains("call %stasis_audio_get_sample_rate", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void InputPointerXPx_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): f32 {
+                return input_pointer_x_px(0);
+            }
+            """);
+
+        Assert.Contains("call %stasis_input_pointer_x_px", ir);
         Assert.DoesNotContain("TODO:", ir);
     }
 
