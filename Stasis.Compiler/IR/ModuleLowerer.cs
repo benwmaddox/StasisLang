@@ -2907,7 +2907,7 @@ public sealed class ModuleLowerer
                         if (_headlessGraphics)
                             return ConstI32(1);
 
-                        var path = LowerExpression(builder, args[0], locals);
+                        var path = LowerCStringPointer(builder, args[0], locals);
                         var size = LowerExpression(builder, args[1], locals);
 
                         var fn = _moduleBuilder.Module.GetNamedFunction("stasis_load_font");
@@ -2930,7 +2930,7 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
 
                         var fontHandle = LowerExpression(builder, args[0], locals);
-                        var text = LowerExpression(builder, args[1], locals);
+                        var text = LowerCStringPointer(builder, args[1], locals);
                         var x = LowerExpression(builder, args[2], locals);
                         var y = LowerExpression(builder, args[3], locals);
                         var r = LowerExpression(builder, args[4], locals);
@@ -2961,7 +2961,7 @@ public sealed class ModuleLowerer
                             return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
 
                         var fontHandle = LowerExpression(builder, args[0], locals);
-                        var text = LowerExpression(builder, args[1], locals);
+                        var text = LowerCStringPointer(builder, args[1], locals);
 
                         var fn = _moduleBuilder.Module.GetNamedFunction("stasis_measure_text");
                         var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float,
