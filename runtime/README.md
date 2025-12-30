@@ -68,6 +68,12 @@ The library exports these functions for Stasis programs:
 | `stasis_input_pointer_count()` | Number of pointers tracked this frame (mouse + active touches) |
 | `stasis_input_pointer_*` | Pointer snapshot queries (pos, deltas, edge flags) |
 | `stasis_input_viewport_*_px` | Viewport rectangle (currently full window) |
+| `stasis_audio_is_available()` | Initialize audio if needed; returns 1 on success |
+| `stasis_audio_get_sample_rate()` | Current audio sample rate (Hz) |
+| `stasis_audio_get_channels()` | Current audio channels (v1: 2) |
+| `stasis_audio_get_queued_frames()` | Frames currently queued in the ring buffer |
+| `stasis_audio_get_underruns()` | Underrun counter (device starved -> outputs silence) |
+| `stasis_audio_push_f32_interleaved(ptr, frames)` | Push `f32` interleaved frames (LRLR...); returns frames accepted |
 
 ## SDL Scancodes
 

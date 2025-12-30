@@ -192,6 +192,19 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void AudioGetSampleRate_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                return audio_get_sample_rate();
+            }
+            """);
+
+        Assert.Contains("call %stasis_audio_get_sample_rate", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
     public void InputPointerXPx_UsesRuntimeHook()
     {
         var ir = CompileCraneliftIr("""
@@ -201,6 +214,20 @@ public class CraneliftBackendConfirmationTests
             """);
 
         Assert.Contains("call %stasis_input_pointer_x_px", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void AudioPushF32Interleaved_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            global samples: f32[8];
+            function main(): i32 {
+                return audio_push_f32_interleaved(samples, 4);
+            }
+            """);
+
+        Assert.Contains("call %stasis_audio_push_f32_interleaved", ir);
         Assert.DoesNotContain("TODO:", ir);
     }
 

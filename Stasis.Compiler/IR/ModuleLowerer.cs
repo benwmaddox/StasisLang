@@ -630,6 +630,67 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioIsAvailable(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_is_available");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_is_available", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioGetSampleRate(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_get_sample_rate");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_get_sample_rate", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioGetChannels(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_get_channels");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_get_channels", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioGetQueuedFrames(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_get_queued_frames");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_get_queued_frames", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioGetUnderruns(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_get_underruns");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_get_underruns", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisAudioPushF32Interleaved(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_audio_push_f32_interleaved");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr, LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_audio_push_f32_interleaved", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisShouldQuit(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_should_quit");
@@ -1046,6 +1107,14 @@ public sealed class ModuleLowerer
             "input_viewport_y_px",
             "input_viewport_w_px",
             "input_viewport_h_px",
+
+            // Legacy audio (external runtime)
+            "audio_is_available",
+            "audio_get_sample_rate",
+            "audio_get_channels",
+            "audio_get_queued_frames",
+            "audio_get_underruns",
+            "audio_push_f32_interleaved",
 
             // Standard Library: char_* module
             "char_is_digit",
@@ -2259,6 +2328,104 @@ public sealed class ModuleLowerer
                         var (fn, fnType) = GetOrDeclareStasisSleepMs(_moduleBuilder);
                         builder.BuildCall2(fnType, fn, new[] { ms }, "");
                         return ConstI32(0);
+                    }
+                case "audio_is_available":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("audio_is_available expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioIsAvailable(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "audio_is_available.call");
+                    }
+                case "audio_get_sample_rate":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("audio_get_sample_rate expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioGetSampleRate(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "audio_get_sample_rate.call");
+                    }
+                case "audio_get_channels":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("audio_get_channels expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioGetChannels(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "audio_get_channels.call");
+                    }
+                case "audio_get_queued_frames":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("audio_get_queued_frames expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioGetQueuedFrames(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "audio_get_queued_frames.call");
+                    }
+                case "audio_get_underruns":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("audio_get_underruns expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioGetUnderruns(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "audio_get_underruns.call");
+                    }
+                case "audio_push_f32_interleaved":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("audio_push_f32_interleaved expects (samples, frame_count).", span);
+                            return ConstI32(0);
+                        }
+
+                        var samples = LowerArrayPointer(builder, args[0], locals);
+                        if (samples.Handle == IntPtr.Zero)
+                            samples = LowerExpression(builder, args[0], locals);
+                        var frames = LowerExpression(builder, args[1], locals);
+
+                        if (samples.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("audio_push_f32_interleaved expects an array/pointer for 'samples'.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var samplesPtr = builder.BuildBitCast(samples, i8Ptr, "audio.samples");
+
+                        var (fn, fnType) = GetOrDeclareStasisAudioPushF32Interleaved(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { samplesPtr, frames }, "audio_push_f32_interleaved.call");
                     }
                 case "should_quit":
                     {
