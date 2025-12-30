@@ -970,6 +970,22 @@ public sealed class CraneliftFunctionBuilder
             "list_directory" => true,
             "dir_list_entry_is_dir" => true,
             "dir_list_entry_copy_name" => true,
+            "input_pointer_count" => true,
+            "input_pointer_id" => true,
+            "input_pointer_is_down" => true,
+            "input_pointer_went_down" => true,
+            "input_pointer_went_up" => true,
+            "input_pointer_x_px" => true,
+            "input_pointer_y_px" => true,
+            "input_pointer_dx_px" => true,
+            "input_pointer_dy_px" => true,
+            "input_pointer_x_n" => true,
+            "input_pointer_y_n" => true,
+            "input_dropped_pointers" => true,
+            "input_viewport_x_px" => true,
+            "input_viewport_y_px" => true,
+            "input_viewport_w_px" => true,
+            "input_viewport_h_px" => true,
             "char_is_digit" => true,
             "char_is_alpha" => true,
             "char_is_alnum" => true,
@@ -1115,6 +1131,38 @@ public sealed class CraneliftFunctionBuilder
                 return LowerDirListEntryIsDir(arguments);
             case "dir_list_entry_copy_name":
                 return LowerDirListEntryCopyName(arguments);
+            case "input_pointer_count":
+                return LowerExternalCallValue("stasis_input_pointer_count", "input_pointer_count expects no arguments.", arguments, 0);
+            case "input_pointer_id":
+                return LowerExternalCallValue("stasis_input_pointer_id", "input_pointer_id expects (idx: i32).", arguments, 1);
+            case "input_pointer_is_down":
+                return LowerExternalCallValue("stasis_input_pointer_is_down", "input_pointer_is_down expects (idx: i32).", arguments, 1);
+            case "input_pointer_went_down":
+                return LowerExternalCallValue("stasis_input_pointer_went_down", "input_pointer_went_down expects (idx: i32).", arguments, 1);
+            case "input_pointer_went_up":
+                return LowerExternalCallValue("stasis_input_pointer_went_up", "input_pointer_went_up expects (idx: i32).", arguments, 1);
+            case "input_pointer_x_px":
+                return LowerExternalCallValue("stasis_input_pointer_x_px", "input_pointer_x_px expects (idx: i32).", arguments, 1);
+            case "input_pointer_y_px":
+                return LowerExternalCallValue("stasis_input_pointer_y_px", "input_pointer_y_px expects (idx: i32).", arguments, 1);
+            case "input_pointer_dx_px":
+                return LowerExternalCallValue("stasis_input_pointer_dx_px", "input_pointer_dx_px expects (idx: i32).", arguments, 1);
+            case "input_pointer_dy_px":
+                return LowerExternalCallValue("stasis_input_pointer_dy_px", "input_pointer_dy_px expects (idx: i32).", arguments, 1);
+            case "input_pointer_x_n":
+                return LowerExternalCallValue("stasis_input_pointer_x_n", "input_pointer_x_n expects (idx: i32).", arguments, 1);
+            case "input_pointer_y_n":
+                return LowerExternalCallValue("stasis_input_pointer_y_n", "input_pointer_y_n expects (idx: i32).", arguments, 1);
+            case "input_dropped_pointers":
+                return LowerExternalCallValue("stasis_input_dropped_pointers", "input_dropped_pointers expects no arguments.", arguments, 0);
+            case "input_viewport_x_px":
+                return LowerExternalCallValue("stasis_input_viewport_x_px", "input_viewport_x_px expects no arguments.", arguments, 0);
+            case "input_viewport_y_px":
+                return LowerExternalCallValue("stasis_input_viewport_y_px", "input_viewport_y_px expects no arguments.", arguments, 0);
+            case "input_viewport_w_px":
+                return LowerExternalCallValue("stasis_input_viewport_w_px", "input_viewport_w_px expects no arguments.", arguments, 0);
+            case "input_viewport_h_px":
+                return LowerExternalCallValue("stasis_input_viewport_h_px", "input_viewport_h_px expects no arguments.", arguments, 0);
             case "char_is_digit":
                 return LowerCharIsDigit(arguments);
             case "char_is_alpha":
