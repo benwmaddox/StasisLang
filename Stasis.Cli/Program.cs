@@ -344,8 +344,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return 1;
         }
 
-        // Auto-detect graphics usage if not explicitly enabled
-        if (!enableGraphics && DetectsGraphicsUsage(source))
+        // Auto-detect graphics usage if not explicitly enabled.
+        // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
+        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) && DetectsGraphicsUsage(source))
         {
             enableGraphics = true;
         }
@@ -2820,7 +2821,9 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
             PrintDiagnostics(importDiagnostics, importSource, path);
             return new PrepareResult(null, new CompileResult(path, importSource, false, false, backend, null, null, importDiagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
-        var usesGraphics = DetectsGraphicsUsage(source);
+        // Tests should be deterministic and avoid IO-heavy dependencies, but the Cranelift backend still relies on
+        // runtime hooks for some builtins (e.g., get_time_ms), so keep auto-detection there.
+        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : DetectsGraphicsUsage(source);
         var effectiveGraphics = enableGraphics || usesGraphics;
         TestCacheLocation? testCacheLocation = null;
         var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;
@@ -2967,9 +2970,17 @@ static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, stri
         craneliftTargetTriple,
         compilerCacheSalt);
 
-    var options = new JsonSerializerOptions { WriteIndented = true };
-    var json = JsonSerializer.Serialize(entry, options);
-    File.WriteAllText(prep.TestCacheLocation.EntryPath, json, Encoding.UTF8);
+    try
+    {
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        var json = JsonSerializer.Serialize(entry, options);
+        File.WriteAllText(prep.TestCacheLocation.EntryPath, json, Encoding.UTF8);
+    }
+    catch
+    {
+        // Native AOT disables reflection-based JSON serialization by default.
+        // The test cache is an optional optimization, so ignore failures here and continue.
+    }
 }
 
 static string ComputeTestCacheKey(string path, string source, BackendType backend, string moduleName, bool includeTests, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)

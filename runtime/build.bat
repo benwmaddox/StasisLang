@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+call "%~dp0..\env.bat"
+
 echo Building Stasis Graphics Runtime Library (static+shared)...
 
 :: Check for vcpkg - try common locations
@@ -84,11 +86,23 @@ if exist "%MANUAL_LIB_DIR%\\SDL2main.lib" (
     echo   warning: missing SDL2main.lib in %MANUAL_LIB_DIR%
 )
 echo Copying static graphics lib to repo root and build/ for auto-discovery...
-copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\.." >NUL 2>&1
-if not exist "%CD%\\..\\..\\build" (
-    mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+if /I "%STASIS_OVERWRITE_CHECKED_IN_RUNTIME_LIBS%"=="1" (
+    copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\.." >NUL 2>&1
+    if not exist "%CD%\\..\\..\\build" (
+        mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+    )
+    copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
+) else (
+    if not exist "%CD%\\..\\..\\stasis_graphics_static.lib" (
+        copy "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\.." >NUL 2>&1
+    )
+    if not exist "%CD%\\..\\..\\build" (
+        mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+    )
+    if not exist "%CD%\\..\\..\\build\\stasis_graphics_static.lib" (
+        copy "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
+    )
 )
-copy /Y "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
 echo.
 echo To run Asteroids demo with static runtime:
 echo   cd ..\..
