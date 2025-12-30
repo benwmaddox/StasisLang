@@ -5,6 +5,13 @@ option(STASIS_GRAPHICS_BUILD_SHARED "Build the graphics runtime as a DLL" ON)
 option(STASIS_GRAPHICS_BUILD_STATIC "Build the graphics runtime as a static library" ON)
 option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ON)
 
+# Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
+set(STASIS_GRAPHICS_SDL_ONLY_DEFAULT OFF)
+if(ANDROID)
+    set(STASIS_GRAPHICS_SDL_ONLY_DEFAULT ON)
+endif()
+option(STASIS_GRAPHICS_SDL_ONLY "Build SDL_Renderer-only runtime (no OpenGL/GLEW backend)" ${STASIS_GRAPHICS_SDL_ONLY_DEFAULT})
+
 # Prefer static CRT when possible (for single-exe bundling)
 if (MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -13,18 +20,27 @@ endif()
 # Find SDL2 (via vcpkg or system)
 find_package(SDL2 CONFIG REQUIRED)
 
-# Find OpenGL and GLEW
-find_package(OpenGL REQUIRED)
-find_package(GLEW REQUIRED)
+if(NOT STASIS_GRAPHICS_SDL_ONLY)
+    # Find OpenGL and GLEW (desktop backend)
+    find_package(OpenGL REQUIRED)
+    find_package(GLEW REQUIRED)
+endif()
 
 function(configure_stasis_target target is_static)
     target_sources(${target} PRIVATE stasis_graphics.c)
     target_link_libraries(${target} PRIVATE
         $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
         $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
-        OpenGL::GL
-        GLEW::GLEW
     )
+
+    if(NOT STASIS_GRAPHICS_SDL_ONLY)
+        target_link_libraries(${target} PRIVATE
+            OpenGL::GL
+            GLEW::GLEW
+        )
+    else()
+        target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_SDL_ONLY)
+    endif()
 
     if(NOT WIN32)
         target_link_libraries(${target} PRIVATE m)
@@ -35,7 +51,11 @@ function(configure_stasis_target target is_static)
     endif()
 
     if(${is_static})
-        target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC GLEW_STATIC)
+        if(NOT STASIS_GRAPHICS_SDL_ONLY)
+            target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC GLEW_STATIC)
+        else()
+            target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC)
+        endif()
     endif()
 endfunction()
 
