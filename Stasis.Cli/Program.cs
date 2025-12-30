@@ -1566,7 +1566,7 @@ static bool DetectsGraphicsUsage(string source)
     return Regex.IsMatch(
         source,
         @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|draw_lines_f32|clear|gfx_load_sprite|gfx_draw_sprite|gfx_draw_sprites_i32|gfx_poll_reload|gfx_debug_bake_hash|gfx_debug_enable_hash|gfx_debug_get_frame_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|time|get_time_ms|sleep_ms)" +
+        @"(init_window|begin_frame|end_frame|draw_line|draw_lines_f32|clear|gfx_load_sprite|gfx_draw_sprite|gfx_draw_sprites_i32|gfx_poll_reload|gfx_debug_bake_hash|gfx_debug_enable_hash|gfx_debug_get_frame_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|input_pointer_count|input_pointer_id|input_pointer_is_down|input_pointer_went_down|input_pointer_went_up|input_pointer_x_px|input_pointer_y_px|input_pointer_dx_px|input_pointer_dy_px|input_pointer_x_n|input_pointer_y_n|input_dropped_pointers|input_viewport_x_px|input_viewport_y_px|input_viewport_w_px|input_viewport_h_px|time|get_time_ms|sleep_ms)" +
         @"\s*\(",
         RegexOptions.CultureInvariant);
 }
