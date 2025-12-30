@@ -127,6 +127,14 @@ public sealed class SemanticAnalyzer
         AddSymbol("input_viewport_w_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("input_viewport_h_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
+        // Legacy audio functions (external runtime)
+        AddSymbol("audio_is_available", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("audio_get_sample_rate", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("audio_get_channels", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("audio_get_queued_frames", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("audio_get_underruns", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("audio_push_f32_interleaved", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
         // ============================================================
         // Standard Library: char_* module (character/byte utilities)
         // ============================================================
