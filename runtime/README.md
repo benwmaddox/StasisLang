@@ -33,6 +33,15 @@ Native SDL2+OpenGL graphics library for Stasis programs.
    dotnet run --project Stasis.Cli -- run samples/asteroids.stasis --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
    ```
 
+## Android (NDK)
+
+Android builds currently use the SDL_Renderer backend only (no OpenGL 2.1/GLEW path):
+
+- Configure `runtime/CMakeLists.txt` with `-DSTASIS_GRAPHICS_SDL_ONLY=ON`
+- Use an NDK toolchain (direct CMake toolchain or vcpkg Android triplets)
+
+If you are using the vendored vcpkg under `codevcpkg/`, see `runtime/build_android.ps1`.
+
 ## Manual Build (Alternative)
 
 If you prefer to build manually or vcpkg is unavailable:
