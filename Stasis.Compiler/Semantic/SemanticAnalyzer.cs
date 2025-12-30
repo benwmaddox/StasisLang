@@ -90,13 +90,17 @@ public sealed class SemanticAnalyzer
         AddSymbol("end_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("draw_line", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("draw_lines_f32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("gfx_draw_sprites_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("gfx_debug_enable_hash", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        AddSymbol("gfx_debug_get_frame_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("get_window_size", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));

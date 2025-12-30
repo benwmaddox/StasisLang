@@ -8,6 +8,7 @@ EXPORTS
     stasis_end_frame
     stasis_clear
     stasis_draw_line
+    stasis_draw_lines_f32
     stasis_is_key_down
     stasis_get_time_ms
     stasis_sleep_ms
@@ -40,8 +41,11 @@ EXPORTS
     stasis_input_viewport_h_px
     stasis_gfx_load_sprite
     stasis_gfx_draw_sprite
+    stasis_gfx_draw_sprites_i32
     stasis_gfx_poll_reload
     stasis_gfx_debug_bake_hash
+    stasis_gfx_debug_enable_hash
+    stasis_gfx_debug_get_frame_hash
     stasis_load_font
     stasis_draw_text
     stasis_measure_text
