@@ -12,6 +12,14 @@ EXPORTS
     stasis_is_key_down
     stasis_get_time_ms
     stasis_sleep_ms
+    stasis_audio_init
+    stasis_audio_shutdown
+    stasis_audio_is_available
+    stasis_audio_get_sample_rate
+    stasis_audio_get_channels
+    stasis_audio_get_queued_frames
+    stasis_audio_get_underruns
+    stasis_audio_push_f32_interleaved
     stasis_get_startup_test_error
     stasis_get_startup_test_success
     stasis_set_postfx

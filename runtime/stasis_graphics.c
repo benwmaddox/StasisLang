@@ -13,6 +13,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <time.h>
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -74,6 +75,159 @@ static float g_postfx_phase = 0.0f;
 static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
 static bool g_postfx_force_disable = false;
+
+/* ============================================================
+ * Audio output (SDL2) - f32 stereo ring buffer
+ * ============================================================ */
+
+static SDL_AudioDeviceID g_audio_device = 0;
+static SDL_AudioSpec g_audio_spec_obtained;
+static int g_audio_initialized = 0;
+static int g_audio_underruns = 0;
+static int g_audio_channels = 2;
+static int g_audio_sample_rate = 48000;
+static int g_audio_target_latency_frames = 2048;
+static float* g_audio_ring = NULL;
+static int g_audio_ring_capacity_frames = 0;
+static int g_audio_ring_capacity_samples = 0;
+static int g_audio_read_sample = 0;
+static int g_audio_write_sample = 0;
+static int g_audio_queued_samples = 0;
+static int64_t g_audio_running_frame_index = 0;
+
+static int stasis_audio_maxi(int a, int b) { return a > b ? a : b; }
+static int stasis_audio_mini(int a, int b) { return a < b ? a : b; }
+
+static void stasis_audio_callback(void* userdata, Uint8* stream, int len) {
+    (void)userdata;
+    if (!stream || len <= 0) return;
+
+    if (!g_audio_ring || g_audio_channels <= 0) {
+        SDL_memset(stream, 0, (size_t)len);
+        g_audio_underruns++;
+        return;
+    }
+
+    const int requested_samples = len / (int)sizeof(float);
+    if (requested_samples <= 0) {
+        return;
+    }
+
+    float* out = (float*)stream;
+    int remaining = requested_samples;
+    int have = g_audio_queued_samples;
+
+    if (have < requested_samples) {
+        g_audio_underruns++;
+    }
+
+    int to_copy = stasis_audio_mini(have, requested_samples);
+    while (to_copy > 0) {
+        int contiguous = g_audio_ring_capacity_samples - g_audio_read_sample;
+        int chunk = stasis_audio_mini(to_copy, contiguous);
+        SDL_memcpy(out, &g_audio_ring[g_audio_read_sample], (size_t)chunk * sizeof(float));
+        out += chunk;
+        remaining -= chunk;
+        to_copy -= chunk;
+        g_audio_read_sample = (g_audio_read_sample + chunk) % g_audio_ring_capacity_samples;
+        g_audio_queued_samples -= chunk;
+    }
+
+    if (remaining > 0) {
+        SDL_memset(out, 0, (size_t)remaining * sizeof(float));
+    }
+
+    g_audio_running_frame_index += requested_samples / g_audio_channels;
+}
+
+static void stasis_audio_shutdown_internal(void) {
+    if (g_audio_device != 0) {
+        SDL_CloseAudioDevice(g_audio_device);
+        g_audio_device = 0;
+    }
+
+    if (g_audio_ring) {
+        free(g_audio_ring);
+        g_audio_ring = NULL;
+    }
+
+    g_audio_initialized = 0;
+    g_audio_ring_capacity_frames = 0;
+    g_audio_ring_capacity_samples = 0;
+    g_audio_read_sample = 0;
+    g_audio_write_sample = 0;
+    g_audio_queued_samples = 0;
+    g_audio_underruns = 0;
+    g_audio_running_frame_index = 0;
+}
+
+static int stasis_audio_ensure_init(void) {
+    if (g_audio_initialized && g_audio_device != 0) {
+        return 1;
+    }
+
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        if (SDL_Init(SDL_INIT_AUDIO) != 0) {
+            return 0;
+        }
+    }
+
+    SDL_AudioSpec desired;
+    SDL_zero(desired);
+    desired.format = AUDIO_F32SYS;
+    desired.channels = 2;
+    desired.samples = 512;
+    desired.callback = stasis_audio_callback;
+
+    SDL_AudioSpec obtained;
+    SDL_zero(obtained);
+
+    /* Try 48k first, then 44.1k. */
+    int rates[2] = { 48000, 44100 };
+    SDL_AudioDeviceID dev = 0;
+    for (int i = 0; i < 2 && dev == 0; i++) {
+        desired.freq = rates[i];
+        dev = SDL_OpenAudioDevice(NULL, 0, &desired, &obtained, 0);
+        if (dev != 0) {
+            g_audio_sample_rate = obtained.freq;
+        }
+    }
+
+    if (dev == 0) {
+        return 0;
+    }
+
+    if (obtained.format != AUDIO_F32SYS || obtained.channels != 2) {
+        SDL_CloseAudioDevice(dev);
+        return 0;
+    }
+
+    g_audio_device = dev;
+    g_audio_spec_obtained = obtained;
+    g_audio_channels = (int)obtained.channels;
+
+    g_audio_target_latency_frames = stasis_audio_maxi(512, g_audio_target_latency_frames);
+    g_audio_ring_capacity_frames = stasis_audio_maxi(8192, g_audio_target_latency_frames * 4);
+    g_audio_ring_capacity_samples = g_audio_ring_capacity_frames * g_audio_channels;
+
+    g_audio_ring = (float*)malloc((size_t)g_audio_ring_capacity_samples * sizeof(float));
+    if (!g_audio_ring) {
+        SDL_CloseAudioDevice(g_audio_device);
+        g_audio_device = 0;
+        return 0;
+    }
+    SDL_memset(g_audio_ring, 0, (size_t)g_audio_ring_capacity_samples * sizeof(float));
+
+    g_audio_read_sample = 0;
+    g_audio_write_sample = 0;
+    g_audio_queued_samples = 0;
+    g_audio_underruns = 0;
+    g_audio_running_frame_index = 0;
+    g_audio_initialized = 1;
+
+    SDL_PauseAudioDevice(g_audio_device, 0);
+    return 1;
+}
 
 /* Line batching for efficient rendering */
 #define MAX_LINES 10000
@@ -2151,7 +2305,23 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
  * Get current time in milliseconds
  */
 STASIS_EXPORT int stasis_get_time_ms(void) {
+#if defined(_WIN32)
+    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return 0;
+        }
+    }
     return (int)SDL_GetTicks();
+#else
+    if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
+        return (int)SDL_GetTicks();
+    }
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return (int)((now.tv_sec * 1000) + (now.tv_nsec / 1000000));
+#endif
 }
 
 /*
@@ -2159,8 +2329,104 @@ STASIS_EXPORT int stasis_get_time_ms(void) {
  */
 STASIS_EXPORT void stasis_sleep_ms(int ms) {
     if (ms > 0) {
+        if (SDL_WasInit(SDL_INIT_TIMER) != 0) {
+            SDL_Delay((Uint32)ms);
+            return;
+        }
+#if defined(_WIN32)
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return;
+        }
         SDL_Delay((Uint32)ms);
+#else
+        struct timespec delay;
+        delay.tv_sec = ms / 1000;
+        delay.tv_nsec = (ms % 1000) * 1000000;
+        nanosleep(&delay, NULL);
+#endif
     }
+}
+
+/*
+ * Audio - init/shutdown and ring-buffer push API
+ */
+STASIS_EXPORT int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
+    if (sample_rate > 0) g_audio_sample_rate = sample_rate;
+    if (channels != 0 && channels != 2) return 0;
+    g_audio_channels = 2;
+    if (target_latency_frames > 0) g_audio_target_latency_frames = target_latency_frames;
+
+    if (g_audio_device != 0) {
+        stasis_audio_shutdown_internal();
+    }
+
+    return stasis_audio_ensure_init();
+}
+
+STASIS_EXPORT void stasis_audio_shutdown(void) {
+    stasis_audio_shutdown_internal();
+}
+
+STASIS_EXPORT int stasis_audio_is_available(void) {
+    return stasis_audio_ensure_init();
+}
+
+STASIS_EXPORT int stasis_audio_get_sample_rate(void) {
+    if (!stasis_audio_ensure_init()) return 0;
+    return g_audio_sample_rate;
+}
+
+STASIS_EXPORT int stasis_audio_get_channels(void) {
+    if (!stasis_audio_ensure_init()) return 0;
+    return g_audio_channels;
+}
+
+STASIS_EXPORT int stasis_audio_get_queued_frames(void) {
+    if (!stasis_audio_ensure_init()) return 0;
+
+    int queued = 0;
+    SDL_LockAudioDevice(g_audio_device);
+    if (g_audio_channels > 0) {
+        queued = g_audio_queued_samples / g_audio_channels;
+    }
+    SDL_UnlockAudioDevice(g_audio_device);
+    return queued;
+}
+
+STASIS_EXPORT int stasis_audio_get_underruns(void) {
+    if (!stasis_audio_ensure_init()) return 0;
+
+    int underruns = 0;
+    SDL_LockAudioDevice(g_audio_device);
+    underruns = g_audio_underruns;
+    SDL_UnlockAudioDevice(g_audio_device);
+    return underruns;
+}
+
+STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr, int frame_count) {
+    if (!interleaved_lr || frame_count <= 0) return 0;
+    if (!stasis_audio_ensure_init()) return 0;
+
+    int accepted_samples = 0;
+    const int requested_samples = frame_count * g_audio_channels;
+
+    SDL_LockAudioDevice(g_audio_device);
+    int free_samples = g_audio_ring_capacity_samples - g_audio_queued_samples;
+    int to_write = stasis_audio_mini(requested_samples, free_samples);
+
+    while (to_write > 0) {
+        int contiguous = g_audio_ring_capacity_samples - g_audio_write_sample;
+        int chunk = stasis_audio_mini(to_write, contiguous);
+        SDL_memcpy(&g_audio_ring[g_audio_write_sample], &interleaved_lr[accepted_samples], (size_t)chunk * sizeof(float));
+        g_audio_write_sample = (g_audio_write_sample + chunk) % g_audio_ring_capacity_samples;
+        g_audio_queued_samples += chunk;
+        accepted_samples += chunk;
+        to_write -= chunk;
+    }
+    SDL_UnlockAudioDevice(g_audio_device);
+
+    if (g_audio_channels <= 0) return 0;
+    return accepted_samples / g_audio_channels;
 }
 
 /*
@@ -2212,6 +2478,8 @@ STASIS_EXPORT int stasis_gfx_window_resized(void) {
  * Cleanup and shutdown
  */
 STASIS_EXPORT void stasis_shutdown(void) {
+    stasis_audio_shutdown_internal();
+
     if (g_postfx_program) {
         glDeleteProgram(g_postfx_program);
         g_postfx_program = 0;

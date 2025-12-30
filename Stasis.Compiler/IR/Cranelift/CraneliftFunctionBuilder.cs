@@ -931,6 +931,12 @@ public sealed class CraneliftFunctionBuilder
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
+            "audio_is_available" => true,
+            "audio_get_sample_rate" => true,
+            "audio_get_channels" => true,
+            "audio_get_queued_frames" => true,
+            "audio_get_underruns" => true,
+            "audio_push_f32_interleaved" => true,
             "sin" => true,
             "cos" => true,
             "sin_fast" => true,
@@ -1031,6 +1037,18 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGetTimeMs(arguments);
             case "sleep_ms":
                 return LowerSleepMs(arguments);
+            case "audio_is_available":
+                return LowerExternalCallValue("stasis_audio_is_available", "audio_is_available expects no arguments.", arguments, 0);
+            case "audio_get_sample_rate":
+                return LowerExternalCallValue("stasis_audio_get_sample_rate", "audio_get_sample_rate expects no arguments.", arguments, 0);
+            case "audio_get_channels":
+                return LowerExternalCallValue("stasis_audio_get_channels", "audio_get_channels expects no arguments.", arguments, 0);
+            case "audio_get_queued_frames":
+                return LowerExternalCallValue("stasis_audio_get_queued_frames", "audio_get_queued_frames expects no arguments.", arguments, 0);
+            case "audio_get_underruns":
+                return LowerExternalCallValue("stasis_audio_get_underruns", "audio_get_underruns expects no arguments.", arguments, 0);
+            case "audio_push_f32_interleaved":
+                return LowerExternalCallValue("stasis_audio_push_f32_interleaved", "audio_push_f32_interleaved expects (samples, frame_count).", arguments, 2);
             case "sin":
                 return LowerSinCos(arguments, isSin: true);
             case "cos":
