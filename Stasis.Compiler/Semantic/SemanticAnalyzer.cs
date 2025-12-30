@@ -109,6 +109,24 @@ public sealed class SemanticAnalyzer
         AddSymbol("dir_list_entry_is_dir", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("dir_list_entry_copy_name", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
+        // Input snapshot functions (mouse + touch)
+        AddSymbol("input_pointer_count", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_id", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_is_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_went_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_went_up", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_dx_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_dy_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_x_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_pointer_y_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+        AddSymbol("input_dropped_pointers", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_viewport_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_viewport_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_viewport_w_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("input_viewport_h_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
         // Legacy audio functions (external runtime)
         AddSymbol("audio_is_available", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("audio_get_sample_rate", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
