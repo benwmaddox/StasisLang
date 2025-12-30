@@ -288,6 +288,96 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_should_quit", CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("input_pointer_count"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_count", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_id"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_id", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_is_down"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_is_down", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_went_down"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_went_down", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_went_up"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_went_up", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_x_px"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_x_px", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_y_px"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_y_px", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_dx_px"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_dx_px", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_dy_px"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_dy_px", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_x_n"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_x_n", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_pointer_y_n"))
+        {
+            builder.DeclareExternal("stasis_input_pointer_y_n", CraneliftTypeMapper.ClifType.F32,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_dropped_pointers"))
+        {
+            builder.DeclareExternal("stasis_input_dropped_pointers", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_viewport_x_px"))
+        {
+            builder.DeclareExternal("stasis_input_viewport_x_px", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_viewport_y_px"))
+        {
+            builder.DeclareExternal("stasis_input_viewport_y_px", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_viewport_w_px"))
+        {
+            builder.DeclareExternal("stasis_input_viewport_w_px", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("input_viewport_h_px"))
+        {
+            builder.DeclareExternal("stasis_input_viewport_h_px", CraneliftTypeMapper.ClifType.I32);
+        }
+
         if (builtins.Contains("get_window_size"))
         {
             builder.DeclareExternal("stasis_get_window_size", CraneliftTypeMapper.ClifType.Void,
@@ -1001,6 +1091,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
             or "load_font" or "draw_text" or "measure_text" or "set_postfx"
             or "list_directory" or "dir_list_entry_is_dir" or "dir_list_entry_copy_name"
+            or "input_pointer_count" or "input_pointer_id" or "input_pointer_is_down"
+            or "input_pointer_went_down" or "input_pointer_went_up"
+            or "input_pointer_x_px" or "input_pointer_y_px" or "input_pointer_dx_px" or "input_pointer_dy_px"
+            or "input_pointer_x_n" or "input_pointer_y_n"
+            or "input_dropped_pointers"
+            or "input_viewport_x_px" or "input_viewport_y_px" or "input_viewport_w_px" or "input_viewport_h_px"
             or "char_is_digit" or "char_is_alpha" or "char_is_alnum" or "char_is_space"
             or "char_is_upper" or "char_is_lower" or "char_is_hex" or "char_is_print"
             or "char_to_upper" or "char_to_lower" or "char_to_digit" or "char_from_digit"
