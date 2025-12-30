@@ -179,6 +179,21 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void DrawLinesF32_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            global lines: f32[8];
+            function main(): i32 {
+                draw_lines_f32(lines, 1);
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %stasis_draw_lines_f32", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
     public void InputPointerCount_UsesRuntimeHook()
     {
         var ir = CompileCraneliftIr("""
@@ -201,6 +216,34 @@ public class CraneliftBackendConfirmationTests
             """);
 
         Assert.Contains("call %stasis_audio_get_sample_rate", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void GfxDrawSpritesI32_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            global cmds: i32[7];
+            function main(): i32 {
+                gfx_draw_sprites_i32(cmds, 1);
+                return 0;
+            }
+            """);
+
+        Assert.Contains("call %stasis_gfx_draw_sprites_i32", ir);
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void GfxDebugGetFrameHash_UsesRuntimeHook()
+    {
+        var ir = CompileCraneliftIr("""
+            function main(): i32 {
+                return gfx_debug_get_frame_hash();
+            }
+            """);
+
+        Assert.Contains("call %stasis_gfx_debug_get_frame_hash", ir);
         Assert.DoesNotContain("TODO:", ir);
     }
 
