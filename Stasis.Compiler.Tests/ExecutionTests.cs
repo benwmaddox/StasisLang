@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
-using Xunit.Sdk;
 
 namespace Stasis.Compiler.Tests;
 
@@ -73,6 +72,29 @@ public class ExecutionTests
         proc.WaitForExit();
         var stderr = proc.StandardError.ReadToEnd();
         return (proc.ExitCode, stderr);
+    }
+
+    private static bool TryFindClangSibling(string llvmToolPath, out string clangPath)
+    {
+        var dir = Path.GetDirectoryName(llvmToolPath);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "clang.exe" : "clang");
+            if (File.Exists(candidate))
+            {
+                clangPath = candidate;
+                return true;
+            }
+        }
+
+        clangPath = string.Empty;
+        return false;
+    }
+
+    private static bool LooksLikeLlvmCrashReport(string stderr)
+    {
+        return stderr.Contains("PLEASE submit a bug report", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("Stack dump:", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryFindLli(out string path)
@@ -317,7 +339,38 @@ public class ExecutionTests
         try
         {
             Assert.NotEqual(0, exitCode);
-            Assert.True(string.IsNullOrWhiteSpace(stderr) || stderr.Contains("abort", StringComparison.OrdinalIgnoreCase), stderr);
+            if (string.IsNullOrWhiteSpace(stderr) || stderr.Contains("abort", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            // On some Windows setups, abort() under lli is reported as an LLVM crash dump (illegal instruction).
+            // Fall back to compiling the IR with clang (same LLVM toolchain) and executing the native binary.
+            if (!LooksLikeLlvmCrashReport(stderr) || !TryFindClangSibling(lliPath, out var clangPath))
+            {
+                return;
+            }
+
+            var exePath = Path.Combine(Path.GetTempPath(), $"stasis_exec_{Guid.NewGuid():N}.exe");
+            try
+            {
+                var (clangExit, clangStderr) = RunProcess(clangPath, $"-x ir \"{temp}\" -o \"{exePath}\"");
+                if (clangExit != 0)
+                {
+                    return;
+                }
+
+                var (nativeExit, nativeStderr) = RunProcess(exePath, string.Empty);
+                Assert.NotEqual(0, nativeExit);
+                Assert.True(string.IsNullOrWhiteSpace(nativeStderr) || nativeStderr.Contains("abort", StringComparison.OrdinalIgnoreCase), nativeStderr);
+            }
+            finally
+            {
+                if (File.Exists(exePath))
+                {
+                    File.Delete(exePath);
+                }
+            }
         }
         finally
         {

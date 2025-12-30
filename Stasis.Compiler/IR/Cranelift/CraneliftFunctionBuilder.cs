@@ -500,6 +500,36 @@ public sealed class CraneliftFunctionBuilder
         return val;
     }
 
+    private string CoerceLoadedSmallIntToI32(string value, CraneliftTypeMapper.ClifType loadedType)
+    {
+        if (loadedType is CraneliftTypeMapper.ClifType.I8 or CraneliftTypeMapper.ClifType.I16)
+        {
+            var widened = NewValue();
+            _instructions.AppendLine($"    {widened} = uextend.i32 {value}");
+            return widened;
+        }
+
+        return value;
+    }
+
+    private string ReduceI32ToSmallInt(string value, CraneliftTypeMapper.ClifType targetType)
+    {
+        if (targetType == CraneliftTypeMapper.ClifType.I8)
+        {
+            var reduced = NewValue();
+            _instructions.AppendLine($"    {reduced} = ireduce.i8 {value}");
+            return reduced;
+        }
+        if (targetType == CraneliftTypeMapper.ClifType.I16)
+        {
+            var reduced = NewValue();
+            _instructions.AppendLine($"    {reduced} = ireduce.i16 {value}");
+            return reduced;
+        }
+
+        return value;
+    }
+
     private string LowerIdentifier(IdentifierExpressionSyntax id)
     {
         var name = id.Identifier.Text;
@@ -2991,7 +3021,7 @@ public sealed class CraneliftFunctionBuilder
 
             var localResultValue = NewValue();
             _instructions.AppendLine($"    {localResultValue} = load.{FormatType(localElemType)} {localElemAddr}");
-            return localResultValue;
+            return CoerceLoadedSmallIntToI32(localResultValue, localElemType);
         }
 
         // Global array - get base address and calculate element address
@@ -3063,8 +3093,7 @@ public sealed class CraneliftFunctionBuilder
         // Load the element value
         var globalResult = NewValue();
         _instructions.AppendLine($"    {globalResult} = load.{FormatType(globalElemType)} {globalElemAddr}");
-
-        return globalResult;
+        return CoerceLoadedSmallIntToI32(globalResult, globalElemType);
     }
 
     private string LowerArrayFieldAccess(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr)
@@ -3108,7 +3137,7 @@ public sealed class CraneliftFunctionBuilder
 
         var result = NewValue();
         _instructions.AppendLine($"    {result} = load.{FormatType(clifElemType)} {elemAddr}");
-        return result;
+        return CoerceLoadedSmallIntToI32(result, clifElemType);
     }
 
     private string LowerArrayElementFieldAccess(ArrayAccessExpressionSyntax array, string fieldName)
@@ -3238,6 +3267,7 @@ public sealed class CraneliftFunctionBuilder
             value = CoerceAssignmentValue(value, valueType, localArrayType.ElementType);
             var localElemType = _typeMapper.Map(localArrayType.ElementType);
             var localElemSize = GetTypeSize(localElemType);
+            value = ReduceI32ToSmallInt(value, localElemType);
 
             var localBaseAddr = NewValue();
             _instructions.AppendLine($"    {localBaseAddr} = load.{FormatType(local.Type)} {local.Address}");
@@ -3272,6 +3302,7 @@ public sealed class CraneliftFunctionBuilder
         var globalElemType = _typeMapper.Map(arrayType.ElementType);
         var globalElemSize = GetTypeSize(globalElemType);
         value = CoerceAssignmentValue(value, valueType, arrayType.ElementType);
+        value = ReduceI32ToSmallInt(value, globalElemType);
 
         // Load array base address
         var globalBaseAddr = NewValue();
@@ -3326,6 +3357,7 @@ public sealed class CraneliftFunctionBuilder
         var elemType = ResolveType(arrayType.ElementType);
         var clifElemType = _typeMapper.Map(elemType);
         value = CoerceAssignmentValue(value, valueType, elemType);
+        value = ReduceI32ToSmallInt(value, clifElemType);
         var index = LowerExpression(indexExpr);
         var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
 

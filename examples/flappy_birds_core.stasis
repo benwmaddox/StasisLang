@@ -31,7 +31,7 @@ function rand_gap_y(): f32 {
     let r: i32 = rand_next();
     let v: i32 = r % 1000;
     if (v < 0) { v = -v; }
-    let vf: f32 = v;
+    let vf: f32 = i32_to_f32(v);
     let range: f32 = WORLD_H - 2.0 * GAP_HALF - 10.0;
     let base: f32 = 5.0 + GAP_HALF;
     return base + range * (vf / 1000.0);
@@ -45,7 +45,7 @@ function reset() {
 
     let i: i32 = 0;
     for (i = 0; i < 3; i = i + 1) {
-        pipe_x[i] = WORLD_W + (PIPE_SPACING * i);
+        pipe_x[i] = WORLD_W + (PIPE_SPACING * i32_to_f32(i));
         pipe_gap_y[i] = rand_gap_y();
     }
 }

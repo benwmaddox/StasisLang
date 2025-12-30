@@ -1256,12 +1256,12 @@ public sealed class ModuleLowerer
 
         private void LowerFunction(FunctionDeclarationSyntax fn)
         {
-            LowerFunctionCore(fn.Name.Text, fn.Parameters, fn.ReturnType, fn.Body);
+            LowerFunctionCore(fn.Name.Text, fn.Parameters, fn.ReturnType, fn.Body, isTest: false);
         }
 
         private void LowerFunction(TestDeclarationSyntax test)
         {
-            LowerFunctionCore(test.Name.Text, test.Parameters, test.ReturnType, test.Body);
+            LowerFunctionCore(test.Name.Text, test.Parameters, test.ReturnType, test.Body, isTest: true);
         }
 
         private readonly record struct LocalBinding(LLVMValueRef Value, LLVMTypeRef Type, bool IsAddress, ElementBinding? Element = null, TypeSymbol? SemanticType = null, ArrayDescriptorLayout? ArrayLayout = null, bool IsArrayDescriptor = false);
@@ -1274,7 +1274,7 @@ public sealed class ModuleLowerer
             LLVMValueRef? PrimitiveBasePtr = null,
             Dictionary<string, LLVMValueRef>? FieldPtrs = null);
 
-        private void LowerFunctionCore(string name, IReadOnlyList<ParameterSyntax> parameters, TypeSyntax? returnType, BlockStatementSyntax body)
+        private void LowerFunctionCore(string name, IReadOnlyList<ParameterSyntax> parameters, TypeSyntax? returnType, BlockStatementSyntax body, bool isTest)
         {
             var function = _moduleBuilder.Module.GetNamedFunction(name);
             if (function.Handle == IntPtr.Zero)
@@ -1313,7 +1313,7 @@ public sealed class ModuleLowerer
             }
 
             var terminated = LowerBlock(builder, function, body, locals);
-            var isVoid = returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
+            var isVoid = !isTest && (returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal)));
             if (!terminated && isVoid)
             {
                 builder.BuildRetVoid();
@@ -1354,6 +1354,8 @@ public sealed class ModuleLowerer
                     else
                     {
                         var value = LowerExpression(builder, ret.Expression, locals);
+                        var returnType = GetFunctionType(function).ReturnType;
+                        value = ConvertToType(builder, value, returnType);
                         builder.BuildRet(value);
                     }
 
@@ -1930,9 +1932,23 @@ public sealed class ModuleLowerer
                     AddDiagnostic($"Missing array global '{baseName}'.", expr.Span);
                     return LLVMValueRef.CreateConstNull(layout.DescriptorType);
                 }
-                var bitcast = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+
+                LLVMValueRef dataPtr;
+                if (arrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                {
+                    var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                    var backingBytes = Math.Max(1, resolvedLength + headerSize);
+                    var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                    var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{baseName}.payload");
+                    dataPtr = payloadPtr;
+                }
+                else
+                {
+                    dataPtr = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+                }
+
                 var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
-                desc = builder.BuildInsertValue(desc, bitcast, 0, $"{baseName}.desc");
+                desc = builder.BuildInsertValue(desc, dataPtr, 0, $"{baseName}.desc");
                 var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)Math.Max(0, resolvedLength), true);
                 desc = builder.BuildInsertValue(desc, lenVal, 1, $"{baseName}.len");
                 return desc;
@@ -3976,6 +3992,41 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerBinary(LLVMBuilderRef builder, string op, LLVMValueRef lhs, LLVMValueRef rhs, SourceSpan span)
         {
+            var lhsType = lhs.TypeOf;
+            var rhsType = rhs.TypeOf;
+
+            var lhsIsFloat = lhsType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            var rhsIsFloat = rhsType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            if (lhsIsFloat || rhsIsFloat)
+            {
+                var target = (lhsType.Kind == LLVMTypeKind.LLVMDoubleTypeKind || rhsType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
+                    ? LLVMTypeRef.Double
+                    : LLVMTypeRef.Float;
+                lhs = ConvertToType(builder, lhs, target);
+                rhs = ConvertToType(builder, rhs, target);
+            }
+            else if (lhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind && rhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
+            {
+                var targetWidth = Math.Max((int)lhsType.IntWidth, (int)rhsType.IntWidth);
+                if (targetWidth < 32)
+                {
+                    targetWidth = 32;
+                }
+
+                var target = targetWidth switch
+                {
+                    1 => LLVMTypeRef.Int1,
+                    8 => LLVMTypeRef.Int8,
+                    16 => LLVMTypeRef.Int16,
+                    32 => LLVMTypeRef.Int32,
+                    64 => LLVMTypeRef.Int64,
+                    _ => LLVMTypeRef.CreateInt((uint)targetWidth)
+                };
+
+                lhs = ConvertToType(builder, lhs, target);
+                rhs = ConvertToType(builder, rhs, target);
+            }
+
             var type = lhs.TypeOf;
             var isFloat = type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
             return op switch
@@ -4420,9 +4471,24 @@ public sealed class ModuleLowerer
                         var globalName = TryResolveGlobalName(id.Identifier.Text);
                         var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
                         elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
-                        var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
-                        var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
-                        ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");
+                        LLVMValueRef basePtr;
+                        if (arrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            var backingBytes = arrayType.Size > 0 ? arrayType.Size + headerSize : headerSize;
+                            backingBytes = Math.Max(1, backingBytes);
+                            var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                            var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, "str.payload");
+                            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                            basePtr = builder.BuildBitCast(payloadPtr, elemPtrType, "elembase");
+                        }
+                        else
+                        {
+                            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                            basePtr = builder.BuildBitCast(global, elemPtrType, "elembase");
+                        }
+
+                        ptr = builder.BuildGEP2(elemType, basePtr, new[] { index }, "elemaddr");
                         return true;
                     }
                 }
@@ -5119,7 +5185,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         private LLVMValueRef ConvertToType(LLVMBuilderRef builder, LLVMValueRef value, LLVMTypeRef targetType)
         {
             var sourceType = value.TypeOf;
-            if (sourceType.Kind == targetType.Kind)
+            if (sourceType.Handle == targetType.Handle)
             {
                 return value;
             }
@@ -5128,6 +5194,36 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             var sourceIsFloat = sourceType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
             var targetIsInt = targetType.Kind == LLVMTypeKind.LLVMIntegerTypeKind;
             var targetIsFloat = targetType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+
+            if (sourceIsInt && targetIsInt)
+            {
+                if (sourceType.IntWidth == targetType.IntWidth)
+                {
+                    return value;
+                }
+
+                if (sourceType.IntWidth < targetType.IntWidth)
+                {
+                    return builder.BuildZExt(value, targetType, "zext");
+                }
+
+                return builder.BuildTrunc(value, targetType, "trunc");
+            }
+
+            if (sourceIsFloat && targetIsFloat)
+            {
+                if (sourceType.Kind == LLVMTypeKind.LLVMFloatTypeKind && targetType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
+                {
+                    return builder.BuildFPExt(value, targetType, "fpext");
+                }
+
+                if (sourceType.Kind == LLVMTypeKind.LLVMDoubleTypeKind && targetType.Kind == LLVMTypeKind.LLVMFloatTypeKind)
+                {
+                    return builder.BuildFPTrunc(value, targetType, "fptrunc");
+                }
+
+                return value;
+            }
 
             // i32 -> f32: signed int to float
             if (sourceIsInt && targetIsFloat)
@@ -5167,7 +5263,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters);
+            EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
         if (!includeTests)
@@ -5177,14 +5273,14 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
 
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
         {
-            EmitFunction(builder, symbols, structs, test.Name.Text, test.ReturnType, test.Parameters);
+            EmitFunction(builder, symbols, structs, test.Name.Text, test.ReturnType, test.Parameters, isTest: true);
         }
     }
 
-    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters)
+    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters, bool isTest)
     {
         var ret = returnType is null
-            ? LLVMTypeRef.Void
+            ? (isTest ? LLVMTypeRef.Int32 : LLVMTypeRef.Void)
             : builder.TypeMapper.Map(ResolveType(returnType, symbols));
 
         var paramTypes = parameters
