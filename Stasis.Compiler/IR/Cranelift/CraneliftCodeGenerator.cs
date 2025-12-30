@@ -149,6 +149,38 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("audio_is_available"))
+        {
+            builder.DeclareExternal("stasis_audio_is_available", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("audio_get_sample_rate"))
+        {
+            builder.DeclareExternal("stasis_audio_get_sample_rate", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("audio_get_channels"))
+        {
+            builder.DeclareExternal("stasis_audio_get_channels", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("audio_get_queued_frames"))
+        {
+            builder.DeclareExternal("stasis_audio_get_queued_frames", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("audio_get_underruns"))
+        {
+            builder.DeclareExternal("stasis_audio_get_underruns", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("audio_push_f32_interleaved"))
+        {
+            builder.DeclareExternal("stasis_audio_push_f32_interleaved", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.I32);
+        }
+
         if (builtins.Overlaps(new[] { "sin", "sin_fast" }))
         {
             builder.DeclareExternal("sinf", CraneliftTypeMapper.ClifType.F32,
@@ -986,6 +1018,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         name is "print_int" or "print_char" or "print_string" or "read_int" or "read_char"
             or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
             or "time" or "get_time_ms" or "sleep_ms"
+            or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
+            or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"
             or "sin" or "cos" or "sin_fast" or "cos_fast"
             or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line" or "draw_lines_f32"
             or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_poll_reload" or "gfx_debug_bake_hash"

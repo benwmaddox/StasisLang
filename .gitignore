@@ -19,6 +19,7 @@ _ReSharper.Caches/
 !vscode-stasis/.vscode/**
 .config/dotnet-tools.json.lock
 .claude/settings.local.json
+.stasis_cache/
 
 # Build artifacts
 *.dll
