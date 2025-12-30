@@ -1,0 +1,478 @@
+import "../src/stdlib/stdlib.stasis";
+
+// Interactive showcase sample:
+// 1) Rendering: draws shapes with different colors.
+// 2) Input: click the shape to randomize shape/color.
+// 3) Sound: background tone + click beep (procedural audio).
+// 4) Text: click the text box and type; rendered with a TTF font.
+//
+// Run:
+// - LLVM:     stasis.bat run samples/interactive_showcase.stasis --backend llvm --graphics
+// - Cranelift stasis.bat run samples/interactive_showcase.stasis --backend cranelift --graphics
+//
+// Notes:
+// - Font path is Windows-specific by default. Change FONT_PATH if needed.
+
+const PI2: f32 = 6.28318;
+const FRAME_MS: i32 = 16;
+
+const FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const FONT_SIZE: i32 = 20;
+
+const FRAMES_PER_PUSH: i32 = 256;
+global audio_buf: f32[512]; // 256 frames * 2 channels
+
+global audio_ready: bool;
+global audio_sr: i32;
+global audio_phase0: f32;
+global audio_phase1: f32;
+global click_phase: f32;
+global click_env: f32;
+
+global rng_state: i32;
+
+enum ShapeKind {
+    Rect = 0,
+    Tri = 1,
+    Circle = 2
+}
+
+global shape_kind: ShapeKind;
+global shape_x: f32;
+global shape_y: f32;
+global shape_half: f32;
+global shape_r: f32;
+global shape_g: f32;
+global shape_b: f32;
+
+global font_handle: i32;
+global text_focused: bool;
+global text_len: i32;
+global text_buf: utf8[256];
+global key_prev: i32[128];
+
+function abs_f32(x: f32): f32 {
+    if (x < 0.0) {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+function clamp01(x: f32): f32 {
+    if (x < 0.0) {
+        return 0.0;
+    }
+    if (x > 1.0) {
+        return 1.0;
+    }
+    return x;
+}
+
+function rand_next(): i32 {
+    rng_state = rng_state * 1103515245 + 12345;
+    return rng_state;
+}
+
+function rand_range_i32(min_incl: i32, max_incl: i32): i32 {
+    let r: i32 = rand_next();
+    if (r < 0) {
+        r = 0 - r;
+    }
+    let span: i32 = (max_incl - min_incl) + 1;
+    if (span <= 1) {
+        return min_incl;
+    }
+    return min_incl + (r % span);
+}
+
+function rand_f32_01(): f32 {
+    let v: i32 = rand_range_i32(0, 255);
+    return i32_to_f32(v) / 255.0;
+}
+
+function point_in_aabb(px: f32, py: f32, cx: f32, cy: f32, half: f32): bool {
+    return px >= (cx - half) && px <= (cx + half) && py >= (cy - half) && py <= (cy + half);
+}
+
+function draw_rect(cx: f32, cy: f32, half: f32, r: f32, g: f32, b: f32): void {
+    let x0: f32 = cx - half;
+    let y0: f32 = cy - half;
+    let x1: f32 = cx + half;
+    let y1: f32 = cy + half;
+    draw_line(x0, y0, x1, y0, r, g, b, 1.0);
+    draw_line(x1, y0, x1, y1, r, g, b, 1.0);
+    draw_line(x1, y1, x0, y1, r, g, b, 1.0);
+    draw_line(x0, y1, x0, y0, r, g, b, 1.0);
+}
+
+function draw_tri(cx: f32, cy: f32, half: f32, r: f32, g: f32, b: f32): void {
+    let x0: f32 = cx;
+    let y0: f32 = cy - half;
+    let x1: f32 = cx - half;
+    let y1: f32 = cy + half;
+    let x2: f32 = cx + half;
+    let y2: f32 = cy + half;
+    draw_line(x0, y0, x1, y1, r, g, b, 1.0);
+    draw_line(x1, y1, x2, y2, r, g, b, 1.0);
+    draw_line(x2, y2, x0, y0, r, g, b, 1.0);
+}
+
+function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32): void {
+    let segments: i32 = 24;
+    let i: i32 = 0;
+    let step: f32 = PI2 / i32_to_f32(segments);
+    let a0: f32 = 0.0;
+    for (i = 0; i < segments; i = i + 1) {
+        let a1: f32 = a0 + step;
+        let x0: f32 = cx + cos_fast(a0) * radius;
+        let y0: f32 = cy + sin_fast(a0) * radius;
+        let x1: f32 = cx + cos_fast(a1) * radius;
+        let y1: f32 = cy + sin_fast(a1) * radius;
+        draw_line(x0, y0, x1, y1, r, g, b, 1.0);
+        a0 = a1;
+    }
+}
+
+function draw_shape(kind: ShapeKind, cx: f32, cy: f32, half: f32, r: f32, g: f32, b: f32): void {
+    if (kind == ShapeKind.Rect) {
+        draw_rect(cx, cy, half, r, g, b);
+        return;
+    }
+    if (kind == ShapeKind.Tri) {
+        draw_tri(cx, cy, half, r, g, b);
+        return;
+    }
+    draw_circle(cx, cy, half, r, g, b);
+}
+
+function utf8_set_len(s: utf8[], len: i32): void {
+    let value: i32 = len;
+    if (value < 0) {
+        value = 0;
+    }
+
+    // byte_length (i32) at [-8..-5]
+    let b0: i32 = value % 256;
+    let b1: i32 = (value / 256) % 256;
+    let b2: i32 = (value / 65536) % 256;
+    let b3: i32 = (value / 16777216) % 256;
+    s[-8] = b0;
+    s[-7] = b1;
+    s[-6] = b2;
+    s[-5] = b3;
+
+    // char_length (i32) at [-4..-1] (ASCII input => char_length == byte_length)
+    s[-4] = b0;
+    s[-3] = b1;
+    s[-2] = b2;
+    s[-1] = b3;
+}
+
+function text_sync_header(): void {
+    utf8_set_len(text_buf, text_len);
+    text_buf[text_len] = 0;
+}
+
+function text_clear(): void {
+    text_len = 0;
+    text_buf[0] = 0;
+    text_sync_header();
+}
+
+function text_append_byte(b: i32): void {
+    if (text_len >= 254) {
+        return;
+    }
+    text_buf[text_len] = b;
+    text_len = text_len + 1;
+    text_buf[text_len] = 0;
+    text_sync_header();
+}
+
+function text_backspace(): void {
+    if (text_len <= 0) {
+        return;
+    }
+    text_len = text_len - 1;
+    text_buf[text_len] = 0;
+    text_sync_header();
+}
+
+function key_went_down(sc: i32): bool {
+    if (sc < 0 || sc >= 128) {
+        return false;
+    }
+    let down: bool = is_key_down(sc);
+    let prev: i32 = key_prev[sc];
+    let went: bool = down && prev == 0;
+
+    let next: i32 = 0;
+    if (down) {
+        next = 1;
+    }
+    key_prev[sc] = next;
+
+    return went;
+}
+
+function update_text_input(): void {
+    if (!text_focused) {
+        return;
+    }
+
+    // SDL scancodes (subset):
+    // A..Z = 4..29, 1..0 = 30..39, Return=40, Backspace=42, Space=44
+    let sc: i32 = 0;
+
+    if (key_went_down(42)) {
+        text_backspace();
+    }
+    if (key_went_down(44)) {
+        text_append_byte(32);
+    }
+    if (key_went_down(40)) {
+        text_append_byte(10);
+    }
+
+    for (sc = 4; sc <= 29; sc = sc + 1) {
+        if (key_went_down(sc)) {
+            // lower-case ASCII
+            let ch: i32 = 97 + (sc - 4);
+            text_append_byte(ch);
+        }
+    }
+
+    for (sc = 30; sc <= 39; sc = sc + 1) {
+        if (key_went_down(sc)) {
+            let ch: i32 = 48;
+            if (sc == 39) {
+                ch = 48;
+            } else {
+                ch = 49 + (sc - 30);
+            }
+            text_append_byte(ch);
+        }
+    }
+}
+
+function trigger_click_sound(): void {
+    click_phase = 0.0;
+    click_env = 0.35;
+}
+
+function fill_audio_chunk(sample_rate: i32): void {
+    let sr_f: f32 = i32_to_f32(sample_rate);
+
+    // Simple "music": two sines.
+    let step0: f32 = (PI2 * 110.0) / sr_f;
+    let step1: f32 = (PI2 * 165.0) / sr_f;
+    // Click beep.
+    let click_step: f32 = (PI2 * 880.0) / sr_f;
+
+    let i: i32 = 0;
+    for (i = 0; i < FRAMES_PER_PUSH; i = i + 1) {
+        let music: f32 = (sin_fast(audio_phase0) * 0.06) + (sin_fast(audio_phase1) * 0.04);
+
+        let click: f32 = 0.0;
+        if (click_env > 0.0001) {
+            click = sin_fast(click_phase) * click_env;
+            click_env = click_env * 0.996;
+        } else {
+            click_env = 0.0;
+        }
+
+        let s: f32 = clamp01((music + click) * 0.5 + 0.5) * 2.0 - 1.0;
+
+        let idx: i32 = i * 2;
+        audio_buf[idx] = s;
+        audio_buf[idx + 1] = s;
+
+        audio_phase0 = audio_phase0 + step0;
+        if (audio_phase0 > PI2) {
+            audio_phase0 = audio_phase0 - PI2;
+        }
+        audio_phase1 = audio_phase1 + step1;
+        if (audio_phase1 > PI2) {
+            audio_phase1 = audio_phase1 - PI2;
+        }
+        click_phase = click_phase + click_step;
+        if (click_phase > PI2) {
+            click_phase = click_phase - PI2;
+        }
+    }
+}
+
+function audio_update(): void {
+    if (!audio_ready) {
+        return;
+    }
+
+    // Keep ~200ms buffered.
+    let target: i32 = audio_sr / 5;
+    let queued: i32 = audio_get_queued_frames();
+    let guard: i32 = 0;
+    for (guard = 0; queued < target && guard < 8; guard = guard + 1) {
+        fill_audio_chunk(audio_sr);
+        let pushed: i32 = audio_push_f32_interleaved(audio_buf, FRAMES_PER_PUSH);
+        if (pushed <= 0) {
+            return;
+        }
+        queued = queued + pushed;
+        if (pushed < FRAMES_PER_PUSH) {
+            return;
+        }
+    }
+}
+
+function randomize_shape(): void {
+    let k: i32 = rand_range_i32(0, 2);
+    if (k == 0) {
+        shape_kind = ShapeKind.Rect;
+    } else {
+        if (k == 1) {
+            shape_kind = ShapeKind.Tri;
+        } else {
+            shape_kind = ShapeKind.Circle;
+        }
+    }
+    shape_r = rand_f32_01();
+    shape_g = rand_f32_01();
+    shape_b = rand_f32_01();
+    if (shape_r + shape_g + shape_b < 0.4) {
+        shape_r = shape_r + 0.4;
+        shape_g = shape_g + 0.2;
+    }
+}
+
+function main(): i32 {
+    rng_state = time();
+
+    let ok: bool = init_window(900, 600, "Stasis Interactive Showcase");
+    if (!ok) {
+        return 1;
+    }
+
+    font_handle = load_font(FONT_PATH, FONT_SIZE);
+
+    audio_ready = audio_is_available();
+    if (audio_ready) {
+        audio_sr = audio_get_sample_rate();
+    }
+
+    text_clear();
+    text_append_byte(99);  // c
+    text_append_byte(108); // l
+    text_append_byte(105); // i
+    text_append_byte(99);  // c
+    text_append_byte(107); // k
+    text_append_byte(32);  // space
+    text_append_byte(104); // h
+    text_append_byte(101); // e
+    text_append_byte(114); // r
+    text_append_byte(101); // e
+    text_append_byte(32);
+    text_append_byte(97);
+    text_append_byte(110);
+    text_append_byte(100);
+    text_append_byte(32);
+    text_append_byte(116);
+    text_append_byte(121);
+    text_append_byte(112);
+    text_append_byte(101);
+    text_append_byte(46);
+    text_append_byte(46);
+    text_append_byte(46);
+
+    randomize_shape();
+    shape_half = 90.0;
+    shape_x = 450.0;
+    shape_y = 240.0;
+
+    let running: i32 = 1;
+    for (; running == 1; ) {
+        if (should_quit()) {
+            running = 0;
+        }
+
+        let w_i: i32 = gfx_window_width();
+        let h_i: i32 = gfx_window_height();
+        let w: f32 = i32_to_f32(w_i);
+        let h: f32 = i32_to_f32(h_i);
+
+        shape_x = w * 0.5;
+        shape_y = h * 0.40;
+
+        let box_x0: f32 = 20.0;
+        let box_y0: f32 = h - 90.0;
+        let box_w: f32 = w - 40.0;
+        let box_h: f32 = 70.0;
+        let box_x1: f32 = box_x0 + box_w;
+        let box_y1: f32 = box_y0 + box_h;
+
+        let count: i32 = input_pointer_count();
+        let i: i32 = 0;
+        for (i = 0; i < count; i = i + 1) {
+            let went_down: bool = input_pointer_went_down(i);
+            if (went_down) {
+                let px: f32 = input_pointer_x_px(i);
+                let py: f32 = input_pointer_y_px(i);
+
+                if (point_in_aabb(px, py, shape_x, shape_y, shape_half)) {
+                    randomize_shape();
+                    trigger_click_sound();
+                } else {
+                    if (px >= box_x0 && px <= box_x1 && py >= box_y0 && py <= box_y1) {
+                        text_focused = true;
+                        trigger_click_sound();
+                    } else {
+                        text_focused = false;
+                    }
+                }
+            }
+        }
+
+        update_text_input();
+
+        begin_frame();
+        clear(0.02, 0.02, 0.03, 1.0);
+
+        // A couple static shapes so we always hit "different shapes/colors".
+        draw_rect(w * 0.18, h * 0.30, 50.0, 0.3, 0.9, 0.5);
+        draw_circle(w * 0.82, h * 0.30, 50.0, 0.9, 0.3, 0.6);
+
+        // Interactive shape (click inside the box to randomize).
+        draw_shape(shape_kind, shape_x, shape_y, shape_half, shape_r, shape_g, shape_b);
+
+        // Text box outline.
+        let box_r: f32 = 0.25;
+        let box_g: f32 = 0.25;
+        let box_b: f32 = 0.35;
+        if (text_focused) {
+            box_r = 0.25;
+            box_g = 0.75;
+            box_b = 0.25;
+        }
+        draw_line(box_x0, box_y0, box_x1, box_y0, box_r, box_g, box_b, 1.0);
+        draw_line(box_x1, box_y0, box_x1, box_y1, box_r, box_g, box_b, 1.0);
+        draw_line(box_x1, box_y1, box_x0, box_y1, box_r, box_g, box_b, 1.0);
+        draw_line(box_x0, box_y1, box_x0, box_y0, box_r, box_g, box_b, 1.0);
+
+        // Instructions + typed text.
+        draw_text(font_handle, "Click shape to randomize. Click box to type. Backspace deletes.", 24.0, 18.0, 0.85, 0.85, 0.9, 1.0);
+        draw_text(font_handle, text_buf, box_x0 + 10.0, box_y0 + 14.0, 0.95, 0.95, 0.95, 1.0);
+
+        // Simple caret when focused.
+        if (text_focused) {
+            let tw: f32 = measure_text(font_handle, text_buf);
+            let cx: f32 = box_x0 + 10.0 + tw + 2.0;
+            draw_line(cx, box_y0 + 14.0, cx, box_y1 - 14.0, 0.95, 0.95, 0.95, 1.0);
+        }
+
+        end_frame();
+
+        audio_update();
+        sleep_ms(FRAME_MS);
+    }
+
+    return 0;
+}
