@@ -24,4 +24,4 @@ if [[ ! -f "${graphics_library_path}" ]]; then
   exit 1
 fi
 
-"${script_dir}/stasis.sh" test samples --all --backend llvm --graphics --graphics-lib "${graphics_library_path}"
+bash "${script_dir}/stasis.sh" test samples --all --backend llvm --graphics --graphics-lib "${graphics_library_path}"
