@@ -48,6 +48,7 @@ Common commands:
 - `.\stasis.bat run .\samples\asteroids.stasis --backend llvm --graphics`
 - `.\stasis.bat test --all --backend cranelift`
 - `.\stasis.bat run .\samples\basic.stasis --emit-ir > out.ll`
+- `.\stasis.bat run .\samples\basic.stasis --watch` (opt-in dev loop)
 
 Backends:
 

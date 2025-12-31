@@ -32,7 +32,6 @@ var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
 var watch = false;
-var watchExplicit = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
@@ -95,7 +94,6 @@ while (cliArgs.Count > 0)
             break;
         case "--watch":
             watch = true;
-            watchExplicit = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -263,16 +261,7 @@ if (backend == BackendType.Llvm)
     LlvmNativeLoader.EnsureLoaded();
 }
 
-// Dev defaults: in run mode, auto-enable watch for tick-hosted games (or likely graphics programs),
-// and enable phase timing output when watching. (Explicit --watch always wins.)
-if (devMode && !watchExplicit && File.Exists(path))
-{
-    var sourceForDetect = File.ReadAllText(path);
-    if (DetectsTickUsage(sourceForDetect) || DetectsGraphicsUsage(sourceForDetect))
-    {
-        watch = true;
-    }
-}
+// Dev defaults: enable phase timing output when watching. (Explicit --watch always wins.)
 
 if (devMode && watch)
 {
@@ -2912,7 +2901,7 @@ static void PrintUsage()
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
-    Console.WriteLine("Run: for games that define `function tick()`, 'run' defaults to a dev loop (auto-watch + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
+    Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
