@@ -1,0 +1,39 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace "com.stasis.brickoutrevenge"
+    compileSdkVersion 34
+
+    defaultConfig {
+        applicationId "com.stasis.brickoutrevenge"
+        minSdkVersion 21
+        targetSdkVersion 34
+        versionCode 1
+        versionName "0.0.0"
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    // We package prebuilt native libs produced by scripts under src/main/jniLibs/.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+}
+

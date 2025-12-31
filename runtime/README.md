@@ -40,7 +40,11 @@ Android builds currently use the SDL_Renderer backend only (no OpenGL 2.1/GLEW p
 - Configure `runtime/CMakeLists.txt` with `-DSTASIS_GRAPHICS_SDL_ONLY=ON`
 - Use an NDK toolchain (direct CMake toolchain or vcpkg Android triplets)
 
-If you are using the vendored vcpkg under `codevcpkg/`, see `runtime/build_android.ps1`.
+Build helper:
+- `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME` and vcpkg via `VCPKG_ROOT` or `C:\vcpkg`)
+
+Brickout Revenge debug APK workflow:
+- See `docs/brickout-android-debug-plan.md` and use `android/build_brickout_android_debug.ps1` + `android/install_brickout_android_debug.ps1`.
 
 ## Manual Build (Alternative)
 

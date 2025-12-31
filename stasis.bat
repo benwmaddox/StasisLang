@@ -3,6 +3,7 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 set "CONFIG=Release"
 set "DOTNET_ARGS=--no-restore --configuration %CONFIG%"
+if "%DOTNET_GCHeapHardLimit%"=="" set "DOTNET_GCHeapHardLimit=2147483648"
 if "%1"=="test" (
     set "DOTNET_ARGS=--no-build --configuration %CONFIG%"
 )

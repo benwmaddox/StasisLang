@@ -23,7 +23,10 @@ This plan focuses on getting Stasis running on Android in small, verifiable step
 3. Output: a shared library suitable for loading from Java/Kotlin via `System.loadLibrary`.
 
 Build helper:
-- `runtime/build_android.ps1` (uses vendored `codevcpkg/` + `ANDROID_NDK_HOME`)
+- `runtime/build_android.ps1` (uses `VCPKG_ROOT` or `C:\vcpkg` + `ANDROID_NDK_HOME`)
+
+Related (Brickout Revenge debug workflow):
+- See `docs/brickout-android-debug-plan.md` and `android/build_brickout_android_debug.ps1` / `android/install_brickout_android_debug.ps1` for a "build APK + install + push assets" path.
 
 ## Phase 2: Minimal Android host app (JNI bridge)
 
@@ -48,4 +51,3 @@ Notes:
 - A minimal Android app launches on device/emulator and renders a frame.
 - Pointer/tap events reach Stasis code with correct coordinates.
 - Audio playback works with underrun diagnostics visible.
-

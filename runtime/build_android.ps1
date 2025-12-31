@@ -6,11 +6,18 @@ param(
 )
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$vcpkgRoot = Join-Path $repoRoot "codevcpkg"
-$vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
+$vendoredVcpkgRoot = Join-Path $repoRoot "codevcpkg"
+$vcpkgRoot = $vendoredVcpkgRoot
+if (-not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
+    $vcpkgRoot = $env:VCPKG_ROOT
+}
+if (-not $vcpkgRoot) {
+    $vcpkgRoot = "C:\\vcpkg"
+}
 
+$vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
 if (-not (Test-Path $vcpkgExe)) {
-    throw "vcpkg.exe not found at $vcpkgExe (expected vendored vcpkg under codevcpkg/)"
+    throw "vcpkg.exe not found (set VCPKG_ROOT or install vcpkg to C:\\vcpkg). Looked in: $vendoredVcpkgRoot, $env:VCPKG_ROOT, C:\\vcpkg"
 }
 
 $ndk = $env:ANDROID_NDK_HOME
