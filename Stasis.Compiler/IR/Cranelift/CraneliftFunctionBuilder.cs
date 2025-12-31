@@ -570,10 +570,10 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerBinary(BinaryExpressionSyntax bin)
     {
-        var left = LowerExpression(bin.Left);
-        var right = LowerExpression(bin.Right);
         var leftType = GetExpressionType(bin.Left);
         var rightType = GetExpressionType(bin.Right);
+        var left = TryEmitNumericLiteral(bin.Left, rightType, out var leftLiteral) ? leftLiteral : LowerExpression(bin.Left);
+        var right = TryEmitNumericLiteral(bin.Right, leftType, out var rightLiteral) ? rightLiteral : LowerExpression(bin.Right);
         var isFloat = IsFloatType(leftType) || IsFloatType(rightType);
         if (isFloat)
         {
@@ -2294,9 +2294,8 @@ public sealed class CraneliftFunctionBuilder
         var index = LowerExpression(arguments[1]);
         var addr = EmitByteAddress(ptr, index);
         var byteVal = LowerExpression(arguments[2]);
-        var truncated = NewValue();
-        _instructions.AppendLine($"    {truncated} = ireduce.i8 {byteVal}");
-        _instructions.AppendLine($"    store {truncated}, {addr}");
+        byteVal = ReduceI32ToSmallInt(byteVal, CraneliftTypeMapper.ClifType.I8);
+        _instructions.AppendLine($"    store {byteVal}, {addr}");
         var len64 = NewValue();
         _instructions.AppendLine($"    {len64} = call %strlen({ptr})");
         var len = NewValue();
@@ -2382,9 +2381,8 @@ public sealed class CraneliftFunctionBuilder
         var len = NewValue();
         _instructions.AppendLine($"    {len} = ireduce.i32 {len64}");
         var addr = EmitByteAddress(ptr, len);
-        var truncated = NewValue();
-        _instructions.AppendLine($"    {truncated} = ireduce.i8 {byteVal}");
-        _instructions.AppendLine($"    store {truncated}, {addr}");
+        byteVal = ReduceI32ToSmallInt(byteVal, CraneliftTypeMapper.ClifType.I8);
+        _instructions.AppendLine($"    store {byteVal}, {addr}");
         var one = OneI32();
         var nextIndex = NewValue();
         _instructions.AppendLine($"    {nextIndex} = iadd {len}, {one}");
@@ -2784,14 +2782,24 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerAssignment(AssignmentExpressionSyntax assign)
     {
-        var value = LowerExpression(assign.Right);
-        var valueType = GetExpressionType(assign.Right);
+        var targetType = GetExpressionType(assign.Left);
+        var value = TryEmitNumericLiteral(assign.Right, targetType, out var literalValue)
+            ? literalValue
+            : LowerExpression(assign.Right);
+        var valueType = TryEmitNumericLiteral(assign.Right, targetType, out _)
+            ? targetType
+            : GetExpressionType(assign.Right);
         var isCompound = assign.OperatorToken.Kind != TokenKind.Equal;
 
         if (isCompound)
         {
             var current = LowerExpression(assign.Left);
             var leftType = GetExpressionType(assign.Left);
+            if (TryEmitNumericLiteral(assign.Right, leftType, out var compoundLiteral))
+            {
+                value = compoundLiteral;
+                valueType = leftType;
+            }
             value = LowerCompoundAssignmentValue(assign.OperatorToken.Kind, current, leftType, value, valueType);
             valueType = leftType;
         }
@@ -2809,6 +2817,8 @@ public sealed class CraneliftFunctionBuilder
                 if (_localTypes.TryGetValue(name, out var localType))
                 {
                     value = CoerceAssignmentValue(value, valueType, localType);
+                    var localClifType = _typeMapper.Map(localType);
+                    value = ReduceI32ToSmallInt(value, localClifType);
                 }
                 _instructions.AppendLine($"    store {value}, {local.Address}");
             }
@@ -2820,6 +2830,11 @@ public sealed class CraneliftFunctionBuilder
                 if (_symbols.TryGetValue(name, out var symbol))
                 {
                     value = CoerceAssignmentValue(value, valueType, symbol.Type);
+                    if (symbol.Type is not null)
+                    {
+                        var globalClifType = _typeMapper.Map(symbol.Type);
+                        value = ReduceI32ToSmallInt(value, globalClifType);
+                    }
                 }
                 _instructions.AppendLine($"    store {value}, {addr}");
             }
@@ -2850,6 +2865,67 @@ public sealed class CraneliftFunctionBuilder
 
         return value;
     }
+
+    private bool TryEmitNumericLiteral(ExpressionSyntax expr, TypeSymbol? targetType, out string value)
+    {
+        value = string.Empty;
+        if (targetType is not PrimitiveTypeSymbol targetPrim)
+        {
+            return false;
+        }
+
+        if (expr is LiteralExpressionSyntax lit)
+        {
+            if (lit.Literal.Kind == TokenKind.IntegerLiteral &&
+                (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
+                long.TryParse(lit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            {
+                return TryEmitIntegerConst(targetPrim.PrimitiveName, parsed, out value);
+            }
+
+            if (lit.Literal.Kind == TokenKind.FloatLiteral &&
+                IsFloatType(targetPrim) &&
+                double.TryParse(lit.Literal.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedFloat))
+            {
+                var val = NewValue();
+                var op = targetPrim.PrimitiveName == "f64" ? "f64const" : "f32const";
+                _instructions.AppendLine($"    {val} = {op} {parsedFloat.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+                value = val;
+                return true;
+            }
+        }
+
+        if (expr is UnaryExpressionSyntax unary &&
+            unary.OperatorToken.Kind == TokenKind.Minus &&
+            unary.Operand is LiteralExpressionSyntax innerLit &&
+            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
+            long.TryParse(innerLit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var innerParsed))
+        {
+            return TryEmitIntegerConst(targetPrim.PrimitiveName, -innerParsed, out value);
+        }
+
+        return false;
+    }
+
+    private bool TryEmitIntegerConst(string primitiveName, long literalValue, out string value)
+    {
+        value = string.Empty;
+        var val = NewValue();
+        // Keep integer literals as i32 and rely on explicit ireduce at stores when writing into byte/word storage.
+        _instructions.AppendLine($"    {val} = iconst.i32 {literalValue.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        value = val;
+        return true;
+    }
+
+    private static bool IsIntegerType(PrimitiveTypeSymbol prim) =>
+        prim.PrimitiveName is "i32" or "u8" or "u16" or "u32" or "bool";
+
+    private static bool IsByteLikeType(PrimitiveTypeSymbol prim) =>
+        prim.PrimitiveName is "u8" or "utf8" or "ascii";
+
+    private static bool IsFloatType(PrimitiveTypeSymbol prim) =>
+        prim.PrimitiveName is "f32" or "f64";
 
     private string LowerMemberAccess(MemberAccessExpressionSyntax member)
     {
@@ -3258,9 +3334,8 @@ public sealed class CraneliftFunctionBuilder
                 var localPayloadBase = NewValue();
                 _instructions.AppendLine($"    {localPayloadBase} = load.{FormatType(local.Type)} {local.Address}");
                 var addr = EmitByteAddress(localPayloadBase, index);
-                var truncated = NewValue();
-                _instructions.AppendLine($"    {truncated} = ireduce.i8 {value}");
-                _instructions.AppendLine($"    store {truncated}, {addr}");
+                value = ReduceI32ToSmallInt(value, CraneliftTypeMapper.ClifType.I8);
+                _instructions.AppendLine($"    store {value}, {addr}");
                 return;
             }
 
@@ -3314,9 +3389,8 @@ public sealed class CraneliftFunctionBuilder
             var headerOffset = ConstI64(globalHeaderSize);
             _instructions.AppendLine($"    {payloadBase} = iadd {globalBaseAddr}, {headerOffset}");
             var addr = EmitByteAddress(payloadBase, index);
-            var truncated = NewValue();
-            _instructions.AppendLine($"    {truncated} = ireduce.i8 {value}");
-            _instructions.AppendLine($"    store {truncated}, {addr}");
+            value = ReduceI32ToSmallInt(value, CraneliftTypeMapper.ClifType.I8);
+            _instructions.AppendLine($"    store {value}, {addr}");
             return;
         }
 

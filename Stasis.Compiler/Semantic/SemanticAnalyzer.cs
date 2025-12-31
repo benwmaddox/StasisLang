@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Linq;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
@@ -144,22 +145,22 @@ public sealed class SemanticAnalyzer
         // ============================================================
 
         // Classification
-        AddSymbol("char_is_digit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_alpha", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_alnum", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_space", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_upper", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_lower", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_hex", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("char_is_print", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alpha", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alnum", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_space", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_upper", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_lower", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_print", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // Conversion
-        AddSymbol("char_to_upper", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
-        AddSymbol("char_to_lower", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_to_upper", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_to_lower", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("char_to_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_from_digit", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_from_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("char_to_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_from_hex", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_from_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // ============================================================
         // Standard Library: str_* module (string operations)
@@ -167,23 +168,23 @@ public sealed class SemanticAnalyzer
 
         // Length & Capacity
         AddSymbol("str_len", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_is_empty", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_is_empty", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // Character Access
-        AddSymbol("str_get", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("str_get", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_set", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
         // Comparison
-        AddSymbol("str_eq", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_eq", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_cmp", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_starts_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("str_ends_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_starts_with", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_ends_with", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // Search
         AddSymbol("str_find", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_find_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_find_last_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_contains", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_contains", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // Modification (in-place)
         AddSymbol("str_clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
@@ -458,7 +459,14 @@ public sealed class SemanticAnalyzer
             var initType = ResolveExpressionType(v.Initializer, scope);
             if (varType is not null && initType is not null && !AreTypesCompatible(varType, initType))
             {
-                _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(initType)}' to variable of type '{FormatType(varType)}'.", v.Initializer.Span));
+                if (!TryAllowNumericLiteralAssignment(varType, v.Initializer, out var literalError))
+                {
+                    _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(initType)}' to variable of type '{FormatType(varType)}'.", v.Initializer.Span));
+                }
+                else if (literalError is not null)
+                {
+                    _diagnostics.Add(new Diagnostic(literalError, v.Initializer.Span));
+                }
             }
         }
     }
@@ -516,7 +524,7 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(arg, scope);
                 }
 
-                ValidateOperatorCall(op);
+                ValidateOperatorCall(op, scope);
                 break;
             case AssignmentExpressionSyntax assign:
                 AnalyzeExpression(assign.Left, scope);
@@ -528,7 +536,14 @@ public sealed class SemanticAnalyzer
                 var rightType = ResolveExpressionType(assign.Right, scope);
                 if (leftType is not null && rightType is not null && !AreTypesCompatible(leftType, rightType))
                 {
-                    _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(rightType)}' to target of type '{FormatType(leftType)}'.", assign.Right.Span));
+                    if (!TryAllowNumericLiteralAssignment(leftType, assign.Right, out var literalError))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(rightType)}' to target of type '{FormatType(leftType)}'.", assign.Right.Span));
+                    }
+                    else if (literalError is not null)
+                    {
+                        _diagnostics.Add(new Diagnostic(literalError, assign.Right.Span));
+                    }
                 }
                 break;
             case BinaryExpressionSyntax bin:
@@ -539,7 +554,7 @@ public sealed class SemanticAnalyzer
         }
     }
 
-    private void ValidateOperatorCall(OperatorCallExpressionSyntax op)
+    private void ValidateOperatorCall(OperatorCallExpressionSyntax op, IReadOnlyDictionary<string, Symbol> scope)
     {
         var opText = op.OperatorToken.Text;
         if (op.Arguments.Count != 1)
@@ -553,6 +568,43 @@ public sealed class SemanticAnalyzer
             if (!IsAssignableReceiver(op.Receiver))
             {
                 _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", op.Receiver.Span));
+            }
+            return;
+        }
+
+        if (op.Arguments.Count != 1)
+        {
+            return;
+        }
+
+        var receiverType = ResolveExpressionType(op.Receiver, scope);
+        var argType = ResolveExpressionType(op.Arguments[0], scope);
+        if (receiverType is PrimitiveTypeSymbol recvPrim && argType is PrimitiveTypeSymbol argPrim)
+        {
+            if (IsIntegerType(recvPrim.PrimitiveName) && IsIntegerType(argPrim.PrimitiveName) &&
+                !string.Equals(recvPrim.PrimitiveName, argPrim.PrimitiveName, StringComparison.Ordinal))
+            {
+                if (!TryAllowNumericLiteralCompatibility(recvPrim.PrimitiveName, op.Arguments[0], out var literalError))
+                {
+                    _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span));
+                }
+                else if (literalError is not null)
+                {
+                    _diagnostics.Add(new Diagnostic(literalError, op.Arguments[0].Span));
+                }
+            }
+            else if (IsFloatType(recvPrim.PrimitiveName) && IsFloatType(argPrim.PrimitiveName) &&
+                     !string.Equals(recvPrim.PrimitiveName, argPrim.PrimitiveName, StringComparison.Ordinal))
+            {
+                _diagnostics.Add(new Diagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span));
+            }
+            else if (IsIntegerType(recvPrim.PrimitiveName) && IsFloatType(argPrim.PrimitiveName))
+            {
+                _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span));
+            }
+            else if (IsFloatType(recvPrim.PrimitiveName) && IsIntegerType(argPrim.PrimitiveName))
+            {
+                _diagnostics.Add(new Diagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span));
             }
         }
     }
@@ -637,6 +689,30 @@ public sealed class SemanticAnalyzer
                     {
                         _diagnostics.Add(new Diagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
                     }
+                    else if (IsIntegerType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName) &&
+                             !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
+                    {
+                        // Allow integer literals to match the other operand type when the literal fits (e.g., u8 == 72).
+                        var rightLiteralOk = TryAllowNumericLiteralCompatibility(leftPrim.PrimitiveName, bin.Right, out var rightLiteralError);
+                        var leftLiteralOk = TryAllowNumericLiteralCompatibility(rightPrim.PrimitiveName, bin.Left, out var leftLiteralError);
+                        if (!rightLiteralOk && !leftLiteralOk)
+                        {
+                            _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span));
+                        }
+                        else if (rightLiteralError is not null)
+                        {
+                            _diagnostics.Add(new Diagnostic(rightLiteralError, bin.Right.Span));
+                        }
+                        else if (leftLiteralError is not null)
+                        {
+                            _diagnostics.Add(new Diagnostic(leftLiteralError, bin.Left.Span));
+                        }
+                    }
+                    else if (IsFloatType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName) &&
+                             !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span));
+                    }
                 }
             }
 
@@ -655,6 +731,29 @@ public sealed class SemanticAnalyzer
                     else if (IsFloatType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName))
                     {
                         _diagnostics.Add(new Diagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                    }
+                    else if (IsIntegerType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName) &&
+                             !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
+                    {
+                        var rightLiteralOk = TryAllowNumericLiteralCompatibility(leftPrim.PrimitiveName, bin.Right, out var rightLiteralError);
+                        var leftLiteralOk = TryAllowNumericLiteralCompatibility(rightPrim.PrimitiveName, bin.Left, out var leftLiteralError);
+                        if (!rightLiteralOk && !leftLiteralOk)
+                        {
+                            _diagnostics.Add(new Diagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span));
+                        }
+                        else if (rightLiteralError is not null)
+                        {
+                            _diagnostics.Add(new Diagnostic(rightLiteralError, bin.Right.Span));
+                        }
+                        else if (leftLiteralError is not null)
+                        {
+                            _diagnostics.Add(new Diagnostic(leftLiteralError, bin.Left.Span));
+                        }
+                    }
+                    else if (IsFloatType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName) &&
+                             !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
+                    {
+                        _diagnostics.Add(new Diagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span));
                     }
                 }
 
@@ -899,8 +998,14 @@ public sealed class SemanticAnalyzer
                     return globalSym.Type;
                 }
                 return null;
+            case UnaryExpressionSyntax unary when unary.OperatorToken.Kind == TokenKind.Bang:
+                return new PrimitiveTypeSymbol("bool");
+            case UnaryExpressionSyntax unary:
+                return ResolveExpressionType(unary.Operand, scope);
             case ParenthesizedExpressionSyntax paren:
                 return ResolveExpressionType(paren.Expression, scope);
+            case AssignmentExpressionSyntax assign:
+                return ResolveExpressionType(assign.Left, scope);
             case MemberAccessExpressionSyntax member:
                 // Check if this is an enum member access (e.g., State.Idle)
                 if (member.Receiver is IdentifierExpressionSyntax enumId &&
@@ -917,6 +1022,21 @@ public sealed class SemanticAnalyzer
 
                 // Struct field access (including nested chains like state.ship.weapon.x)
                 return ResolveMemberAccessType(member, scope);
+            case ArrayAccessExpressionSyntax array:
+                {
+                    var receiverType = ResolveExpressionType(array.Receiver, scope);
+                    if (receiverType is ArrayTypeSymbol arrType)
+                    {
+                        if (arrType.ElementType is PrimitiveTypeSymbol prim &&
+                            (prim.PrimitiveName == "u8" || prim.PrimitiveName == "u16" || prim.PrimitiveName == "utf8" || prim.PrimitiveName == "ascii"))
+                        {
+                            // Byte/word array elements are treated as i32 values when read (zero-extended).
+                            return new PrimitiveTypeSymbol("i32");
+                        }
+                        return arrType.ElementType;
+                    }
+                    return null;
+                }
             case BinaryExpressionSyntax bin when bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual
                 or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual:
                 // Comparison operators return bool
@@ -939,6 +1059,20 @@ public sealed class SemanticAnalyzer
 
                     // Default to left operand type, or i32 if unknown
                     return leftType ?? new PrimitiveTypeSymbol("i32");
+                }
+            case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                               _symbols.TryGetValue(id.Identifier.Text, out var sym):
+                return sym.Type;
+            case OperatorCallExpressionSyntax op:
+                {
+                    // Operator calls are expressions; the result is either the receiver type or bool for comparisons.
+                    var receiverType = ResolveExpressionType(op.Receiver, scope);
+                    return op.OperatorToken.Kind switch
+                    {
+                        TokenKind.EqualEqual or TokenKind.BangEqual or TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual =>
+                            new PrimitiveTypeSymbol("bool"),
+                        _ => receiverType
+                    };
                 }
             default:
                 return null;
@@ -989,6 +1123,13 @@ public sealed class SemanticAnalyzer
             }
 
             currentType = ResolveType(field.Type);
+        }
+
+        if (currentType is PrimitiveTypeSymbol prim &&
+            (prim.PrimitiveName == "u8" || prim.PrimitiveName == "u16" || prim.PrimitiveName == "utf8" || prim.PrimitiveName == "ascii"))
+        {
+            // Byte/word fields are treated as i32 values when read (zero-extended).
+            return new PrimitiveTypeSymbol("i32");
         }
 
         return currentType;
@@ -1049,7 +1190,8 @@ public sealed class SemanticAnalyzer
 
     private bool IsIntegerType(string typeName)
     {
-        return typeName is "i32" or "u8" or "u16" or "u32";
+        // Note: utf8/ascii behave like u8 for indexing/byte-oriented APIs.
+        return typeName is "i32" or "u8" or "u16" or "u32" or "utf8" or "ascii";
     }
 
     private bool IsFloatType(string typeName)
@@ -1068,4 +1210,88 @@ public sealed class SemanticAnalyzer
             _ => "unknown"
         };
     }
+
+    private static bool TryGetIntegerLiteralValue(ExpressionSyntax expr, out long value)
+    {
+        if (expr is LiteralExpressionSyntax lit &&
+            lit.Literal.Kind == TokenKind.IntegerLiteral &&
+            long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            value = parsed;
+            return true;
+        }
+
+        if (expr is UnaryExpressionSyntax unary &&
+            unary.OperatorToken.Kind == TokenKind.Minus &&
+            unary.Operand is LiteralExpressionSyntax innerLit &&
+            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
+        {
+            value = -innerParsed;
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private static bool TryAllowNumericLiteralCompatibility(string targetPrimitiveName, ExpressionSyntax expr, out string? error)
+    {
+        error = null;
+        if (!TryGetIntegerLiteralValue(expr, out var literal))
+        {
+            return false;
+        }
+
+        switch (targetPrimitiveName)
+        {
+            case "u8":
+            case "utf8":
+            case "ascii":
+                if (literal < 0 || literal > byte.MaxValue)
+                {
+                    error = $"Integer literal {literal} does not fit in '{targetPrimitiveName}'.";
+                }
+                return true;
+            case "u16":
+                if (literal < 0 || literal > ushort.MaxValue)
+                {
+                    error = $"Integer literal {literal} does not fit in '{targetPrimitiveName}'.";
+                }
+                return true;
+            case "u32":
+                if (literal < 0 || literal > uint.MaxValue)
+                {
+                    error = $"Integer literal {literal} does not fit in '{targetPrimitiveName}'.";
+                }
+                return true;
+            case "i32":
+                if (literal < int.MinValue || literal > int.MaxValue)
+                {
+                    error = $"Integer literal {literal} does not fit in '{targetPrimitiveName}'.";
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryAllowNumericLiteralAssignment(TypeSymbol targetType, ExpressionSyntax expr, out string? error)
+    {
+        error = null;
+        if (targetType is not PrimitiveTypeSymbol prim)
+        {
+            return false;
+        }
+
+        if (!IsIntegerLikePrimitive(prim.PrimitiveName))
+        {
+            return false;
+        }
+
+        return TryAllowNumericLiteralCompatibility(prim.PrimitiveName, expr, out error);
+    }
+
+    private static bool IsIntegerLikePrimitive(string primitiveName) =>
+        primitiveName is "i32" or "u8" or "u16" or "u32" or "utf8" or "ascii";
 }
