@@ -8,7 +8,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [x] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [x] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [x] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
-- [ ] Follow through: implement `docs/audio-plan.md` (desktop SDL2 audio MVP first).
+- [x] Follow through: implement `docs/audio-plan.md` (desktop SDL2 audio MVP first).
 - [ ] Follow through: implement `docs/input-plan.md` (pointer snapshot, mouse + touch/taps).
 - [ ] Follow through: implement `docs/aquarium-sample-plan.md` (add `samples/aquarium.stasis`).
 - [ ] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).

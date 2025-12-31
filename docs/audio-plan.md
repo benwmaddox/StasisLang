@@ -2,6 +2,16 @@
 
 This document describes a practical, low-latency, cross-platform plan for sound output in Stasis, inspired by the Handmade Hero "game generates samples; platform plays them" model.
 
+## Status (desktop MVP)
+
+Implemented for desktop via SDL2:
+
+- Runtime ring buffer + audio callback: `runtime/stasis_graphics.c`
+- Stasis-facing builtins: `audio_is_available`, `audio_get_sample_rate`, `audio_get_channels`, `audio_get_queued_frames`, `audio_get_underruns`, `audio_push_f32_interleaved`
+- Example program: `samples/audio_sine.stasis` (prints queued frames + underruns)
+
+WASM/WebAudio remains planned work.
+
 ## Goals
 
 - Cross-platform sound output suitable for games (desktop first, then WASM/mobile).
@@ -200,4 +210,3 @@ CI sanity:
 - M2: SDL2 backend wired into the runner (desktop audio output).
 - M3: Stasis sample: sine wave + underrun stats (`samples/audio_sine.stasis`).
 - M4: WebAudio design + first worklet prototype (feature-flagged).
-
