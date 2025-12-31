@@ -56,6 +56,7 @@ Backends:
 
 ## Demos and docs
 
+- Overview: `STASIS_OVERVIEW.md`
 - Demo day commands: `docs/demo-day.md`
 - Game-dev iteration workflow: `docs/game-dev-workflow.md`
 - Language spec (semantics, memory rules): `docs/spec.md`
