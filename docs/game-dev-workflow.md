@@ -145,7 +145,8 @@ Treat SVG as a clean source format and drive most animation from code:
 
 ### 6) Data hot reload (JSON -> global state)
 
-If your game has `tick()`, `stasis run` defaults to the dev loop and will also hot-reload a JSON config between ticks.
+Data hot reload is only enabled in the watch-based `tick()` dev loop (`--watch`), where the CLI binds a JSON file to globals via the runner.
+Plain `stasis run` does not currently pass any data binding to the runner, so it will not hot-reload JSON between ticks.
 
 Conventions:
 - Prefer a `data/config.json` next to the source file (for example `samples/brickout_revenge/data/config.json`).
@@ -339,6 +340,6 @@ This keeps examples and docs aligned with the spec and assets:
 For day-to-day game iteration, you should not need any special "state file" arguments.
 The CLI and runner handle the mechanics internally.
 
-- Prefer `stasisc run <file>` / `.\stasis.bat run <file>` for hot reload.
+- Prefer `stasis run <file>` / `.\stasis.bat run <file>` for hot reload.
 - Use `--fps` to set the host pacing.
 - Use `--hot-state` only if you are experimenting with restart-based snapshot/restore across separate process runs.
