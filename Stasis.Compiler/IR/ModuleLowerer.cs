@@ -1386,6 +1386,14 @@ public sealed class ModuleLowerer
             if (decl.Initializer is not null)
             {
                 var initValue = LowerExpression(builder, decl.Initializer, locals);
+                if (TryLowerIntegerLiteralToType(decl.Initializer, llvmType, out var loweredInt))
+                {
+                    initValue = loweredInt;
+                }
+                else if (TryLowerFloatLiteralToType(decl.Initializer, llvmType, out var loweredFloat))
+                {
+                    initValue = loweredFloat;
+                }
                 var converted = ConvertToType(builder, initValue, llvmType);
                 builder.BuildStore(converted, alloca);
             }
@@ -1506,6 +1514,63 @@ public sealed class ModuleLowerer
             }
         }
 
+        private static bool TryLowerIntegerLiteralToType(ExpressionSyntax expr, LLVMTypeRef targetType, out LLVMValueRef lowered)
+        {
+            lowered = default;
+            if (targetType.Kind != LLVMTypeKind.LLVMIntegerTypeKind)
+            {
+                return false;
+            }
+
+            long value;
+            if (expr is LiteralExpressionSyntax lit &&
+                lit.Literal.Kind == TokenKind.IntegerLiteral &&
+                long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            {
+                value = parsed;
+            }
+            else if (expr is UnaryExpressionSyntax unary &&
+                     unary.OperatorToken.Kind == TokenKind.Minus &&
+                     unary.Operand is LiteralExpressionSyntax innerLit &&
+                     innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+                     long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
+            {
+                value = -innerParsed;
+            }
+            else
+            {
+                return false;
+            }
+
+            unchecked
+            {
+                lowered = LLVMValueRef.CreateConstInt(targetType, (ulong)value, true);
+            }
+            return true;
+        }
+
+        private static bool TryLowerFloatLiteralToType(ExpressionSyntax expr, LLVMTypeRef targetType, out LLVMValueRef lowered)
+        {
+            lowered = default;
+            if (expr is not LiteralExpressionSyntax lit || lit.Literal.Kind != TokenKind.FloatLiteral)
+            {
+                return false;
+            }
+
+            if (targetType.Kind is not (LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind))
+            {
+                return false;
+            }
+
+            if (!double.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            {
+                return false;
+            }
+
+            lowered = LLVMValueRef.CreateConstReal(targetType, value);
+            return true;
+        }
+
         private LLVMValueRef EmitUtf8Literal(LLVMBuilderRef builder, string text)
         {
             var bytes = Encoding.UTF8.GetBytes(text);
@@ -1600,6 +1665,14 @@ public sealed class ModuleLowerer
 
             var rhs = LowerExpression(builder, assign.Right, locals);
             // Convert RHS to target type if needed (e.g., i32 -> f32)
+            if (TryLowerIntegerLiteralToType(assign.Right, ptrType, out var loweredInt))
+            {
+                rhs = loweredInt;
+            }
+            else if (TryLowerFloatLiteralToType(assign.Right, ptrType, out var loweredFloat))
+            {
+                rhs = loweredFloat;
+            }
             rhs = ConvertToType(builder, rhs, ptrType);
             if (assign.OperatorToken.Kind == TokenKind.Equal)
             {
@@ -1807,6 +1880,23 @@ public sealed class ModuleLowerer
                 default:
                     var lhs = LowerExpression(builder, bin.Left, locals);
                     var rhs = LowerExpression(builder, bin.Right, locals);
+                    if (TryLowerIntegerLiteralToType(bin.Left, rhs.TypeOf, out var leftInt))
+                    {
+                        lhs = leftInt;
+                    }
+                    else if (TryLowerFloatLiteralToType(bin.Left, rhs.TypeOf, out var leftFloat))
+                    {
+                        lhs = leftFloat;
+                    }
+
+                    if (TryLowerIntegerLiteralToType(bin.Right, lhs.TypeOf, out var rightInt))
+                    {
+                        rhs = rightInt;
+                    }
+                    else if (TryLowerFloatLiteralToType(bin.Right, lhs.TypeOf, out var rightFloat))
+                    {
+                        rhs = rightFloat;
+                    }
                     return LowerBinary(builder, bin.OperatorToken.Text, lhs, rhs, bin.OperatorToken.Span);
             }
         }
@@ -4000,32 +4090,19 @@ public sealed class ModuleLowerer
             var rhsIsFloat = rhsType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
             if (lhsIsFloat || rhsIsFloat)
             {
-                var target = (lhsType.Kind == LLVMTypeKind.LLVMDoubleTypeKind || rhsType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
-                    ? LLVMTypeRef.Double
-                    : LLVMTypeRef.Float;
-                lhs = ConvertToType(builder, lhs, target);
-                rhs = ConvertToType(builder, rhs, target);
+                if (!(lhsIsFloat && rhsIsFloat) || lhsType.Kind != rhsType.Kind)
+                {
+                    AddDiagnostic("Binary operands must have the same float type; use an explicit conversion.", span);
+                    return lhs;
+                }
             }
             else if (lhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind && rhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
             {
-                var targetWidth = Math.Max((int)lhsType.IntWidth, (int)rhsType.IntWidth);
-                if (targetWidth < 32)
+                if (lhsType.IntWidth != rhsType.IntWidth)
                 {
-                    targetWidth = 32;
+                    AddDiagnostic("Binary operands must have the same integer type; use an explicit conversion.", span);
+                    return lhs;
                 }
-
-                var target = targetWidth switch
-                {
-                    1 => LLVMTypeRef.Int1,
-                    8 => LLVMTypeRef.Int8,
-                    16 => LLVMTypeRef.Int16,
-                    32 => LLVMTypeRef.Int32,
-                    64 => LLVMTypeRef.Int64,
-                    _ => LLVMTypeRef.CreateInt((uint)targetWidth)
-                };
-
-                lhs = ConvertToType(builder, lhs, target);
-                rhs = ConvertToType(builder, rhs, target);
             }
 
             var type = lhs.TypeOf;
@@ -4237,7 +4314,8 @@ public sealed class ModuleLowerer
 
             if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var ptr, out var elemType))
             {
-                return builder.BuildLoad2(elemType, ptr, "elemload");
+                var loaded = builder.BuildLoad2(elemType, ptr, "elemload");
+                return PromoteLoadedSmallIntToI32(builder, loaded);
             }
 
             AddDiagnostic("Unable to lower array access.", arr.Span);
@@ -4252,7 +4330,8 @@ public sealed class ModuleLowerer
             {
                 if (TryBuildElementPointer(builder, elemBinding, member.Member.Text, member.Span, out var ptr, out var elemType))
                 {
-                    return builder.BuildLoad2(elemType, ptr, "fieldload");
+                    var loaded = builder.BuildLoad2(elemType, ptr, "fieldload");
+                    return PromoteLoadedSmallIntToI32(builder, loaded);
                 }
 
                 return ConstI32(0);
@@ -4263,7 +4342,8 @@ public sealed class ModuleLowerer
             {
                 if (TryLowerArrayElementPointer(builder, arr, member.Member.Text, locals, out var ptr, out var elemType))
                 {
-                    return builder.BuildLoad2(elemType, ptr, "fieldload");
+                    var loaded = builder.BuildLoad2(elemType, ptr, "fieldload");
+                    return PromoteLoadedSmallIntToI32(builder, loaded);
                 }
             }
 
@@ -4308,7 +4388,8 @@ public sealed class ModuleLowerer
                             }
 
                             var llvmType = _moduleBuilder.TypeMapper.Map(fieldType);
-                            return builder.BuildLoad2(llvmType, global, flattenedName);
+                            var loaded = builder.BuildLoad2(llvmType, global, flattenedName);
+                            return PromoteLoadedSmallIntToI32(builder, loaded);
                         }
                     }
                 }
@@ -4324,7 +4405,8 @@ public sealed class ModuleLowerer
                     if (global.Handle != IntPtr.Zero && TryResolveMemberType(member, out var resolvedType))
                     {
                         var llvmType = _moduleBuilder.TypeMapper.Map(resolvedType);
-                        return builder.BuildLoad2(llvmType, global, flattenedPath);
+                        var loaded = builder.BuildLoad2(llvmType, global, flattenedPath);
+                        return PromoteLoadedSmallIntToI32(builder, loaded);
                     }
                 }
             }
@@ -4337,11 +4419,22 @@ public sealed class ModuleLowerer
         {
             if (TryLowerArrayElementPointer(builder, arr, fieldName, locals, out var ptr, out var elemType))
             {
-                return builder.BuildLoad2(elemType, ptr, "elemload");
+                var loaded = builder.BuildLoad2(elemType, ptr, "elemload");
+                return PromoteLoadedSmallIntToI32(builder, loaded);
             }
 
             AddDiagnostic("Unable to lower array access.", arr.Span);
             return ConstI32(0);
+        }
+
+        private static LLVMValueRef PromoteLoadedSmallIntToI32(LLVMBuilderRef builder, LLVMValueRef value)
+        {
+            var type = value.TypeOf;
+            if (type.Kind == LLVMTypeKind.LLVMIntegerTypeKind && type.IntWidth < 32)
+            {
+                return builder.BuildZExt(value, LLVMTypeRef.Int32, "promote.i32");
+            }
+            return value;
         }
 
         private bool TryLowerArrayElementPointer(LLVMBuilderRef builder, ArrayAccessExpressionSyntax arr, string? fieldName, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef elemType)
