@@ -11,9 +11,6 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [
-    "onLanguage:stasis"
-  ],
   "contributes": {
     "languages": [
       {
@@ -37,4 +34,3 @@
     ]
   }
 }
-
