@@ -1,0 +1,73 @@
+// Game input helpers (not loaded by default).
+//
+// These helpers are deterministic and explicit; they do not allocate or hide casts.
+//
+// Keyboard:
+// - Host provides `is_key_down(scancode: i32) -> bool`.
+// - To detect edges, pass an `i32[SC_MAX]` array of prior states (0/1).
+//
+// Pointers:
+// - Host provides `input_pointer_*` snapshot queries for the current frame.
+
+// Updates `key_prev[sc]` (0/1) and returns a small state code:
+// - 0: up
+// - 1: down (held)
+// - 2: went_down (down this frame, was up last frame)
+// - 3: went_up (up this frame, was down last frame)
+//
+// Notes:
+// - If `sc` is out of range, returns 0 and does not touch `key_prev`.
+function game_key_update(key_prev: i32[], sc: i32): i32 {
+    if (sc < 0 || sc >= 128) {
+        return 0;
+    }
+
+    let down: bool = is_key_down(sc);
+    let prev: i32 = key_prev[sc];
+    let next: i32 = 0;
+    if (down) {
+        next = 1;
+    }
+    key_prev[sc] = next;
+
+    if (next == 1 && prev == 0) {
+        return 2;
+    }
+    if (next == 0 && prev == 1) {
+        return 3;
+    }
+    return next;
+}
+
+function game_key_is_down(code: i32): bool {
+    return code == 1 || code == 2;
+}
+
+function game_key_went_down(code: i32): bool {
+    return code == 2;
+}
+
+function game_key_went_up(code: i32): bool {
+    return code == 3;
+}
+
+function game_pointer_any_went_down(): bool {
+    let count: i32 = input_pointer_count();
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        if (input_pointer_went_down(i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function game_pointer_hit_aabb_px(idx: i32, x0: f32, y0: f32, x1: f32, y1: f32): bool {
+    let count: i32 = input_pointer_count();
+    if (idx < 0 || idx >= count) {
+        return false;
+    }
+    let px: f32 = input_pointer_x_px(idx);
+    let py: f32 = input_pointer_y_px(idx);
+    return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+}

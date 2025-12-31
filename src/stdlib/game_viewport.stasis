@@ -1,0 +1,64 @@
+// Viewport and coordinate helpers (not loaded by default).
+//
+// Host provides:
+// - input_viewport_*_px() -> i32
+// - input_pointer_x_n/y_n() -> f32 (normalized)
+//
+// Viewport is currently the full window, but treating it as a first-class rect
+// keeps UI/game coordinate conversions explicit.
+
+function game_viewport_x_px_i32(): i32 { return input_viewport_x_px(); }
+function game_viewport_y_px_i32(): i32 { return input_viewport_y_px(); }
+function game_viewport_w_px_i32(): i32 { return input_viewport_w_px(); }
+function game_viewport_h_px_i32(): i32 { return input_viewport_h_px(); }
+
+function game_viewport_x_px(): f32 { return i32_to_f32(input_viewport_x_px()); }
+function game_viewport_y_px(): f32 { return i32_to_f32(input_viewport_y_px()); }
+function game_viewport_w_px(): f32 { return i32_to_f32(input_viewport_w_px()); }
+function game_viewport_h_px(): f32 { return i32_to_f32(input_viewport_h_px()); }
+
+// Convert viewport-local normalized coords (0..1) to pixel space.
+// - `nx/ny` are in viewport-local normalized space.
+function game_viewport_n_to_px(nx: f32, ny: f32, out_x_px: f32[], out_y_px: f32[]): void {
+    out_x_px[0] = game_viewport_x_px() + nx * game_viewport_w_px();
+    out_y_px[0] = game_viewport_y_px() + ny * game_viewport_h_px();
+}
+
+// Convert pixel coords to viewport-local normalized space (0..1).
+function game_viewport_px_to_n(x_px: f32, y_px: f32, out_nx: f32[], out_ny: f32[]): void {
+    let vw: f32 = game_viewport_w_px();
+    let vh: f32 = game_viewport_h_px();
+    if (vw <= 0.0 || vh <= 0.0) {
+        out_nx[0] = 0.0;
+        out_ny[0] = 0.0;
+        return;
+    }
+    out_nx[0] = (x_px - game_viewport_x_px()) / vw;
+    out_ny[0] = (y_px - game_viewport_y_px()) / vh;
+}
+
+// Simple 2D camera (screen pixels <-> world units).
+//
+// Convention:
+// - world -> screen: screen = viewport_origin + ((world - cam_pos) * zoom)
+// - screen -> world: world = cam_pos + ((screen - viewport_origin) / zoom)
+struct GameCamera2D {
+    x: f32;
+    y: f32;
+    zoom: f32;
+}
+
+function game_camera2d_world_to_screen(cam: GameCamera2D[], wx: f32, wy: f32, out_sx: f32[], out_sy: f32[]): void {
+    let z: f32 = cam[0].zoom;
+    if (z == 0.0) { z = 1.0; }
+    out_sx[0] = game_viewport_x_px() + (wx - cam[0].x) * z;
+    out_sy[0] = game_viewport_y_px() + (wy - cam[0].y) * z;
+}
+
+function game_camera2d_screen_to_world(cam: GameCamera2D[], sx: f32, sy: f32, out_wx: f32[], out_wy: f32[]): void {
+    let z: f32 = cam[0].zoom;
+    if (z == 0.0) { z = 1.0; }
+    out_wx[0] = cam[0].x + (sx - game_viewport_x_px()) / z;
+    out_wy[0] = cam[0].y + (sy - game_viewport_y_px()) / z;
+}
+
