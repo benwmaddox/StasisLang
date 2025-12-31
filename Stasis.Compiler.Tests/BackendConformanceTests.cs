@@ -16,6 +16,28 @@ public class BackendConformanceTests
         LlvmNativeLoader.EnsureLoaded();
     }
 
+    [Fact]
+    public void CompoundAssignment_U8_TruncatesBeforeStore_OnLlvm()
+    {
+        var source = @"
+global b: u8;
+
+function main(): i32 {
+    // RHS is typed as u8 because (b + 1) resolves to the left operand type.
+    // This exercises the compound-assignment lowering without relying on implicit numeric conversions.
+    b += b + 1;
+    return 0;
+}
+";
+        var result = CompileWithBackend(source, BackendType.Llvm);
+
+        Assert.True(result.Success, $"Backend LLVM failed: {string.Join(", ", result.Diagnostics.Select(d => d.Message))}");
+        Assert.NotEmpty(result.Ir);
+
+        Assert.DoesNotMatch("(?m)^\\s*store\\s+i32\\b.*\\bptr\\s+@b\\b", result.Ir);
+        Assert.Matches("(?m)^\\s*store\\s+i8\\b.*\\bptr\\s+@b\\b", result.Ir);
+    }
+
     [Theory]
     [InlineData(BackendType.Llvm)]
     [InlineData(BackendType.Cranelift)]

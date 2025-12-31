@@ -1625,6 +1625,7 @@ public sealed class ModuleLowerer
             }
 
             var combined = LowerBinary(builder, opText, lhsValue, rhs, assign.OperatorToken.Span);
+            combined = ConvertToType(builder, combined, ptrType);
             builder.BuildStore(combined, ptr);
             return combined;
         }
