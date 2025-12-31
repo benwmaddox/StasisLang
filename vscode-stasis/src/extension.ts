@@ -42,9 +42,12 @@ function tryServerCommand(extensionPath: string): { command: string; args: strin
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const server = tryServerCommand(context.extensionPath);
   if (!server) {
-    void vscode.window.showErrorMessage(
-      "Stasis Language Server binary not found. Publish it into vscode-stasis/server/ (see vscode-stasis/README.md)."
+    const output = vscode.window.createOutputChannel("Stasis");
+    output.appendLine(
+      "Stasis Language Server binary not found. LSP features are disabled; syntax highlighting still works."
     );
+    output.appendLine("To enable LSP, publish the server into vscode-stasis/server/ (see vscode-stasis/README.md).");
+    context.subscriptions.push(output);
     return;
   }
 
