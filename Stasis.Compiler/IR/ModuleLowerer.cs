@@ -1101,6 +1101,12 @@ public sealed class ModuleLowerer
             // Type conversion
             "i32_to_f32",
             "f32_to_i32",
+            "u8_to_i32",
+            "u16_to_i32",
+            "i32_to_u8_trunc",
+            "i32_to_u8_checked",
+            "i32_to_u16_trunc",
+            "i32_to_u16_checked",
 
             // Legacy system (to be renamed)
             "time",
@@ -1256,12 +1262,12 @@ public sealed class ModuleLowerer
 
         private void LowerFunction(FunctionDeclarationSyntax fn)
         {
-            LowerFunctionCore(fn.Name.Text, fn.Parameters, fn.ReturnType, fn.Body);
+            LowerFunctionCore(fn.Name.Text, fn.Parameters, fn.ReturnType, fn.Body, isTest: false);
         }
 
         private void LowerFunction(TestDeclarationSyntax test)
         {
-            LowerFunctionCore(test.Name.Text, test.Parameters, test.ReturnType, test.Body);
+            LowerFunctionCore(test.Name.Text, test.Parameters, test.ReturnType, test.Body, isTest: true);
         }
 
         private readonly record struct LocalBinding(LLVMValueRef Value, LLVMTypeRef Type, bool IsAddress, ElementBinding? Element = null, TypeSymbol? SemanticType = null, ArrayDescriptorLayout? ArrayLayout = null, bool IsArrayDescriptor = false);
@@ -1274,7 +1280,7 @@ public sealed class ModuleLowerer
             LLVMValueRef? PrimitiveBasePtr = null,
             Dictionary<string, LLVMValueRef>? FieldPtrs = null);
 
-        private void LowerFunctionCore(string name, IReadOnlyList<ParameterSyntax> parameters, TypeSyntax? returnType, BlockStatementSyntax body)
+        private void LowerFunctionCore(string name, IReadOnlyList<ParameterSyntax> parameters, TypeSyntax? returnType, BlockStatementSyntax body, bool isTest)
         {
             var function = _moduleBuilder.Module.GetNamedFunction(name);
             if (function.Handle == IntPtr.Zero)
@@ -1313,7 +1319,7 @@ public sealed class ModuleLowerer
             }
 
             var terminated = LowerBlock(builder, function, body, locals);
-            var isVoid = returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
+            var isVoid = !isTest && (returnType is null || (returnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal)));
             if (!terminated && isVoid)
             {
                 builder.BuildRetVoid();
@@ -1354,6 +1360,8 @@ public sealed class ModuleLowerer
                     else
                     {
                         var value = LowerExpression(builder, ret.Expression, locals);
+                        var returnType = GetFunctionType(function).ReturnType;
+                        value = ConvertToType(builder, value, returnType);
                         builder.BuildRet(value);
                     }
 
@@ -1384,6 +1392,14 @@ public sealed class ModuleLowerer
             if (decl.Initializer is not null)
             {
                 var initValue = LowerExpression(builder, decl.Initializer, locals);
+                if (TryLowerIntegerLiteralToType(decl.Initializer, llvmType, out var loweredInt))
+                {
+                    initValue = loweredInt;
+                }
+                else if (TryLowerFloatLiteralToType(decl.Initializer, llvmType, out var loweredFloat))
+                {
+                    initValue = loweredFloat;
+                }
                 var converted = ConvertToType(builder, initValue, llvmType);
                 builder.BuildStore(converted, alloca);
             }
@@ -1504,6 +1520,84 @@ public sealed class ModuleLowerer
             }
         }
 
+        private static bool TryLowerIntegerLiteralToType(ExpressionSyntax expr, LLVMTypeRef targetType, out LLVMValueRef lowered)
+        {
+            lowered = default;
+            if (targetType.Kind != LLVMTypeKind.LLVMIntegerTypeKind)
+            {
+                return false;
+            }
+
+            long value;
+            if (expr is LiteralExpressionSyntax lit &&
+                lit.Literal.Kind == TokenKind.IntegerLiteral &&
+                long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+            {
+                value = parsed;
+            }
+            else if (expr is UnaryExpressionSyntax unary &&
+                     unary.OperatorToken.Kind == TokenKind.Minus &&
+                     unary.Operand is LiteralExpressionSyntax innerLit &&
+                     innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+                     long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
+            {
+                value = -innerParsed;
+            }
+            else
+            {
+                return false;
+            }
+
+            unchecked
+            {
+                lowered = LLVMValueRef.CreateConstInt(targetType, (ulong)value, true);
+            }
+            return true;
+        }
+
+        private LLVMValueRef LowerU8ExpressionAsI32(LLVMBuilderRef builder, ExpressionSyntax expr, Dictionary<string, LocalBinding> locals, string context, SourceSpan span)
+        {
+            LLVMValueRef value;
+            if (TryLowerIntegerLiteralToType(expr, LLVMTypeRef.Int8, out var lowered))
+            {
+                value = lowered;
+            }
+            else
+            {
+                value = LowerExpression(builder, expr, locals);
+            }
+
+            if (value.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || value.TypeOf.IntWidth != 8)
+            {
+                AddDiagnostic($"{context} expects a u8 value.", span);
+                return ConstI32(0);
+            }
+
+            return builder.BuildZExt(value, LLVMTypeRef.Int32, "u8.i32");
+        }
+
+        private static bool TryLowerFloatLiteralToType(ExpressionSyntax expr, LLVMTypeRef targetType, out LLVMValueRef lowered)
+        {
+            lowered = default;
+            if (expr is not LiteralExpressionSyntax lit || lit.Literal.Kind != TokenKind.FloatLiteral)
+            {
+                return false;
+            }
+
+            if (targetType.Kind is not (LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind))
+            {
+                return false;
+            }
+
+            if (!double.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            {
+                return false;
+            }
+
+            lowered = LLVMValueRef.CreateConstReal(targetType, value);
+            return true;
+        }
+
         private LLVMValueRef EmitUtf8Literal(LLVMBuilderRef builder, string text)
         {
             var bytes = Encoding.UTF8.GetBytes(text);
@@ -1598,6 +1692,14 @@ public sealed class ModuleLowerer
 
             var rhs = LowerExpression(builder, assign.Right, locals);
             // Convert RHS to target type if needed (e.g., i32 -> f32)
+            if (TryLowerIntegerLiteralToType(assign.Right, ptrType, out var loweredInt))
+            {
+                rhs = loweredInt;
+            }
+            else if (TryLowerFloatLiteralToType(assign.Right, ptrType, out var loweredFloat))
+            {
+                rhs = loweredFloat;
+            }
             rhs = ConvertToType(builder, rhs, ptrType);
             if (assign.OperatorToken.Kind == TokenKind.Equal)
             {
@@ -1623,6 +1725,7 @@ public sealed class ModuleLowerer
             }
 
             var combined = LowerBinary(builder, opText, lhsValue, rhs, assign.OperatorToken.Span);
+            combined = ConvertToType(builder, combined, ptrType);
             builder.BuildStore(combined, ptr);
             return combined;
         }
@@ -1804,6 +1907,23 @@ public sealed class ModuleLowerer
                 default:
                     var lhs = LowerExpression(builder, bin.Left, locals);
                     var rhs = LowerExpression(builder, bin.Right, locals);
+                    if (TryLowerIntegerLiteralToType(bin.Left, rhs.TypeOf, out var leftInt))
+                    {
+                        lhs = leftInt;
+                    }
+                    else if (TryLowerFloatLiteralToType(bin.Left, rhs.TypeOf, out var leftFloat))
+                    {
+                        lhs = leftFloat;
+                    }
+
+                    if (TryLowerIntegerLiteralToType(bin.Right, lhs.TypeOf, out var rightInt))
+                    {
+                        rhs = rightInt;
+                    }
+                    else if (TryLowerFloatLiteralToType(bin.Right, lhs.TypeOf, out var rightFloat))
+                    {
+                        rhs = rightFloat;
+                    }
                     return LowerBinary(builder, bin.OperatorToken.Text, lhs, rhs, bin.OperatorToken.Span);
             }
         }
@@ -1930,9 +2050,23 @@ public sealed class ModuleLowerer
                     AddDiagnostic($"Missing array global '{baseName}'.", expr.Span);
                     return LLVMValueRef.CreateConstNull(layout.DescriptorType);
                 }
-                var bitcast = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+
+                LLVMValueRef dataPtr;
+                if (arrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                {
+                    var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                    var backingBytes = Math.Max(1, resolvedLength + headerSize);
+                    var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                    var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, $"{baseName}.payload");
+                    dataPtr = payloadPtr;
+                }
+                else
+                {
+                    dataPtr = builder.BuildBitCast(global, ptrType, $"{baseName}.ptr");
+                }
+
                 var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
-                desc = builder.BuildInsertValue(desc, bitcast, 0, $"{baseName}.desc");
+                desc = builder.BuildInsertValue(desc, dataPtr, 0, $"{baseName}.desc");
                 var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)Math.Max(0, resolvedLength), true);
                 desc = builder.BuildInsertValue(desc, lenVal, 1, $"{baseName}.len");
                 return desc;
@@ -2111,6 +2245,156 @@ public sealed class ModuleLowerer
                         }
                         var arg = LowerExpression(builder, args[0], locals);
                         return builder.BuildFPToSI(arg, LLVMTypeRef.Int32, "f32toi32");
+                    }
+                case "u8_to_i32":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("u8_to_i32 expects a single u8 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        LLVMValueRef arg;
+                        if (TryLowerIntegerLiteralToType(args[0], LLVMTypeRef.Int8, out var lowered))
+                        {
+                            arg = lowered;
+                        }
+                        else
+                        {
+                            arg = LowerExpression(builder, args[0], locals);
+                        }
+
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 8)
+                        {
+                            AddDiagnostic("u8_to_i32 expects a u8 value.", span);
+                            return ConstI32(0);
+                        }
+
+                        return builder.BuildZExt(arg, LLVMTypeRef.Int32, "u8toi32");
+                    }
+                case "u16_to_i32":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("u16_to_i32 expects a single u16 argument.", span);
+                            return ConstI32(0);
+                        }
+
+                        LLVMValueRef arg;
+                        if (TryLowerIntegerLiteralToType(args[0], LLVMTypeRef.Int16, out var lowered))
+                        {
+                            arg = lowered;
+                        }
+                        else
+                        {
+                            arg = LowerExpression(builder, args[0], locals);
+                        }
+
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 16)
+                        {
+                            AddDiagnostic("u16_to_i32 expects a u16 value.", span);
+                            return ConstI32(0);
+                        }
+
+                        return builder.BuildZExt(arg, LLVMTypeRef.Int32, "u16toi32");
+                    }
+                case "i32_to_u8_trunc":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("i32_to_u8_trunc expects a single i32 argument.", span);
+                            return ConstI8(0);
+                        }
+
+                        var arg = LowerExpression(builder, args[0], locals);
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 32)
+                        {
+                            AddDiagnostic("i32_to_u8_trunc expects an i32 value.", span);
+                            return ConstI8(0);
+                        }
+
+                        return builder.BuildTrunc(arg, LLVMTypeRef.Int8, "i32tou8.trunc");
+                    }
+                case "i32_to_u8_checked":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("i32_to_u8_checked expects a single i32 argument.", span);
+                            return ConstI8(0);
+                        }
+
+                        var arg = LowerExpression(builder, args[0], locals);
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 32)
+                        {
+                            AddDiagnostic("i32_to_u8_checked expects an i32 value.", span);
+                            return ConstI8(0);
+                        }
+
+                        var (abortFn, abortType) = GetOrDeclareAbort(_moduleBuilder);
+                        var isNeg = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, arg, ConstI32(0), "i32tou8.neg");
+                        var isGt = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, arg, ConstI32(255), "i32tou8.gt");
+                        var bad = builder.BuildOr(isNeg, isGt, "i32tou8.bad");
+
+                        var fn = builder.InsertBlock.Parent;
+                        var okBlock = AppendBlock(fn, NextBlockName("i32tou8.ok"));
+                        var abortBlock = AppendBlock(fn, NextBlockName("i32tou8.abort"));
+                        builder.BuildCondBr(bad, abortBlock, okBlock);
+
+                        builder.PositionAtEnd(abortBlock);
+                        builder.BuildCall2(abortType, abortFn, Array.Empty<LLVMValueRef>(), "");
+                        builder.BuildUnreachable();
+
+                        builder.PositionAtEnd(okBlock);
+                        return builder.BuildTrunc(arg, LLVMTypeRef.Int8, "i32tou8.checked");
+                    }
+                case "i32_to_u16_trunc":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("i32_to_u16_trunc expects a single i32 argument.", span);
+                            return ConstI16(0);
+                        }
+
+                        var arg = LowerExpression(builder, args[0], locals);
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 32)
+                        {
+                            AddDiagnostic("i32_to_u16_trunc expects an i32 value.", span);
+                            return ConstI16(0);
+                        }
+
+                        return builder.BuildTrunc(arg, LLVMTypeRef.Int16, "i32tou16.trunc");
+                    }
+                case "i32_to_u16_checked":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("i32_to_u16_checked expects a single i32 argument.", span);
+                            return ConstI16(0);
+                        }
+
+                        var arg = LowerExpression(builder, args[0], locals);
+                        if (arg.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || arg.TypeOf.IntWidth != 32)
+                        {
+                            AddDiagnostic("i32_to_u16_checked expects an i32 value.", span);
+                            return ConstI16(0);
+                        }
+
+                        var (abortFn, abortType) = GetOrDeclareAbort(_moduleBuilder);
+                        var isNeg = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, arg, ConstI32(0), "i32tou16.neg");
+                        var isGt = builder.BuildICmp(LLVMIntPredicate.LLVMIntSGT, arg, ConstI32(65535), "i32tou16.gt");
+                        var bad = builder.BuildOr(isNeg, isGt, "i32tou16.bad");
+
+                        var fn = builder.InsertBlock.Parent;
+                        var okBlock = AppendBlock(fn, NextBlockName("i32tou16.ok"));
+                        var abortBlock = AppendBlock(fn, NextBlockName("i32tou16.abort"));
+                        builder.BuildCondBr(bad, abortBlock, okBlock);
+
+                        builder.PositionAtEnd(abortBlock);
+                        builder.BuildCall2(abortType, abortFn, Array.Empty<LLVMValueRef>(), "");
+                        builder.BuildUnreachable();
+
+                        builder.PositionAtEnd(okBlock);
+                        return builder.BuildTrunc(arg, LLVMTypeRef.Int16, "i32tou16.checked");
                     }
                 case "time":
                     {
@@ -2891,7 +3175,7 @@ public sealed class ModuleLowerer
                         if (_headlessGraphics)
                             return ConstI32(1);
 
-                        var path = LowerExpression(builder, args[0], locals);
+                        var path = LowerCStringPointer(builder, args[0], locals);
                         var size = LowerExpression(builder, args[1], locals);
 
                         var fn = _moduleBuilder.Module.GetNamedFunction("stasis_load_font");
@@ -2914,7 +3198,7 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
 
                         var fontHandle = LowerExpression(builder, args[0], locals);
-                        var text = LowerExpression(builder, args[1], locals);
+                        var text = LowerCStringPointer(builder, args[1], locals);
                         var x = LowerExpression(builder, args[2], locals);
                         var y = LowerExpression(builder, args[3], locals);
                         var r = LowerExpression(builder, args[4], locals);
@@ -2945,7 +3229,7 @@ public sealed class ModuleLowerer
                             return LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0);
 
                         var fontHandle = LowerExpression(builder, args[0], locals);
-                        var text = LowerExpression(builder, args[1], locals);
+                        var text = LowerCStringPointer(builder, args[1], locals);
 
                         var fn = _moduleBuilder.Module.GetNamedFunction("stasis_measure_text");
                         var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Float,
@@ -3074,7 +3358,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_digit expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_digit", span);
                         // c >= '0' && c <= '9'
                         var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
                         var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
@@ -3089,7 +3373,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_alpha expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_alpha", span);
                         // (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
                         var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
                         var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
@@ -3108,7 +3392,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_alnum expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_alnum", span);
                         // digit or alpha
                         var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
                         var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
@@ -3131,7 +3415,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_space expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_space", span);
                         // c == ' ' || c == '\t' || c == '\n' || c == '\r'
                         var isSpace = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32(' '), "isSpace");
                         var isTab = builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, c, ConstI32('\t'), "isTab");
@@ -3150,7 +3434,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_upper expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_upper", span);
                         var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
                         var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
                         var result = builder.BuildAnd(geA, leZ, "is_upper");
@@ -3164,7 +3448,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_lower expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_lower", span);
                         var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
                         var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
                         var result = builder.BuildAnd(geA, leZ, "is_lower");
@@ -3178,7 +3462,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_hex expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_hex", span);
                         // digit or 'a'-'f' or 'A'-'F'
                         var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
                         var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
@@ -3201,7 +3485,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_is_print expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_is_print", span);
                         // c >= 32 && c <= 126
                         var ge32 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32(32), "ge32");
                         var le126 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32(126), "le126");
@@ -3214,15 +3498,16 @@ public sealed class ModuleLowerer
                         if (args.Count != 1)
                         {
                             AddDiagnostic("char_to_upper expects 1 argument (c: u8).", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_to_upper", span);
                         // if c >= 'a' && c <= 'z' then c - 32 else c
                         var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('a'), "gea");
                         var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('z'), "lez");
                         var isLower = builder.BuildAnd(geA, leZ, "isLower");
                         var upper = builder.BuildSub(c, ConstI32(32), "upper");
-                        return builder.BuildSelect(isLower, upper, c, "char_to_upper");
+                        var selected = builder.BuildSelect(isLower, upper, c, "char_to_upper");
+                        return builder.BuildTrunc(selected, LLVMTypeRef.Int8, "char_to_upper.u8");
                     }
 
                 case "char_to_lower":
@@ -3230,15 +3515,16 @@ public sealed class ModuleLowerer
                         if (args.Count != 1)
                         {
                             AddDiagnostic("char_to_lower expects 1 argument (c: u8).", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_to_lower", span);
                         // if c >= 'A' && c <= 'Z' then c + 32 else c
                         var geA = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('A'), "geA");
                         var leZ = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('Z'), "leZ");
                         var isUpper = builder.BuildAnd(geA, leZ, "isUpper");
                         var lower = builder.BuildAdd(c, ConstI32(32), "lower");
-                        return builder.BuildSelect(isUpper, lower, c, "char_to_lower");
+                        var selected = builder.BuildSelect(isUpper, lower, c, "char_to_lower");
+                        return builder.BuildTrunc(selected, LLVMTypeRef.Int8, "char_to_lower.u8");
                     }
 
                 case "char_to_digit":
@@ -3248,7 +3534,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_to_digit expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_to_digit", span);
                         // if c >= '0' && c <= '9' then c - '0' else -1
                         var ge0 = builder.BuildICmp(LLVMIntPredicate.LLVMIntUGE, c, ConstI32('0'), "ge0");
                         var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, c, ConstI32('9'), "le9");
@@ -3262,7 +3548,7 @@ public sealed class ModuleLowerer
                         if (args.Count != 1)
                         {
                             AddDiagnostic("char_from_digit expects 1 argument (d: i32).", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
                         var d = LowerExpression(builder, args[0], locals);
                         // if d >= 0 && d <= 9 then d + '0' else '?'
@@ -3270,7 +3556,8 @@ public sealed class ModuleLowerer
                         var le9 = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, d, ConstI32(9), "le9");
                         var valid = builder.BuildAnd(ge0, le9, "valid");
                         var ch = builder.BuildAdd(d, ConstI32('0'), "ch");
-                        return builder.BuildSelect(valid, ch, ConstI32('?'), "char_from_digit");
+                        var selected = builder.BuildSelect(valid, ch, ConstI32('?'), "char_from_digit");
+                        return builder.BuildTrunc(selected, LLVMTypeRef.Int8, "char_from_digit.u8");
                     }
 
                 case "char_to_hex":
@@ -3280,7 +3567,7 @@ public sealed class ModuleLowerer
                             AddDiagnostic("char_to_hex expects 1 argument (c: u8).", span);
                             return ConstI32(0);
                         }
-                        var c = LowerExpression(builder, args[0], locals);
+                        var c = LowerU8ExpressionAsI32(builder, args[0], locals, "char_to_hex", span);
                         var function = builder.InsertBlock.Parent;
 
                         // Check digit first
@@ -3339,7 +3626,7 @@ public sealed class ModuleLowerer
                         if (args.Count != 1)
                         {
                             AddDiagnostic("char_from_hex expects 1 argument (d: i32).", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
                         var d = LowerExpression(builder, args[0], locals);
                         // if d >= 0 && d <= 9 then d + '0'
@@ -3354,7 +3641,8 @@ public sealed class ModuleLowerer
                         var digitCh = builder.BuildAdd(d, ConstI32('0'), "digitCh");
                         var hexCh = builder.BuildAdd(builder.BuildSub(d, ConstI32(10), "d10"), ConstI32('a'), "hexCh");
                         var temp = builder.BuildSelect(isHexLetter, hexCh, ConstI32('?'), "temp");
-                        return builder.BuildSelect(isDigit, digitCh, temp, "char_from_hex");
+                        var selected = builder.BuildSelect(isDigit, digitCh, temp, "char_from_hex");
+                        return builder.BuildTrunc(selected, LLVMTypeRef.Int8, "char_from_hex.u8");
                     }
 
                 // ============================================================
@@ -3400,18 +3688,18 @@ public sealed class ModuleLowerer
                         if (args.Count != 2)
                         {
                             AddDiagnostic("str_get expects 2 arguments (s: u8[], index: i32).", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
                         var ptr = LowerArrayPointer(builder, args[0], locals);
                         var index = LowerExpression(builder, args[1], locals);
                         if (ptr.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_get requires an array argument.", span);
-                            return ConstI32(0);
+                            return ConstI8(0);
                         }
                         var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { index }, "elemPtr");
                         var val = builder.BuildLoad2(LLVMTypeRef.Int8, elemPtr, "str_get");
-                        return builder.BuildZExt(val, LLVMTypeRef.Int32, "str_get.i32");
+                        return val;
                     }
 
                 case "str_set":
@@ -3423,15 +3711,27 @@ public sealed class ModuleLowerer
                         }
                         var ptr = LowerArrayPointer(builder, args[0], locals);
                         var index = LowerExpression(builder, args[1], locals);
-                        var byteVal = LowerExpression(builder, args[2], locals);
+                        LLVMValueRef byteVal;
+                        if (TryLowerIntegerLiteralToType(args[2], LLVMTypeRef.Int8, out var lowered))
+                        {
+                            byteVal = lowered;
+                        }
+                        else
+                        {
+                            byteVal = LowerExpression(builder, args[2], locals);
+                        }
                         if (ptr.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_set requires an array argument.", span);
                             return ConstI32(0);
                         }
+                        if (byteVal.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || byteVal.TypeOf.IntWidth != 8)
+                        {
+                            AddDiagnostic("str_set expects a u8 value for 'byte'.", span);
+                            return ConstI32(0);
+                        }
                         var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptr, new[] { index }, "elemPtr");
-                        var truncated = builder.BuildTrunc(byteVal, LLVMTypeRef.Int8, "byte");
-                        builder.BuildStore(truncated, elemPtr);
+                        builder.BuildStore(byteVal, elemPtr);
                         var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
                         var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptr }, "strlen.call");
                         var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "str_set.len");
@@ -3532,17 +3832,29 @@ public sealed class ModuleLowerer
                         }
                         var (strlenFn, strlenType) = GetOrDeclareStrlen(_moduleBuilder);
                         var ptrDst = LowerArrayPointer(builder, args[0], locals);
-                        var byteVal = LowerExpression(builder, args[1], locals);
+                        LLVMValueRef byteVal;
+                        if (TryLowerIntegerLiteralToType(args[1], LLVMTypeRef.Int8, out var lowered))
+                        {
+                            byteVal = lowered;
+                        }
+                        else
+                        {
+                            byteVal = LowerExpression(builder, args[1], locals);
+                        }
                         if (ptrDst.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_append_char requires an array argument.", span);
                             return ConstI32(0);
                         }
+                        if (byteVal.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || byteVal.TypeOf.IntWidth != 8)
+                        {
+                            AddDiagnostic("str_append_char expects a u8 value for 'byte'.", span);
+                            return ConstI32(0);
+                        }
                         var len64 = builder.BuildCall2(strlenType, strlenFn, new[] { ptrDst }, "strlen.call");
                         var len = builder.BuildTrunc(len64, LLVMTypeRef.Int32, "len");
                         var elemPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { len }, "elemPtr");
-                        var truncated = builder.BuildTrunc(byteVal, LLVMTypeRef.Int8, "byte");
-                        builder.BuildStore(truncated, elemPtr);
+                        builder.BuildStore(byteVal, elemPtr);
                         var nextPtr = builder.BuildGEP2(LLVMTypeRef.Int8, ptrDst, new[] { builder.BuildAdd(len, ConstI32(1), "next") }, "nextPtr");
                         builder.BuildStore(ConstI8(0), nextPtr);
                         var newLen = builder.BuildAdd(len, ConstI32(1), "str_append_char.len");
@@ -3576,10 +3888,23 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
                         var ptr = LowerArrayPointer(builder, args[0], locals);
-                        var byteVal = builder.BuildTrunc(LowerExpression(builder, args[1], locals), LLVMTypeRef.Int8, "find_char.byte");
+                        LLVMValueRef byteVal;
+                        if (TryLowerIntegerLiteralToType(args[1], LLVMTypeRef.Int8, out var lowered))
+                        {
+                            byteVal = lowered;
+                        }
+                        else
+                        {
+                            byteVal = LowerExpression(builder, args[1], locals);
+                        }
                         if (ptr.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_find_char requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        if (byteVal.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || byteVal.TypeOf.IntWidth != 8)
+                        {
+                            AddDiagnostic("str_find_char expects a u8 value for 'byte'.", span);
                             return ConstI32(0);
                         }
                         var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_char.idx");
@@ -3730,10 +4055,23 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
                         }
                         var ptr = LowerArrayPointer(builder, args[0], locals);
-                        var byteVal = builder.BuildTrunc(LowerExpression(builder, args[1], locals), LLVMTypeRef.Int8, "find_last_char.byte");
+                        LLVMValueRef byteVal;
+                        if (TryLowerIntegerLiteralToType(args[1], LLVMTypeRef.Int8, out var lowered))
+                        {
+                            byteVal = lowered;
+                        }
+                        else
+                        {
+                            byteVal = LowerExpression(builder, args[1], locals);
+                        }
                         if (ptr.Handle == IntPtr.Zero)
                         {
                             AddDiagnostic("str_find_last_char requires an array argument.", span);
+                            return ConstI32(0);
+                        }
+                        if (byteVal.TypeOf.Kind != LLVMTypeKind.LLVMIntegerTypeKind || byteVal.TypeOf.IntWidth != 8)
+                        {
+                            AddDiagnostic("str_find_last_char expects a u8 value for 'byte'.", span);
                             return ConstI32(0);
                         }
                         var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "find_last.idx");
@@ -3940,6 +4278,9 @@ public sealed class ModuleLowerer
         private static LLVMValueRef ConstI8(int value) =>
             LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, (ulong)value, false);
 
+        private static LLVMValueRef ConstI16(int value) =>
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int16, (ulong)value, false);
+
         private LLVMValueRef BuildIsContinuationByte(LLVMBuilderRef builder, LLVMValueRef byteVal)
         {
             var byteI32 = builder.BuildZExt(byteVal, LLVMTypeRef.Int32, "byte.i32");
@@ -3976,6 +4317,28 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerBinary(LLVMBuilderRef builder, string op, LLVMValueRef lhs, LLVMValueRef rhs, SourceSpan span)
         {
+            var lhsType = lhs.TypeOf;
+            var rhsType = rhs.TypeOf;
+
+            var lhsIsFloat = lhsType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            var rhsIsFloat = rhsType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+            if (lhsIsFloat || rhsIsFloat)
+            {
+                if (!(lhsIsFloat && rhsIsFloat) || lhsType.Kind != rhsType.Kind)
+                {
+                    AddDiagnostic("Binary operands must have the same float type; use an explicit conversion.", span);
+                    return lhs;
+                }
+            }
+            else if (lhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind && rhsType.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
+            {
+                if (lhsType.IntWidth != rhsType.IntWidth)
+                {
+                    AddDiagnostic("Binary operands must have the same integer type; use an explicit conversion.", span);
+                    return lhs;
+                }
+            }
+
             var type = lhs.TypeOf;
             var isFloat = type.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
             return op switch
@@ -4185,7 +4548,8 @@ public sealed class ModuleLowerer
 
             if (TryLowerArrayElementPointer(builder, arr, fieldName: null, locals, out var ptr, out var elemType))
             {
-                return builder.BuildLoad2(elemType, ptr, "elemload");
+                var loaded = builder.BuildLoad2(elemType, ptr, "elemload");
+                return loaded;
             }
 
             AddDiagnostic("Unable to lower array access.", arr.Span);
@@ -4198,10 +4562,11 @@ public sealed class ModuleLowerer
                 locals.TryGetValue(elemId.Identifier.Text, out var elemBinding) &&
                 elemBinding.Element is not null)
             {
-                if (TryBuildElementPointer(builder, elemBinding, member.Member.Text, member.Span, out var ptr, out var elemType))
-                {
-                    return builder.BuildLoad2(elemType, ptr, "fieldload");
-                }
+                    if (TryBuildElementPointer(builder, elemBinding, member.Member.Text, member.Span, out var ptr, out var elemType))
+                    {
+                        var loaded = builder.BuildLoad2(elemType, ptr, "fieldload");
+                        return loaded;
+                    }
 
                 return ConstI32(0);
             }
@@ -4211,7 +4576,8 @@ public sealed class ModuleLowerer
             {
                 if (TryLowerArrayElementPointer(builder, arr, member.Member.Text, locals, out var ptr, out var elemType))
                 {
-                    return builder.BuildLoad2(elemType, ptr, "fieldload");
+                    var loaded = builder.BuildLoad2(elemType, ptr, "fieldload");
+                    return loaded;
                 }
             }
 
@@ -4256,7 +4622,8 @@ public sealed class ModuleLowerer
                             }
 
                             var llvmType = _moduleBuilder.TypeMapper.Map(fieldType);
-                            return builder.BuildLoad2(llvmType, global, flattenedName);
+                            var loaded = builder.BuildLoad2(llvmType, global, flattenedName);
+                            return loaded;
                         }
                     }
                 }
@@ -4272,7 +4639,8 @@ public sealed class ModuleLowerer
                     if (global.Handle != IntPtr.Zero && TryResolveMemberType(member, out var resolvedType))
                     {
                         var llvmType = _moduleBuilder.TypeMapper.Map(resolvedType);
-                        return builder.BuildLoad2(llvmType, global, flattenedPath);
+                        var loaded = builder.BuildLoad2(llvmType, global, flattenedPath);
+                        return loaded;
                     }
                 }
             }
@@ -4285,7 +4653,8 @@ public sealed class ModuleLowerer
         {
             if (TryLowerArrayElementPointer(builder, arr, fieldName, locals, out var ptr, out var elemType))
             {
-                return builder.BuildLoad2(elemType, ptr, "elemload");
+                var loaded = builder.BuildLoad2(elemType, ptr, "elemload");
+                return loaded;
             }
 
             AddDiagnostic("Unable to lower array access.", arr.Span);
@@ -4420,9 +4789,24 @@ public sealed class ModuleLowerer
                         var globalName = TryResolveGlobalName(id.Identifier.Text);
                         var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
                         elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
-                        var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
-                        var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
-                        ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");
+                        LLVMValueRef basePtr;
+                        if (arrayType.ElementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                        {
+                            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                            var backingBytes = arrayType.Size > 0 ? arrayType.Size + headerSize : headerSize;
+                            backingBytes = Math.Max(1, backingBytes);
+                            var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                            var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, "str.payload");
+                            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                            basePtr = builder.BuildBitCast(payloadPtr, elemPtrType, "elembase");
+                        }
+                        else
+                        {
+                            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                            basePtr = builder.BuildBitCast(global, elemPtrType, "elembase");
+                        }
+
+                        ptr = builder.BuildGEP2(elemType, basePtr, new[] { index }, "elemaddr");
                         return true;
                     }
                 }
@@ -5119,7 +5503,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         private LLVMValueRef ConvertToType(LLVMBuilderRef builder, LLVMValueRef value, LLVMTypeRef targetType)
         {
             var sourceType = value.TypeOf;
-            if (sourceType.Kind == targetType.Kind)
+            if (sourceType.Handle == targetType.Handle)
             {
                 return value;
             }
@@ -5128,6 +5512,36 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             var sourceIsFloat = sourceType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
             var targetIsInt = targetType.Kind == LLVMTypeKind.LLVMIntegerTypeKind;
             var targetIsFloat = targetType.Kind is LLVMTypeKind.LLVMFloatTypeKind or LLVMTypeKind.LLVMDoubleTypeKind;
+
+            if (sourceIsInt && targetIsInt)
+            {
+                if (sourceType.IntWidth == targetType.IntWidth)
+                {
+                    return value;
+                }
+
+                if (sourceType.IntWidth < targetType.IntWidth)
+                {
+                    return builder.BuildZExt(value, targetType, "zext");
+                }
+
+                return builder.BuildTrunc(value, targetType, "trunc");
+            }
+
+            if (sourceIsFloat && targetIsFloat)
+            {
+                if (sourceType.Kind == LLVMTypeKind.LLVMFloatTypeKind && targetType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
+                {
+                    return builder.BuildFPExt(value, targetType, "fpext");
+                }
+
+                if (sourceType.Kind == LLVMTypeKind.LLVMDoubleTypeKind && targetType.Kind == LLVMTypeKind.LLVMFloatTypeKind)
+                {
+                    return builder.BuildFPTrunc(value, targetType, "fptrunc");
+                }
+
+                return value;
+            }
 
             // i32 -> f32: signed int to float
             if (sourceIsInt && targetIsFloat)
@@ -5167,7 +5581,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters);
+            EmitFunction(builder, symbols, structs, fn.Name.Text, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
         if (!includeTests)
@@ -5177,14 +5591,14 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
 
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
         {
-            EmitFunction(builder, symbols, structs, test.Name.Text, test.ReturnType, test.Parameters);
+            EmitFunction(builder, symbols, structs, test.Name.Text, test.ReturnType, test.Parameters, isTest: true);
         }
     }
 
-    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters)
+    private static void EmitFunction(LlvmModuleBuilder builder, IReadOnlyDictionary<string, Symbol> symbols, IReadOnlyDictionary<string, StructDeclarationSyntax> structs, string name, TypeSyntax? returnType, IReadOnlyList<ParameterSyntax> parameters, bool isTest)
     {
         var ret = returnType is null
-            ? LLVMTypeRef.Void
+            ? (isTest ? LLVMTypeRef.Int32 : LLVMTypeRef.Void)
             : builder.TypeMapper.Map(ResolveType(returnType, symbols));
 
         var paramTypes = parameters
