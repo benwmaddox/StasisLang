@@ -481,10 +481,13 @@ function main(): i32 {
     str_set(a, 0, 65);
     str_set(a, 1, 0);
     let len: i32 = str_len(a);
-    let eq: i32 = str_eq(a, b);
+    let eq_i32: i32 = 0;
+    if (str_eq(a, b)) {
+        eq_i32 = 1;
+    }
     let idx: i32 = str_find(a, b);
     let sub: i32 = str_substr(dst, a, 0, 1);
-    return len + eq + idx + sub;
+    return len + eq_i32 + idx + sub;
 }
 ";
         var result = CompileWithBackend(source, backend);

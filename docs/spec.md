@@ -98,6 +98,19 @@ f32, f64
 bool
 ```
 
+### Explicit Numeric Casts (No Implicit Widening/Truncation)
+
+Stasis does not perform implicit numeric casts between integer sizes. Use explicit conversion functions:
+
+- `u8_to_i32(u8) -> i32`
+- `u16_to_i32(u16) -> i32`
+- `i32_to_u8_trunc(i32) -> u8` (low 8 bits)
+- `i32_to_u8_checked(i32) -> u8` (aborts if out of range)
+- `i32_to_u16_trunc(i32) -> u16` (low 16 bits)
+- `i32_to_u16_checked(i32) -> u16` (aborts if out of range)
+- `i32_to_f32(i32) -> f32`
+- `f32_to_i32(f32) -> i32`
+
 ### Arrays (fixed size)
 
 ```
