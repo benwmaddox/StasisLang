@@ -32,12 +32,12 @@ var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
 var watch = false;
-var watchExplicit = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
 string? graphicsLibPath = null;
 BackendType? selectedBackend = null;
+string? llvmTargetTriple = null;
 bool? craneliftRunnerOverride = null;
 var runnerEnv = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER");
 if (runnerEnv == "1")
@@ -94,7 +94,6 @@ while (cliArgs.Count > 0)
             break;
         case "--watch":
             watch = true;
-            watchExplicit = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -125,6 +124,9 @@ while (cliArgs.Count > 0)
                 Console.Error.WriteLine($"error: invalid --backend '{backendArg}'. Use 'llvm' or 'cranelift'.");
                 Environment.Exit(1);
             }
+            break;
+        case "--llvm-target" when cliArgs.Count > 0:
+            llvmTargetTriple = cliArgs.Dequeue();
             break;
         case "--cranelift-runner":
             craneliftRunnerOverride = true;
@@ -259,16 +261,7 @@ if (backend == BackendType.Llvm)
     LlvmNativeLoader.EnsureLoaded();
 }
 
-// Dev defaults: in run mode, auto-enable watch for tick-hosted games (or likely graphics programs),
-// and enable phase timing output when watching. (Explicit --watch always wins.)
-if (devMode && !watchExplicit && File.Exists(path))
-{
-    var sourceForDetect = File.ReadAllText(path);
-    if (DetectsTickUsage(sourceForDetect) || DetectsGraphicsUsage(sourceForDetect))
-    {
-        watch = true;
-    }
-}
+// Dev defaults: enable phase timing output when watching. (Explicit --watch always wins.)
 
 if (devMode && watch)
 {
@@ -289,6 +282,12 @@ if (watch)
     }
 }
 
+if (emitIrOnly && outputPath is not null && (watch || runAllInDirectory))
+{
+    Console.Error.WriteLine("error: --out with --emit-ir is only supported for single-file runs.");
+    Environment.Exit(1);
+}
+
 if (runAllInDirectory && mode == "test")
 {
     var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
@@ -304,7 +303,7 @@ if (runAllInDirectory && mode == "test")
 
     var allowReachabilityFallback = mode != "release";
     var enableTestCache = true;
-    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache);
+    var overallExit = RunAllTestsInDirectoryParallel(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache, llvmTargetTriple);
     Environment.Exit(overallExit);
 }
 
@@ -317,14 +316,14 @@ if (watch)
         useCraneliftRunner = true;
     }
 
-    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState, tickHostFps);
+    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState, tickHostFps, llvmTargetTriple);
     Environment.Exit(watchExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, int tickHostFps, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, int tickHostFps, string? llvmTargetTriple, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
@@ -422,8 +421,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             // Use LLVM backend via ModuleLowerer (existing path)
             var lowerer = new ModuleLowerer();
             var lowerOptions = enableGraphics
-                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
-                : (includeTests ? LowerOptions.Default : LowerOptions.Production);
+                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false, TargetTriple: llvmTargetTriple)
+                : (includeTests ? LowerOptions.Default : LowerOptions.Production) with { TargetTriple = llvmTargetTriple };
             LowerResult lower;
             if (useLowerLock)
             {
@@ -447,13 +446,13 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         if (lowerDiagnostics.Count > 0)
         {
             PrintDiagnostics(lowerDiagnostics, source, path);
-            Console.WriteLine(ir);
+            WriteIrOutput(ir, outputPath);
             return 1;
         }
 
         if (emitIrOnly)
         {
-            Console.WriteLine(ir);
+            WriteIrOutput(ir, outputPath);
             return lowerDiagnostics.Count > 0 ? 1 : 0;
         }
 
@@ -2703,7 +2702,7 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     File.WriteAllText(path, json, Encoding.UTF8);
 }
 
-static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps)
+static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
 {
     var fullPath = Path.GetFullPath(path);
     var dir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
@@ -2774,7 +2773,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     }
     else
     {
-        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
     }
 
     while (!cts.IsCancellationRequested)
@@ -2834,7 +2833,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
             }
             else
             {
-                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
             }
         }
 
@@ -2874,10 +2873,26 @@ static Process StartWatchChild(string exePath, string[] args)
 static string QuoteArg(string arg) =>
     arg.Contains(' ') ? $"\"{arg}\"" : arg;
 
+static void WriteIrOutput(string ir, string? outputPath)
+{
+    if (!string.IsNullOrWhiteSpace(outputPath))
+    {
+        var outDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrWhiteSpace(outDir))
+        {
+            Directory.CreateDirectory(outDir);
+        }
+        File.WriteAllText(outputPath, ir);
+        return;
+    }
+
+    Console.WriteLine(ir);
+}
+
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>]");
+    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");
@@ -2885,19 +2900,20 @@ static void PrintUsage()
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
-    Console.WriteLine("Run: for games that define `function tick()`, 'run' defaults to a dev loop (auto-watch + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
+    Console.WriteLine("LLVM: pass --llvm-target <triple> to set the LLVM module target triple (useful for cross-compiling emitted IR).");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
 }
 
-static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, bool useLowerLock = true, int lowerDegree = 1) =>
-    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache, useLowerLock, lowerDegree).GetAwaiter().GetResult();
+static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, string? llvmTargetTriple, bool useLowerLock = true, int lowerDegree = 1) =>
+    RunAllTestsInDirectoryParallelAsync(files, includeTests, moduleName, emitIrOnly, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, allowReachabilityFallback, enableTestCache, llvmTargetTriple, useLowerLock, lowerDegree).GetAwaiter().GetResult();
 
-static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, bool useLowerLock, int lowerDegree)
+static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, string? llvmTargetTriple, bool useLowerLock, int lowerDegree)
 {
     var prepChannel = Channel.CreateUnbounded<PreparedForLower>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     var resultChannel = Channel.CreateUnbounded<CompileResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
@@ -2931,7 +2947,7 @@ static async Task<int> RunAllTestsInDirectoryParallelAsync(string[] files, bool 
         await foreach (var item in prepChannel.Reader.ReadAllAsync())
         {
             var effectiveGraphics = enableGraphics || item.UsesGraphics;
-            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, optLevel, enableLto, effectiveGraphics, graphicsLibPath, backend, useCraneliftRunner, useLowerLock, allowReachabilityFallback, enableTestCache);
+            var result = LowerPrepared(item, includeTests, moduleName, emitIrOnly, optLevel, enableLto, effectiveGraphics, graphicsLibPath, backend, useCraneliftRunner, useLowerLock, allowReachabilityFallback, enableTestCache, llvmTargetTriple);
             await resultChannel.Writer.WriteAsync(result);
         }
     })).ToArray();
@@ -3426,7 +3442,7 @@ static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, strin
 }
 
  
-static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, bool allowReachabilityFallback, bool enableTestCache)
+static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, bool allowReachabilityFallback, bool enableTestCache, string? llvmTargetTriple)
 {
     var stopwatch = Stopwatch.StartNew();
     var diagnostics = new List<Diagnostic>();
@@ -3478,8 +3494,8 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
         {
             var lowerer = new ModuleLowerer();
             var lowerOptions = enableGraphics
-                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false)
-                : (includeTests ? LowerOptions.Default : LowerOptions.Production);
+                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false, TargetTriple: llvmTargetTriple)
+                : (includeTests ? LowerOptions.Default : LowerOptions.Production) with { TargetTriple = llvmTargetTriple };
             LowerResult lower;
             if (useLowerLock)
             {

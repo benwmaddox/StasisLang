@@ -21,7 +21,7 @@ public sealed class ModuleLowerer
     public LowerResult LowerToIr(CompilationUnitSyntax compilationUnit, SemanticResult semantic, LayoutPlan layout, string moduleName = "module", LowerOptions? options = null)
     {
         var opts = options ?? LowerOptions.Default;
-        using var builder = new LlvmModuleBuilder(moduleName);
+        using var builder = new LlvmModuleBuilder(moduleName, opts.TargetTriple);
         var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, opts.IncludeTests, opts.AllowReachabilityFallback);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
