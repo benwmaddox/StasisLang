@@ -2,6 +2,18 @@
 
 This document proposes a single input model usable by desktop (mouse) and mobile (touch/taps), tuned for Brickout Revenge and other small games.
 
+## Status (desktop MVP)
+
+Implemented for desktop via SDL2:
+
+- Stasis-facing API is exposed as per-field snapshot queries (rather than a returned struct pointer):
+  - `input_pointer_count()` and `input_pointer_*` accessors
+  - `input_viewport_*_px()` accessors
+  - `input_dropped_pointers()` debug counter
+- Visualization sample: `samples/input_pointers.stasis`
+
+Web/WASM Pointer Events support remains planned work.
+
 ## Goals
 
 - A single "input snapshot per frame" that Stasis code consumes deterministically.
@@ -71,14 +83,25 @@ Provide a minimal, stable set of queries.
 
 ### Snapshot access
 
-- `input_get_frame() -> InputFrame*`
-  - Returns a pointer to the current tick snapshot.
-  - Snapshot is read-only from Stasis' point of view.
+- `input_pointer_count() -> i32`
+- `input_pointer_id(idx: i32) -> i32`
+- `input_pointer_is_down(idx: i32) -> bool`
+- `input_pointer_went_down(idx: i32) -> bool`
+- `input_pointer_went_up(idx: i32) -> bool`
+- `input_pointer_x_px(idx: i32) -> f32`
+- `input_pointer_y_px(idx: i32) -> f32`
+- `input_pointer_dx_px(idx: i32) -> f32`
+- `input_pointer_dy_px(idx: i32) -> f32`
+- `input_pointer_x_n(idx: i32) -> f32`
+- `input_pointer_y_n(idx: i32) -> f32`
+- `input_dropped_pointers() -> i32`
 
 ### Viewport access
 
-- `input_get_viewport() -> Viewport`
-  - So games can do their own mapping if needed and for debugging.
+- `input_viewport_x_px() -> i32`
+- `input_viewport_y_px() -> i32`
+- `input_viewport_w_px() -> i32`
+- `input_viewport_h_px() -> i32`
 
 ### Convenience (optional)
 
@@ -150,4 +173,3 @@ Concrete desired behaviors:
 - M3: Expose snapshot to the runner and Stasis.
 - M4: Add a small sample that visualizes pointers.
 - M5: Implement web Pointer Events mapping when WASM path is available.
-
