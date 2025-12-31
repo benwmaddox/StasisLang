@@ -10,12 +10,12 @@ public sealed class LlvmModuleBuilder : IDisposable
     public LLVMModuleRef Module { get; }
     public LlvmTypeMapper TypeMapper { get; }
 
-    public LlvmModuleBuilder(string moduleName)
+    public LlvmModuleBuilder(string moduleName, string? targetTriple = null)
     {
         Context = LLVMContextRef.Create();
         Module = Context.CreateModuleWithName(moduleName);
         var module = Module;
-        module.Target = GetHostTriple();
+        module.Target = string.IsNullOrWhiteSpace(targetTriple) ? GetHostTriple() : targetTriple;
         Module = module;
         TypeMapper = new LlvmTypeMapper(Context);
     }
@@ -64,14 +64,26 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return "x86_64-pc-windows-msvc";
+            return RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.Arm64 => "aarch64-pc-windows-msvc",
+                _ => "x86_64-pc-windows-msvc"
+            };
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            return "x86_64-apple-darwin";
+            return RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.Arm64 => "aarch64-apple-darwin",
+                _ => "x86_64-apple-darwin"
+            };
         }
 
-        return "x86_64-pc-linux-gnu";
+        return RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.Arm64 => "aarch64-unknown-linux-gnu",
+            _ => "x86_64-pc-linux-gnu"
+        };
     }
 }
