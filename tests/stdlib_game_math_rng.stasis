@@ -1,0 +1,12 @@
+import "../src/stdlib/game_math.stasis";
+
+global rng_state: i32[1];
+
+test `game_rng_range_i32 handles int_min`() {
+    // Choose a seed where the next LCG step yields INT_MIN (-2147483648).
+    // (seed * 1103515245 + 12345) mod 2^32 == 0x80000000
+    game_rng_seed(rng_state, 2088216195);
+    let v: i32 = game_rng_range_i32(rng_state, 10, 20);
+    return v >= 10 && v <= 20;
+}
+
