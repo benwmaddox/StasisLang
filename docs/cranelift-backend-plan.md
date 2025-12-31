@@ -614,8 +614,8 @@ Source (.stasis)
 
 **Priority 5: Struct Member Access (Week 3)**
 - [x] Implement struct field access with SoA transformation (replace TODO at line 472)
-- [ ] Add nested struct/array access support
-- [ ] Test: Struct creation and field access
+- [x] Add nested struct/array access support (nested struct fields inside struct arrays)
+- [x] Test: nested struct fields inside struct arrays (`tests/nested_struct_array_fields.stasis`)
 
 **Priority 6: Test Harness (Week 3)**
 - [x] Generate `run_tests` entry point function
