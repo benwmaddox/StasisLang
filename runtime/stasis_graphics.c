@@ -120,6 +120,56 @@ static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
 static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
+/* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static void setup_ortho(void);
+#endif
+
+/* Sprite atlas bookkeeping (paths + rasterized sprites). */
+#define MAX_SPRITES 256
+
+typedef struct {
+    char* path;
+    int w;              /* current rasterized width */
+    int h;              /* current rasterized height */
+    int max_w;          /* requested max width (logical) */
+    int max_h;          /* requested max height (logical) */
+    int atlas_x;
+    int atlas_y;
+    float u0, v0, u1, v1;
+    uint64_t mtime;
+    SDL_Texture* sdl_tex;
+    int used;
+    int needs_reraster;  /* flag for window resize */
+} SpriteEntry;
+
+static SpriteEntry g_sprites[MAX_SPRITES];
+static int g_sprite_count = 0;
+
+/* Font rendering with stb_truetype. */
+#define MAX_FONTS 8
+#define FONT_ATLAS_SIZE 512
+#define FONT_FIRST_CHAR 32
+#define FONT_NUM_CHARS 95
+
+typedef struct {
+    bool active;
+    stbtt_fontinfo font_info;
+    unsigned char* ttf_buffer;
+    float scale;
+    int ascent, descent, line_gap;
+
+    /* Baked bitmap atlas */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    GLuint atlas_texture;
+#endif
+    SDL_Texture* sdl_texture;
+    stbtt_bakedchar char_data[FONT_NUM_CHARS];
+    int font_size;
+} StasisFont;
+
+static StasisFont g_fonts[MAX_FONTS];
+
 static int stasis_input_valid_index(int idx) {
     return idx >= 0 && idx < STASIS_MAX_POINTERS;
 }
@@ -585,7 +635,6 @@ static char g_asset_base[512] = {0};
 static char g_asset_env[512] = {0};
 
 /* Sprite atlas + batching (baked from SVG sources) */
-#define MAX_SPRITES 256
 #define SPRITE_ATLAS_W 1024
 #define SPRITE_ATLAS_H 1024
 #define SPRITE_ATLAS_PAD 2
@@ -596,24 +645,6 @@ typedef struct {
     float u, v;
     float r, g, b, a;
 } SpriteVertex;
-
-typedef struct {
-    char* path;
-    int w;              /* current rasterized width */
-    int h;              /* current rasterized height */
-    int max_w;          /* requested max width (logical) */
-    int max_h;          /* requested max height (logical) */
-    int atlas_x;
-    int atlas_y;
-    float u0, v0, u1, v1;
-    uint64_t mtime;
-    SDL_Texture* sdl_tex;
-    int used;
-    int needs_reraster;  /* flag for window resize */
-} SpriteEntry;
-
-static SpriteEntry g_sprites[MAX_SPRITES];
-static int g_sprite_count = 0;
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_sprite_program = 0;
@@ -3077,29 +3108,6 @@ STASIS_EXPORT void stasis_copy_dir_entry_name(const unsigned char* names, int32_
 }
 
 /* ===== FONT RENDERING WITH STB_TRUETYPE ===== */
-
-#define MAX_FONTS 8
-#define FONT_ATLAS_SIZE 512
-#define FONT_FIRST_CHAR 32
-#define FONT_NUM_CHARS 95
-
-typedef struct {
-    bool active;
-    stbtt_fontinfo font_info;
-    unsigned char* ttf_buffer;
-    float scale;
-    int ascent, descent, line_gap;
-
-    /* Baked bitmap atlas */
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-    GLuint atlas_texture;
-#endif
-    SDL_Texture* sdl_texture;
-    stbtt_bakedchar char_data[FONT_NUM_CHARS];
-    int font_size;
-} StasisFont;
-
-static StasisFont g_fonts[MAX_FONTS];
 
 /* Load a TrueType font from disk */
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {

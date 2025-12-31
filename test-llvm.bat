@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+call "%~dp0env.bat"
+
 set "SCRIPT_DIR=%~dp0"
 set "STASIS_SUPPRESS_WARNINGS=1"
 set "STASIS_BACKEND=llvm"

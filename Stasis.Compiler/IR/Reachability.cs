@@ -23,20 +23,23 @@ public static class Reachability
         var reachable = new HashSet<string>(StringComparer.Ordinal);
         var queue = new Queue<string>();
 
-        if (functions.ContainsKey("main"))
+        if (!includeTests)
         {
-            queue.Enqueue("main");
-        }
+            if (functions.ContainsKey("main"))
+            {
+                queue.Enqueue("main");
+            }
 
-        // Tick hosting: if a program defines `tick`, treat it as an entrypoint alongside `main`.
-        if (functions.ContainsKey("tick"))
-        {
-            queue.Enqueue("tick");
-        }
+            // Tick hosting: if a program defines `tick`, treat it as an entrypoint alongside `main`.
+            if (functions.ContainsKey("tick"))
+            {
+                queue.Enqueue("tick");
+            }
 
-        foreach (var export in functions.Values.Where(fn => fn.IsExported))
-        {
-            queue.Enqueue(export.Name.Text);
+            foreach (var export in functions.Values.Where(fn => fn.IsExported))
+            {
+                queue.Enqueue(export.Name.Text);
+            }
         }
 
         if (includeTests)

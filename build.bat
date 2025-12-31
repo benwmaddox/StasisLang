@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+call "%~dp0env.bat"
+
 pushd tools\cranelift-aot
 cargo build -p stasis-cranelift-aot --release
 if errorlevel 1 (

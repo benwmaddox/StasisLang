@@ -35,8 +35,8 @@ public sealed class LlvmTypeMapper
             "f32" => LLVMTypeRef.Float,
             "f64" => LLVMTypeRef.Double,
             "string" => LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), // bare string is a pointer to bytes
-            "utf8" => LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
-            "ascii" => LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+            "utf8" => LLVMTypeRef.Int8,
+            "ascii" => LLVMTypeRef.Int8,
             "void" => LLVMTypeRef.Void,
             _ => LLVMTypeRef.Int32
         };

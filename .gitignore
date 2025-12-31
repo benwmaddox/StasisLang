@@ -20,6 +20,7 @@ _ReSharper.Caches/
 .config/dotnet-tools.json.lock
 .claude/settings.local.json
 .stasis_cache/
+.tools/
 
 # Build artifacts
 *.dll

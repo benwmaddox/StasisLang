@@ -9,7 +9,7 @@ function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     let i: i32 = 0;
     let limit: i32 = dst_max - 1;
     for (i = 0; i < limit; i = i + 1) {
-        let b: i32 = src[i];
+        let b: u8 = src[i];
         if (b == 0) {
             str_set(dst, i, 0);
             return i;
@@ -82,10 +82,10 @@ function ascii_from_hex(d: i32): u8 {
 }
 
 function ascii_len(s: ascii[]): i32 {
-    let b0: i32 = s[-4];
-    let b1: i32 = s[-3];
-    let b2: i32 = s[-2];
-    let b3: i32 = s[-1];
+    let b0: i32 = u8_to_i32(s[-4]);
+    let b1: i32 = u8_to_i32(s[-3]);
+    let b2: i32 = u8_to_i32(s[-2]);
+    let b3: i32 = u8_to_i32(s[-1]);
     return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
 }
 
@@ -98,10 +98,10 @@ function ascii_set_len(s: ascii[], len: i32) {
     let b1: i32 = (value / 256) % 256;
     let b2: i32 = (value / 65536) % 256;
     let b3: i32 = (value / 16777216) % 256;
-    s[-4] = b0;
-    s[-3] = b1;
-    s[-2] = b2;
-    s[-1] = b3;
+    s[-4] = i32_to_u8_trunc(b0);
+    s[-3] = i32_to_u8_trunc(b1);
+    s[-2] = i32_to_u8_trunc(b2);
+    s[-1] = i32_to_u8_trunc(b3);
 }
 
 function ascii_is_empty(s: ascii[]): bool {
@@ -142,7 +142,7 @@ function ascii_clear(s: ascii[]) {
 function ascii_copy(dst: ascii[], src: ascii[]): i32 {
     let i: i32 = 0;
     for (i = 0; 1; i = i + 1) {
-        let b: i32 = src[i];
+        let b: u8 = src[i];
         dst[i] = b;
         if (b == 0) {
             ascii_set_len(dst, i);
@@ -156,7 +156,7 @@ function ascii_append(dst: ascii[], src: ascii[]): i32 {
     let base: i32 = ascii_len(dst);
     let i: i32 = 0;
     for (i = 0; 1; i = i + 1) {
-        let b: i32 = src[i];
+        let b: u8 = src[i];
         if (b == 0) {
             dst[base + i] = 0;
             ascii_set_len(dst, base + i);
@@ -182,8 +182,8 @@ function ascii_append_byte(dst: ascii[], b: u8): i32 {
 function ascii_cmp(a: ascii[], b: ascii[]): i32 {
     let i: i32 = 0;
     for (i = 0; 1; i = i + 1) {
-        let av: i32 = a[i];
-        let bv: i32 = b[i];
+        let av: i32 = u8_to_i32(a[i]);
+        let bv: i32 = u8_to_i32(b[i]);
         if (av < bv) {
             return -1;
         }
@@ -204,7 +204,7 @@ function ascii_eq(a: ascii[], b: ascii[]): bool {
 function ascii_find_byte(s: ascii[], b: u8): i32 {
     let i: i32 = 0;
     for (i = 0; 1; i = i + 1) {
-        let cur: i32 = s[i];
+        let cur: u8 = s[i];
         if (cur == b) {
             return i;
         }
@@ -219,7 +219,7 @@ function ascii_find_last_byte(s: ascii[], b: u8): i32 {
     let i: i32 = 0;
     let last: i32 = -1;
     for (i = 0; 1; i = i + 1) {
-        let cur: i32 = s[i];
+        let cur: u8 = s[i];
         if (cur == b) {
             last = i;
         }
@@ -233,11 +233,11 @@ function ascii_find_last_byte(s: ascii[], b: u8): i32 {
 function ascii_starts_with(s: ascii[], prefix: ascii[]): bool {
     let i: i32 = 0;
     for (i = 0; 1; i = i + 1) {
-        let p: i32 = prefix[i];
+        let p: u8 = prefix[i];
         if (p == 0) {
             return true;
         }
-        let v: i32 = s[i];
+        let v: u8 = s[i];
         if (v == 0) {
             return false;
         }
@@ -313,8 +313,8 @@ function mem_zero(dst: u8[], count: i32) {
 function mem_cmp(a: u8[], b: u8[], count: i32): i32 {
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let av: i32 = a[i];
-        let bv: i32 = b[i];
+        let av: i32 = u8_to_i32(a[i]);
+        let bv: i32 = u8_to_i32(b[i]);
         if (av < bv) {
             return -1;
         }
