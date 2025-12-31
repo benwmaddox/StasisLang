@@ -81,6 +81,7 @@ Require-Command "dotnet"
 $vcpkgRoot = Resolve-VcpkgRoot -RepoRoot $repoRoot
 $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
 $triplet = "arm64-android"
+$emitHeapLimitBytes = 2147483648
 
 Write-Host "Repo:  $repoRoot"
 Write-Host "NDK:   $ndk"
@@ -95,7 +96,8 @@ $outDir = Join-Path $repoRoot "android\\out"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $game = Join-Path $repoRoot "samples\\brickout_revenge\\brickout_revenge.stasis"
-$llPath = Join-Path $outDir "brickout_revenge.ll"
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$llPath = Join-Path $outDir "brickout_revenge_$stamp.ll"
 
 Write-Host ""
 Write-Host "Emitting LLVM IR to: $llPath"
@@ -112,10 +114,21 @@ $emitCmd = @(
     "--backend", "llvm",
     "--graphics",
     "--emit-ir",
-    "--llvm-target", "aarch64-linux-android21"
+    "--llvm-target", "aarch64-linux-android21",
+    "--out", "`"$llPath`""
 ) -join " "
 
-cmd /c "$emitCmd > `"$llPath`""
+$prevGcServer = $env:DOTNET_gcServer
+$prevHeapLimit = $env:DOTNET_GCHeapHardLimit
+$env:DOTNET_gcServer = "0"
+$env:DOTNET_GCHeapHardLimit = "$emitHeapLimitBytes"
+try {
+    cmd /c "$emitCmd"
+}
+finally {
+    $env:DOTNET_gcServer = $prevGcServer
+    $env:DOTNET_GCHeapHardLimit = $prevHeapLimit
+}
 if ($LASTEXITCODE -ne 0) { throw "stasis IR emit failed with exit code $LASTEXITCODE" }
 
 $toolchain = Join-Path $vcpkgRoot "scripts\\buildsystems\\vcpkg.cmake"
@@ -175,4 +188,3 @@ if (Test-Path $apk) {
 }
 
 throw "APK not found at expected path: $apk"
-
