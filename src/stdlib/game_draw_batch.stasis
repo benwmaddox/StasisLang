@@ -1,0 +1,64 @@
+// Draw batching helpers (not loaded by default).
+//
+// These helpers build a line command buffer compatible with:
+// - draw_lines_f32(lines: f32[], count: i32)
+//
+// Layout: 8 floats per line:
+//   x0, y0, x1, y1, r, g, b, a
+
+const GAME_LINE_STRIDE_F32: i32 = 8;
+
+function game_lines_clear(count: i32[]): void {
+    count[0] = 0;
+}
+
+function game_lines_push(
+    lines: f32[],
+    max_lines: i32,
+    count: i32[],
+    x0: f32, y0: f32, x1: f32, y1: f32,
+    r: f32, g: f32, b: f32, a: f32
+): bool {
+    if (count[0] >= max_lines) {
+        return false;
+    }
+    let base: i32 = count[0] * GAME_LINE_STRIDE_F32;
+    lines[base + 0] = x0;
+    lines[base + 1] = y0;
+    lines[base + 2] = x1;
+    lines[base + 3] = y1;
+    lines[base + 4] = r;
+    lines[base + 5] = g;
+    lines[base + 6] = b;
+    lines[base + 7] = a;
+    count[0] = count[0] + 1;
+    return true;
+}
+
+function game_lines_flush(lines: f32[], count: i32[]): void {
+    if (count[0] <= 0) {
+        return;
+    }
+    draw_lines_f32(lines, count[0]);
+}
+
+function game_lines_push_rect(
+    lines: f32[],
+    max_lines: i32,
+    count: i32[],
+    cx: f32, cy: f32,
+    half: f32,
+    r: f32, g: f32, b: f32, a: f32
+): bool {
+    let x0: f32 = cx - half;
+    let y0: f32 = cy - half;
+    let x1: f32 = cx + half;
+    let y1: f32 = cy + half;
+
+    if (!game_lines_push(lines, max_lines, count, x0, y0, x1, y0, r, g, b, a)) { return false; }
+    if (!game_lines_push(lines, max_lines, count, x1, y0, x1, y1, r, g, b, a)) { return false; }
+    if (!game_lines_push(lines, max_lines, count, x1, y1, x0, y1, r, g, b, a)) { return false; }
+    if (!game_lines_push(lines, max_lines, count, x0, y1, x0, y0, r, g, b, a)) { return false; }
+    return true;
+}
+

@@ -1,0 +1,8 @@
+import "../src/stdlib/game_input.stasis";
+
+global key_prev: i32[128];
+
+test `game_key_update returns up for invalid scancode`(): bool {
+    return game_key_update(key_prev, -1) == 0 && game_key_update(key_prev, 128) == 0;
+}
+

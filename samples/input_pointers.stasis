@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/game_viewport.stasis";
 
 // Input pointers sample: draws a crosshair at each active pointer (mouse + touch).
 // Uses the input snapshot builtins:
@@ -16,15 +17,10 @@ function draw_cross(x: f32, y: f32, r: f32, g: f32, b: f32): void {
 }
 
 function draw_viewport_outline(): void {
-    let vx_i: i32 = input_viewport_x_px();
-    let vy_i: i32 = input_viewport_y_px();
-    let vw_i: i32 = input_viewport_w_px();
-    let vh_i: i32 = input_viewport_h_px();
-
-    let vx: f32 = vx_i;
-    let vy: f32 = vy_i;
-    let vw: f32 = vw_i;
-    let vh: f32 = vh_i;
+    let vx: f32 = game_viewport_x_px();
+    let vy: f32 = game_viewport_y_px();
+    let vw: f32 = game_viewport_w_px();
+    let vh: f32 = game_viewport_h_px();
 
     let x0: f32 = vx;
     let y0: f32 = vy;

@@ -1,0 +1,18 @@
+import "../src/stdlib/game_draw_batch.stasis";
+
+global lines: f32[64];
+global count: i32[1];
+
+test `game_lines_push respects max_lines`(): bool {
+    game_lines_clear(count);
+    let ok0: bool = game_lines_push(lines, 1, count, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0);
+    let ok1: bool = game_lines_push(lines, 1, count, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0);
+    return ok0 && !ok1 && count[0] == 1;
+}
+
+test `game_lines_push_rect pushes four lines`(): bool {
+    game_lines_clear(count);
+    let ok: bool = game_lines_push_rect(lines, 16, count, 10.0, 10.0, 2.0, 0.1, 0.2, 0.3, 1.0);
+    return ok && count[0] == 4;
+}
+
