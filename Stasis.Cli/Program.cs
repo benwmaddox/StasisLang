@@ -38,7 +38,17 @@ var enableLto = false;
 var enableGraphics = false;
 string? graphicsLibPath = null;
 BackendType? selectedBackend = null;
-var useCraneliftRunner = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER") == "1";
+bool? craneliftRunnerOverride = null;
+var runnerEnv = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER");
+if (runnerEnv == "1")
+{
+    craneliftRunnerOverride = true;
+}
+else if (runnerEnv == "0")
+{
+    craneliftRunnerOverride = false;
+}
+var useCraneliftRunner = craneliftRunnerOverride ?? false;
 var enableHotState = false;
 var tickHostFps = 60;
 
@@ -117,7 +127,12 @@ while (cliArgs.Count > 0)
             }
             break;
         case "--cranelift-runner":
+            craneliftRunnerOverride = true;
             useCraneliftRunner = true;
+            break;
+        case "--no-cranelift-runner":
+            craneliftRunnerOverride = false;
+            useCraneliftRunner = false;
             break;
         case "--hot-state":
             enableHotState = true;
@@ -176,7 +191,7 @@ if (backend == BackendType.Cranelift && selectedBackend is null && !CanUseCranel
     backend = BackendType.Llvm;
 }
 
-if (backend == BackendType.Cranelift && (mode == "test" || mode == "run"))
+if (backend == BackendType.Cranelift && (mode == "test" || mode == "run") && craneliftRunnerOverride is null)
 {
     useCraneliftRunner = true;
 }
@@ -444,6 +459,101 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
         if (backend == BackendType.Cranelift)
         {
+            // Artifact cache: skip AOT + link on warm runs when the source and build options are unchanged.
+            if (IsCraneliftArtifactCacheEnabled() &&
+                !enableHotState &&
+                mode != "build" &&
+                mode != "release")
+            {
+                var cacheDir = GetCraneliftArtifactCacheDirectory(mode);
+                Directory.CreateDirectory(cacheDir);
+                var craneliftTargetTriple = GetCraneliftTargetTriple();
+                var compilerCacheSalt = GetCompilerCacheSalt();
+                var cacheKey = ComputeCraneliftArtifactCacheKey(path, source, mode, backend, moduleName, includeTests, optLevel, enableLto, graphicsLibPath, useCraneliftRunner, enableGraphics, craneliftTargetTriple, compilerCacheSalt);
+                var cachedClif = Path.Combine(cacheDir, $"{cacheKey}.clif");
+                var cachedObj = Path.Combine(cacheDir, $"{cacheKey}{GetObjectFileExtension()}");
+                var cachedOut = Path.Combine(cacheDir, cacheKey + (useCraneliftRunner ? (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so") : (OperatingSystem.IsWindows() ? ".exe" : string.Empty)));
+
+                if (File.Exists(cachedOut))
+                {
+                    var entryBase = mode == "test" ? "run_tests" : "main";
+                    var entryName = $"{moduleName}__{entryBase}";
+                    if (useCraneliftRunner)
+                    {
+                        var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
+                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                    }
+                    return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
+                }
+
+                File.WriteAllText(cachedClif, ir);
+                if (logPhaseTiming)
+                {
+                    irWriteMs = phaseStopwatch.ElapsedMilliseconds;
+                    phaseStopwatch.Restart();
+                }
+
+                if (useCraneliftRunner)
+                {
+                    var exports = new List<string>();
+                    var entryBase = mode == "test" ? "run_tests" : "main";
+                    exports.Add($"{moduleName}__{entryBase}");
+                    var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
+                    if (hasTick)
+                    {
+                        exports.Add($"{moduleName}__tick");
+                    }
+
+                    var sw = Stopwatch.StartNew();
+                    var ensureExit = EnsureCraneliftCachedRunnerDll(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath, exports);
+                    sw.Stop();
+                    if (logPhaseTiming)
+                    {
+                        aotMs = sw.ElapsedMilliseconds;
+                        linkMs = 0;
+                        runMs = 0;
+                    }
+                    if (ensureExit != 0)
+                    {
+                        return ensureExit;
+                    }
+
+                    var runSw = Stopwatch.StartNew();
+                    var entryName = $"{moduleName}__{entryBase}";
+                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                    runSw.Stop();
+                    if (logPhaseTiming)
+                    {
+                        runMs = runSw.ElapsedMilliseconds;
+                    }
+                    return exit;
+                }
+                else
+                {
+                    var sw = Stopwatch.StartNew();
+                    var ensureExit = EnsureCraneliftCachedExecutable(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath);
+                    sw.Stop();
+                    if (logPhaseTiming)
+                    {
+                        aotMs = sw.ElapsedMilliseconds;
+                        linkMs = 0;
+                        runMs = 0;
+                    }
+                    if (ensureExit != 0)
+                    {
+                        return ensureExit;
+                    }
+                    var runSw = Stopwatch.StartNew();
+                    var exit = RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
+                    runSw.Stop();
+                    if (logPhaseTiming)
+                    {
+                        runMs = runSw.ElapsedMilliseconds;
+                    }
+                    return exit;
+                }
+            }
+
             // Native Cranelift path: CLIF -> object -> clang link -> executable.
             if (!OperatingSystem.IsWindows())
             {
@@ -1573,6 +1683,39 @@ static bool DetectsGraphicsUsage(string source)
 
 static bool DetectsTickUsage(string source) =>
     Regex.IsMatch(source, @"(?m)^\s*function\s+tick\s*\(", RegexOptions.CultureInvariant);
+
+const int CraneliftArtifactCacheVersion = 1;
+
+static bool IsCraneliftArtifactCacheEnabled() =>
+    !string.Equals(Environment.GetEnvironmentVariable("STASIS_DISABLE_ARTIFACT_CACHE"), "1", StringComparison.OrdinalIgnoreCase);
+
+static string GetCraneliftArtifactCacheDirectory(string mode)
+{
+    var currentDirectory = Directory.GetCurrentDirectory();
+    var bucket = mode == "test" ? "test" : "run";
+    return Path.Combine(currentDirectory, ".stasis_cache", bucket);
+}
+
+static string ComputeCraneliftArtifactCacheKey(string path, string source, string mode, BackendType backend, string moduleName, bool includeTests, string? optLevel, bool enableLto, string? graphicsLibPath, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
+{
+    var fullPath = Path.GetFullPath(path);
+    var identity = new StringBuilder();
+    identity.Append("version=").Append(CraneliftArtifactCacheVersion).Append('\n');
+    identity.Append("mode=").Append(mode).Append('\n');
+    identity.Append("backend=").Append(backend).Append('\n');
+    identity.Append("module=").Append(moduleName).Append('\n');
+    identity.Append("includeTests=").Append(includeTests).Append('\n');
+    identity.Append("optLevel=").Append(optLevel ?? string.Empty).Append('\n');
+    identity.Append("enableLto=").Append(enableLto).Append('\n');
+    identity.Append("graphicsLibPath=").Append(graphicsLibPath ?? string.Empty).Append('\n');
+    identity.Append("useCraneliftRunner=").Append(useCraneliftRunner).Append('\n');
+    identity.Append("usesGraphics=").Append(usesGraphics).Append('\n');
+    identity.Append("craneliftTarget=").Append(craneliftTargetTriple ?? string.Empty).Append('\n');
+    identity.Append("compilerCacheSalt=").Append(compilerCacheSalt).Append('\n');
+    identity.Append("path=").Append(fullPath).Append('\n');
+    identity.Append("source=").Append(source);
+    return ComputeSha256Hex(identity.ToString());
+}
 
 static string? FindGraphicsLibrary(bool preferShared = false)
 {
@@ -2747,7 +2890,8 @@ static void PrintUsage()
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
-    Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override.");
+    Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
+    Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
 }
 
 static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, bool useLowerLock = true, int lowerDegree = 1) =>
@@ -3097,7 +3241,7 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
     });
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, int? tickHostFps = null)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -3114,13 +3258,18 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
         }
     }
 
-    if (UseCraneliftRunnerServer())
+    if (tickHostFps is null && UseCraneliftRunnerServer())
     {
         var runner = GetCraneliftRunnerServer(runnerPath);
         return runner.Run(dllPath, entryName, out _);
     }
 
-    return RunProcess(runnerPath, $"\"{dllPath}\" {entryName}");
+    var args = $"\"{dllPath}\" {entryName}";
+    if (tickHostFps is not null)
+    {
+        args += $" --fps {tickHostFps.Value}";
+    }
+    return RunProcess(runnerPath, args);
 }
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
@@ -3199,7 +3348,7 @@ static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, stri
     }
 }
 
-static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string>? exports = null)
 {
     if (!OperatingSystem.IsWindows())
     {
@@ -3246,8 +3395,8 @@ static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, strin
 
         if (!File.Exists(dllPath))
         {
-            var exports = new[] { entryName };
-            var args = BuildClangArgsForObject(objPath, tempDll, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsExports: exports);
+            var dllExports = exports is { Count: > 0 } ? exports : new[] { entryName };
+            var args = BuildClangArgsForObject(objPath, tempDll, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsExports: dllExports);
             var exit = RunProcess(clang, args, suppressOutput: true);
             if (exit != 0)
             {
