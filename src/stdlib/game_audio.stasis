@@ -1,0 +1,100 @@
+// Game audio helpers (not loaded by default).
+//
+// Goals:
+// - Deterministic, explicit audio generation in Stasis.
+// - Small helpers for a background loop + one-shot events.
+//
+// Output format:
+// - f32 interleaved stereo: LRLR...
+// - `frames` = number of stereo frames (not samples).
+//
+// Notes:
+// - Cranelift currently does not support "array element field stores" (e.g. `m[0].field = ...`),
+//   so these APIs are structured around explicit SoA-style arrays with `[0]` access.
+
+function game_audio_clamp_pm1(x: f32): f32 {
+    if (x < -1.0) { return -1.0; }
+    if (x > 1.0) { return 1.0; }
+    return x;
+}
+
+// Initializes a simple 2-oscillator "music" loop plus a sine click one-shot.
+function game_audio_mixer_init_default(
+    loop0_phase: f32[], loop0_hz: f32[], loop0_gain: f32[],
+    loop1_phase: f32[], loop1_hz: f32[], loop1_gain: f32[],
+    click_active: i32[], click_phase: f32[], click_hz: f32[], click_gain: f32[],
+    click_env: f32[], click_env_decay: f32[]
+): void {
+    loop0_phase[0] = 0.0;
+    loop0_hz[0] = 110.0;
+    loop0_gain[0] = 0.06;
+
+    loop1_phase[0] = 0.0;
+    loop1_hz[0] = 165.0;
+    loop1_gain[0] = 0.04;
+
+    click_active[0] = 0;
+    click_phase[0] = 0.0;
+    click_hz[0] = 880.0;
+    click_gain[0] = 1.0;
+    click_env[0] = 0.0;
+    click_env_decay[0] = 0.996;
+}
+
+function game_audio_mixer_trigger_click(
+    click_active: i32[], click_phase: f32[], click_hz: f32[], click_gain: f32[],
+    click_env: f32[], click_env_decay: f32[]
+): void {
+    click_active[0] = 1;
+    click_phase[0] = 0.0;
+    click_hz[0] = 880.0;
+    click_gain[0] = 1.0;
+    click_env[0] = 0.35;
+    click_env_decay[0] = 0.996;
+}
+
+function game_audio_mixer_fill_stereo_interleaved(
+    loop0_phase: f32[], loop0_hz: f32[], loop0_gain: f32[],
+    loop1_phase: f32[], loop1_hz: f32[], loop1_gain: f32[],
+    click_active: i32[], click_phase: f32[], click_hz: f32[], click_gain: f32[],
+    click_env: f32[], click_env_decay: f32[],
+    out: f32[], frames: i32, sample_rate: i32
+): void {
+    if (sample_rate <= 0) {
+        return;
+    }
+
+    let sr_f: f32 = i32_to_f32(sample_rate);
+    let loop0_step: f32 = (6.2831853 * loop0_hz[0]) / sr_f;
+    let loop1_step: f32 = (6.2831853 * loop1_hz[0]) / sr_f;
+    let click_step: f32 = (6.2831853 * click_hz[0]) / sr_f;
+
+    let i: i32 = 0;
+    for (i = 0; i < frames; i = i + 1) {
+        let music: f32 = sin_fast(loop0_phase[0]) * loop0_gain[0] + sin_fast(loop1_phase[0]) * loop1_gain[0];
+
+        loop0_phase[0] = loop0_phase[0] + loop0_step;
+        if (loop0_phase[0] > 6.2831853) { loop0_phase[0] = loop0_phase[0] - 6.2831853; }
+        loop1_phase[0] = loop1_phase[0] + loop1_step;
+        if (loop1_phase[0] > 6.2831853) { loop1_phase[0] = loop1_phase[0] - 6.2831853; }
+
+        let click: f32 = 0.0;
+        if (click_active[0] == 1) {
+            click = sin_fast(click_phase[0]) * (click_gain[0] * click_env[0]);
+            click_phase[0] = click_phase[0] + click_step;
+            if (click_phase[0] > 6.2831853) { click_phase[0] = click_phase[0] - 6.2831853; }
+
+            click_env[0] = click_env[0] * click_env_decay[0];
+            if (click_env[0] < 0.0001) {
+                click_env[0] = 0.0;
+                click_active[0] = 0;
+            }
+        }
+
+        let s: f32 = game_audio_clamp_pm1(music + click);
+        let idx: i32 = i * 2;
+        out[idx] = s;
+        out[idx + 1] = s;
+    }
+}
+
