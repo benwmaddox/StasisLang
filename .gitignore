@@ -33,6 +33,12 @@ codevcpkg/
 build/hotstate/
 build/aot/
 
+# Android local build outputs
+android/out/
+android/build/
+android/**/app/build/
+*.apk
+
 # Debug/temp files
 nul
 samples/*_debug.stasis
