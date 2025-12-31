@@ -63,12 +63,13 @@
 ### Build server install flow
 1. Detect device: `adb devices`
 2. Optional clean install: `adb uninstall com.stasis.brickoutrevenge`
-3. Install: `adb install -r out/android/brickout-revenge.apk`
-4. Optional asset push: `adb push assets/ /sdcard/Android/data/com.stasis.brickoutrevenge/files/`
+3. Install: `adb install -r android/brickout-revenge/app/build/outputs/apk/debug/app-debug.apk`
+4. Push assets/data: `adb push samples/brickout_revenge /sdcard/Android/data/com.stasis.brickoutrevenge/files/samples/brickout_revenge`
 
 ### Manual local testing
 - Detect device: `adb devices`
-- Install: `adb install -r out/android/brickout-revenge.apk`
+- Build+package: `android\build_brickout_android_debug.bat`
+- Install+push+launch: `android\install_brickout_android_debug.bat`
 - Uninstall (clean): `adb uninstall com.stasis.brickoutrevenge`
 
 ## Multi-app extensibility
