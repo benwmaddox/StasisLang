@@ -28,6 +28,8 @@ import "../../src/stdlib/sdl_scancodes.stasis";
 // Pool sizes (compile-time; keep in sync with the array sizes below)
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
+const MAX_TAP_PULSES: i32 = 16;
+const TAP_PULSE_DURATION_MS: i32 = 2000;
 
 enum BrickType {
     Basic,
@@ -201,6 +203,13 @@ struct BrickoutSprites {
     brick_reflector_fx: i32;
 }
 
+struct TapPulse {
+    x: f32;
+    y: f32;
+    age_ms: i32;
+    active: i32;
+}
+
 struct GameState {
     config: BrickoutConfig;
     bricks: Brick[50];
@@ -218,6 +227,7 @@ struct GameState {
     rng_state: i32;
     running: i32;
     sprites: BrickoutSprites;
+    tap_pulses: TapPulse[16];
 }
 
 global state: GameState;
@@ -282,6 +292,21 @@ function apply_config_live(): void {
     foreach (let ball in state.balls) {
         ball.radius = state.config.ball.radius;
     }
+}
+
+function sync_screen_size(): void {
+    if (!gfx_window_resized()) {
+        return;
+    }
+
+    let w: i32 = gfx_window_width();
+    let h: i32 = gfx_window_height();
+    if (w < 1 || h < 1) {
+        return;
+    }
+
+    state.config.screen.w = w;
+    state.config.screen.h = h;
 }
 
 // Grid helpers - bricks are placed on a grid in the lower portion
@@ -1395,6 +1420,7 @@ function draw_frame(): void {
     draw_balls();
     draw_paddle();
     draw_ui();
+    draw_tap_pulses();
 }
 
 // Timing
@@ -1405,6 +1431,61 @@ function compute_delta_ms(): i32 {
     if (delta_ms > 100) { delta_ms = 100; }
     state.timers.last_time = current_time;
     return delta_ms;
+}
+
+function record_tap_pulses(): void {
+    let count: i32 = input_pointer_count();
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        let went_down: bool = input_pointer_went_down(i);
+        if (!went_down) {
+            continue;
+        }
+
+        let x: f32 = input_pointer_x_px(i);
+        let y: f32 = input_pointer_y_px(i);
+        let j: i32 = 0;
+        for (j = 0; j < MAX_TAP_PULSES; j = j + 1) {
+            if (state.tap_pulses[j].active == 0) {
+                state.tap_pulses[j].active = 1;
+                state.tap_pulses[j].age_ms = 0;
+                state.tap_pulses[j].x = x;
+                state.tap_pulses[j].y = y;
+                break;
+            }
+        }
+    }
+}
+
+function update_tap_pulses(delta_ms: i32): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
+        if (state.tap_pulses[i].active == 0) {
+            continue;
+        }
+
+        state.tap_pulses[i].age_ms = state.tap_pulses[i].age_ms + delta_ms;
+        if (state.tap_pulses[i].age_ms >= TAP_PULSE_DURATION_MS) {
+            state.tap_pulses[i].active = 0;
+        }
+    }
+}
+
+function draw_tap_pulses(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
+        if (state.tap_pulses[i].active == 0) {
+            continue;
+        }
+
+        let age_f: f32 = i32_to_f32(state.tap_pulses[i].age_ms);
+        let dur_f: f32 = i32_to_f32(TAP_PULSE_DURATION_MS);
+        let t: f32 = age_f / dur_f;
+        if (t > 1.0) { t = 1.0; }
+        let radius: f32 = 8.0 + (48.0 * t);
+        let alpha: f32 = 0.6 * (1.0 - t);
+        draw_circle(state.tap_pulses[i].x, state.tap_pulses[i].y, radius, 0.2, 0.9, 1.0, alpha);
+    }
 }
 
 function main(): i32 {
@@ -1462,6 +1543,7 @@ function tick(): i32 {
         return 1;
     }
 
+    sync_screen_size();
     apply_config_live();
 
     state.timers.frame_start = get_time_ms();
@@ -1479,6 +1561,8 @@ function tick(): i32 {
         return 1;
     }
 
+    record_tap_pulses();
+
     begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
 
@@ -1486,6 +1570,7 @@ function tick(): i32 {
     let delta_f: f32 = i32_to_f32(delta_ms);
     let dt: f32 = delta_f / 1000.0;
 
+    update_tap_pulses(delta_ms);
     update_game(dt, delta_ms);
     draw_frame();
 
