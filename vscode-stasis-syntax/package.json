@@ -1,0 +1,40 @@
+{
+  "name": "stasis-syntax",
+  "displayName": "Stasis Syntax",
+  "description": "Syntax highlighting for the Stasis language (.stasis).",
+  "version": "0.0.1",
+  "publisher": "stasislang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:stasis"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "stasis",
+        "aliases": [
+          "Stasis",
+          "stasis"
+        ],
+        "extensions": [
+          ".stasis"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stasis",
+        "scopeName": "source.stasis",
+        "path": "./syntaxes/stasis.tmLanguage.json"
+      }
+    ]
+  }
+}
+
