@@ -1,0 +1,62 @@
+import "../src/stdlib/game_audio.stasis";
+
+global loop0_phase: f32[1];
+global loop0_hz: f32[1];
+global loop0_gain: f32[1];
+global loop1_phase: f32[1];
+global loop1_hz: f32[1];
+global loop1_gain: f32[1];
+global click_active: i32[1];
+global click_phase: f32[1];
+global click_hz: f32[1];
+global click_gain: f32[1];
+global click_env: f32[1];
+global click_env_decay: f32[1];
+
+global buf: f32[16]; // 8 frames stereo
+
+test `game_audio_mixer outputs silence when gains are zero`(): bool {
+    game_audio_mixer_init_default(
+        loop0_phase, loop0_hz, loop0_gain,
+        loop1_phase, loop1_hz, loop1_gain,
+        click_active, click_phase, click_hz, click_gain,
+        click_env, click_env_decay
+    );
+    loop0_gain[0] = 0.0;
+    loop1_gain[0] = 0.0;
+    click_active[0] = 0;
+    click_env[0] = 0.0;
+    game_audio_mixer_fill_stereo_interleaved(
+        loop0_phase, loop0_hz, loop0_gain,
+        loop1_phase, loop1_hz, loop1_gain,
+        click_active, click_phase, click_hz, click_gain,
+        click_env, click_env_decay,
+        buf, 8, 48000
+    );
+    return buf[0] == 0.0 && buf[1] == 0.0 && buf[2] == 0.0 && buf[3] == 0.0;
+}
+
+test `game_audio_mixer click decays`(): bool {
+    game_audio_mixer_init_default(
+        loop0_phase, loop0_hz, loop0_gain,
+        loop1_phase, loop1_hz, loop1_gain,
+        click_active, click_phase, click_hz, click_gain,
+        click_env, click_env_decay
+    );
+    loop0_gain[0] = 0.0;
+    loop1_gain[0] = 0.0;
+
+    game_audio_mixer_trigger_click(click_active, click_phase, click_hz, click_gain, click_env, click_env_decay);
+
+    let before: f32 = click_env[0];
+    game_audio_mixer_fill_stereo_interleaved(
+        loop0_phase, loop0_hz, loop0_gain,
+        loop1_phase, loop1_hz, loop1_gain,
+        click_active, click_phase, click_hz, click_gain,
+        click_env, click_env_decay,
+        buf, 8, 48000
+    );
+    let after: f32 = click_env[0];
+    return before == 0.35 && after < before && after >= 0.0;
+}
+

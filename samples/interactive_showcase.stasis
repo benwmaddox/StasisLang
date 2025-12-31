@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/game_audio.stasis";
 import "../src/stdlib/game_draw.stasis";
 import "../src/stdlib/game_input.stasis";
 import "../src/stdlib/game_math.stasis";
@@ -27,10 +28,18 @@ global audio_buf: f32[512]; // 256 frames * 2 channels
 
 global audio_ready: bool;
 global audio_sr: i32;
-global audio_phase0: f32;
-global audio_phase1: f32;
-global click_phase: f32;
-global click_env: f32;
+global audio_loop0_phase: f32[1];
+global audio_loop0_hz: f32[1];
+global audio_loop0_gain: f32[1];
+global audio_loop1_phase: f32[1];
+global audio_loop1_hz: f32[1];
+global audio_loop1_gain: f32[1];
+global audio_click_active: i32[1];
+global audio_click_phase: f32[1];
+global audio_click_hz: f32[1];
+global audio_click_gain: f32[1];
+global audio_click_env: f32[1];
+global audio_click_env_decay: f32[1];
 
 global rng_state: i32[1];
 
@@ -141,50 +150,24 @@ function update_text_input(): void {
 }
 
 function trigger_click_sound(): void {
-    click_phase = 0.0;
-    click_env = 0.35;
+    game_audio_mixer_trigger_click(
+        audio_click_active,
+        audio_click_phase,
+        audio_click_hz,
+        audio_click_gain,
+        audio_click_env,
+        audio_click_env_decay
+    );
 }
 
 function fill_audio_chunk(sample_rate: i32): void {
-    let sr_f: f32 = i32_to_f32(sample_rate);
-
-    // Simple "music": two sines.
-    let step0: f32 = (PI2 * 110.0) / sr_f;
-    let step1: f32 = (PI2 * 165.0) / sr_f;
-    // Click beep.
-    let click_step: f32 = (PI2 * 880.0) / sr_f;
-
-    let i: i32 = 0;
-    for (i = 0; i < FRAMES_PER_PUSH; i = i + 1) {
-        let music: f32 = (sin_fast(audio_phase0) * 0.06) + (sin_fast(audio_phase1) * 0.04);
-
-        let click: f32 = 0.0;
-        if (click_env > 0.0001) {
-            click = sin_fast(click_phase) * click_env;
-            click_env = click_env * 0.996;
-        } else {
-            click_env = 0.0;
-        }
-
-        let s: f32 = game_clamp_f32((music + click) * 0.5 + 0.5, 0.0, 1.0) * 2.0 - 1.0;
-
-        let idx: i32 = i * 2;
-        audio_buf[idx] = s;
-        audio_buf[idx + 1] = s;
-
-        audio_phase0 = audio_phase0 + step0;
-        if (audio_phase0 > PI2) {
-            audio_phase0 = audio_phase0 - PI2;
-        }
-        audio_phase1 = audio_phase1 + step1;
-        if (audio_phase1 > PI2) {
-            audio_phase1 = audio_phase1 - PI2;
-        }
-        click_phase = click_phase + click_step;
-        if (click_phase > PI2) {
-            click_phase = click_phase - PI2;
-        }
-    }
+    game_audio_mixer_fill_stereo_interleaved(
+        audio_loop0_phase, audio_loop0_hz, audio_loop0_gain,
+        audio_loop1_phase, audio_loop1_hz, audio_loop1_gain,
+        audio_click_active, audio_click_phase, audio_click_hz, audio_click_gain,
+        audio_click_env, audio_click_env_decay,
+        audio_buf, FRAMES_PER_PUSH, sample_rate
+    );
 }
 
 function audio_update(): void {
@@ -242,6 +225,12 @@ function main(): i32 {
     audio_ready = audio_is_available();
     if (audio_ready) {
         audio_sr = audio_get_sample_rate();
+        game_audio_mixer_init_default(
+            audio_loop0_phase, audio_loop0_hz, audio_loop0_gain,
+            audio_loop1_phase, audio_loop1_hz, audio_loop1_gain,
+            audio_click_active, audio_click_phase, audio_click_hz, audio_click_gain,
+            audio_click_env, audio_click_env_decay
+        );
     }
 
     text_clear();
