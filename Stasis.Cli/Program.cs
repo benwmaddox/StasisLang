@@ -293,6 +293,12 @@ if (watch)
     }
 }
 
+if (emitIrOnly && outputPath is not null && (watch || runAllInDirectory))
+{
+    Console.Error.WriteLine("error: --out with --emit-ir is only supported for single-file runs.");
+    Environment.Exit(1);
+}
+
 if (runAllInDirectory && mode == "test")
 {
     var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
@@ -451,13 +457,13 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         if (lowerDiagnostics.Count > 0)
         {
             PrintDiagnostics(lowerDiagnostics, source, path);
-            Console.WriteLine(ir);
+            WriteIrOutput(ir, outputPath);
             return 1;
         }
 
         if (emitIrOnly)
         {
-            Console.WriteLine(ir);
+            WriteIrOutput(ir, outputPath);
             return lowerDiagnostics.Count > 0 ? 1 : 0;
         }
 
@@ -2878,10 +2884,26 @@ static Process StartWatchChild(string exePath, string[] args)
 static string QuoteArg(string arg) =>
     arg.Contains(' ') ? $"\"{arg}\"" : arg;
 
+static void WriteIrOutput(string ir, string? outputPath)
+{
+    if (!string.IsNullOrWhiteSpace(outputPath))
+    {
+        var outDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrWhiteSpace(outDir))
+        {
+            Directory.CreateDirectory(outDir);
+        }
+        File.WriteAllText(outputPath, ir);
+        return;
+    }
+
+    Console.WriteLine(ir);
+}
+
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>]");
+    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");
@@ -2889,7 +2911,7 @@ static void PrintUsage()
     Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout. With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
     Console.WriteLine("Run: for games that define `function tick()`, 'run' defaults to a dev loop (auto-watch + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
