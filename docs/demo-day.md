@@ -18,6 +18,18 @@ cd /d E:\StasisLang
 test.bat
 ```
 
+## Cranelift note (runner vs EXE)
+
+For `--backend cranelift`, `run`/`test` default to producing a DLL and invoking it via `stasis_runner.exe` (the "runner"). This is the path used for hot-swap between `tick()` calls and is also the fastest warm iteration loop.
+
+If you want Cranelift to behave more like LLVM (produce and run an EXE), pass `--no-cranelift-runner`:
+
+```bat
+.\stasis.bat run .\samples\basic.stasis --backend cranelift --no-cranelift-runner
+```
+
+Cranelift `run`/`test` also caches linked artifacts under `.stasis_cache\run` and `.stasis_cache\test` so repeated runs of an unchanged file should not relink. Set `STASIS_DISABLE_ARTIFACT_CACHE=1` to disable this cache.
+
 ## Interactive demos (graphics/input/audio/text)
 
 ### 1) Interactive showcase (graphics + pointer input + audio + font text)
@@ -206,4 +218,3 @@ Run:
 ```
 
 While it runs, edit `data\data_hotreload_latency\balance.json` and watch it print `health changed=...`.
-
