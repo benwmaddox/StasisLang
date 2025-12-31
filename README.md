@@ -60,6 +60,7 @@ Options:
 - When `lli` is unavailable, the CLI compiles the IR with `clang`. On Windows it links against the latest installed Windows SDK (`ucrt`, `kernel32`, `legacy_stdio_definitions`) so the test harness `printf` resolves.
 
 ## Samples
+- Demo day quick guide: `docs/demo-day.md`
 - `samples/basic.stasis` basic function plus `main` returning 5.
 - `samples/tests.stasis` includes Stasis `test` declarations; the emitted `run_tests` function prints a summary and returns the failure count.
 - `samples/sudoku.stasis` playable Sudoku: `stasis run samples/sudoku.stasis` then enter `row col value` (1-9, 0 clears) or `q` to quit. Clue cells are colored differently; invalid moves are rejected.
