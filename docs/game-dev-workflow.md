@@ -143,6 +143,19 @@ Treat SVG as a clean source format and drive most animation from code:
 - Keep a consistent `viewBox` contract per asset family so sizing stays predictable.
 - If an SVG looks good in a browser but fails to bake, reduce it to simple paths/rects/circles with solid fills/strokes.
 
+### 6) Data hot reload (JSON -> global state)
+
+Data hot reload is only enabled in the watch-based `tick()` dev loop (`--watch`), where the CLI binds a JSON file to globals via the runner.
+Plain `stasis run` does not currently pass any data binding to the runner, so it will not hot-reload JSON between ticks.
+
+Conventions:
+- Prefer a `data/config.json` next to the source file (for example `samples/brickout_revenge/data/config.json`).
+- Otherwise the CLI will bind the first `*.json` it finds nearby, or `data/<sourceBaseName>/*.json` under the repo root.
+
+Samples:
+- `samples/data_hotreload_smoke.stasis` + `data/data_hotreload_smoke/balance.json`
+- `samples/data_hotreload_latency.stasis` + `data/data_hotreload_latency/balance.json`
+
 ## Approaches That Work Well in Stasis (today)
 
 Stasis is opinionated: static global memory, deterministic layouts, and predictable performance. Lean into that.
@@ -327,6 +340,6 @@ This keeps examples and docs aligned with the spec and assets:
 For day-to-day game iteration, you should not need any special "state file" arguments.
 The CLI and runner handle the mechanics internally.
 
-- Prefer `stasisc run <file>` / `.\stasis.bat run <file>` for hot reload.
+- Prefer `stasis run <file>` / `.\stasis.bat run <file>` for hot reload.
 - Use `--fps` to set the host pacing.
 - Use `--hot-state` only if you are experimenting with restart-based snapshot/restore across separate process runs.
