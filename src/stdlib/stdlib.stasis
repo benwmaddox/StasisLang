@@ -324,3 +324,67 @@ function mem_cmp(a: u8[], b: u8[], count: i32): i32 {
     }
     return 0;
 }
+
+// UTF-8 string buffer helpers.
+//
+// Layout (see `docs/spec.md`):
+// - `utf8[N]`: [byte_length: i32][char_length: i32][data: u8[N]]
+//
+// Note: `utf8_set_len_ascii` assumes the payload contains only ASCII bytes, so
+// `char_length == byte_length`.
+
+function utf8_byte_len(s: utf8[]): i32 {
+    let b0: i32 = u8_to_i32(s[-8]);
+    let b1: i32 = u8_to_i32(s[-7]);
+    let b2: i32 = u8_to_i32(s[-6]);
+    let b3: i32 = u8_to_i32(s[-5]);
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+function utf8_char_len(s: utf8[]): i32 {
+    let b0: i32 = u8_to_i32(s[-4]);
+    let b1: i32 = u8_to_i32(s[-3]);
+    let b2: i32 = u8_to_i32(s[-2]);
+    let b3: i32 = u8_to_i32(s[-1]);
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+function utf8_set_byte_len(s: utf8[], len: i32): void {
+    let value: i32 = len;
+    if (value < 0) {
+        value = 0;
+    }
+    let b0: i32 = value % 256;
+    let b1: i32 = (value / 256) % 256;
+    let b2: i32 = (value / 65536) % 256;
+    let b3: i32 = (value / 16777216) % 256;
+    s[-8] = i32_to_u8_trunc(b0);
+    s[-7] = i32_to_u8_trunc(b1);
+    s[-6] = i32_to_u8_trunc(b2);
+    s[-5] = i32_to_u8_trunc(b3);
+}
+
+function utf8_set_char_len(s: utf8[], len: i32): void {
+    let value: i32 = len;
+    if (value < 0) {
+        value = 0;
+    }
+    let b0: i32 = value % 256;
+    let b1: i32 = (value / 256) % 256;
+    let b2: i32 = (value / 65536) % 256;
+    let b3: i32 = (value / 16777216) % 256;
+    s[-4] = i32_to_u8_trunc(b0);
+    s[-3] = i32_to_u8_trunc(b1);
+    s[-2] = i32_to_u8_trunc(b2);
+    s[-1] = i32_to_u8_trunc(b3);
+}
+
+function utf8_set_len_ascii(s: utf8[], len: i32): void {
+    utf8_set_byte_len(s, len);
+    utf8_set_char_len(s, len);
+}
+
+function utf8_clear_ascii(s: utf8[]): void {
+    s[0] = 0;
+    utf8_set_len_ascii(s, 0);
+}
