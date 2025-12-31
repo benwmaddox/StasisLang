@@ -2,6 +2,10 @@
 
 function game_abs_i32(x: i32): i32 {
     if (x < 0) {
+        // i32 abs is undefined for INT_MIN; clamp so callers stay deterministic.
+        if (x == -2147483648) {
+            return 2147483647;
+        }
         return 0 - x;
     }
     return x;
@@ -65,7 +69,13 @@ function game_rng_next(state: i32[]): i32 {
 function game_rng_range_i32(state: i32[], min_incl: i32, max_incl: i32): i32 {
     let r: i32 = game_rng_next(state);
     if (r < 0) {
-        r = 0 - r;
+        // Avoid INT_MIN overflow on negation (keeps modulo in-range).
+        if (r == -2147483648) {
+            r = 2147483647;
+        }
+        else {
+            r = 0 - r;
+        }
     }
 
     let span: i32 = (max_incl - min_incl) + 1;
