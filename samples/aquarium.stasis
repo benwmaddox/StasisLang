@@ -1,0 +1,336 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/game_audio.stasis";
+import "../src/stdlib/game_draw.stasis";
+import "../src/stdlib/game_math.stasis";
+
+// Aquarium sample (minimal):
+// - SoA-ish entities (fish + pellets) in static globals.
+// - Rendering via line primitives.
+// - Pointer input: click/tap to drop food pellets.
+// - Optional audio: click beep when dropping food.
+//
+// Run:
+//   .\stasis.bat run .\samples\aquarium.stasis --backend cranelift --graphics
+
+const SCREEN_W: i32 = 900;
+const SCREEN_H: i32 = 600;
+const TARGET_FPS: i32 = 60;
+const FRAME_MS: i32 = 16;
+const DT: f32 = 0.016;
+
+const MAX_FISH: i32 = 24;
+const MAX_PELLETS: i32 = 64;
+
+global rng_state: i32[1];
+
+global fish_active: i32[24];
+global fish_x: f32[24];
+global fish_y: f32[24];
+global fish_vx: f32[24];
+global fish_vy: f32[24];
+global fish_phase: f32[24];
+global fish_r: f32[24];
+global fish_g: f32[24];
+global fish_b: f32[24];
+
+global pellet_active: i32[64];
+global pellet_x: f32[64];
+global pellet_y: f32[64];
+global pellet_vy: f32[64];
+global pellet_t: f32[64];
+
+global tmp_idx: i32[1];
+global tmp_dx: f32[1];
+global tmp_dy: f32[1];
+
+// Audio (simple click + optional ambient loop).
+const AUDIO_FRAMES_PER_PUSH: i32 = 256;
+global audio_buf: f32[512];
+global audio_ready: bool;
+global audio_sr: i32;
+global audio_loop0_phase: f32[1];
+global audio_loop0_hz: f32[1];
+global audio_loop0_gain: f32[1];
+global audio_loop1_phase: f32[1];
+global audio_loop1_hz: f32[1];
+global audio_loop1_gain: f32[1];
+global audio_click_active: i32[1];
+global audio_click_phase: f32[1];
+global audio_click_hz: f32[1];
+global audio_click_gain: f32[1];
+global audio_click_env: f32[1];
+global audio_click_env_decay: f32[1];
+
+function spawn_pellet(px: f32, py: f32): void {
+    let slot: i32 = -1;
+    let i: i32 = 0;
+    for (i = 0; i < MAX_PELLETS; i = i + 1) {
+        if (slot < 0 && pellet_active[i] == 0) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        return;
+    }
+
+    pellet_active[slot] = 1;
+    pellet_x[slot] = px;
+    pellet_y[slot] = py;
+    pellet_vy[slot] = 0.0;
+    pellet_t[slot] = 0.0;
+
+    if (audio_ready) {
+        game_audio_mixer_trigger_click(
+            audio_click_active, audio_click_phase, audio_click_hz, audio_click_gain, audio_click_env, audio_click_env_decay
+        );
+    }
+}
+
+function update_pellets(dt: f32): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_PELLETS; i = i + 1) {
+        if (pellet_active[i] == 1) {
+            pellet_t[i] = pellet_t[i] + dt;
+            pellet_vy[i] = pellet_vy[i] + 80.0 * dt;
+            pellet_y[i] = pellet_y[i] + pellet_vy[i] * dt;
+
+            if (pellet_y[i] > i32_to_f32(SCREEN_H) - 10.0) {
+                pellet_y[i] = i32_to_f32(SCREEN_H) - 10.0;
+                pellet_vy[i] = pellet_vy[i] * 0.2;
+            }
+
+            if (pellet_t[i] > 12.0) {
+                pellet_active[i] = 0;
+            }
+        }
+    }
+}
+
+function nearest_pellet(px: f32, py: f32, out_idx: i32[], out_dx: f32[], out_dy: f32[]): bool {
+    let best_i: i32 = -1;
+    let best_d2: f32 = 99999999.0;
+    let i: i32 = 0;
+    for (i = 0; i < MAX_PELLETS; i = i + 1) {
+        if (pellet_active[i] == 1) {
+            let dx: f32 = pellet_x[i] - px;
+            let dy: f32 = pellet_y[i] - py;
+            let d2: f32 = dx * dx + dy * dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best_i = i;
+                out_dx[0] = dx;
+                out_dy[0] = dy;
+            }
+        }
+    }
+    out_idx[0] = best_i;
+    return best_i >= 0;
+}
+
+function update_fish(dt: f32): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_FISH; i = i + 1) {
+        if (fish_active[i] == 0) {
+            // skip
+        } else {
+
+            // Seek nearest pellet if present, otherwise wander.
+            let has_food: bool = nearest_pellet(fish_x[i], fish_y[i], tmp_idx, tmp_dx, tmp_dy);
+            let ax: f32 = 0.0;
+            let ay: f32 = 0.0;
+            if (has_food) {
+                let dx: f32 = tmp_dx[0];
+                let dy: f32 = tmp_dy[0];
+                let d2: f32 = dx * dx + dy * dy;
+                if (d2 < 14.0 * 14.0) {
+                    pellet_active[tmp_idx[0]] = 0;
+                } else {
+                    // Normalize-ish: L1 magnitude (no sqrt).
+                    let inv: f32 = 1.0 / (game_abs_f32(dx) + game_abs_f32(dy) + 0.001);
+                    ax = dx * inv * 180.0;
+                    ay = dy * inv * 180.0;
+                }
+            } else {
+                fish_phase[i] = fish_phase[i] + dt;
+                ax = cos_fast(fish_phase[i] + i32_to_f32(i) * 0.3) * 50.0;
+                ay = sin_fast(fish_phase[i] + i32_to_f32(i) * 0.2) * 35.0;
+            }
+
+            fish_vx[i] = fish_vx[i] + ax * dt;
+            fish_vy[i] = fish_vy[i] + ay * dt;
+
+            // Soft speed cap (L1).
+            let l1: f32 = game_abs_f32(fish_vx[i]) + game_abs_f32(fish_vy[i]);
+            if (l1 > 260.0) {
+                let inv: f32 = 260.0 / (l1 + 0.001);
+                fish_vx[i] = fish_vx[i] * inv;
+                fish_vy[i] = fish_vy[i] * inv;
+            }
+
+            fish_x[i] = fish_x[i] + fish_vx[i] * dt;
+            fish_y[i] = fish_y[i] + fish_vy[i] * dt;
+
+            // Keep in bounds with simple bounce.
+            if (fish_x[i] < 20.0) { fish_x[i] = 20.0; fish_vx[i] = 0.0 - fish_vx[i]; }
+            if (fish_x[i] > i32_to_f32(SCREEN_W) - 20.0) { fish_x[i] = i32_to_f32(SCREEN_W) - 20.0; fish_vx[i] = 0.0 - fish_vx[i]; }
+            if (fish_y[i] < 20.0) { fish_y[i] = 20.0; fish_vy[i] = 0.0 - fish_vy[i]; }
+            if (fish_y[i] > i32_to_f32(SCREEN_H) - 40.0) { fish_y[i] = i32_to_f32(SCREEN_H) - 40.0; fish_vy[i] = 0.0 - fish_vy[i]; }
+        }
+    }
+}
+
+function draw_fish(i: i32): void {
+    // Facing based on velocity; fall back to a stable direction.
+    let vx: f32 = fish_vx[i];
+    let vy: f32 = fish_vy[i];
+    let mag: f32 = game_abs_f32(vx) + game_abs_f32(vy);
+    if (mag < 0.001) {
+        vx = 1.0;
+        vy = 0.0;
+        mag = 1.0;
+    }
+    let nx: f32 = vx / mag;
+    let ny: f32 = vy / mag;
+
+    let px: f32 = fish_x[i];
+    let py: f32 = fish_y[i];
+    let size: f32 = 10.0 + (i32_to_f32(i % 5)) * 2.0;
+
+    let fx: f32 = px + nx * size;
+    let fy: f32 = py + ny * size;
+    let bx: f32 = px - nx * size;
+    let by: f32 = py - ny * size;
+    let lx: f32 = bx + (0.0 - ny) * (size * 0.7);
+    let ly: f32 = by + nx * (size * 0.7);
+    let rx: f32 = bx + ny * (size * 0.7);
+    let ry: f32 = by + (0.0 - nx) * (size * 0.7);
+
+    draw_line(fx, fy, lx, ly, fish_r[i], fish_g[i], fish_b[i], 1.0);
+    draw_line(fx, fy, rx, ry, fish_r[i], fish_g[i], fish_b[i], 1.0);
+    draw_line(lx, ly, rx, ry, fish_r[i], fish_g[i], fish_b[i], 1.0);
+}
+
+function draw_scene(): void {
+    clear(0.01, 0.03, 0.06, 1.0);
+
+    // Subtle background hint.
+    game_draw_rect(60.0, 60.0, 40.0, 0.06, 0.10, 0.16, 1.0);
+
+    let i: i32 = 0;
+    for (i = 0; i < MAX_PELLETS; i = i + 1) {
+        if (pellet_active[i] == 1) {
+            game_draw_circle(pellet_x[i], pellet_y[i], 3.0, 0.9, 0.85, 0.3, 1.0);
+        }
+    }
+
+    for (i = 0; i < MAX_FISH; i = i + 1) {
+        if (fish_active[i] == 1) {
+            draw_fish(i);
+        }
+    }
+}
+
+function audio_update(): void {
+    if (!audio_ready) { return; }
+
+    // Keep ~200ms buffered.
+    let target: i32 = audio_sr / 5;
+    let queued: i32 = audio_get_queued_frames();
+    let guard: i32 = 0;
+    for (guard = 0; queued < target && guard < 8; guard = guard + 1) {
+        game_audio_mixer_fill_stereo_interleaved(
+            audio_loop0_phase, audio_loop0_hz, audio_loop0_gain,
+            audio_loop1_phase, audio_loop1_hz, audio_loop1_gain,
+            audio_click_active, audio_click_phase, audio_click_hz, audio_click_gain,
+            audio_click_env, audio_click_env_decay,
+            audio_buf, AUDIO_FRAMES_PER_PUSH, audio_sr
+        );
+        let pushed: i32 = audio_push_f32_interleaved(audio_buf, AUDIO_FRAMES_PER_PUSH);
+        if (pushed <= 0) {
+            return;
+        }
+        queued = queued + pushed;
+        if (pushed < AUDIO_FRAMES_PER_PUSH) {
+            return;
+        }
+    }
+}
+
+function init_game(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_FISH; i = i + 1) {
+        fish_active[i] = 1;
+        fish_x[i] = game_rng_range_f32(rng_state, 80.0, i32_to_f32(SCREEN_W) - 80.0);
+        fish_y[i] = game_rng_range_f32(rng_state, 80.0, i32_to_f32(SCREEN_H) - 140.0);
+        fish_vx[i] = game_rng_range_f32(rng_state, -30.0, 30.0);
+        fish_vy[i] = game_rng_range_f32(rng_state, -20.0, 20.0);
+        fish_phase[i] = game_rng_range_f32(rng_state, 0.0, 6.0);
+        fish_r[i] = game_rng_f32_01(rng_state) * 0.6 + 0.2;
+        fish_g[i] = game_rng_f32_01(rng_state) * 0.6 + 0.2;
+        fish_b[i] = game_rng_f32_01(rng_state) * 0.6 + 0.2;
+    }
+    for (i = 0; i < MAX_PELLETS; i = i + 1) {
+        pellet_active[i] = 0;
+    }
+}
+
+test `aquarium_spawn_pellet_uses_slot`(): bool {
+    // Deterministic: ensure first spawn takes slot 0.
+    pellet_active[0] = 0;
+    spawn_pellet(10.0, 20.0);
+    return pellet_active[0] == 1 && pellet_x[0] == 10.0 && pellet_y[0] == 20.0;
+}
+
+function main(): i32 {
+    game_rng_seed(rng_state, time());
+
+    let ok: bool = init_window(SCREEN_W, SCREEN_H, "Stasis Aquarium");
+    if (!ok) {
+        return 1;
+    }
+
+    audio_ready = audio_is_available();
+    if (audio_ready) {
+        audio_sr = audio_get_sample_rate();
+        game_audio_mixer_init_default(
+            audio_loop0_phase, audio_loop0_hz, audio_loop0_gain,
+            audio_loop1_phase, audio_loop1_hz, audio_loop1_gain,
+            audio_click_active, audio_click_phase, audio_click_hz, audio_click_gain,
+            audio_click_env, audio_click_env_decay
+        );
+        // Keep ambient quiet for this sample.
+        audio_loop0_gain[0] = 0.01;
+        audio_loop1_gain[0] = 0.01;
+    }
+
+    init_game();
+
+    let running: i32 = 1;
+    let frame: i32 = 0;
+    for (frame = 0; running == 1; frame = frame + 1) {
+        if (should_quit()) {
+            running = 0;
+        }
+
+        // Click/tap to drop food.
+        let count: i32 = input_pointer_count();
+        let i: i32 = 0;
+        for (i = 0; i < count; i = i + 1) {
+            if (input_pointer_went_down(i)) {
+                spawn_pellet(input_pointer_x_px(i), input_pointer_y_px(i));
+            }
+        }
+
+        update_pellets(DT);
+        update_fish(DT);
+        audio_update();
+
+        begin_frame();
+        draw_scene();
+        end_frame();
+
+        sleep_ms(FRAME_MS);
+    }
+
+    return 0;
+}
