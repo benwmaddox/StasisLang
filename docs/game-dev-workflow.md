@@ -143,6 +143,18 @@ Treat SVG as a clean source format and drive most animation from code:
 - Keep a consistent `viewBox` contract per asset family so sizing stays predictable.
 - If an SVG looks good in a browser but fails to bake, reduce it to simple paths/rects/circles with solid fills/strokes.
 
+### 6) Data hot reload (JSON -> global state)
+
+If your game has `tick()`, `stasis run` defaults to the dev loop and will also hot-reload a JSON config between ticks.
+
+Conventions:
+- Prefer a `data/config.json` next to the source file (for example `samples/brickout_revenge/data/config.json`).
+- Otherwise the CLI will bind the first `*.json` it finds nearby, or `data/<sourceBaseName>/*.json` under the repo root.
+
+Samples:
+- `samples/data_hotreload_smoke.stasis` + `data/data_hotreload_smoke/balance.json`
+- `samples/data_hotreload_latency.stasis` + `data/data_hotreload_latency/balance.json`
+
 ## Approaches That Work Well in Stasis (today)
 
 Stasis is opinionated: static global memory, deterministic layouts, and predictable performance. Lean into that.

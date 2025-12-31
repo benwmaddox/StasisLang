@@ -2,6 +2,19 @@
 
 Fast data reloading (<50ms) for game development iteration.
 
+## Status (implemented)
+
+Data hot-reload is implemented today for the Cranelift runner workflow:
+
+- The CLI emits a per-module `struct-meta.json` describing the flattened `global state` field layout and JSON paths.
+- The native runner (`runtime/stasis_runner.c`) loads a JSON file and applies values into the running module by looking up exported global symbols (DLL exports).
+- During tick-hosted runs, the runner polls the JSON file mtime once per tick and re-applies changes between ticks (no recompilation).
+
+See:
+- `runtime/stasis_data.c` (JSON -> globals binder)
+- `samples/data_hotreload_smoke.stasis` + `data/data_hotreload_smoke/balance.json`
+- `samples/data_hotreload_latency.stasis` + `data/data_hotreload_latency/balance.json`
+
 ## Problem
 
 Current hot reload timings:
@@ -10,7 +23,7 @@ Current hot reload timings:
 |-------------|------|------------|
 | Code (.stasis) | 50-250ms | Cranelift AOT + linking |
 | SVG assets | ~5-10ms | `gfx_poll_reload()` |
-| Data files | N/A | Not implemented |
+| Data files | <50ms typical | file read + JSON parse + apply |
 
 Code changes require compilation. Data changes (level layouts, entity definitions, balance parameters) don't need compilation - they should reload in <50ms.
 
@@ -97,9 +110,15 @@ Runner memory-maps data files directly. File changes are visible immediately.
 - Complex error handling for corrupted files
 - Platform differences in mmap semantics
 
-## Recommended Approach: Option A (Runtime Facilities)
+## Current Approach (runner-based binding)
 
-Matches the existing pattern (`gfx_load_sprite` / `gfx_poll_reload`) and keeps the runtime self-contained.
+The current implementation is closest to Option A, but it is host/runner-mediated rather than exposed as Stasis built-ins:
+
+- The Stasis program keeps a single `global state` struct for gameplay state.
+- The compiler/CLI emits `struct-meta.json` for that `state` layout (field symbol names + JSON paths + types).
+- The runner reads a JSON file and writes values into exported `state__...` globals in the loaded DLL.
+
+This keeps edits to `.json` files fast (no compilation) and works with the existing `tick()` hot-swap loop.
 
 ## Data Format
 
@@ -110,22 +129,16 @@ Matches the existing pattern (`gfx_load_sprite` / `gfx_poll_reload`) and keeps t
 - Fast enough for <50ms target (typical game data is <100KB)
 - Uses cJSON library (embedded in runtime)
 
-### JSON Key Format (Prototype)
+### JSON Format (current)
 
-For simplicity, the prototype uses **flat keys** matching the exported symbol names.
-Double underscore (`__`) separates struct nesting; single underscores can appear in field names.
+Use nested JSON matching the `jsonPath` emitted in `struct-meta.json` (dot-separated, without the `state__` prefix).
+Example for `state.balance.health`:
 
 ```json
-{
-  "state__balance__speed": 200.0,
-  "state__balance__health": 100,
-  "state__balance__spawn_rate": 0.5
-}
+{ "balance": { "health": 123 } }
 ```
 
-This matches how module names use `__` (e.g., `module__main`) and removes ambiguity.
-
-Future: Could support nested JSON with path resolution based on `__` separator.
+The binder also accepts the flattened symbol name as a fallback key (e.g. `state__balance__health`) but nested JSON is preferred.
 
 ### Binary Format (Future Optimization)
 
@@ -134,7 +147,23 @@ If JSON parsing becomes a bottleneck:
 - Memory-map binary in release mode
 - Keep JSON for dev mode
 
+## Current Workflow (today)
+
+- Define your configuration under `global state` (for example `state.balance.health`).
+- Put JSON next to your source (preferred):
+  - `samples/my_game.stasis`
+  - `samples/my_game/data/config.json`
+- Run in the tick-hosted dev loop (Cranelift):
+
+```bat
+.\stasis.bat run .\samples\data_hotreload_latency.stasis --backend cranelift
+```
+
+While running, edit the JSON file and save. The runner re-applies changes between ticks.
+
 ## API Design
+
+Note: The sections below describe an older proposed Stasis-level `data_watch()` API. The current implementation uses runner-based binding (see "Status" + "Current Workflow" above).
 
 ### Core Functions
 
@@ -388,8 +417,6 @@ Buffer remaining for:
 
 ## Next Steps
 
-1. Prototype `data_watch()` and `data_changed()` in stasis_runner.c
-2. Add cJSON or yyjson to runtime
-3. Implement basic typed accessors
-4. Test with brickout_revenge sample
-5. Document in game-dev-workflow.md
+1. Add multi-file binding (levels + balance) and a simple merge/override convention.
+2. Add better on-reload diagnostics (per-file: parse time + applied field count + errors).
+3. Consider exposing a Stasis-level API (`data_watch`/`data_changed`) once there is a stable runtime import surface for it.

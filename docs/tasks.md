@@ -11,7 +11,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [x] Follow through: implement `docs/audio-plan.md` (desktop SDL2 audio MVP first).
 - [x] Follow through: implement `docs/input-plan.md` (pointer snapshot, mouse + touch/taps).
 - [x] Follow through: implement `docs/aquarium-sample-plan.md` (add `samples/aquarium.stasis`).
-- [ ] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).
+- [x] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).
 - [ ] Follow through: execute `docs/cranelift-backend-plan.md` (close remaining backend gaps).
 - [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
 - [ ] Follow through: execute `docs/android-plan.md` (Android runtime build + host proof-of-concept).
