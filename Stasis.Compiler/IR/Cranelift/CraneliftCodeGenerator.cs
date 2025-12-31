@@ -567,12 +567,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                                                    structs.TryGetValue(named.Name, out var structDecl):
                     // Struct array -> SoA fields
                     var structCount = ParseArrayLength(arrayType.SizeToken?.Text);
-                    foreach (var field in structDecl.Fields)
-                    {
-                        var fieldType = ResolveType(field.Type, symbols);
-                        var elemType = typeMapper.Map(fieldType);
-                        builder.DefineGlobalArray($"{structDecl.Name.Text}__{field.Identifier.Text}", elemType, structCount);
-                    }
+                    EmitStructArrayGlobals(structDecl.Name.Text, structDecl, structCount, symbols, structs, builder);
                     break;
                 case ArrayTypeSyntax arrayType:
                     {
@@ -880,24 +875,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                                                    structs.TryGetValue(nestedNamed.Name, out var nestedStruct):
                     {
                         var count = ParseArrayLength(arrayType.SizeToken?.Text);
-                        foreach (var nestedField in nestedStruct.Fields)
-                        {
-                            var nestedFieldType = ResolveType(nestedField.Type, symbols);
-                            var nestedElemType = typeMapper.Map(nestedFieldType);
-                            var nestedName = $"{fieldName}__{nestedField.Identifier.Text}";
-                            if (nestedFieldType is ArrayTypeSymbol nestedArray &&
-                                nestedArray.ElementType is PrimitiveTypeSymbol prim &&
-                                HeaderSizeFor(prim.PrimitiveName) > 0)
-                            {
-                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
-                                var stride = nestedArray.Size + headerSize;
-                                builder.DefineGlobalArray(nestedName, CraneliftTypeMapper.ClifType.I8, count * stride);
-                            }
-                            else
-                            {
-                                builder.DefineGlobalArray(nestedName, nestedElemType, count);
-                            }
-                        }
+                        EmitStructArrayGlobals(fieldName, nestedStruct, count, symbols, structs, builder);
                         break;
                     }
                 case ArrayTypeSyntax arrayType:
@@ -928,6 +906,56 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                     }
             }
         }
+    }
+
+    private static void EmitStructArrayGlobals(
+        string prefix,
+        StructDeclarationSyntax structDecl,
+        int count,
+        IReadOnlyDictionary<string, Symbol> symbols,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        CraneliftModuleBuilder builder)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            EmitStructArrayField(prefix, field, count, symbols, structs, builder);
+        }
+    }
+
+    private static void EmitStructArrayField(
+        string prefix,
+        StructFieldSyntax field,
+        int count,
+        IReadOnlyDictionary<string, Symbol> symbols,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        CraneliftModuleBuilder builder)
+    {
+        var typeMapper = builder.TypeMapper;
+
+        if (field.Type is NamedTypeSyntax namedField && structs.TryGetValue(namedField.Name, out var nestedStructDecl))
+        {
+            foreach (var nestedField in nestedStructDecl.Fields)
+            {
+                EmitStructArrayField($"{prefix}__{field.Identifier.Text}", nestedField, count, symbols, structs, builder);
+            }
+            return;
+        }
+
+        var fieldType = ResolveType(field.Type, symbols);
+        var fieldName = $"{prefix}__{field.Identifier.Text}";
+
+        if (fieldType is ArrayTypeSymbol nestedArray &&
+            nestedArray.ElementType is PrimitiveTypeSymbol prim &&
+            HeaderSizeFor(prim.PrimitiveName) > 0)
+        {
+            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+            var stride = nestedArray.Size + headerSize;
+            builder.DefineGlobalArray(fieldName, CraneliftTypeMapper.ClifType.I8, count * stride);
+            return;
+        }
+
+        var elemType = typeMapper.Map(fieldType);
+        builder.DefineGlobalArray(fieldName, elemType, count);
     }
 
     private static int ParseArrayLength(string? text) =>

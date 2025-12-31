@@ -53,16 +53,8 @@ public sealed class ModuleLowerer
             {
                 case ArrayTypeSyntax array when array.ElementType is NamedTypeSyntax named && structs.TryGetValue(named.Name, out var structDecl):
                     {
-                        foreach (var field in structDecl.Fields)
-                        {
-                            var fieldType = ResolveType(field.Type, symbols);
-                            var llvmElem = builder.TypeMapper.Map(fieldType);
-                            var fieldLayout = globalLayout?.Fields.FirstOrDefault(f => string.Equals(f.Name, $"{structDecl.Name.Text}_{field.Identifier.Text}", StringComparison.Ordinal));
-                            var length = fieldLayout is null
-                                ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
-                                : (uint)Math.Max(1, fieldLayout.Size / SizeOf(fieldType));
-                            builder.DefineGlobalArray($"{structDecl.Name.Text}_{field.Identifier.Text}", llvmElem, length);
-                        }
+                        var length = ParseArrayLength(array.SizeToken?.Text ?? string.Empty);
+                        EmitStructArrayGlobals(structDecl.Name.Text, structDecl, length, symbols, structs, builder);
 
                         break;
                     }
@@ -116,28 +108,7 @@ public sealed class ModuleLowerer
                     {
                         // Nested struct array → SoA
                         var count = ParseArrayLength(arrayType.SizeToken?.Text ?? string.Empty);
-                        foreach (var nestedField in nestedStruct.Fields)
-                        {
-                            var nestedFieldType = ResolveType(nestedField.Type, symbols);
-                            var nestedName = $"{fieldName}_{nestedField.Identifier.Text}";
-
-                            // Special handling for string array fields in nested structs
-                            if (nestedFieldType is ArrayTypeSymbol arrType &&
-                                arrType.ElementType is PrimitiveTypeSymbol prim &&
-                                HeaderSizeFor(prim.PrimitiveName) > 0)
-                            {
-                                // Each entry in the outer array contains a string buffer: [count x [strSize+8 x i8]]
-                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
-                                var stringSize = arrType.Size + headerSize;  // UTF-8 header + data
-                                var stringBufferType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)stringSize);
-                                builder.DefineGlobalArray(nestedName, stringBufferType, count);
-                            }
-                            else
-                            {
-                                var llvmElem = builder.TypeMapper.Map(nestedFieldType);
-                                builder.DefineGlobalArray(nestedName, llvmElem, count);
-                            }
-                        }
+                        EmitStructArrayGlobals(fieldName, nestedStruct, count, symbols, structs, builder);
                         break;
                     }
                 case ArrayTypeSyntax arrayType:
@@ -176,6 +147,43 @@ public sealed class ModuleLowerer
                     }
             }
         }
+    }
+
+    private static void EmitStructArrayGlobals(string prefix, StructDeclarationSyntax structDecl, uint count, IReadOnlyDictionary<string, Symbol> symbols, Dictionary<string, StructDeclarationSyntax> structs, LlvmModuleBuilder builder)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            EmitStructArrayField(prefix, field, count, symbols, structs, builder);
+        }
+    }
+
+    private static void EmitStructArrayField(string prefix, StructFieldSyntax field, uint count, IReadOnlyDictionary<string, Symbol> symbols, Dictionary<string, StructDeclarationSyntax> structs, LlvmModuleBuilder builder)
+    {
+        if (field.Type is NamedTypeSyntax namedField && structs.TryGetValue(namedField.Name, out var nestedStructDecl))
+        {
+            foreach (var nestedField in nestedStructDecl.Fields)
+            {
+                EmitStructArrayField($"{prefix}_{field.Identifier.Text}", nestedField, count, symbols, structs, builder);
+            }
+            return;
+        }
+
+        var fieldType = ResolveType(field.Type, symbols);
+        var fieldName = $"{prefix}_{field.Identifier.Text}";
+
+        if (fieldType is ArrayTypeSymbol arrType &&
+            arrType.ElementType is PrimitiveTypeSymbol prim &&
+            HeaderSizeFor(prim.PrimitiveName) > 0)
+        {
+            var headerSize = HeaderSizeFor(prim.PrimitiveName);
+            var stringSize = arrType.Size + headerSize;
+            var stringBufferType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)stringSize);
+            builder.DefineGlobalArray(fieldName, stringBufferType, count);
+            return;
+        }
+
+        var llvmElem = builder.TypeMapper.Map(fieldType);
+        builder.DefineGlobalArray(fieldName, llvmElem, count);
     }
 
     private static void EmitConstants(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LlvmModuleBuilder builder)
@@ -1827,6 +1835,16 @@ public sealed class ModuleLowerer
                     return false;
 
                 case MemberAccessExpressionSyntax nestedMember:
+                    if (TryGetArrayElementFieldPath(nestedMember, out var nestedArray, out var nestedFieldPath))
+                    {
+                        if (TryLowerArrayElementPointer(builder, nestedArray, nestedFieldPath, locals, out var nestedPtr, out var nestedElemType))
+                        {
+                            ptr = nestedPtr;
+                            type = nestedElemType;
+                            return true;
+                        }
+                    }
+
                     // Handle nested member access like state.ship.x
                     var flattenedPath = BuildFlattenedMemberPath(nestedMember);
                     if (flattenedPath is not null)
@@ -4571,10 +4589,10 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
-            // Handle array[i].field syntax
-            if (member.Receiver is ArrayAccessExpressionSyntax arr)
+            // Handle array[i].field(.nested...) syntax
+            if (TryGetArrayElementFieldPath(member, out var arr, out var fieldPath))
             {
-                if (TryLowerArrayElementPointer(builder, arr, member.Member.Text, locals, out var ptr, out var elemType))
+                if (TryLowerArrayElementPointer(builder, arr, fieldPath, locals, out var ptr, out var elemType))
                 {
                     var loaded = builder.BuildLoad2(elemType, ptr, "fieldload");
                     return loaded;
@@ -4688,22 +4706,22 @@ public sealed class ModuleLowerer
                         {
                             // state.asteroids[i].x → state_asteroids_x[i]
                             var flattenedName = $"{structId.Identifier.Text}_{memberAccess.Member.Text}_{fieldName}";
-                            var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
-                            if (global.Handle != IntPtr.Zero)
-                            {
-                                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                                if (field is not null)
-                                {
-                                    var fieldType = ResolveType(field.Type, _symbols);
-                                    elemType = _moduleBuilder.TypeMapper.Map(fieldType);
-                                    var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
-                                    var casted = builder.BuildBitCast(global, elemPtrType, "fieldbase");
-                                    ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+                             var global = _moduleBuilder.Module.GetNamedGlobal(flattenedName);
+                             if (global.Handle != IntPtr.Zero)
+                             {
+                                 if (TryResolveStructFieldPath(elemStructDecl, fieldName, out var fieldType))
+                                 {
+                                     elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                                     var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                                     var casted = builder.BuildBitCast(global, elemPtrType, "fieldbase");
+                                     ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
+                                     return true;
+                                 }
+
+                                 AddDiagnostic($"Unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", arr.Span);
+                             }
+                         }
+                     }
                     else if (fieldName is null)
                     {
                         // Primitive array stored on a struct field (state.lane_lookup[i])
@@ -4757,29 +4775,27 @@ public sealed class ModuleLowerer
                     var zero = ConstI32(0);
                     var index = LowerExpression(builder, arr.Index, locals);
 
-                    if (arrayType.ElementType is NamedTypeSymbol namedElem && fieldName is not null && _structs.TryGetValue(namedElem.TypeName, out var structDecl))
-                    {
-                        var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, fieldName, StringComparison.Ordinal));
-                        if (field is not null)
-                        {
-                            var fieldType = ResolveType(field.Type, _symbols);
-                            elemType = _moduleBuilder.TypeMapper.Map(fieldType);
-                            var fieldGlobalName = TryResolveFieldGlobalName(id.Identifier.Text, namedElem.TypeName, fieldName);
-                            var fieldGlobal = _moduleBuilder.Module.GetNamedGlobal(fieldGlobalName);
-                            if (fieldGlobal.Handle != IntPtr.Zero)
-                            {
-                                var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
-                                var casted = builder.BuildBitCast(fieldGlobal, elemPtrType, "fieldbase");
-                                ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
-                                return true;
-                            }
-                            AddDiagnostic($"Layout for global '{id.Identifier.Text}' missing field '{fieldName}'.", arr.Span);
-                        }
-                        else
-                        {
-                            AddDiagnostic($"Unknown field '{fieldName}' on struct '{namedElem.TypeName}'.", arr.Span);
-                        }
-                    }
+                     if (arrayType.ElementType is NamedTypeSymbol namedElem && fieldName is not null && _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+                     {
+                         if (TryResolveStructFieldPath(structDecl, fieldName, out var fieldType))
+                         {
+                             elemType = _moduleBuilder.TypeMapper.Map(fieldType);
+                             var fieldGlobalName = TryResolveFieldGlobalName(id.Identifier.Text, namedElem.TypeName, fieldName);
+                             var fieldGlobal = _moduleBuilder.Module.GetNamedGlobal(fieldGlobalName);
+                             if (fieldGlobal.Handle != IntPtr.Zero)
+                             {
+                                 var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+                                 var casted = builder.BuildBitCast(fieldGlobal, elemPtrType, "fieldbase");
+                                 ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "fieldaddr");
+                                 return true;
+                             }
+                             AddDiagnostic($"Layout for global '{id.Identifier.Text}' missing field '{fieldName}'.", arr.Span);
+                         }
+                         else
+                         {
+                             AddDiagnostic($"Unknown field '{fieldName}' on struct '{namedElem.TypeName}'.", arr.Span);
+                         }
+                     }
                     else if (fieldName is not null)
                     {
                         AddDiagnostic($"Field access requires struct array; '{id.Identifier.Text}' is not a struct array.", arr.Span);
@@ -4836,14 +4852,12 @@ public sealed class ModuleLowerer
                     return false;
                 }
 
-                var field = element.StructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                if (field is null)
+                if (!TryResolveStructFieldPath(element.StructDecl, fieldName, out var fieldType))
                 {
                     AddDiagnostic($"Unknown field '{fieldName}' on struct '{element.StructDecl.Name.Text}'.", span);
                     return false;
                 }
 
-                var fieldType = ResolveType(field.Type, _symbols);
                 elemType = _moduleBuilder.TypeMapper.Map(fieldType);
                 LLVMValueRef? basePtr = null;
                 if (element.FieldPtrs is not null && element.FieldPtrs.TryGetValue(fieldName, out var fp))
@@ -5384,6 +5398,71 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             }
 
             return null;
+        }
+
+        private static bool TryGetArrayElementFieldPath(MemberAccessExpressionSyntax member, out ArrayAccessExpressionSyntax arrayAccess, out string fieldPath)
+        {
+            var parts = new List<string>();
+            var current = (ExpressionSyntax)member;
+
+            while (current is MemberAccessExpressionSyntax m)
+            {
+                parts.Add(m.Member.Text);
+                current = m.Receiver;
+            }
+
+            if (current is ArrayAccessExpressionSyntax arr && parts.Count > 0)
+            {
+                parts.Reverse();
+                arrayAccess = arr;
+                fieldPath = string.Join("_", parts);
+                return true;
+            }
+
+            arrayAccess = null!;
+            fieldPath = string.Empty;
+            return false;
+        }
+
+        private bool TryResolveStructFieldPath(StructDeclarationSyntax structDecl, string fieldPath, out TypeSymbol fieldType)
+        {
+            fieldType = null!;
+
+            var parts = fieldPath.Split('_', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                return false;
+            }
+
+            var currentStruct = structDecl;
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var segment = parts[i];
+                var field = currentStruct.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, segment, StringComparison.Ordinal));
+                if (field is null)
+                {
+                    return false;
+                }
+
+                var segmentType = ResolveType(field.Type, _symbols);
+                if (i == parts.Length - 1)
+                {
+                    if (segmentType is NamedTypeSymbol)
+                    {
+                        return false;
+                    }
+
+                    fieldType = segmentType;
+                    return true;
+                }
+
+                if (segmentType is not NamedTypeSymbol nestedNamed || !_structs.TryGetValue(nestedNamed.TypeName, out currentStruct))
+                {
+                    return false;
+                }
+            }
+
+            return false;
         }
 
         private bool TryResolveMemberType(MemberAccessExpressionSyntax member, out TypeSymbol type)

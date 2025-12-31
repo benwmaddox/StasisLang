@@ -1,0 +1,31 @@
+import "../src/stdlib/stdlib.stasis";
+
+struct Vec2 {
+    x: f32;
+    y: f32;
+}
+
+struct Thing {
+    pos: Vec2;
+    vel: Vec2;
+    active: bool;
+}
+
+struct State {
+    things: Thing[2];
+}
+
+global state: State;
+
+test `nested struct array field store + load`() {
+    state.things[0].pos.x = 1.25;
+    state.things[0].pos.y = 2.5;
+    state.things[1].vel.x = -3.0;
+    state.things[1].vel.y = 4.0;
+
+    return state.things[0].pos.x == 1.25
+        && state.things[0].pos.y == 2.5
+        && state.things[1].vel.x == -3.0
+        && state.things[1].vel.y == 4.0;
+}
+

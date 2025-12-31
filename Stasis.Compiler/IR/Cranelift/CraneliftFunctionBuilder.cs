@@ -3161,9 +3161,14 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    {result} = iconst.i32 0");
             return result;
         }
-        else if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
+        else if (TryGetNestedForeachElementFieldPath(member, out var nestedBinding, out var nestedFieldPath))
         {
-            return LowerArrayElementFieldAccess(arrayAccess, member.Member.Text);
+            var arrayAccess = BuildForeachArrayAccess(nestedBinding);
+            return LowerArrayElementFieldAccess(arrayAccess, nestedFieldPath);
+        }
+        else if (TryGetNestedArrayElementFieldPath(member, out var nestedArrayAccess, out var nestedArrayFieldPath))
+        {
+            return LowerArrayElementFieldAccess(nestedArrayAccess, nestedArrayFieldPath);
         }
         else if (TryResolveArrayMember(member, out var arrayName))
         {
@@ -3370,24 +3375,34 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerArrayElementFieldAccess(ArrayAccessExpressionSyntax array, string fieldName)
     {
+        return LowerArrayElementFieldAccess(array, new[] { fieldName });
+    }
+
+    private string LowerArrayElementFieldAccess(ArrayAccessExpressionSyntax array, IReadOnlyList<string> fieldPath)
+    {
+        if (fieldPath.Count == 0)
+        {
+            var fallback = NewValue();
+            _instructions.AppendLine($"    {fallback} = iconst.i32 0 ; error: empty field path");
+            return fallback;
+        }
+
         if (array.Receiver is IdentifierExpressionSyntax id &&
             _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
             symbol.Type is ArrayTypeSymbol arrayType &&
             arrayType.ElementType is NamedTypeSymbol namedElem &&
             _structs.TryGetValue(namedElem.TypeName, out var structDecl))
         {
-            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-            if (field is null)
+            if (!TryResolveStructFieldPath(structDecl, fieldPath, out var elemType))
             {
                 var err = NewValue();
-                _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
+                _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field path {string.Join('.', fieldPath)}");
                 return err;
             }
 
-            var elemType = ResolveType(field.Type);
             var clifElemType = _typeMapper.Map(elemType);
             var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}__{fieldName}";
+            var baseName = $"{structDecl.Name.Text}__{string.Join("__", fieldPath)}";
 
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3419,18 +3434,16 @@ public sealed class CraneliftFunctionBuilder
                 arrayTypeSyntax.ElementType is NamedTypeSyntax elementNamed &&
                 _structs.TryGetValue(elementNamed.Name, out var elemStructDecl))
             {
-                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                if (field is null)
+                if (!TryResolveStructFieldPath(elemStructDecl, fieldPath, out var elemType))
                 {
                     var err = NewValue();
-                    _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
+                    _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field path {string.Join('.', fieldPath)}");
                     return err;
                 }
 
-                var elemType = ResolveType(field.Type);
                 var clifElemType = _typeMapper.Map(elemType);
                 var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
+                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{string.Join("__", fieldPath)}";
 
                 var baseAddr = NewValue();
                 _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3452,10 +3465,10 @@ public sealed class CraneliftFunctionBuilder
             }
         }
 
-        var fallback = NewValue();
+        var fallbackValue = NewValue();
         _diagnostics.Add(new Diagnostic("Array element field access not supported in Cranelift backend.", array.Span));
-        _instructions.AppendLine($"    {fallback} = iconst.i32 0");
-        return fallback;
+        _instructions.AppendLine($"    {fallbackValue} = iconst.i32 0");
+        return fallbackValue;
     }
 
     private void LowerArrayStore(ArrayAccessExpressionSyntax array, string value, TypeSymbol? valueType)
@@ -3611,9 +3624,16 @@ public sealed class CraneliftFunctionBuilder
             return;
         }
 
-        if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess)
+        if (TryGetNestedForeachElementFieldPath(member, out var nestedBinding, out var nestedFieldPath))
         {
-            LowerArrayElementFieldStore(arrayAccess, member.Member.Text, value, valueType);
+            var arrayAccess = BuildForeachArrayAccess(nestedBinding);
+            LowerArrayElementFieldStore(arrayAccess, nestedFieldPath, value, valueType);
+            return;
+        }
+
+        if (TryGetNestedArrayElementFieldPath(member, out var nestedArrayAccess, out var nestedArrayFieldPath))
+        {
+            LowerArrayElementFieldStore(nestedArrayAccess, nestedArrayFieldPath, value, valueType);
             return;
         }
 
@@ -3630,24 +3650,34 @@ public sealed class CraneliftFunctionBuilder
 
     private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, string fieldName, string value, TypeSymbol? valueType)
     {
+        LowerArrayElementFieldStore(array, new[] { fieldName }, value, valueType);
+    }
+
+    private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, IReadOnlyList<string> fieldPath, string value, TypeSymbol? valueType)
+    {
+        if (fieldPath.Count == 0)
+        {
+            _instructions.AppendLine("    ; error: empty field path");
+            return;
+        }
+
         if (array.Receiver is IdentifierExpressionSyntax id &&
             _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
             symbol.Type is ArrayTypeSymbol arrayType &&
             arrayType.ElementType is NamedTypeSymbol namedElem &&
             _structs.TryGetValue(namedElem.TypeName, out var structDecl))
         {
-            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-            if (field is null)
+            if (!TryResolveStructFieldPath(structDecl, fieldPath, out var elemType))
             {
-                _instructions.AppendLine($"    ; error: unknown field {fieldName}");
+                _instructions.AppendLine($"    ; error: unknown field path {string.Join('.', fieldPath)}");
                 return;
             }
 
-            var elemType = ResolveType(field.Type);
             var clifElemType = _typeMapper.Map(elemType);
             value = CoerceAssignmentValue(value, valueType, elemType);
+            value = ReduceI32ToSmallInt(value, clifElemType);
             var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}__{fieldName}";
+            var baseName = $"{structDecl.Name.Text}__{string.Join("__", fieldPath)}";
 
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3677,18 +3707,17 @@ public sealed class CraneliftFunctionBuilder
                 arrayTypeSyntax.ElementType is NamedTypeSyntax elementNamed &&
                 _structs.TryGetValue(elementNamed.Name, out var elemStructDecl))
             {
-                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                if (field is null)
+                if (!TryResolveStructFieldPath(elemStructDecl, fieldPath, out var elemType))
                 {
-                    _instructions.AppendLine($"    ; error: unknown field {fieldName}");
+                    _instructions.AppendLine($"    ; error: unknown field path {string.Join('.', fieldPath)}");
                     return;
                 }
 
-                var elemType = ResolveType(field.Type);
                 var clifElemType = _typeMapper.Map(elemType);
                 value = CoerceAssignmentValue(value, valueType, elemType);
+                value = ReduceI32ToSmallInt(value, clifElemType);
                 var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
+                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{string.Join("__", fieldPath)}";
 
                 var baseAddr = NewValue();
                 _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -3709,6 +3738,90 @@ public sealed class CraneliftFunctionBuilder
         }
 
         _diagnostics.Add(new Diagnostic("Array element field store not supported in Cranelift backend.", array.Span));
+    }
+
+    private bool TryResolveStructFieldPath(StructDeclarationSyntax structDecl, IReadOnlyList<string> fieldPath, out TypeSymbol fieldType)
+    {
+        fieldType = new NamedTypeSymbol("unknown");
+        var currentStruct = structDecl;
+
+        for (var i = 0; i < fieldPath.Count; i++)
+        {
+            var segment = fieldPath[i];
+            var field = currentStruct.Fields.FirstOrDefault(f => f.Identifier.Text == segment);
+            if (field is null)
+            {
+                return false;
+            }
+
+            var segmentType = ResolveType(field.Type);
+            if (i == fieldPath.Count - 1)
+            {
+                if (segmentType is ArrayTypeSymbol || segmentType is NamedTypeSymbol)
+                {
+                    return false;
+                }
+
+                fieldType = segmentType;
+                return true;
+            }
+
+            if (segmentType is not NamedTypeSymbol nestedNamed || !_structs.TryGetValue(nestedNamed.TypeName, out currentStruct))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryGetNestedArrayElementFieldPath(MemberAccessExpressionSyntax member, out ArrayAccessExpressionSyntax arrayAccess, out IReadOnlyList<string> fieldPath)
+    {
+        var parts = new List<string>();
+        ExpressionSyntax current = member;
+        while (current is MemberAccessExpressionSyntax m)
+        {
+            parts.Add(m.Member.Text);
+            current = m.Receiver;
+        }
+
+        if (current is ArrayAccessExpressionSyntax arr && parts.Count > 0)
+        {
+            parts.Reverse();
+            arrayAccess = arr;
+            fieldPath = parts;
+            return true;
+        }
+
+        arrayAccess = null!;
+        fieldPath = Array.Empty<string>();
+        return false;
+    }
+
+    private bool TryGetNestedForeachElementFieldPath(MemberAccessExpressionSyntax member, out ForeachElementBinding binding, out IReadOnlyList<string> fieldPath)
+    {
+        var parts = new List<string>();
+        ExpressionSyntax current = member;
+        while (current is MemberAccessExpressionSyntax m)
+        {
+            parts.Add(m.Member.Text);
+            current = m.Receiver;
+        }
+
+        if (current is IdentifierExpressionSyntax id &&
+            parts.Count > 0 &&
+            _elementBindings.TryGetValue(id.Identifier.Text, out var foundBinding) &&
+            foundBinding.ElementType is NamedTypeSymbol)
+        {
+            parts.Reverse();
+            fieldPath = parts;
+            binding = foundBinding;
+            return true;
+        }
+
+        binding = default!;
+        fieldPath = Array.Empty<string>();
+        return false;
     }
 
     private string LowerForeachElementValue(ForeachElementBinding binding, SourceSpan span)
