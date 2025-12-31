@@ -30,6 +30,7 @@ var includeTests = false;
 var moduleName = "module";
 var emitIrOnly = false;
 string? outputPath = null;
+string? emitStructMetaPath = null;
 var runAllInDirectory = false;
 var watch = false;
 string? optLevel = null;
@@ -88,6 +89,9 @@ while (cliArgs.Count > 0)
             break;
         case "--emit-ir":
             emitIrOnly = true;
+            break;
+        case "--emit-struct-meta" when cliArgs.Count > 0:
+            emitStructMetaPath = cliArgs.Dequeue();
             break;
         case "--all":
             runAllInDirectory = true;
@@ -316,14 +320,14 @@ if (watch)
         useCraneliftRunner = true;
     }
 
-    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState, tickHostFps, llvmTargetTriple);
+    var watchExit = WatchFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, emitStructMetaPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, useCraneliftRunner, enableHotState, tickHostFps, llvmTargetTriple);
     Environment.Exit(watchExit);
 }
 
-var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+var singleExit = ProcessFile(path, mode, includeTests, moduleName, emitIrOnly, outputPath, emitStructMetaPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
 Environment.Exit(singleExit);
 
-static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, int tickHostFps, string? llvmTargetTriple, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
+static int ProcessFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? emitStructMetaPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, int tickHostFps, string? llvmTargetTriple, bool useLowerLock = true, bool useCraneliftRunner = false, bool enableHotState = false)
 {
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
@@ -390,12 +394,20 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return 1;
         }
 
-        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        if (logPhaseTiming)
+    var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+    if (logPhaseTiming)
+    {
+        layoutMs = phaseStopwatch.ElapsedMilliseconds;
+        phaseStopwatch.Restart();
+    }
+
+    if (!string.IsNullOrEmpty(emitStructMetaPath))
+    {
+        if (!TryEmitStructMetadata(emitStructMetaPath, layout, backend))
         {
-            layoutMs = phaseStopwatch.ElapsedMilliseconds;
-            phaseStopwatch.Restart();
+            return 1;
         }
+    }
 
         // Generate code using selected backend
         string ir;
@@ -420,9 +432,10 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         {
             // Use LLVM backend via ModuleLowerer (existing path)
             var lowerer = new ModuleLowerer();
+            var exportGlobals = !string.IsNullOrEmpty(emitStructMetaPath);
             var lowerOptions = enableGraphics
-                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false, TargetTriple: llvmTargetTriple)
-                : (includeTests ? LowerOptions.Default : LowerOptions.Production) with { TargetTriple = llvmTargetTriple };
+                ? new LowerOptions(IncludeTests: includeTests, EmitTestHarness: includeTests, HeadlessGraphics: false, TargetTriple: llvmTargetTriple, ExportGlobals: exportGlobals)
+                : (includeTests ? LowerOptions.Default : LowerOptions.Production) with { TargetTriple = llvmTargetTriple, ExportGlobals = exportGlobals };
             LowerResult lower;
             if (useLowerLock)
             {
@@ -2658,7 +2671,40 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     return true;
 }
 
-static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyList<FieldLayout> entries)
+static bool TryEmitStructMetadata(string path, LayoutPlan layout, BackendType backend)
+{
+    var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
+    if (state is null)
+    {
+        Console.Error.WriteLine("error: --emit-struct-meta requires a global named 'state'.");
+        return false;
+    }
+
+    var entries = state.Fields.ToArray();
+    if (entries.Length == 0)
+    {
+        Console.Error.WriteLine("error: --emit-struct-meta: state has no fields.");
+        return false;
+    }
+
+    var dir = Path.GetDirectoryName(path);
+    if (!string.IsNullOrWhiteSpace(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+
+    Func<string, string>? nameTransform = null;
+    if (backend == BackendType.Llvm)
+    {
+        nameTransform = name => name.Replace("__", "_", StringComparison.Ordinal);
+    }
+
+    EmitStructMetadataJson(path, state, entries, nameTransform);
+    Console.WriteLine($"Struct metadata: {path}");
+    return true;
+}
+
+static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyList<FieldLayout> entries, Func<string, string>? symbolNameTransform = null)
 {
     var fields = new List<object>();
     var globalPrefix = state.Name + "__";
@@ -2678,9 +2724,11 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
         }
         jsonPath = jsonPath.Replace("__", ".", StringComparison.Ordinal);
 
+        var symbolName = symbolNameTransform is null ? entry.Name : symbolNameTransform(entry.Name);
+
         fields.Add(new
         {
-            name = entry.Name,        // Flattened symbol name (for DLL lookup)
+            name = symbolName,        // Flattened symbol name (for DLL lookup)
             jsonPath = jsonPath,      // Preferred JSON path (non-lowered)
             offset = entry.Offset,
             size = entry.Size,
@@ -2702,7 +2750,7 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     File.WriteAllText(path, json, Encoding.UTF8);
 }
 
-static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
+static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? emitStructMetaPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
 {
     var fullPath = Path.GetFullPath(path);
     var dir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
@@ -2773,7 +2821,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     }
     else
     {
-        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+        _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, emitStructMetaPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
     }
 
     while (!cts.IsCancellationRequested)
@@ -2833,7 +2881,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
             }
             else
             {
-                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
+                _ = ProcessFile(fullPath, mode, includeTests, moduleName, emitIrOnly, outputPath, emitStructMetaPath, optLevel, enableLto, enableGraphics, graphicsLibPath, backend, tickHostFps, llvmTargetTriple, useCraneliftRunner: useCraneliftRunner, enableHotState: enableHotState);
             }
         }
 
@@ -2892,7 +2940,7 @@ static void WriteIrOutput(string ir, string? outputPath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
+    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>] [--emit-struct-meta <path>]");
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");

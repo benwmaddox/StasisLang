@@ -90,12 +90,13 @@ Write-Host "vcpkg: $vcpkgExe"
 # vcpkg expects ANDROID_NDK_HOME for Android triplets.
 $env:ANDROID_NDK_HOME = $ndk
 
-& $vcpkgExe install "sdl2:$triplet" --recurse
+& $vcpkgExe install "sdl2:$triplet" "libiconv:$triplet" --recurse
 
 $outDir = Join-Path $repoRoot "android\\out"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $game = Join-Path $repoRoot "samples\\brickout_revenge\\brickout_revenge.stasis"
+$structMetaPath = Join-Path $repoRoot "samples\\brickout_revenge\\data\\brickout_revenge.struct-meta.json"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $llPath = Join-Path $outDir "brickout_revenge_$stamp.ll"
 
@@ -115,7 +116,8 @@ $emitCmd = @(
     "--graphics",
     "--emit-ir",
     "--llvm-target", "aarch64-linux-android21",
-    "--out", "`"$llPath`""
+    "--out", "`"$llPath`"",
+    "--emit-struct-meta", "`"$structMetaPath`""
 ) -join " "
 
 $prevGcServer = $env:DOTNET_gcServer
@@ -136,6 +138,11 @@ if (-not (Test-Path $toolchain)) {
     throw "vcpkg toolchain not found: $toolchain"
 }
 
+$ndkToolchain = Join-Path $ndk "build\\cmake\\android.toolchain.cmake"
+if (-not (Test-Path $ndkToolchain)) {
+    throw "Android NDK toolchain not found: $ndkToolchain"
+}
+
 $nativeBuildDir = Join-Path $repoRoot "android\\build\\brickout-android-arm64-debug"
 New-Item -ItemType Directory -Force -Path $nativeBuildDir | Out-Null
 
@@ -145,6 +152,9 @@ Write-Host "Building native libmain.so..."
 & cmake -S (Join-Path $repoRoot "android\\brickout-revenge\\native") -B $nativeBuildDir -G Ninja `
     -DCMAKE_BUILD_TYPE=Debug `
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+    -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ndkToolchain" `
+    -DANDROID_ABI="arm64-v8a" `
+    -DANDROID_PLATFORM="android-21" `
     -DVCPKG_TARGET_TRIPLET="$triplet" `
     -DSTASIS_REPO_ROOT="$repoRoot" `
     -DSTASIS_GAME_LL="$llPath"
@@ -160,14 +170,16 @@ if (-not (Test-Path $libMain)) {
 
 $libSdl = Find-LibSDL2 -VcpkgRoot $vcpkgRoot -Triplet $triplet
 if (-not $libSdl) {
-    throw "libSDL2.so not found under vcpkg installed/$triplet (check your vcpkg triplet linkage)"
+    Write-Host "libSDL2.so not found under vcpkg installed/$triplet; assuming SDL2 is statically linked into libmain.so."
 }
 
 $jniDir = Join-Path $repoRoot "android\\brickout-revenge\\app\\src\\main\\jniLibs\\arm64-v8a"
 New-Item -ItemType Directory -Force -Path $jniDir | Out-Null
 
 Copy-Item -Force $libMain (Join-Path $jniDir "libmain.so")
-Copy-Item -Force $libSdl (Join-Path $jniDir "libSDL2.so")
+if ($libSdl) {
+    Copy-Item -Force $libSdl (Join-Path $jniDir "libSDL2.so")
+}
 
 Write-Host ""
 Write-Host "Packaging APK (Gradle)..."

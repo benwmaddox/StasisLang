@@ -6,12 +6,14 @@ namespace Stasis.Compiler.IR.Llvm;
 
 public sealed class LlvmModuleBuilder : IDisposable
 {
+    private readonly bool exportGlobals;
     public LLVMContextRef Context { get; }
     public LLVMModuleRef Module { get; }
     public LlvmTypeMapper TypeMapper { get; }
 
-    public LlvmModuleBuilder(string moduleName, string? targetTriple = null)
+    public LlvmModuleBuilder(string moduleName, string? targetTriple = null, bool exportGlobals = false)
     {
+        this.exportGlobals = exportGlobals;
         Context = LLVMContextRef.Create();
         Module = Context.CreateModuleWithName(moduleName);
         var module = Module;
@@ -24,7 +26,7 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         var arrType = LLVMTypeRef.CreateArray(elementType, length);
         var global = Module.AddGlobal(arrType, name);
-        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.Linkage = exportGlobals ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
         global.Initializer = LLVMValueRef.CreateConstNull(arrType);
         return global;
     }
@@ -32,7 +34,7 @@ public sealed class LlvmModuleBuilder : IDisposable
     public LLVMValueRef DefineGlobalScalar(string name, LLVMTypeRef elementType)
     {
         var global = Module.AddGlobal(elementType, name);
-        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.Linkage = exportGlobals ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
         global.Initializer = LLVMValueRef.CreateConstNull(elementType);
         return global;
     }
@@ -40,7 +42,7 @@ public sealed class LlvmModuleBuilder : IDisposable
     public LLVMValueRef DefineConstantScalar(string name, LLVMTypeRef elementType, LLVMValueRef initializer)
     {
         var global = Module.AddGlobal(elementType, name);
-        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.Linkage = exportGlobals ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
         global.IsGlobalConstant = true;
         global.Initializer = initializer;
         return global;

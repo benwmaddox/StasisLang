@@ -20,6 +20,9 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <time.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -45,6 +48,9 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
     (void)category;
     (void)priority;
     if (!message) return;
+#if defined(__ANDROID__)
+    __android_log_print(ANDROID_LOG_INFO, "SDL/APP", "%s", message);
+#endif
     fprintf(stderr, "%s\n", message);
     fflush(stderr);
 }
@@ -1975,11 +1981,15 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     int should_skip_test = (skip_test && strcmp(skip_test, "0") != 0);
     if (should_run_test && !should_skip_test) {
         int test_ok;
+#if defined(STASIS_GRAPHICS_SDL_ONLY)
+        test_ok = verify_sdl_rendering(g_renderer, width, height);
+#else
         if (g_use_sdl_renderer) {
             test_ok = verify_sdl_rendering(g_renderer, width, height);
         } else {
             test_ok = verify_opengl_rendering(width, height);
         }
+#endif
 
         if (!test_ok) {
             /* Print detailed diagnostics to stderr */
@@ -2033,6 +2043,10 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         }
 
         /* Clear the test pattern before returning to caller */
+#if defined(STASIS_GRAPHICS_SDL_ONLY)
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+        SDL_RenderClear(g_renderer);
+#else
         if (g_use_sdl_renderer) {
             SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
             SDL_RenderClear(g_renderer);
@@ -2040,6 +2054,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
         }
+#endif
     }
 
     return 1;
@@ -2606,6 +2621,7 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
         return;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
         flush_sprites();
     }
@@ -2641,6 +2657,7 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     v[4] = (SpriteVertex){ p3x, p3y, u0, v1, af, af, af, af };
     v[5] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
     g_sprite_vert_count += 6;
+#endif
 }
 
 /*
