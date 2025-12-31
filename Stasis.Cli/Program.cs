@@ -3019,7 +3019,7 @@ static string ComputeSha256Hex(string value)
 
 static string? TryGetCachedExecutablePath(CompileResult result)
 {
-    if (result.Backend != BackendType.Llvm || !result.IsCacheArtifact || string.IsNullOrEmpty(result.ArtifactPath))
+    if (!result.IsCacheArtifact || string.IsNullOrEmpty(result.ArtifactPath))
     {
         return null;
     }
@@ -3035,7 +3035,248 @@ static string? TryGetCachedExecutablePath(CompileResult result)
     return Path.Combine(cacheDirectory, cacheFileName + extension);
 }
 
+static string? TryGetCachedObjectPath(CompileResult result)
+{
+    if (result.Backend != BackendType.Cranelift || !result.IsCacheArtifact || string.IsNullOrEmpty(result.ArtifactPath))
+    {
+        return null;
+    }
 
+    var cacheDirectory = Path.GetDirectoryName(result.ArtifactPath);
+    var cacheFileName = Path.GetFileNameWithoutExtension(result.ArtifactPath);
+    if (string.IsNullOrEmpty(cacheDirectory) || string.IsNullOrEmpty(cacheFileName))
+    {
+        return null;
+    }
+
+    return Path.Combine(cacheDirectory, cacheFileName + GetObjectFileExtension());
+}
+
+static string? TryGetCachedRunnerDllPath(CompileResult result)
+{
+    if (result.Backend != BackendType.Cranelift || !result.IsCacheArtifact || string.IsNullOrEmpty(result.ArtifactPath))
+    {
+        return null;
+    }
+
+    var cacheDirectory = Path.GetDirectoryName(result.ArtifactPath);
+    var cacheFileName = Path.GetFileNameWithoutExtension(result.ArtifactPath);
+    if (string.IsNullOrEmpty(cacheDirectory) || string.IsNullOrEmpty(cacheFileName))
+    {
+        return null;
+    }
+
+    var extension = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
+    return Path.Combine(cacheDirectory, cacheFileName + extension);
+}
+
+static int RunCachedExecutable(string mode, string executablePath, bool enableGraphics, string? graphicsLibPath)
+{
+    if (enableGraphics)
+    {
+        var exeDir = Path.GetDirectoryName(executablePath);
+        if (!string.IsNullOrEmpty(exeDir))
+        {
+            CopyGraphicsRuntimeDependencies(exeDir, graphicsLibPath);
+        }
+    }
+
+    return RunProcess(executablePath, string.Empty, psi =>
+    {
+        if (enableGraphics)
+        {
+            var runTest = Environment.GetEnvironmentVariable("STASIS_RUN_RENDER_TEST");
+            if (string.IsNullOrEmpty(runTest) || runTest == "0")
+            {
+                if (Environment.GetEnvironmentVariable("STASIS_SKIP_RENDER_TEST") is null)
+                {
+                    psi.Environment["STASIS_SKIP_RENDER_TEST"] = "1";
+                }
+            }
+        }
+    });
+}
+
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindCraneliftRunner(out var runnerPath))
+    {
+        Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
+        return 1;
+    }
+
+    if (enableGraphics)
+    {
+        var dllDir = Path.GetDirectoryName(dllPath);
+        if (!string.IsNullOrEmpty(dllDir))
+        {
+            CopyGraphicsRuntimeDependencies(dllDir, graphicsLibPath);
+        }
+    }
+
+    if (UseCraneliftRunnerServer())
+    {
+        var runner = GetCraneliftRunnerServer(runnerPath);
+        return runner.Run(dllPath, entryName, out _);
+    }
+
+    return RunProcess(runnerPath, $"\"{dllPath}\" {entryName}");
+}
+
+static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
+        return 1;
+    }
+
+    if (!TryFindCraneliftAot(out var aotTool))
+    {
+        Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+        return 1;
+    }
+
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var entryBase = mode == "test" ? "run_tests" : "main";
+    var entryName = $"{moduleName}__{entryBase}";
+
+    Directory.CreateDirectory(Path.GetDirectoryName(objPath)!);
+    Directory.CreateDirectory(Path.GetDirectoryName(exePath)!);
+
+    var tempObj = objPath + ".tmp";
+    var tempExe = exePath + ".tmp";
+    try
+    {
+        if (!File.Exists(objPath))
+        {
+            var aotExit = RunCraneliftAot(aotTool, clifPath, tempObj, moduleName, optLevel, out _, out _);
+            if (aotExit != 0)
+            {
+                return aotExit;
+            }
+
+            if (File.Exists(objPath))
+            {
+                File.Delete(objPath);
+            }
+            File.Move(tempObj, objPath);
+        }
+
+        if (!File.Exists(exePath))
+        {
+            var args = BuildClangArgsForObject(objPath, tempExe, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName);
+            var exit = RunProcess(clang, args, suppressOutput: true);
+            if (exit != 0)
+            {
+                return exit;
+            }
+
+            if (File.Exists(exePath))
+            {
+                File.Delete(exePath);
+            }
+            File.Move(tempExe, exePath);
+        }
+
+        return 0;
+    }
+    finally
+    {
+        if (File.Exists(tempObj))
+        {
+            File.Delete(tempObj);
+        }
+        if (File.Exists(tempExe))
+        {
+            File.Delete(tempExe);
+        }
+    }
+}
+
+static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
+        return 1;
+    }
+
+    if (!TryFindCraneliftAot(out var aotTool))
+    {
+        Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+        return 1;
+    }
+
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var entryBase = mode == "test" ? "run_tests" : "main";
+    var entryName = $"{moduleName}__{entryBase}";
+
+    Directory.CreateDirectory(Path.GetDirectoryName(objPath)!);
+    Directory.CreateDirectory(Path.GetDirectoryName(dllPath)!);
+
+    var tempObj = objPath + ".tmp";
+    var tempDll = dllPath + ".tmp";
+    try
+    {
+        if (!File.Exists(objPath))
+        {
+            var aotExit = RunCraneliftAot(aotTool, clifPath, tempObj, moduleName, optLevel, out _, out _);
+            if (aotExit != 0)
+            {
+                return aotExit;
+            }
+
+            if (File.Exists(objPath))
+            {
+                File.Delete(objPath);
+            }
+            File.Move(tempObj, objPath);
+        }
+
+        if (!File.Exists(dllPath))
+        {
+            var exports = new[] { entryName };
+            var args = BuildClangArgsForObject(objPath, tempDll, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsExports: exports);
+            var exit = RunProcess(clang, args, suppressOutput: true);
+            if (exit != 0)
+            {
+                return exit;
+            }
+
+            if (File.Exists(dllPath))
+            {
+                File.Delete(dllPath);
+            }
+            File.Move(tempDll, dllPath);
+        }
+
+        return 0;
+    }
+    finally
+    {
+        if (File.Exists(tempObj))
+        {
+            File.Delete(tempObj);
+        }
+        if (File.Exists(tempDll))
+        {
+            File.Delete(tempDll);
+        }
+    }
+}
+
+ 
 static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool useLowerLock, bool allowReachabilityFallback, bool enableTestCache)
 {
     var stopwatch = Stopwatch.StartNew();
@@ -3171,36 +3412,97 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     var executeExit = 1;
     if (result.Backend == BackendType.Cranelift)
     {
-        if (!TryFindCraneliftAot(out var aotTool))
+        if (useCraneliftRunner)
         {
-            Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
-        }
-        else
-        {
-            if (useCraneliftRunner)
+            var cachedObjectPath = TryGetCachedObjectPath(result);
+            var cachedDllPath = TryGetCachedRunnerDllPath(result);
+            var entryName = $"{moduleName}__run_tests";
+
+            if (!string.IsNullOrWhiteSpace(cachedObjectPath) &&
+                !string.IsNullOrWhiteSpace(cachedDllPath) &&
+                !string.IsNullOrWhiteSpace(result.ArtifactPath))
             {
-                executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, tickHostFps: null, out _, out _, out _, out _);
-            }
-            else
-            {
-                var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
-                try
+                if (!File.Exists(cachedDllPath))
                 {
-                    var aotExit = RunCraneliftAot(aotTool, result.ArtifactPath, tempObj, moduleName, optLevel, out _, out _);
-                    if (aotExit != 0)
+                    var ensureExit = EnsureCraneliftCachedRunnerDll(result.ArtifactPath, cachedObjectPath, cachedDllPath, moduleName, "test", optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
+                    if (ensureExit != 0)
                     {
-                        executeExit = aotExit;
+                        executeExit = ensureExit;
                     }
                     else
                     {
-                        executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, moduleName);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
                     }
                 }
-                finally
+                else
                 {
-                    if (File.Exists(tempObj))
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
+                }
+            }
+            else
+            {
+                if (!TryFindCraneliftAot(out var aotTool))
+                {
+                    Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+                }
+                else
+                {
+                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, tickHostFps: null, out _, out _, out _, out _);
+                }
+            }
+        }
+        else
+        {
+            var cachedExecutablePath = TryGetCachedExecutablePath(result);
+            var cachedObjectPath = TryGetCachedObjectPath(result);
+            if (!string.IsNullOrWhiteSpace(cachedExecutablePath) &&
+                !string.IsNullOrWhiteSpace(cachedObjectPath) &&
+                !string.IsNullOrWhiteSpace(result.ArtifactPath))
+            {
+                if (!File.Exists(cachedExecutablePath))
+                {
+                    var ensureExit = EnsureCraneliftCachedExecutable(result.ArtifactPath, cachedObjectPath, cachedExecutablePath, moduleName, "test", optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
+                    if (ensureExit != 0)
                     {
-                        File.Delete(tempObj);
+                        executeExit = ensureExit;
+                    }
+                    else
+                    {
+                        executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath);
+                    }
+                }
+                else
+                {
+                    executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath);
+                }
+            }
+            else
+            {
+                if (!TryFindCraneliftAot(out var aotTool))
+                {
+                    Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+                }
+                else
+                {
+                    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
+                    try
+                    {
+                        var aotExit = RunCraneliftAot(aotTool, result.ArtifactPath, tempObj, moduleName, optLevel, out _, out _);
+                        if (aotExit != 0)
+                        {
+                            executeExit = aotExit;
+                        }
+                        else
+                        {
+                            executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, moduleName);
+                        }
+                    }
+                    finally
+                    {
+                        if (File.Exists(tempObj))
+                        {
+                            File.Delete(tempObj);
+                        }
                     }
                 }
             }
