@@ -79,6 +79,12 @@ public sealed class SemanticAnalyzer
         // Type conversion functions
         AddSymbol("i32_to_f32", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
         AddSymbol("f32_to_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("u8_to_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("u16_to_i32", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("i32_to_u8_trunc", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("i32_to_u8_checked", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("i32_to_u16_trunc", SymbolKind.Function, new PrimitiveTypeSymbol("u16"), new SourceSpan(0, 0));
+        AddSymbol("i32_to_u16_checked", SymbolKind.Function, new PrimitiveTypeSymbol("u16"), new SourceSpan(0, 0));
 
         // Legacy system functions (to be renamed to sys_*)
         AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
@@ -145,22 +151,22 @@ public sealed class SemanticAnalyzer
         // ============================================================
 
         // Classification
-        AddSymbol("char_is_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_alpha", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_alnum", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_space", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_upper", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_lower", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_is_print", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_is_digit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alpha", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_alnum", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_space", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_upper", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_lower", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_hex", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("char_is_print", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
 
         // Conversion
-        AddSymbol("char_to_upper", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_to_lower", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_to_upper", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
+        AddSymbol("char_to_lower", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
         AddSymbol("char_to_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_from_digit", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_from_digit", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
         AddSymbol("char_to_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("char_from_hex", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("char_from_hex", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
 
         // ============================================================
         // Standard Library: str_* module (string operations)
@@ -168,23 +174,23 @@ public sealed class SemanticAnalyzer
 
         // Length & Capacity
         AddSymbol("str_len", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_is_empty", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_is_empty", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
 
         // Character Access
-        AddSymbol("str_get", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_get", SymbolKind.Function, new PrimitiveTypeSymbol("u8"), new SourceSpan(0, 0));
         AddSymbol("str_set", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
         // Comparison
-        AddSymbol("str_eq", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_eq", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
         AddSymbol("str_cmp", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_starts_with", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_ends_with", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_starts_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("str_ends_with", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
 
         // Search
         AddSymbol("str_find", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_find_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("str_find_last_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("str_contains", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("str_contains", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
 
         // Modification (in-place)
         AddSymbol("str_clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
@@ -1028,10 +1034,10 @@ public sealed class SemanticAnalyzer
                     if (receiverType is ArrayTypeSymbol arrType)
                     {
                         if (arrType.ElementType is PrimitiveTypeSymbol prim &&
-                            (prim.PrimitiveName == "u8" || prim.PrimitiveName == "u16" || prim.PrimitiveName == "utf8" || prim.PrimitiveName == "ascii"))
+                            (prim.PrimitiveName == "ascii" || prim.PrimitiveName == "utf8"))
                         {
-                            // Byte/word array elements are treated as i32 values when read (zero-extended).
-                            return new PrimitiveTypeSymbol("i32");
+                            // String buffers expose byte elements when indexed.
+                            return new PrimitiveTypeSymbol("u8");
                         }
                         return arrType.ElementType;
                     }
@@ -1123,13 +1129,6 @@ public sealed class SemanticAnalyzer
             }
 
             currentType = ResolveType(field.Type);
-        }
-
-        if (currentType is PrimitiveTypeSymbol prim &&
-            (prim.PrimitiveName == "u8" || prim.PrimitiveName == "u16" || prim.PrimitiveName == "utf8" || prim.PrimitiveName == "ascii"))
-        {
-            // Byte/word fields are treated as i32 values when read (zero-extended).
-            return new PrimitiveTypeSymbol("i32");
         }
 
         return currentType;
