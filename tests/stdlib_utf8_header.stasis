@@ -1,0 +1,19 @@
+import "../src/stdlib/stdlib.stasis";
+
+global utf8_buf: utf8[16];
+
+test `utf8_set_len_ascii writes both lengths`(): bool {
+    utf8_buf[0] = 65;
+    utf8_buf[1] = 0;
+    utf8_set_len_ascii(utf8_buf, 1);
+    return utf8_byte_len(utf8_buf) == 1 && utf8_char_len(utf8_buf) == 1;
+}
+
+test `utf8_clear_ascii clears header and payload`(): bool {
+    utf8_buf[0] = 66;
+    utf8_buf[1] = 0;
+    utf8_set_len_ascii(utf8_buf, 1);
+    utf8_clear_ascii(utf8_buf);
+    return utf8_buf[0] == 0 && utf8_byte_len(utf8_buf) == 0 && utf8_char_len(utf8_buf) == 0;
+}
+
