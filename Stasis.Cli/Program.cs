@@ -554,12 +554,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             }
 
             // Native Cranelift path: CLIF -> object -> clang link -> executable.
-            if (!OperatingSystem.IsWindows())
-            {
-                Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-                return 1;
-            }
-
             if (!TryFindCraneliftAot(out var aotTool))
             {
                 Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
@@ -3295,12 +3289,6 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-        return 1;
-    }
-
     if (!TryFindCraneliftAot(out var aotTool))
     {
         Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
@@ -3371,12 +3359,6 @@ static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, stri
 
 static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string>? exports = null)
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-        return 1;
-    }
-
     if (!TryFindCraneliftAot(out var aotTool))
     {
         Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
