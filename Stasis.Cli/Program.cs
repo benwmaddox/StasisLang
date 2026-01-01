@@ -1087,6 +1087,7 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         else
         {
             args.Add($"-Wl,-e,{entry}");
+            args.Add("-nostartfiles");
         }
     }
 
