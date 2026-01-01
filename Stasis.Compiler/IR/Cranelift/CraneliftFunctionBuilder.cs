@@ -4056,6 +4056,25 @@ public sealed class CraneliftFunctionBuilder
         {
             switch (prim.PrimitiveName)
             {
+                case "string":
+                    if (value.LiteralKind == TokenKind.StringLiteral)
+                    {
+                        var text = UnescapeString(value.LiteralText);
+                        if (_stringLiterals.TryGetValue(text, out var globalName))
+                        {
+                            var baseAddr = NewValue();
+                            _instructions.AppendLine($"    {baseAddr} = global_value {globalName}");
+                            var payload = NewValue();
+                            var headerOffset = ConstI64(HeaderSizeFor("string"));
+                            _instructions.AppendLine($"    {payload} = iadd {baseAddr}, {headerOffset}");
+                            return payload;
+                        }
+
+                        _diagnostics.Add(new Diagnostic($"String literal not defined: \"{text}\"", new SourceSpan(0, 0)));
+                        _instructions.AppendLine($"    {val} = iconst.i64 0 ; missing string literal");
+                        return val;
+                    }
+                    break;
                 case "f32":
                     _instructions.AppendLine($"    {val} = f32const {FormatFloatLiteral(value)}");
                     return val;

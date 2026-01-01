@@ -462,13 +462,15 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.R64);
         }
 
-        if (builtins.Overlaps(new[]
+        var needsStringRuntime = builtins.Overlaps(new[]
             {
                 "str_len", "str_is_empty", "str_get", "str_set", "str_eq", "str_cmp",
                 "str_copy", "str_append", "str_append_char", "str_clear",
                 "str_contains", "str_find", "str_find_char", "str_find_last_char",
                 "str_starts_with", "str_ends_with", "str_substr"
-            }))
+            });
+
+        if (needsStringRuntime)
         {
             builder.DeclareExternal("strlen", CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64);
             builder.DeclareExternal("strcmp", CraneliftTypeMapper.ClifType.I32, CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64);
@@ -479,6 +481,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("strrchr", CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I32);
             builder.DeclareExternal("strstr", CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64);
             builder.DeclareExternal("memcpy", CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64, CraneliftTypeMapper.ClifType.I64);
+            builder.DeclareExternal("abort", CraneliftTypeMapper.ClifType.Void);
+        }
+
+        if (!needsStringRuntime && builtins.Overlaps(new[] { "i32_to_u8_checked", "i32_to_u16_checked" }))
+        {
             builder.DeclareExternal("abort", CraneliftTypeMapper.ClifType.Void);
         }
 
@@ -973,6 +980,14 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             CollectFromBlock(func.Body, builtins, stringLiterals);
         }
 
+        foreach (var constDecl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
+        {
+            if (constDecl.Initializer is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+            {
+                stringLiterals.Add(UnescapeString(lit.Literal.Text));
+            }
+        }
+
         if (includeTests)
         {
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
@@ -1128,6 +1143,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "char_is_upper" or "char_is_lower" or "char_is_hex" or "char_is_print"
             or "char_to_upper" or "char_to_lower" or "char_to_digit" or "char_from_digit"
             or "char_to_hex" or "char_from_hex"
+            or "i32_to_u8_checked" or "i32_to_u16_checked"
             or "str_len" or "str_is_empty" or "str_get" or "str_set" or "str_eq" or "str_cmp"
             or "str_copy" or "str_append" or "str_append_char" or "str_clear"
             or "str_contains" or "str_find" or "str_find_char" or "str_find_last_char"

@@ -185,6 +185,14 @@ public sealed class ModuleLowerer
             var type = ResolveType(constDecl.Type, symbols);
             var llvmType = builder.TypeMapper.Map(type);
 
+            if (type is PrimitiveTypeSymbol prim && prim.PrimitiveName == "string")
+            {
+                if (TryEmitStringConstant(constDecl, prim, builder))
+                {
+                    continue;
+                }
+            }
+
             // Evaluate the initializer to get a constant value
             var constValue = EvaluateConstantExpression(constDecl.Initializer, llvmType, builder.Context);
             if (constValue.Handle != IntPtr.Zero)
@@ -192,6 +200,109 @@ public sealed class ModuleLowerer
                 builder.DefineConstantScalar(constDecl.Name.Text, llvmType, constValue);
             }
         }
+    }
+
+    private static bool TryEmitStringConstant(ConstDeclarationSyntax constDecl, PrimitiveTypeSymbol prim, LlvmModuleBuilder builder)
+    {
+        if (constDecl.Initializer is not LiteralExpressionSyntax lit || lit.Literal.Kind != TokenKind.StringLiteral)
+        {
+            return false;
+        }
+
+        var text = UnescapeStringInline(lit.Literal.Text);
+        var payloadBytes = BuildUtf8Payload(text);
+
+        var arrType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)payloadBytes.Count);
+        var values = payloadBytes
+            .Select(b => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, b, false))
+            .ToArray();
+        var initializer = LLVMValueRef.CreateConstArray(LLVMTypeRef.Int8, values);
+
+        var dataName = $"{constDecl.Name.Text}.data";
+        var dataGlobal = builder.Module.AddGlobal(arrType, dataName);
+        dataGlobal.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        dataGlobal.IsGlobalConstant = true;
+        dataGlobal.Initializer = initializer;
+
+        var headerSize = HeaderSizeFor("string");
+        var idx0 = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0, false);
+        var idxHeader = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)headerSize, false);
+        var payloadPtr = LLVMValueRef.CreateConstGEP2(arrType, dataGlobal, new[] { idx0, idxHeader });
+
+        builder.DefineConstantScalar(constDecl.Name.Text, builder.TypeMapper.Map(prim), payloadPtr);
+        return true;
+    }
+
+    private static string UnescapeStringInline(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var inner = text.Length >= 2 ? text.Substring(1, text.Length - 2) : text;
+        var sb = new StringBuilder(inner.Length);
+        for (int i = 0; i < inner.Length; i++)
+        {
+            var ch = inner[i];
+            if (ch == '\\' && i + 1 < inner.Length)
+            {
+                i++;
+                var esc = inner[i];
+                sb.Append(esc switch
+                {
+                    '\\' => '\\',
+                    '"' => '"',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    _ => esc
+                });
+            }
+            else
+            {
+                sb.Append(ch);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static List<byte> BuildUtf8Payload(string text)
+    {
+        static void WriteInt32LEInline(List<byte> bytes, int value)
+        {
+            bytes.Add((byte)(value & 0xFF));
+            bytes.Add((byte)((value >> 8) & 0xFF));
+            bytes.Add((byte)((value >> 16) & 0xFF));
+            bytes.Add((byte)((value >> 24) & 0xFF));
+        }
+
+        static int CountCodepointsInline(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return 0;
+            }
+
+            var count = 0;
+            foreach (var rune in value.EnumerateRunes())
+            {
+                count++;
+            }
+
+            return count;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(text);
+        var byteLength = bytes.Length;
+        var payloadBytes = new List<byte>(byteLength + 9);
+        var charLength = CountCodepointsInline(text);
+        WriteInt32LEInline(payloadBytes, byteLength);
+        WriteInt32LEInline(payloadBytes, charLength);
+        payloadBytes.AddRange(bytes);
+        payloadBytes.Add(0);
+        return payloadBytes;
     }
 
     private static LLVMValueRef EvaluateConstantExpression(ExpressionSyntax expr, LLVMTypeRef targetType, LLVMContextRef context)
