@@ -2009,11 +2009,20 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     int should_skip_test = (skip_test && strcmp(skip_test, "0") != 0);
     if (should_run_test && !should_skip_test) {
         int test_ok;
+#if defined(STASIS_GRAPHICS_SDL_ONLY)
+        if (!g_use_sdl_renderer) {
+            fprintf(stderr, "error: SDL-only build requires an SDL renderer.\n");
+            SDL_Quit();
+            return 0;
+        }
+        test_ok = verify_sdl_rendering(g_renderer, width, height);
+#else
         if (g_use_sdl_renderer) {
             test_ok = verify_sdl_rendering(g_renderer, width, height);
         } else {
             test_ok = verify_opengl_rendering(width, height);
         }
+#endif
 
         if (!test_ok) {
             /* Print detailed diagnostics to stderr */
@@ -2070,10 +2079,13 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (g_use_sdl_renderer) {
             SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
             SDL_RenderClear(g_renderer);
-        } else {
+        }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        else {
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
         }
+#endif
     }
 
     return 1;
@@ -2640,9 +2652,11 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
         return;
     }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
         flush_sprites();
     }
+#endif
 
     float hw = (float)w * 0.5f;
     float hh = (float)h * 0.5f;
