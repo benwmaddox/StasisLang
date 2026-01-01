@@ -1620,12 +1620,16 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
     let slot_w: f32 = w - pad * 2.0;
     let slot_y: f32 = y + header_h + pad;
     let i: i32 = 0;
+    let slots_done: bool = false;
     for (i = 0; i < 3; i = i + 1) {
-        let sy: f32 = slot_y + i32_to_f32(i) * (slot_h + slot_gap);
-        if (sy + slot_h > y + h - pad) {
-            break;
+        if (!slots_done) {
+            let sy: f32 = slot_y + i32_to_f32(i) * (slot_h + slot_gap);
+            if (sy + slot_h > y + h - pad) {
+                slots_done = true;
+            } else {
+                draw_rect(x + pad, sy, slot_w, slot_h, 0.3, 0.6, 0.8, 0.8);
+            }
         }
-        draw_rect(x + pad, sy, slot_w, slot_h, 0.3, 0.6, 0.8, 0.8);
     }
 }
 
@@ -1762,13 +1766,16 @@ function record_tap_pulses(): void {
         let vx: f32 = state.layout.viewport_x;
         let vy: f32 = state.layout.viewport_y;
         let j: i32 = 0;
+        let placed: bool = false;
         for (j = 0; j < MAX_TAP_PULSES; j = j + 1) {
-            if (state.tap_pulses[j].active == 0) {
-                state.tap_pulses[j].active = 1;
-                state.tap_pulses[j].age_ms = 0;
-                state.tap_pulses[j].x = x + vx;
-                state.tap_pulses[j].y = y + vy;
-                break;
+            if (!placed) {
+                if (state.tap_pulses[j].active == 0) {
+                    state.tap_pulses[j].active = 1;
+                    state.tap_pulses[j].age_ms = 0;
+                    state.tap_pulses[j].x = x + vx;
+                    state.tap_pulses[j].y = y + vy;
+                    placed = true;
+                }
             }
         }
     }
