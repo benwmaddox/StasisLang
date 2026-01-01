@@ -111,6 +111,10 @@ function ui_draw_button_9slice(
         if (content_w < 0.0) { content_w = 0.0; }
     }
 
+    if (font_handle == 0) {
+        return;
+    }
+
     let text_w: f32 = measure_text(font_handle, label);
     let text_x: f32 = content_x + (content_w - text_w) * 0.5;
     let text_y: f32 = y + (h * 0.55);

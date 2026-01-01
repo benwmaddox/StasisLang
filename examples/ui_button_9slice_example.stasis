@@ -1,10 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/ui_button_9slice.stasis";
 
-// Font path is Windows-specific by default. Change FONT_PATH if needed.
-const FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
-const FONT_SIZE: i32 = 20;
-
 global font_handle: i32;
 global button_top_left: i32;
 global button_top: i32;
@@ -80,7 +76,7 @@ function main(): i32 {
         return 1;
     }
 
-    font_handle = load_font(FONT_PATH, FONT_SIZE);
+    font_handle = 0;
     load_assets();
 
     let running: i32 = 1;

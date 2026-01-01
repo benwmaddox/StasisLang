@@ -67,6 +67,8 @@ let button_slice_h: f32 = 32.0;
 let icon_play: i32 = gfx_load_sprite("docs/assets/ui/button_9slice_dark/icon_play.png", 64, 64);
 let icon_star: i32 = gfx_load_sprite("docs/assets/ui/button_9slice_dark/icon_star.png", 64, 64);
 
+// If font_handle is 0, text rendering is skipped.
+
 // Row layout helper: compute button width and x offsets for a row.
 let w: f32 = ui_row_button_width(720.0, 3, 16.0);
 let h: f32 = 56.0;
