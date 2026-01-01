@@ -214,6 +214,38 @@ static void stasis_set_pointer_pos_px(int idx, float x, float y) {
     stasis_update_pointer_norm(idx);
 }
 
+static void stasis_update_safe_viewport(void) {
+    if (!g_window) return;
+
+    int display = SDL_GetWindowDisplayIndex(g_window);
+    if (display < 0) return;
+
+    SDL_Rect usable;
+    if (SDL_GetDisplayUsableBounds(display, &usable) != 0) {
+        return;
+    }
+
+    int win_x = 0;
+    int win_y = 0;
+    SDL_GetWindowPosition(g_window, &win_x, &win_y);
+
+    int win_right = win_x + g_window_width;
+    int win_bottom = win_y + g_window_height;
+    int left = usable.x > win_x ? usable.x : win_x;
+    int top = usable.y > win_y ? usable.y : win_y;
+    int right = (usable.x + usable.w) < win_right ? (usable.x + usable.w) : win_right;
+    int bottom = (usable.y + usable.h) < win_bottom ? (usable.y + usable.h) : win_bottom;
+    int w = right - left;
+    int h = bottom - top;
+
+    if (w > 0 && h > 0) {
+        g_input_frame.viewport_x_px = left - win_x;
+        g_input_frame.viewport_y_px = top - win_y;
+        g_input_frame.viewport_w_px = w;
+        g_input_frame.viewport_h_px = h;
+    }
+}
+
 static int stasis_find_finger_slot(SDL_FingerID fingerId) {
     for (int i = 0; i < STASIS_MAX_POINTERS - 1; i++) {
         if (g_finger_active[i] && g_finger_ids[i] == fingerId) {
@@ -263,6 +295,7 @@ static void stasis_pump_events(void) {
     g_input_frame.viewport_y_px = 0;
     g_input_frame.viewport_w_px = g_window_width;
     g_input_frame.viewport_h_px = g_window_height;
+    stasis_update_safe_viewport();
 
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -297,6 +330,7 @@ static void stasis_pump_events(void) {
 
                     g_input_frame.viewport_w_px = g_window_width;
                     g_input_frame.viewport_h_px = g_window_height;
+                    stasis_update_safe_viewport();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
                     if (!g_use_sdl_renderer) {
