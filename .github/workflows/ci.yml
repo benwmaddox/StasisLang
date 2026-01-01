@@ -97,11 +97,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift --emit-ir > /dev/null
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend cranelift
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend cranelift --emit-ir > /dev/null
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend cranelift
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend cranelift --emit-ir > /dev/null
 
       - name: Upload IR artifacts
         if: matrix.os == 'ubuntu-latest'
