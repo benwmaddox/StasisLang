@@ -395,10 +395,14 @@ function update_layout(): void {
     let use_side: bool = false;
     if (can_side && can_bottom) {
         use_side = side_scale >= bottom_scale;
-    } else if (can_side) {
-        use_side = true;
-    } else if (can_bottom) {
-        use_side = false;
+    } else {
+        if (can_side) {
+            use_side = true;
+        } else {
+            if (can_bottom) {
+                use_side = false;
+            }
+        }
     }
 
     if (use_side) {
@@ -411,32 +415,34 @@ function update_layout(): void {
         state.layout.ui_y = vy;
         state.layout.ui_w = vw - side_play_w;
         state.layout.ui_h = vh;
-    } else if (can_bottom) {
-        state.layout.ui_mode = 2;
-        state.layout.play_w = bottom_play_w;
-        state.layout.play_h = bottom_play_h;
-        state.layout.play_x = vx + (vw - bottom_play_w) * 0.5;
-        state.layout.play_y = vy;
-        state.layout.ui_x = vx;
-        state.layout.ui_y = vy + bottom_play_h;
-        state.layout.ui_w = vw;
-        state.layout.ui_h = vh - bottom_play_h;
     } else {
-        let play_w: f32 = vw;
-        let play_h: f32 = vw / aspect;
-        if (play_h > vh) {
-            play_h = vh;
-            play_w = vh * aspect;
+        if (can_bottom) {
+            state.layout.ui_mode = 2;
+            state.layout.play_w = bottom_play_w;
+            state.layout.play_h = bottom_play_h;
+            state.layout.play_x = vx + (vw - bottom_play_w) * 0.5;
+            state.layout.play_y = vy;
+            state.layout.ui_x = vx;
+            state.layout.ui_y = vy + bottom_play_h;
+            state.layout.ui_w = vw;
+            state.layout.ui_h = vh - bottom_play_h;
+        } else {
+            let play_w: f32 = vw;
+            let play_h: f32 = vw / aspect;
+            if (play_h > vh) {
+                play_h = vh;
+                play_w = vh * aspect;
+            }
+            state.layout.ui_mode = 0;
+            state.layout.play_w = play_w;
+            state.layout.play_h = play_h;
+            state.layout.play_x = vx + (vw - play_w) * 0.5;
+            state.layout.play_y = vy + (vh - play_h) * 0.5;
+            state.layout.ui_x = vx;
+            state.layout.ui_y = vy;
+            state.layout.ui_w = vw;
+            state.layout.ui_h = vh;
         }
-        state.layout.ui_mode = 0;
-        state.layout.play_w = play_w;
-        state.layout.play_h = play_h;
-        state.layout.play_x = vx + (vw - play_w) * 0.5;
-        state.layout.play_y = vy + (vh - play_h) * 0.5;
-        state.layout.ui_x = vx;
-        state.layout.ui_y = vy;
-        state.layout.ui_w = vw;
-        state.layout.ui_h = vh;
     }
 
     state.layout.play_scale = state.layout.play_w / base_w;
@@ -1680,12 +1686,14 @@ function draw_ui_panels(): void {
             draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
             draw_tech_panel(ui_x + pad, ui_y + pad + panel_h + gap, panel_w, panel_h);
         }
-    } else if (state.layout.ui_mode == 2) {
-        let panel_w: f32 = (ui_w - pad * 2.0 - gap) * 0.5;
-        let panel_h: f32 = ui_h - pad * 2.0;
-        if (panel_w > 1.0 && panel_h > 1.0) {
-            draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
-            draw_tech_panel(ui_x + pad + panel_w + gap, ui_y + pad, panel_w, panel_h);
+    } else {
+        if (state.layout.ui_mode == 2) {
+            let panel_w: f32 = (ui_w - pad * 2.0 - gap) * 0.5;
+            let panel_h: f32 = ui_h - pad * 2.0;
+            if (panel_w > 1.0 && panel_h > 1.0) {
+                draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
+                draw_tech_panel(ui_x + pad + panel_w + gap, ui_y + pad, panel_w, panel_h);
+            }
         }
     }
 }
@@ -1757,24 +1765,22 @@ function record_tap_pulses(): void {
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
         let went_down: bool = input_pointer_went_down(i);
-        if (!went_down) {
-            continue;
-        }
-
-        let x: f32 = input_pointer_x_px(i);
-        let y: f32 = input_pointer_y_px(i);
-        let vx: f32 = state.layout.viewport_x;
-        let vy: f32 = state.layout.viewport_y;
-        let j: i32 = 0;
-        let placed: bool = false;
-        for (j = 0; j < MAX_TAP_PULSES; j = j + 1) {
-            if (!placed) {
-                if (state.tap_pulses[j].active == 0) {
-                    state.tap_pulses[j].active = 1;
-                    state.tap_pulses[j].age_ms = 0;
-                    state.tap_pulses[j].x = x + vx;
-                    state.tap_pulses[j].y = y + vy;
-                    placed = true;
+        if (went_down) {
+            let x: f32 = input_pointer_x_px(i);
+            let y: f32 = input_pointer_y_px(i);
+            let vx: f32 = state.layout.viewport_x;
+            let vy: f32 = state.layout.viewport_y;
+            let j: i32 = 0;
+            let placed: bool = false;
+            for (j = 0; j < MAX_TAP_PULSES; j = j + 1) {
+                if (!placed) {
+                    if (state.tap_pulses[j].active == 0) {
+                        state.tap_pulses[j].active = 1;
+                        state.tap_pulses[j].age_ms = 0;
+                        state.tap_pulses[j].x = x + vx;
+                        state.tap_pulses[j].y = y + vy;
+                        placed = true;
+                    }
                 }
             }
         }
@@ -1784,13 +1790,11 @@ function record_tap_pulses(): void {
 function update_tap_pulses(delta_ms: i32): void {
     let i: i32 = 0;
     for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
-        if (state.tap_pulses[i].active == 0) {
-            continue;
-        }
-
-        state.tap_pulses[i].age_ms = state.tap_pulses[i].age_ms + delta_ms;
-        if (state.tap_pulses[i].age_ms >= TAP_PULSE_DURATION_MS) {
-            state.tap_pulses[i].active = 0;
+        if (state.tap_pulses[i].active != 0) {
+            state.tap_pulses[i].age_ms = state.tap_pulses[i].age_ms + delta_ms;
+            if (state.tap_pulses[i].age_ms >= TAP_PULSE_DURATION_MS) {
+                state.tap_pulses[i].active = 0;
+            }
         }
     }
 }
@@ -1798,17 +1802,15 @@ function update_tap_pulses(delta_ms: i32): void {
 function draw_tap_pulses(): void {
     let i: i32 = 0;
     for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
-        if (state.tap_pulses[i].active == 0) {
-            continue;
+        if (state.tap_pulses[i].active != 0) {
+            let age_f: f32 = i32_to_f32(state.tap_pulses[i].age_ms);
+            let dur_f: f32 = i32_to_f32(TAP_PULSE_DURATION_MS);
+            let t: f32 = age_f / dur_f;
+            if (t > 1.0) { t = 1.0; }
+            let radius: f32 = 8.0 + (48.0 * t);
+            let alpha: f32 = 0.6 * (1.0 - t);
+            draw_circle(state.tap_pulses[i].x, state.tap_pulses[i].y, radius, 0.2, 0.9, 1.0, alpha);
         }
-
-        let age_f: f32 = i32_to_f32(state.tap_pulses[i].age_ms);
-        let dur_f: f32 = i32_to_f32(TAP_PULSE_DURATION_MS);
-        let t: f32 = age_f / dur_f;
-        if (t > 1.0) { t = 1.0; }
-        let radius: f32 = 8.0 + (48.0 * t);
-        let alpha: f32 = 0.6 * (1.0 - t);
-        draw_circle(state.tap_pulses[i].x, state.tap_pulses[i].y, radius, 0.2, 0.9, 1.0, alpha);
     }
 }
 
