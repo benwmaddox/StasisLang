@@ -18,7 +18,8 @@ powershell -NoProfile -Command ^
   "$env:STASIS_CRANELIFT_AOT='%STASIS_CRANELIFT_AOT%';" ^
   "$aot = '%AOT_CLI%';" ^
   "if (!(Test-Path $aot)) { Write-Error 'AOT CLI not found. Run build.bat first.'; exit 1 }" ^
-  "& $aot test --all --backend cranelift;"
+  "& $aot test --all --backend cranelift; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE };" ^
+  "& $aot test --all --backend llvm; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE };"
 if errorlevel 1 exit /b 1
 
 endlocal
