@@ -1,11 +1,21 @@
+using System.Linq;
 using System.Runtime.InteropServices;
+using LLVMSharp.Interop;
 
 namespace Stasis.Compiler;
 
 public static class LlvmNativeLoader
 {
+    private static bool _initialized;
+
     public static void EnsureLoaded()
     {
+        if (_initialized)
+        {
+            return;
+        }
+        _initialized = true;
+
         var nativeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? "libLLVM.dll"
             : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
@@ -28,8 +38,10 @@ public static class LlvmNativeLoader
         var rid = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? "win-x64"
             : RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                ? "osx-x64"
-                : "linux-x64";
+                ? (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "osx-arm64" : "osx-x64")
+                : RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                    ? "linux-arm64"
+                    : "linux-x64";
 
         var version = "20.1.2";
         searchPaths.Add(Path.Combine(nugetRoot, "libllvm", version, "runtimes", rid, "native", nativeName));
@@ -44,13 +56,40 @@ public static class LlvmNativeLoader
             }
         }
 
-        foreach (var candidate in searchPaths)
+        var candidates = searchPaths
+            .Where(File.Exists)
+            .ToArray();
+
+        NativeLibrary.SetDllImportResolver(typeof(LLVM).Assembly, (libraryName, assembly, searchPath) =>
         {
-            if (File.Exists(candidate))
+            if (!string.Equals(libraryName, "libLLVM", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(libraryName, nativeName, StringComparison.OrdinalIgnoreCase))
             {
-                NativeLibrary.Load(candidate);
+                return IntPtr.Zero;
+            }
+
+            foreach (var candidate in candidates)
+            {
+                if (NativeLibrary.TryLoad(candidate, out var handle))
+                {
+                    return handle;
+                }
+            }
+
+            return IntPtr.Zero;
+        });
+
+        foreach (var candidate in candidates)
+        {
+            if (NativeLibrary.TryLoad(candidate, out _))
+            {
                 return;
             }
+        }
+
+        if (NativeLibrary.TryLoad(nativeName, out _))
+        {
+            return;
         }
 
         throw new DllNotFoundException($"libLLVM native library not found. Checked: {string.Join(", ", searchPaths)}. Set LLVM_NATIVE_PATH or ensure libllvm runtime packages are restored.");
