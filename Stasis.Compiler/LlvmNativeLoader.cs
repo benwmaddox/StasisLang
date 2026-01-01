@@ -1,6 +1,4 @@
-using System.Linq;
 using System.Runtime.InteropServices;
-using LLVMSharp.Interop;
 
 namespace Stasis.Compiler;
 
@@ -28,6 +26,7 @@ public static class LlvmNativeLoader
         if (!string.IsNullOrWhiteSpace(explicitDir))
         {
             searchPaths.Add(Path.Combine(explicitDir, nativeName));
+            PrependLibraryPath(explicitDir);
         }
 
         searchPaths.Add(Path.Combine(AppContext.BaseDirectory, nativeName));
@@ -56,33 +55,11 @@ public static class LlvmNativeLoader
             }
         }
 
-        var candidates = searchPaths
-            .Where(File.Exists)
-            .ToArray();
-
-        NativeLibrary.SetDllImportResolver(typeof(LLVM).Assembly, (libraryName, assembly, searchPath) =>
+        foreach (var candidate in searchPaths)
         {
-            if (!string.Equals(libraryName, "libLLVM", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(libraryName, nativeName, StringComparison.OrdinalIgnoreCase))
+            if (File.Exists(candidate))
             {
-                return IntPtr.Zero;
-            }
-
-            foreach (var candidate in candidates)
-            {
-                if (NativeLibrary.TryLoad(candidate, out var handle))
-                {
-                    return handle;
-                }
-            }
-
-            return IntPtr.Zero;
-        });
-
-        foreach (var candidate in candidates)
-        {
-            if (NativeLibrary.TryLoad(candidate, out _))
-            {
+                NativeLibrary.Load(candidate);
                 return;
             }
         }
@@ -93,5 +70,45 @@ public static class LlvmNativeLoader
         }
 
         throw new DllNotFoundException($"libLLVM native library not found. Checked: {string.Join(", ", searchPaths)}. Set LLVM_NATIVE_PATH or ensure libllvm runtime packages are restored.");
+    }
+
+    private static void PrependLibraryPath(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            PrependEnvPath("PATH", path);
+            return;
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            PrependEnvPath("DYLD_LIBRARY_PATH", path);
+            PrependEnvPath("DYLD_FALLBACK_LIBRARY_PATH", path);
+            return;
+        }
+
+        PrependEnvPath("LD_LIBRARY_PATH", path);
+    }
+
+    private static void PrependEnvPath(string variable, string path)
+    {
+        var existing = Environment.GetEnvironmentVariable(variable);
+        if (string.IsNullOrWhiteSpace(existing))
+        {
+            Environment.SetEnvironmentVariable(variable, path);
+            return;
+        }
+
+        var separator = Path.PathSeparator;
+        var segments = existing.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var segment in segments)
+        {
+            if (string.Equals(segment, path, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        Environment.SetEnvironmentVariable(variable, $"{path}{separator}{existing}");
     }
 }
