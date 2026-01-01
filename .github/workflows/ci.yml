@@ -10,7 +10,7 @@ jobs:
   build-test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
       DOTNET_NOLOGO: true
@@ -40,12 +40,18 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm clang libsdl2-dev libglew-dev
+          sudo apt-get install -y llvm clang libsdl2-dev
 
       - name: Install LLVM (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           choco install -y llvm
+
+      - name: Install SDL2 (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew update
+          brew install sdl2
 
       - name: Restore tools
         run: dotnet tool restore
@@ -104,14 +110,25 @@ jobs:
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- run samples/basic.stasis --emit-ir > artifacts/basic.ll
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- test samples/tests.stasis --emit-ir > artifacts/tests.ll
 
-      - name: Build graphics runtime (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build graphics runtime (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
-          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF
+          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON
           cmake --build runtime/build --config Release
 
-      - name: Compile graphics samples (Ubuntu, LLVM + Cranelift)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build graphics runtime (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Join-Path $env:RUNNER_TEMP "vcpkg"
+          git clone https://github.com/microsoft/vcpkg.git $vcpkgRoot
+          & "$vcpkgRoot\\bootstrap-vcpkg.bat"
+          & "$vcpkgRoot\\vcpkg.exe" install sdl2:x64-windows
+          $env:VCPKG_ROOT = $vcpkgRoot
+          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\\scripts\\buildsystems\\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake --build runtime/build --config Release
+
+      - name: Compile graphics samples (LLVM + Cranelift)
         run: |
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend llvm
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift
