@@ -9,7 +9,6 @@ It also lists prerequisites that are not wired yet.
 
 Design reference:
 - `docs/brickout-revenge-brainstorm.md` for the overall game goals and progression model that this input flow supports.
-
 ## Current anchors in the sample
 - `GameState` has `cursor`, `layout`, and `tap_pulses`, but no selection/drag state.
 - UI scaffolding exists in `draw_menu_panel`, `draw_tech_panel`, and `draw_ui_panels`, but the slots are not interactive.
