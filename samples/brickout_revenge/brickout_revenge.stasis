@@ -636,6 +636,7 @@ function world_to_grid_x(wx: f32): i32 {
     let cell_w: f32 = state.config.brick.width + state.config.grid.spacing;
     let local_x: f32 = wx - state.config.grid.origin_x;
     if (cell_w <= 0.0) { return -1; }
+    if (local_x < 0.0) { return -1; }
     return f32_to_i32(local_x / cell_w);
 }
 
@@ -645,6 +646,7 @@ function world_to_grid_y(wy: f32): i32 {
     let cell_h: f32 = state.config.brick.height + state.config.grid.spacing;
     if (cell_h <= 0.0) { return -1; }
     let local_y: f32 = base_y - wy;
+    if (local_y < 0.0) { return -1; }
     return f32_to_i32(local_y / cell_h);
 }
 
