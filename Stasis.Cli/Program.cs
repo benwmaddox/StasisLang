@@ -1095,6 +1095,11 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         }
     }
 
+    if (!isDll && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+    {
+        args.Add("-Wl,-no_pie");
+    }
+
     if (!isDll && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         args.Add("-Wl,/subsystem:console");
