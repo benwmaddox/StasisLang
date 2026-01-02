@@ -73,7 +73,7 @@ echo.
 echo Copying static dependency libs to build\\Release for single-exe links...
 set "STATIC_LIB_DIR=%VCPKG_ROOT%\\installed\\%VCPKG_TRIPLET%\\lib"
 set "MANUAL_LIB_DIR=%STATIC_LIB_DIR%\\manual-link"
-for %%F in (SDL2-static.lib glew32.lib OpenGL32.Lib GlU32.Lib) do (
+for %%F in (SDL2-static.lib libglew32.lib OpenGL32.Lib GlU32.Lib) do (
     if exist "%STATIC_LIB_DIR%\\%%F" (
         copy /Y "%STATIC_LIB_DIR%\\%%F" "%CD%\\Release" >NUL
     ) else (

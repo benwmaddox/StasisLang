@@ -554,12 +554,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             }
 
             // Native Cranelift path: CLIF -> object -> clang link -> executable.
-            if (!OperatingSystem.IsWindows())
-            {
-                Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-                return 1;
-            }
-
             if (!TryFindCraneliftAot(out var aotTool))
             {
                 Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
@@ -1092,8 +1086,18 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         }
         else
         {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                entry = $"_{entry}";
+            }
             args.Add($"-Wl,-e,{entry}");
+            args.Add("-nostartfiles");
         }
+    }
+
+    if (!isDll && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+    {
+        args.Add("-Wl,-no_pie");
     }
 
     if (!isDll && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -2067,14 +2071,21 @@ static string GetCompilerCacheSalt()
     var assembly = typeof(Program).Assembly;
     var version = assembly.GetName().Version?.ToString() ?? "unknown";
     var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
-    var location = assembly.Location;
-    if (string.IsNullOrEmpty(location) || !File.Exists(location))
+    var exePath = Environment.ProcessPath;
+    if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
     {
-        return $"{version}:{informationalVersion}";
+        var lastWriteTicks = File.GetLastWriteTimeUtc(exePath).Ticks;
+        return $"{version}:{informationalVersion}:{lastWriteTicks}";
     }
 
-    var lastWriteTicks = File.GetLastWriteTimeUtc(location).Ticks;
-    return $"{version}:{informationalVersion}:{lastWriteTicks}";
+    var baseDir = AppContext.BaseDirectory;
+    if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
+    {
+        var lastWriteTicks = Directory.GetLastWriteTimeUtc(baseDir).Ticks;
+        return $"{version}:{informationalVersion}:{lastWriteTicks}";
+    }
+
+    return $"{version}:{informationalVersion}";
 }
 
 static int RunCraneliftAot(string aotTool, string clifPath, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
@@ -2660,7 +2671,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
 
 static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyList<FieldLayout> entries)
 {
-    var fields = new List<object>();
+    var fields = new List<StructFieldMetadata>(entries.Count);
     var globalPrefix = state.Name + "__";
     foreach (var entry in entries)
     {
@@ -2678,27 +2689,26 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
         }
         jsonPath = jsonPath.Replace("__", ".", StringComparison.Ordinal);
 
-        fields.Add(new
+        fields.Add(new StructFieldMetadata
         {
-            name = entry.Name,        // Flattened symbol name (for DLL lookup)
-            jsonPath = jsonPath,      // Preferred JSON path (non-lowered)
-            offset = entry.Offset,
-            size = entry.Size,
-            type = entry.Type.ToString().ToLowerInvariant(),
-            arrayCount = entry.ArrayCount
+            Name = entry.Name,        // Flattened symbol name (for DLL lookup)
+            JsonPath = jsonPath,      // Preferred JSON path (non-lowered)
+            Offset = entry.Offset,
+            Size = entry.Size,
+            Type = entry.Type.ToString().ToLowerInvariant(),
+            ArrayCount = entry.ArrayCount
         });
     }
 
-    var metadata = new
+    var metadata = new StructMetadata
     {
-        version = 1,
-        globalName = state.Name,
-        totalSize = state.Size,
-        fields = fields
+        Version = 1,
+        GlobalName = state.Name,
+        TotalSize = state.Size,
+        Fields = fields
     };
 
-    var options = new JsonSerializerOptions { WriteIndented = true };
-    var json = JsonSerializer.Serialize(metadata, options);
+    var json = JsonSerializer.Serialize(metadata, StasisCliJson.Indented.StructMetadata);
     File.WriteAllText(path, json, Encoding.UTF8);
 }
 
@@ -3064,7 +3074,7 @@ static CompileResult? TryLoadTestCache(TestCacheLocation cacheLocation, string s
     try
     {
         var json = File.ReadAllText(cacheLocation.EntryPath);
-        entry = JsonSerializer.Deserialize<TestCacheEntry>(json);
+        entry = JsonSerializer.Deserialize(json, StasisCliJson.Default.TestCacheEntry);
     }
     catch
     {
@@ -3132,8 +3142,7 @@ static void WriteTestCacheEntry(PreparedForLower prep, BackendType backend, stri
 
     try
     {
-        var options = new JsonSerializerOptions { WriteIndented = true };
-        var json = JsonSerializer.Serialize(entry, options);
+        var json = JsonSerializer.Serialize(entry, StasisCliJson.Indented.TestCacheEntry);
         File.WriteAllText(prep.TestCacheLocation.EntryPath, json, Encoding.UTF8);
     }
     catch
@@ -3290,12 +3299,6 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-        return 1;
-    }
-
     if (!TryFindCraneliftAot(out var aotTool))
     {
         Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
@@ -3366,12 +3369,6 @@ static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, stri
 
 static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string>? exports = null)
 {
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("error: Cranelift native output is only implemented for Windows x64 currently. Use --emit-ir.");
-        return 1;
-    }
-
     if (!TryFindCraneliftAot(out var aotTool))
     {
         Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");

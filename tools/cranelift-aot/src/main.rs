@@ -15,7 +15,7 @@ use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module, DataDescription};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use target_lexicon::Triple;
+use target_lexicon::{OperatingSystem, Triple};
 
 #[derive(Parser)]
 #[command(name = "stasis-cranelift-aot")]
@@ -69,7 +69,7 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
     let triple = Triple::from_str(target)
         .map_err(|_| anyhow::anyhow!("invalid target triple: {target}"))?;
 
-    let flags = build_flags(opt_level)?;
+    let flags = build_flags(opt_level, &triple)?;
     let isa = isa::lookup(triple.clone())
         .context("failed to look up ISA for target")?
         .finish(flags)
@@ -242,7 +242,7 @@ fn read_string<R: Read>(reader: &mut R, len: usize) -> Result<String>
     Ok(s)
 }
 
-fn build_flags(opt_level: &str) -> Result<settings::Flags>
+fn build_flags(opt_level: &str, target: &Triple) -> Result<settings::Flags>
 {
     let mut flag_builder = settings::builder();
 
@@ -252,6 +252,11 @@ fn build_flags(opt_level: &str) -> Result<settings::Flags>
         "speed" => flag_builder.set("opt_level", "speed")?,
         "speed_and_size" => flag_builder.set("opt_level", "speed_and_size")?,
         other => bail!("invalid --opt-level '{other}' (use none|speed|speed_and_size)"),
+    }
+
+    if matches!(target.operating_system, OperatingSystem::Darwin(_) | OperatingSystem::MacOSX(_))
+    {
+        flag_builder.set("is_pic", "true")?;
     }
 
     Ok(settings::Flags::new(flag_builder))
