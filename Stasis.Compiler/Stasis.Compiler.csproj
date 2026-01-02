@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
@@ -13,6 +13,8 @@
   <ItemGroup>
     <PackageReference Include="LLVMSharp" Version="20.1.2" />
     <PackageReference Include="libLLVM" Version="20.1.2" />
+    <PackageReference Include="libllvm.runtime.osx-arm64" Version="20.1.2" />
+    <PackageReference Include="libllvm.runtime.osx-x64" Version="20.1.2" />
   </ItemGroup>
 
 </Project>
