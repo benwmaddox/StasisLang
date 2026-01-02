@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       DOTNET_NOLOGO: true
@@ -48,14 +48,6 @@ jobs:
         run: |
           choco install -y llvm
 
-      - name: Install SDL2 (macOS)
-        if: matrix.os == 'macos-15-intel'
-        run: |
-          brew update
-          brew install sdl2 llvm
-          echo "LLVM_NATIVE_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
       - name: Restore tools
         run: dotnet tool restore
