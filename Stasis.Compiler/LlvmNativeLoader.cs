@@ -25,6 +25,7 @@ public static class LlvmNativeLoader
         var explicitDir = Environment.GetEnvironmentVariable("LLVM_NATIVE_PATH");
         if (!string.IsNullOrWhiteSpace(explicitDir))
         {
+            AppContext.SetSwitch("LLVMSharp.Interop.DisableResolveLibraryHook", true);
             searchPaths.Add(Path.Combine(explicitDir, nativeName));
             PrependLibraryPath(explicitDir);
         }
