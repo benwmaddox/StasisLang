@@ -242,6 +242,21 @@ static bool ContainsTopLevelFunction(CompilationUnitSyntax unit, string name) =>
         .OfType<FunctionDeclarationSyntax>()
         .Any(f => string.Equals(f.Name.Text, name, StringComparison.Ordinal));
 
+static IReadOnlyList<string> BuildRunnerExports(string moduleName, string mode, bool hasTick, bool includeTests)
+{
+    if (mode == "test" || includeTests)
+    {
+        return new[] { $"{moduleName}__run_tests" };
+    }
+
+    if (hasTick)
+    {
+        return new[] { $"{moduleName}__main", $"{moduleName}__tick" };
+    }
+
+    return new[] { $"{moduleName}__main" };
+}
+
 if (mode == "format")
 {
     var input = File.ReadAllText(path);
@@ -473,14 +488,26 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 var cachedObj = Path.Combine(cacheDir, $"{cacheKey}{GetObjectFileExtension()}");
                 var cachedOut = Path.Combine(cacheDir, cacheKey + (useCraneliftRunner ? (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so") : (OperatingSystem.IsWindows() ? ".exe" : string.Empty)));
 
-                if (File.Exists(cachedOut))
+                var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
+                var runnerExports = useCraneliftRunner
+                    ? BuildRunnerExports(moduleName, mode, hasTick, includeTests)
+                    : Array.Empty<string>();
+                DataBindingPlan? dataBindingPlan = null;
+                if (useCraneliftRunner)
+                {
+                    if (!TryGetDataBindingPlan(path, layout, moduleName, runnerExports, out dataBindingPlan))
+                    {
+                        return 1;
+                    }
+                }
+
+                if (File.Exists(cachedOut) && dataBindingPlan is null)
                 {
                     var entryBase = mode == "test" ? "run_tests" : "main";
                     var entryName = $"{moduleName}__{entryBase}";
                     if (useCraneliftRunner)
                     {
-                        var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, tickHostFps: hasTick ? tickHostFps : null);
                     }
                     return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
                 }
@@ -494,17 +521,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
                 if (useCraneliftRunner)
                 {
-                    var exports = new List<string>();
-                    var entryBase = mode == "test" ? "run_tests" : "main";
-                    exports.Add($"{moduleName}__{entryBase}");
-                    var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                    if (hasTick)
-                    {
-                        exports.Add($"{moduleName}__tick");
-                    }
-
+                    var exports = runnerExports;
                     var sw = Stopwatch.StartNew();
-                    var ensureExit = EnsureCraneliftCachedRunnerDll(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath, exports);
+                    var ensureExit = EnsureCraneliftCachedRunnerDll(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath, dataBindingPlan?.DefPath, exports);
                     sw.Stop();
                     if (logPhaseTiming)
                     {
@@ -518,8 +537,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     }
 
                     var runSw = Stopwatch.StartNew();
+                    var entryBase = mode == "test" ? "run_tests" : "main";
                     var entryName = $"{moduleName}__{entryBase}";
-                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, tickHostFps: hasTick ? tickHostFps : null);
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -582,19 +602,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             {
                 HotStatePlan? hotStatePlan = null;
                 var hasTick = ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                var exports = new List<string>();
-                if (mode == "run")
-                {
-                    exports.Add($"{moduleName}__main");
-                    if (hasTick)
-                    {
-                        exports.Add($"{moduleName}__tick");
-                    }
-                }
-                else
-                {
-                    exports.Add($"{moduleName}__run_tests");
-                }
+                var exports = BuildRunnerExports(moduleName, mode, hasTick, includeTests);
                 if (enableHotState)
                 {
                     if (!TryCreateHotStatePlan(path, layout, moduleName, exports, excludeSpriteFields: true, out var createdPlan))
@@ -603,14 +611,18 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     }
                     hotStatePlan = createdPlan;
                 }
+                if (!TryGetDataBindingPlan(path, layout, moduleName, exports, out var dataBindingPlan))
+                {
+                    return 1;
+                }
 
                 long? runAotSpawn;
                 long runAotCompile;
                 long runLink;
                 long runRun;
                 var runExit = useInMemoryClif
-                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
-                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
+                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, dataBindingPlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
+                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan, dataBindingPlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
                 if (logPhaseTiming)
                 {
                     aotSpawnMs = runAotSpawn ?? 0;
@@ -766,7 +778,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
-static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName, HotStatePlan? hotStatePlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long linkMs, out long runMs)
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long linkMs, out long runMs)
 {
     linkMs = 0;
     runMs = 0;
@@ -787,7 +799,8 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
         var entryName = $"{moduleName}__{entryBase}";
-        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsDefFilePath: hotStatePlan?.DefPath, windowsExports: dllExports);
+        var defPath = hotStatePlan?.DefPath ?? dataBindingPlan?.DefPath;
+        var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsDefFilePath: defPath, windowsExports: dllExports);
         var linkStopwatch = Stopwatch.StartNew();
         var exit = RunProcess(clang, args, suppressOutput: true);
         linkMs = linkStopwatch.ElapsedMilliseconds;
@@ -803,7 +816,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         }
 
         var entry = entryName;
-        if (UseCraneliftRunnerServer() && hotStatePlan is null)
+        if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null)
         {
             var runner = GetCraneliftRunnerServer(runnerPath);
             return runner.Run(dllPath, entry, out runMs);
@@ -826,6 +839,11 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
             }
             runnerArgs += $" --state \"{hotStatePlan.SnapshotPath}\" --state-map \"{hotStatePlan.MapPath}\"";
             runnerArgs += $" --hot-exit-file \"{hotStatePlan.HotExitPath}\"";
+        }
+        if (dataBindingPlan is not null)
+        {
+            runnerArgs += $" --data-bind \"{dataBindingPlan.JsonPath}\" \"{dataBindingPlan.StructMetaPath}\"";
+            Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
         }
         if (tickHostFps is not null)
         {
@@ -851,7 +869,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -879,7 +897,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
         {
             exports = new[] { $"{moduleName}__main" };
         }
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, exports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, dataBindingPlan, exports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -890,7 +908,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
     }
 }
 
-static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -918,7 +936,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
         {
             exports = new[] { $"{moduleName}__main" };
         }
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, exports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, moduleName, hotStatePlan, dataBindingPlan, exports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -2263,6 +2281,31 @@ static string? FindDataBindingJson(string sourcePath, string repoRoot)
     return null;
 }
 
+static bool TryGetDataBindingPlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, out DataBindingPlan? plan)
+{
+    plan = null;
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_DISABLE_DATA_BIND"), "1", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var dataFile = FindDataBindingJson(sourcePath, repoRoot);
+    if (string.IsNullOrEmpty(dataFile))
+    {
+        return true;
+    }
+
+    dataFile = Path.GetFullPath(dataFile);
+    if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, exportedFunctions, excludeSpriteFields: true, out var hotPlan))
+    {
+        return false;
+    }
+
+    plan = new DataBindingPlan(dataFile, hotPlan.StructMetaPath, hotPlan.DefPath);
+    return true;
+}
+
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
@@ -3266,7 +3309,7 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
     });
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, int? tickHostFps = null)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, int? tickHostFps = null)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -3283,13 +3326,18 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
         }
     }
 
-    if (tickHostFps is null && UseCraneliftRunnerServer())
+    if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer())
     {
         var runner = GetCraneliftRunnerServer(runnerPath);
         return runner.Run(dllPath, entryName, out _);
     }
 
     var args = $"\"{dllPath}\" {entryName}";
+    if (dataBindingPlan is not null)
+    {
+        args += $" --data-bind \"{dataBindingPlan.JsonPath}\" \"{dataBindingPlan.StructMetaPath}\"";
+        Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
+    }
     if (tickHostFps is not null)
     {
         args += $" --fps {tickHostFps.Value}";
@@ -3367,7 +3415,7 @@ static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, stri
     }
 }
 
-static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string>? exports = null)
+static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, string dllPath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, string? windowsDefFilePath, IReadOnlyList<string>? exports = null)
 {
     if (!TryFindCraneliftAot(out var aotTool))
     {
@@ -3409,7 +3457,7 @@ static int EnsureCraneliftCachedRunnerDll(string clifPath, string objPath, strin
         if (!File.Exists(dllPath))
         {
             var dllExports = exports is { Count: > 0 } ? exports : new[] { entryName };
-            var args = BuildClangArgsForObject(objPath, tempDll, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsExports: dllExports);
+            var args = BuildClangArgsForObject(objPath, tempDll, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, entryName: entryName, isDll: true, windowsDefFilePath: windowsDefFilePath, windowsExports: dllExports);
             var exit = RunProcess(clang, args, suppressOutput: true);
             if (exit != 0)
             {
@@ -3586,19 +3634,19 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
             {
                 if (!File.Exists(cachedDllPath))
                 {
-                    var ensureExit = EnsureCraneliftCachedRunnerDll(result.ArtifactPath, cachedObjectPath, cachedDllPath, moduleName, "test", optLevel, enableLto, result.UsesGraphics, graphicsLibPath);
+                    var ensureExit = EnsureCraneliftCachedRunnerDll(result.ArtifactPath, cachedObjectPath, cachedDllPath, moduleName, "test", optLevel, enableLto, result.UsesGraphics, graphicsLibPath, windowsDefFilePath: null);
                     if (ensureExit != 0)
                     {
                         executeExit = ensureExit;
                     }
                     else
                     {
-                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null);
                 }
             }
             else
@@ -3609,7 +3657,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                 }
                 else
                 {
-                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, tickHostFps: null, out _, out _, out _, out _);
+                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, aotTool, moduleName, hotStatePlan: null, dataBindingPlan: null, tickHostFps: null, out _, out _, out _, out _);
                 }
             }
         }
