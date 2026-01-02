@@ -1086,6 +1086,10 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         }
         else
         {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                entry = $"_{entry}";
+            }
             args.Add($"-Wl,-e,{entry}");
             args.Add("-nostartfiles");
         }
