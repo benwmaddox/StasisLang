@@ -9,6 +9,7 @@ on:
 jobs:
   build-test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -29,16 +30,24 @@ jobs:
         with:
           dotnet-version: "9.0.x"
 
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
       - name: Install LLVM (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm clang libsdl2-dev libglew-dev
+          sudo apt-get install -y llvm clang libsdl2-dev
 
       - name: Install LLVM (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           choco install -y llvm
+
 
       - name: Restore tools
         run: dotnet tool restore
@@ -48,6 +57,10 @@ jobs:
 
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
+
+      - name: Build Cranelift AOT tool
+        run: cargo build --release
+        working-directory: tools/cranelift-aot
 
       - name: Validate SVG assets
         run: |
@@ -92,6 +105,33 @@ jobs:
           mkdir -p artifacts
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- run samples/basic.stasis --emit-ir > artifacts/basic.ll
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- test samples/tests.stasis --emit-ir > artifacts/tests.ll
+
+      - name: Build graphics runtime (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON
+          cmake --build runtime/build --config Release
+
+      - name: Build graphics runtime (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Join-Path $env:RUNNER_TEMP "vcpkg"
+          git clone https://github.com/microsoft/vcpkg.git $vcpkgRoot
+          & "$vcpkgRoot\\bootstrap-vcpkg.bat"
+          & "$vcpkgRoot\\vcpkg.exe" install sdl2:x64-windows
+          $env:VCPKG_ROOT = $vcpkgRoot
+          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\\scripts\\buildsystems\\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake --build runtime/build --config Release
+
+      - name: Compile graphics samples (LLVM + Cranelift)
+        run: |
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend llvm
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend llvm
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend cranelift
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend llvm
+          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend cranelift
 
       - name: Upload IR artifacts
         if: matrix.os == 'ubuntu-latest'
