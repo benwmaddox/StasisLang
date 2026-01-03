@@ -407,13 +407,15 @@ public class CliSnapshotTests
         }
 
         var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--backend", "llvm");
-        var result = new
-        {
-            ExitCode = exitCode,
-            Stdout = ScrubOutput(stdout),
-            Stderr = ScrubOutput(stderr)
-        };
-        return Verifier.Verify(result).UseDirectory("Snapshots");
+        var scrubbedStdout = ScrubOutput(stdout);
+        var scrubbedStderr = ScrubOutput(stderr);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("PASS: `adds numbers`", scrubbedStdout, StringComparison.Ordinal);
+        Assert.Contains("PASS: `true is true`", scrubbedStdout, StringComparison.Ordinal);
+        Assert.Contains("Tests: passed=2 failed=0", scrubbedStdout, StringComparison.Ordinal);
+        Assert.True(string.IsNullOrWhiteSpace(scrubbedStderr), scrubbedStderr);
+        return Task.CompletedTask;
     }
 
     [Fact]

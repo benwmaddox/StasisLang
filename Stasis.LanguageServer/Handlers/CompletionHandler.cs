@@ -104,12 +104,24 @@ public class CompletionHandler : CompletionHandlerBase
             };
         }
 
-        // Local lookup inside the enclosing function/test (parameters + let bindings).
         if (doc.ParseResult?.CompilationUnit is not { } compilationUnit)
         {
             return null;
         }
 
+        // Parse-tree fallback for globals/consts when semantic info is unavailable.
+        foreach (var decl in compilationUnit.Declarations)
+        {
+            switch (decl)
+            {
+                case GlobalDeclarationSyntax global when string.Equals(global.Name.Text, receiverName, StringComparison.Ordinal):
+                    return GetNamedTypeName(global.Type);
+                case ConstDeclarationSyntax constant when string.Equals(constant.Name.Text, receiverName, StringComparison.Ordinal):
+                    return GetNamedTypeName(constant.Type);
+            }
+        }
+
+        // Local lookup inside the enclosing function/test (parameters + let bindings).
         if (!TryGetEnclosingCallable(compilationUnit, cursorOffset, out var parameters, out var body))
         {
             return null;
