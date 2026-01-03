@@ -706,7 +706,8 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
-        var callName = IsBuiltinFunction(funcName) ? funcName : MangleFunctionName(funcName);
+        var isExtern = IsExternFunction(funcName);
+        var callName = IsBuiltinFunction(funcName) ? funcName : (isExtern ? funcName : MangleFunctionName(funcName));
         var argList = string.Join(", ", args);
         if (IsVoidFunction(funcName))
         {
@@ -1069,6 +1070,9 @@ public sealed class CraneliftFunctionBuilder
             _ => false
         };
     }
+
+    private bool IsExternFunction(string name) =>
+        _functions.TryGetValue(name, out var func) && func.IsExtern;
 
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 

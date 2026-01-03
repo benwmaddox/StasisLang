@@ -2069,6 +2069,16 @@ public sealed class ModuleLowerer
             var fn = _moduleBuilder.Module.GetNamedFunction(id.Identifier.Text);
             if (fn.Handle == IntPtr.Zero)
             {
+                if (_functions.TryGetValue(id.Identifier.Text, out var decl) && decl.IsExtern)
+                {
+                    var externSignature = ResolveFunctionSignature(id.Identifier.Text);
+                    var externType = LLVMTypeRef.CreateFunction(externSignature.ReturnType, externSignature.Parameters, false);
+                    fn = _moduleBuilder.Module.AddFunction(id.Identifier.Text, externType);
+                }
+            }
+
+            if (fn.Handle == IntPtr.Zero)
+            {
                 AddDiagnostic($"Function '{id.Identifier.Text}' missing from module.", call.Span);
                 return ConstI32(0);
             }
