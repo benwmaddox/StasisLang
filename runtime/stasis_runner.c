@@ -327,6 +327,81 @@ static int read_text_file(const char *path, char *out, size_t out_cap)
     return out[0] == '\0' ? 1 : 0;
 }
 
+static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char *map_out, size_t map_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return 1;
+    }
+
+    if (!fgets(dll_out, (int)dll_cap, f))
+    {
+        fclose(f);
+        return 1;
+    }
+    if (dll_out[0] == '\0')
+    {
+        fclose(f);
+        return 1;
+    }
+
+    size_t dll_len = strlen(dll_out);
+    while (dll_len > 0 && (dll_out[dll_len - 1] == '\n' || dll_out[dll_len - 1] == '\r' || dll_out[dll_len - 1] == ' ' || dll_out[dll_len - 1] == '\t'))
+    {
+        dll_out[--dll_len] = '\0';
+    }
+    size_t start = 0;
+    while (dll_out[start] == ' ' || dll_out[start] == '\t')
+    {
+        start++;
+    }
+    if (start > 0)
+    {
+        memmove(dll_out, dll_out + start, strlen(dll_out + start) + 1);
+    }
+
+    if (map_out && map_cap > 0)
+    {
+        map_out[0] = '\0';
+        if (fgets(map_out, (int)map_cap, f))
+        {
+            size_t map_len = strlen(map_out);
+            while (map_len > 0 && (map_out[map_len - 1] == '\n' || map_out[map_len - 1] == '\r' || map_out[map_len - 1] == ' ' || map_out[map_len - 1] == '\t'))
+            {
+                map_out[--map_len] = '\0';
+            }
+            size_t map_start = 0;
+            while (map_out[map_start] == ' ' || map_out[map_start] == '\t')
+            {
+                map_start++;
+            }
+            if (map_start > 0)
+            {
+                memmove(map_out, map_out + map_start, strlen(map_out + map_start) + 1);
+            }
+        }
+    }
+
+    fclose(f);
+    return dll_out[0] == '\0' ? 1 : 0;
+}
+
+static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
+{
+    if (!syms || !*syms || !sym_count)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < *sym_count; i++)
+    {
+        free((*syms)[i].name);
+    }
+    free(*syms);
+    *syms = NULL;
+    *sym_count = 0;
+}
+
 static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
 {
     (void)total_bytes;
@@ -493,6 +568,8 @@ int main(int argc, char **argv)
     const char *entry_name = NULL;
     const char *state_path = NULL;
     const char *state_map_path = NULL;
+    char state_map_buf[2048];
+    state_map_buf[0] = '\0';
     const char *hot_exit_path = NULL;
     const char *swap_file_path = NULL;
     const char *data_bind_json = NULL;
@@ -646,6 +723,9 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--state-map") == 0 && i + 1 < argc)
         {
             state_map_path = argv[++i];
+            strncpy(state_map_buf, state_map_path, sizeof(state_map_buf) - 1);
+            state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+            state_map_path = state_map_buf;
             continue;
         }
         if (strcmp(argv[i], "--hot-exit-file") == 0 && i + 1 < argc)
@@ -834,9 +914,30 @@ int main(int argc, char **argv)
                     if (swap_file_path && file_exists(swap_file_path))
                     {
                         char new_path[2048];
-                        if (read_text_file(swap_file_path, new_path, sizeof(new_path)) == 0)
+                        char map_path[2048];
+                        map_path[0] = '\0';
+                        if (read_swap_file(swap_file_path, new_path, sizeof(new_path), map_path, sizeof(map_path)) == 0)
                         {
                             DeleteFileA(swap_file_path);
+                            if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+                            {
+                                uint64_t new_hash = 0;
+                                uint32_t new_count = 0;
+                                uint32_t new_total = 0;
+                                stasis_state_symbol *new_syms = NULL;
+                                if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
+                                {
+                                    free_state_map(&syms, &sym_count);
+                                    syms = new_syms;
+                                    sym_count = new_count;
+                                    total_bytes = new_total;
+                                    map_hash = new_hash;
+                                    strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
+                                    state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                                    state_map_path = state_map_buf;
+                                    fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                }
+                            }
 
                             LARGE_INTEGER sw_freq;
                             LARGE_INTEGER sw_t0;

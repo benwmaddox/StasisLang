@@ -2510,7 +2510,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 return 0;
             }
 
-            File.WriteAllText(swapFile, hotDll, Encoding.ASCII);
+            var swapText = hotDll + "\n" + plan.MapPath;
+            File.WriteAllText(swapFile, swapText, Encoding.ASCII);
             swapWriteMs = phase.ElapsedMilliseconds;
             swTotal.Stop();
             timingLine =
