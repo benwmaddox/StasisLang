@@ -1,3 +1,4 @@
+@link("stasis_graphics");
 // Graphics/runtime bindings.
 // Import explicitly: import "src/stdlib/graphics.stasis";
 

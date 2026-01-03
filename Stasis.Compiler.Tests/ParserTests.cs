@@ -103,6 +103,21 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_link_directive()
+    {
+        var source = """
+            @link("stasis_graphics");
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var directive = Assert.IsType<LinkDirectiveSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.Equal("link", directive.Name.Text);
+        Assert.Equal("\"stasis_graphics\"", directive.Value.Text);
+    }
+
+    [Fact]
     public void Parses_infix_assignment()
     {
         var source = """

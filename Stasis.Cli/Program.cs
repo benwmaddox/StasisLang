@@ -375,13 +375,6 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
         var runtimeImports = GetRuntimeImportFlags(path);
 
-        // Auto-detect runtime usage via stdlib module imports if not explicitly enabled.
-        // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
-        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) && (runtimeImports.graphics || runtimeImports.audio))
-        {
-            enableGraphics = true;
-        }
-
         var parse = Parser.Parse(source);
         if (logPhaseTiming)
         {
@@ -393,6 +386,16 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             
             PrintDiagnostics(parse.Diagnostics, source, path);
             return 1;
+        }
+
+        var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
+
+        // Auto-detect runtime usage via stdlib module imports or link directives if not explicitly enabled.
+        // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
+        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) &&
+            (runtimeImports.graphics || runtimeImports.audio || linkLibraries.Contains("stasis_graphics", StringComparer.OrdinalIgnoreCase)))
+        {
+            enableGraphics = true;
         }
 
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
@@ -1705,6 +1708,23 @@ static bool DetectsRuntimeImports(string entryPath)
     return imports.graphics || imports.audio;
 }
 
+static IReadOnlyList<string> CollectLinkDirectives(CompilationUnitSyntax compilationUnit)
+{
+    var links = new List<string>();
+    foreach (var directive in compilationUnit.Declarations.OfType<LinkDirectiveSyntax>())
+    {
+        var raw = directive.Value.Text;
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            links.Add(raw.Substring(1, raw.Length - 2));
+        }
+    }
+    return links;
+}
+
+static bool HasLinkDirective(CompilationUnitSyntax compilationUnit, string name) =>
+    CollectLinkDirectives(compilationUnit).Contains(name, StringComparer.OrdinalIgnoreCase);
+
 static bool DetectsModuleImport(string entryPath, string moduleFileName)
 {
     var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2487,7 +2507,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath);
+        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath) || HasLinkDirective(parse.CompilationUnit, "stasis_graphics");
         var parse = Parser.Parse(source);
         parseMs = phase.ElapsedMilliseconds;
         phase.Restart();
@@ -3146,7 +3166,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         }
         // Tests should be deterministic and avoid IO-heavy dependencies, but the Cranelift backend still relies on
         // runtime hooks for some builtins (e.g., get_time_ms), so keep auto-detection there.
-        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : DetectsRuntimeImports(path);
+        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : (DetectsRuntimeImports(path) || HasLinkDirective(parse.CompilationUnit, "stasis_graphics"));
         var effectiveGraphics = enableGraphics || usesGraphics;
         TestCacheLocation? testCacheLocation = null;
         var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;

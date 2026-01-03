@@ -1,3 +1,4 @@
+@link("stasis_graphics");
 // Audio/runtime bindings.
 // Import explicitly: import "src/stdlib/audio.stasis";
 

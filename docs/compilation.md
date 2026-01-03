@@ -97,6 +97,14 @@ GlobalDecl       -> "global" Identifier ":" Type ";"
 
 ---
 
+## 2.3.1 Link Directives
+
+```
+LinkDirective    -> "@" Identifier "(" StringLiteral ")" ";"
+```
+
+---
+
 ## 2.4 Function Declarations
 
 ```
