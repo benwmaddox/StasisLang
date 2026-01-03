@@ -1,5 +1,6 @@
 import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
+import "../../src/stdlib/graphics.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
 // - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --watch`

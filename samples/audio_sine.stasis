@@ -1,4 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/audio.stasis";
 
 // Minimal audio output sample.
 // Generates a mono sine wave and pushes interleaved stereo f32 frames.

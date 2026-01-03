@@ -373,9 +373,11 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return 1;
         }
 
-        // Auto-detect graphics usage if not explicitly enabled.
+        var runtimeImports = GetRuntimeImportFlags(path);
+
+        // Auto-detect runtime usage via stdlib module imports if not explicitly enabled.
         // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
-        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) && DetectsGraphicsUsage(source))
+        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) && (runtimeImports.graphics || runtimeImports.audio))
         {
             enableGraphics = true;
         }
@@ -393,7 +395,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return 1;
         }
 
-        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         if (logPhaseTiming)
         {
             semaMs = phaseStopwatch.ElapsedMilliseconds;
@@ -1690,16 +1692,118 @@ static string? FindGraphicsSharedLibrary()
     return null;
 }
 
-static bool DetectsGraphicsUsage(string source)
+static (bool graphics, bool audio) GetRuntimeImportFlags(string entryPath)
 {
-    // Detect direct calls to the graphics runtime API. Use a "not preceded by identifier char"
-    // check so we don't trigger on helpers like ascii_clear() in the stdlib.
-    return Regex.IsMatch(
-        source,
-        @"(?<![A-Za-z0-9_])" +
-        @"(init_window|begin_frame|end_frame|draw_line|draw_lines_f32|clear|gfx_load_sprite|gfx_draw_sprite|gfx_draw_sprites_i32|gfx_poll_reload|gfx_debug_bake_hash|gfx_debug_enable_hash|gfx_debug_get_frame_hash|should_quit|is_key_down|get_mouse_x|get_mouse_y|is_mouse_down|audio_is_available|audio_get_sample_rate|audio_get_channels|audio_get_queued_frames|audio_get_underruns|audio_push_f32_interleaved|input_pointer_count|input_pointer_id|input_pointer_is_down|input_pointer_went_down|input_pointer_went_up|input_pointer_x_px|input_pointer_y_px|input_pointer_dx_px|input_pointer_dy_px|input_pointer_x_n|input_pointer_y_n|input_dropped_pointers|input_viewport_x_px|input_viewport_y_px|input_viewport_w_px|input_viewport_h_px|time|get_time_ms|sleep_ms)" +
-        @"\s*\(",
-        RegexOptions.CultureInvariant);
+    var graphics = DetectsModuleImport(entryPath, "graphics.stasis");
+    var audio = DetectsModuleImport(entryPath, "audio.stasis");
+    return (graphics, audio);
+}
+
+static bool DetectsRuntimeImports(string entryPath)
+{
+    var imports = GetRuntimeImportFlags(entryPath);
+    return imports.graphics || imports.audio;
+}
+
+static bool DetectsModuleImport(string entryPath, string moduleFileName)
+{
+    var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var targetPath = ResolveStdlibModulePath(moduleFileName);
+    return DetectsModuleImportInner(Path.GetFullPath(entryPath), moduleFileName, targetPath, visited);
+}
+
+static bool DetectsModuleImportInner(string path, string moduleFileName, string? targetPath, HashSet<string> visited)
+{
+    if (!visited.Add(path))
+    {
+        return false;
+    }
+
+    string source;
+    try
+    {
+        source = File.ReadAllText(path);
+    }
+    catch
+    {
+        return false;
+    }
+
+    var baseDir = Path.GetDirectoryName(path) ?? string.Empty;
+    var lineStart = 0;
+    for (var index = 0; index <= source.Length; index++)
+    {
+        var isEnd = index == source.Length;
+        var ch = isEnd ? '\n' : source[index];
+        if (ch != '\n' && !isEnd)
+        {
+            continue;
+        }
+
+        var lineLength = index - lineStart;
+        var line = source.Substring(lineStart, lineLength).TrimEnd('\r');
+        if (TryParseImportLine(line, out var importPath))
+        {
+            var resolved = Path.GetFullPath(Path.Combine(baseDir, importPath));
+            if (IsTargetModule(resolved, moduleFileName, targetPath))
+            {
+                return true;
+            }
+
+            if (File.Exists(resolved) && DetectsModuleImportInner(resolved, moduleFileName, targetPath, visited))
+            {
+                return true;
+            }
+        }
+
+        lineStart = index + 1;
+    }
+
+    return false;
+}
+
+static bool IsTargetModule(string resolvedPath, string moduleFileName, string? targetPath)
+{
+    if (!string.IsNullOrEmpty(targetPath) &&
+        string.Equals(resolvedPath, targetPath, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    return string.Equals(Path.GetFileName(resolvedPath), moduleFileName, StringComparison.OrdinalIgnoreCase);
+}
+
+static string? ResolveStdlibModulePath(string moduleFileName)
+{
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var candidate = Path.GetFullPath(Path.Combine(repoRoot, "src", "stdlib", moduleFileName));
+    return File.Exists(candidate) ? candidate : null;
+}
+
+static bool TryParseImportLine(string line, out string path)
+{
+    path = string.Empty;
+    var trimmed = line.Trim();
+    if (!trimmed.StartsWith("import", StringComparison.Ordinal))
+    {
+        return false;
+    }
+
+    var remainder = trimmed.Substring("import".Length).TrimStart();
+    if (remainder.Length < 2 || remainder[0] != '\"')
+    {
+        return false;
+    }
+
+    var endQuote = remainder.IndexOf('\"', 1);
+    if (endQuote < 0)
+    {
+        return false;
+    }
+
+    path = remainder.Substring(1, endQuote - 1);
+    var tail = remainder.Substring(endQuote + 1).Trim();
+    return tail.Length == 0 || tail == ";";
 }
 
 static bool DetectsTickUsage(string source) =>
@@ -2383,7 +2487,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var usesGraphics = enableGraphics || DetectsGraphicsUsage(source);
+        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath);
         var parse = Parser.Parse(source);
         parseMs = phase.ElapsedMilliseconds;
         phase.Restart();
@@ -2392,7 +2496,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             PrintDiagnostics(parse.Diagnostics, source, sourcePath);
             return 1;
         }
-        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
@@ -3041,7 +3146,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         }
         // Tests should be deterministic and avoid IO-heavy dependencies, but the Cranelift backend still relies on
         // runtime hooks for some builtins (e.g., get_time_ms), so keep auto-detection there.
-        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : DetectsGraphicsUsage(source);
+        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : DetectsRuntimeImports(path);
         var effectiveGraphics = enableGraphics || usesGraphics;
         TestCacheLocation? testCacheLocation = null;
         var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;
@@ -3064,7 +3169,8 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
             return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
 
-        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        var runtimeImports = GetRuntimeImportFlags(path);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {

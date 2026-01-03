@@ -5,8 +5,11 @@ using Stasis.Compiler.Syntax;
 
 namespace Stasis.Compiler;
 
+public sealed record SemanticAnalyzerOptions(bool EnableGraphicsBuiltins = true, bool EnableAudioBuiltins = true);
+
 public sealed class SemanticAnalyzer
 {
+    private readonly SemanticAnalyzerOptions _options;
     private static readonly Dictionary<string, TypeSymbol> BuiltInTypes = new(StringComparer.Ordinal)
     {
         { "u8", new PrimitiveTypeSymbol("u8") },
@@ -25,6 +28,11 @@ public sealed class SemanticAnalyzer
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
     private readonly List<Diagnostic> _diagnostics = new();
     private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+
+    public SemanticAnalyzer(SemanticAnalyzerOptions? options = null)
+    {
+        _options = options ?? new SemanticAnalyzerOptions();
+    }
 
     public SemanticResult Analyze(CompilationUnitSyntax compilationUnit)
     {
@@ -86,65 +94,71 @@ public sealed class SemanticAnalyzer
         AddSymbol("i32_to_u16_trunc", SymbolKind.Function, new PrimitiveTypeSymbol("u16"), new SourceSpan(0, 0));
         AddSymbol("i32_to_u16_checked", SymbolKind.Function, new PrimitiveTypeSymbol("u16"), new SourceSpan(0, 0));
 
-        // Legacy system functions (to be renamed to sys_*)
-        AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+        if (_options.EnableGraphicsBuiltins)
+        {
+            // Legacy system functions (to be renamed to sys_*)
+            AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
-        // Legacy graphics functions (external runtime)
-        AddSymbol("init_window", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("begin_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("end_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("draw_line", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("draw_lines_f32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("gfx_draw_sprites_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("gfx_debug_enable_hash", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("gfx_debug_get_frame_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("get_window_size", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("set_fullscreen", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("set_postfx", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("load_font", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("draw_text", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("measure_text", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("list_directory", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("dir_list_entry_is_dir", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("dir_list_entry_copy_name", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            // Legacy graphics functions (external runtime)
+            AddSymbol("init_window", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("begin_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("end_frame", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("clear", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("draw_line", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("draw_lines_f32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_draw_sprites_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("gfx_debug_bake_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("gfx_debug_enable_hash", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_debug_get_frame_hash", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("is_key_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("should_quit", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("get_window_size", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("set_fullscreen", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("set_postfx", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("load_font", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("draw_text", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("measure_text", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("list_directory", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("dir_list_entry_is_dir", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("dir_list_entry_copy_name", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
-        // Input snapshot functions (mouse + touch)
-        AddSymbol("input_pointer_count", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_id", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_is_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_went_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_went_up", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_dx_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_dy_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_x_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_pointer_y_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
-        AddSymbol("input_dropped_pointers", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_viewport_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_viewport_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_viewport_w_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("input_viewport_h_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            // Input snapshot functions (mouse + touch)
+            AddSymbol("input_pointer_count", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_id", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_is_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_went_down", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_went_up", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_dx_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_dy_px", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_x_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_pointer_y_n", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
+            AddSymbol("input_dropped_pointers", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_viewport_x_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_viewport_y_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_viewport_w_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("input_viewport_h_px", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        }
 
-        // Legacy audio functions (external runtime)
-        AddSymbol("audio_is_available", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
-        AddSymbol("audio_get_sample_rate", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("audio_get_channels", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("audio_get_queued_frames", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("audio_get_underruns", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
-        AddSymbol("audio_push_f32_interleaved", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        if (_options.EnableAudioBuiltins)
+        {
+            // Legacy audio functions (external runtime)
+            AddSymbol("audio_is_available", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+            AddSymbol("audio_get_sample_rate", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("audio_get_channels", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("audio_get_queued_frames", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("audio_get_underruns", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("audio_push_f32_interleaved", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        }
 
         // ============================================================
         // Standard Library: char_* module (character/byte utilities)
