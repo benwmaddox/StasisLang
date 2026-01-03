@@ -35,6 +35,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm clang libsdl2-dev libglew-dev
 
+      - name: Setup Rust (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
       - name: Install LLVM (Windows)
         if: matrix.os == 'windows-latest'
         run: |
@@ -45,6 +52,12 @@ jobs:
 
       - name: Restore
         run: dotnet restore Stasis.sln
+
+      - name: Run build script (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
 
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
