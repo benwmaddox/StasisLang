@@ -43,13 +43,13 @@ global state : GlobalState;
 function main(): i32 {
     // Require JSON data binding: this sample expects to be run under the native runner so
     // `samples/brickout_revenge/data/config.json` is applied to `state.config` before main().
-    if (state.config.magic != 1337) {
-        print_string("error: brickout config.json not bound (expected state.config.magic == 1337)\n");
-        print_string("run: .\\stasis.bat run samples/brickout_revenge/brickout_revenge.stasis --backend cranelift --graphics\n");
-        return 1;
-    }
+    // if (state.config.magic != 1337) {
+    //     print_string("error: brickout config.json not bound (expected state.config.magic == 1337)\n");
+    //     print_string("run: .\\stasis.bat run samples/brickout_revenge/brickout_revenge.stasis --backend cranelift --graphics\n");
+    //     return 1;
+    // }
 
-    let init_ok: bool = init_window(state.config.screen.w, state.config.screen.h, "Brickout Revenge");
+    let init_ok: bool = init_window(state.config.screen.width, state.config.screen.height, "Brickout Revenge");
     if (!init_ok) {
         return 1;
     }
@@ -80,20 +80,14 @@ function main(): i32 {
     }
 
     state.timers.last_time = get_time_ms();
-    state.running = 1;
     return 0;
 }
 
 function tick(): i32 {
-    if (state.running != 1) {
-        return 1;
-    }
-
     let quit: bool = should_quit();
     if (quit) {
-        state.running = 0;
+        return 1;
     }
-
     
     begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
