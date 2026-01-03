@@ -11,6 +11,12 @@ If you only want syntax highlighting (no LSP), use the lightweight extension in 
 
 - `powershell -ExecutionPolicy Bypass -File .\\scripts\\install_vscode_stasis_syntax.ps1`
 
+## Install full extension (syntax + LSP)
+
+This builds/publishes the language server, packages the VSIX, and installs it via the VS Code CLI:
+
+- `powershell -ExecutionPolicy Bypass -File .\\scripts\\install_vscode_stasis_lsp.ps1 -Force`
+
 ## Development
 
 1. Build the language server:
