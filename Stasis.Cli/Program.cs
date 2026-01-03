@@ -2537,10 +2537,14 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
     }
 
-    var initial = BuildAndSwap(startRunner: true, out _);
-    if (initial != 0)
+    var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);
+    if (initial == 0)
     {
-        return initial;
+        Console.Error.WriteLine(initialTimingLine);
+    }
+    else
+    {
+        Console.Error.WriteLine("warning: initial build failed; waiting for changes.");
     }
 
     var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
@@ -2597,7 +2601,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         changeSignal.Reset();
 
-        var exit = BuildAndSwap(startRunner: false, out var timingLine);
+        var exit = BuildAndSwap(startRunner: runner is null, out var timingLine);
         if (exit == 0)
         {
             Console.Error.WriteLine(timingLine);
