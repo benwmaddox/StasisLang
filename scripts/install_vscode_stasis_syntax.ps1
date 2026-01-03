@@ -7,23 +7,42 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repoRoot "vscode-stasis-syntax"
-$target = Join-Path $ExtensionsDir "stasislang.stasis-syntax"
 
 if (-not (Test-Path $source)) {
   throw "Missing extension folder: $source"
 }
 
-if (-not (Test-Path $ExtensionsDir)) {
-  New-Item -ItemType Directory -Path $ExtensionsDir | Out-Null
+$npx = Get-Command npx -ErrorAction SilentlyContinue
+if (-not $npx) {
+  throw "npx is required to package the VSIX. Install Node.js and try again."
 }
 
-if (Test-Path $target) {
-  if (-not $Force) {
-    throw "Target already exists: $target (re-run with -Force to overwrite)"
+$code = Get-Command code -ErrorAction SilentlyContinue
+if (-not $code) {
+  throw "VS Code CLI (code) not found in PATH. Enable it from the VS Code command palette."
+}
+
+$vsixDir = Join-Path $source ".vsix"
+New-Item -ItemType Directory -Force -Path $vsixDir | Out-Null
+$vsixPath = Join-Path $vsixDir "stasislang.stasis-syntax.vsix"
+
+Push-Location $source
+try {
+  & $npx.Path @("@vscode/vsce", "package", "--out", $vsixPath)
+  if ($LASTEXITCODE -ne 0) {
+    throw "VSIX packaging failed."
   }
-  Remove-Item -Recurse -Force $target
+
+  $installArgs = @("--install-extension", $vsixPath)
+  if ($Force) {
+    $installArgs += "--force"
+  }
+  & $code.Path @installArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "VSIX install failed."
+  }
+} finally {
+  Pop-Location
 }
 
-Copy-Item -Recurse -Force $source $target
-Write-Host "Installed to: $target"
-
+Write-Host "Installed VSIX: $vsixPath"

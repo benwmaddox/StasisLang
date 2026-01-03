@@ -36,9 +36,15 @@ public class DiagnosticsPublisher
             return;
 
         var diagnostics = new List<Diagnostic>();
+        var danglingOffset = FindDanglingMemberAccessOffset(document.Content);
 
         foreach (var diag in document.AllDiagnostics)
         {
+            if (danglingOffset.HasValue && diag.Span.Start >= danglingOffset.Value)
+            {
+                continue;
+            }
+
             var range = SourceSpanToRange(document.Content, diag.Span);
             diagnostics.Add(new Diagnostic
             {
@@ -85,4 +91,50 @@ public class DiagnosticsPublisher
             End = end
         };
     }
+
+    private static int? FindDanglingMemberAccessOffset(string content)
+    {
+        for (var i = content.Length - 1; i >= 0; i--)
+        {
+            if (content[i] != '.')
+            {
+                continue;
+            }
+
+            var left = i - 1;
+            while (left >= 0 && char.IsWhiteSpace(content[left]))
+            {
+                left--;
+            }
+
+            if (left < 0 || !IsIdentifierChar(content[left]))
+            {
+                continue;
+            }
+
+            var right = i + 1;
+            while (right < content.Length && char.IsWhiteSpace(content[right]))
+            {
+                if (content[right] == '\n' || content[right] == '\r')
+                {
+                    return i;
+                }
+                right++;
+            }
+
+            if (right >= content.Length)
+            {
+                return i;
+            }
+
+            if (!IsIdentifierChar(content[right]))
+            {
+                continue;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 }
