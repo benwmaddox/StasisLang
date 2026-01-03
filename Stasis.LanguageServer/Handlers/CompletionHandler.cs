@@ -26,12 +26,12 @@ public class CompletionHandler : CompletionHandlerBase
             return Task.FromResult(new CompletionList());
 
         var offset = TextPositionConverter.PositionToOffset(doc.Content, request.Position);
-        if (!TryGetMemberAccessReceiver(doc.Content, offset, out var receiverName))
+        if (!TryGetMemberAccessReceiverChain(doc.Content, offset, out var receiverChain))
         {
             return Task.FromResult(new CompletionList());
         }
 
-        var receiverTypeName = ResolveReceiverTypeName(receiverName, doc, offset);
+        var receiverTypeName = ResolveReceiverTypeName(receiverChain, doc, offset);
         if (string.IsNullOrEmpty(receiverTypeName))
         {
             return Task.FromResult(new CompletionList());
@@ -86,22 +86,29 @@ public class CompletionHandler : CompletionHandlerBase
         return Array.Empty<CompletionItem>();
     }
 
-    private static string? ResolveReceiverTypeName(string receiverName, DocumentState doc, int cursorOffset)
+    private static string? ResolveReceiverTypeName(IReadOnlyList<string> receiverChain, DocumentState doc, int cursorOffset)
     {
-        if (doc.SymbolIndex?.IsEnum(receiverName) == true)
+        if (receiverChain.Count == 0)
         {
-            return receiverName;
+            return null;
+        }
+
+        var baseName = receiverChain[0];
+
+        if (doc.SymbolIndex?.IsEnum(baseName) == true)
+        {
+            return baseName;
         }
 
         // Global symbol table lookup (types, globals, consts, functions, built-ins).
         if (doc.SemanticResult?.Symbols is not null &&
-            doc.SemanticResult.Symbols.TryGetValue(receiverName, out var receiverSymbol))
+            doc.SemanticResult.Symbols.TryGetValue(baseName, out var receiverSymbol))
         {
-            return receiverSymbol.Type switch
+            return ResolveMemberChain(receiverSymbol.Type switch
             {
                 NamedTypeSymbol named => named.TypeName,
                 _ => null
-            };
+            }, receiverChain, doc.SymbolIndex);
         }
 
         if (doc.ParseResult?.CompilationUnit is not { } compilationUnit)
@@ -114,10 +121,10 @@ public class CompletionHandler : CompletionHandlerBase
         {
             switch (decl)
             {
-                case GlobalDeclarationSyntax global when string.Equals(global.Name.Text, receiverName, StringComparison.Ordinal):
-                    return GetNamedTypeName(global.Type);
-                case ConstDeclarationSyntax constant when string.Equals(constant.Name.Text, receiverName, StringComparison.Ordinal):
-                    return GetNamedTypeName(constant.Type);
+                case GlobalDeclarationSyntax global when string.Equals(global.Name.Text, baseName, StringComparison.Ordinal):
+                    return ResolveMemberChain(GetNamedTypeName(global.Type), receiverChain, doc.SymbolIndex);
+                case ConstDeclarationSyntax constant when string.Equals(constant.Name.Text, baseName, StringComparison.Ordinal):
+                    return ResolveMemberChain(GetNamedTypeName(constant.Type), receiverChain, doc.SymbolIndex);
             }
         }
 
@@ -129,16 +136,16 @@ public class CompletionHandler : CompletionHandlerBase
 
         foreach (var parameter in parameters)
         {
-            if (string.Equals(parameter.Name.Text, receiverName, StringComparison.Ordinal))
+            if (string.Equals(parameter.Name.Text, baseName, StringComparison.Ordinal))
             {
-                return GetNamedTypeName(parameter.Type);
+                return ResolveMemberChain(GetNamedTypeName(parameter.Type), receiverChain, doc.SymbolIndex);
             }
         }
 
         VariableDeclarationSyntax? best = null;
         foreach (var decl in EnumerateVariableDeclarations(body))
         {
-            if (!string.Equals(decl.Name.Text, receiverName, StringComparison.Ordinal))
+            if (!string.Equals(decl.Name.Text, baseName, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -154,7 +161,8 @@ public class CompletionHandler : CompletionHandlerBase
             }
         }
 
-        return best?.Type is null ? null : GetNamedTypeName(best.Type);
+        var localTypeName = best?.Type is null ? null : GetNamedTypeName(best.Type);
+        return ResolveMemberChain(localTypeName, receiverChain, doc.SymbolIndex);
     }
 
     private static bool TryGetEnclosingCallable(
@@ -244,9 +252,9 @@ public class CompletionHandler : CompletionHandlerBase
             _ => null
         };
 
-    private static bool TryGetMemberAccessReceiver(string content, int cursorOffset, out string receiverName)
+    private static bool TryGetMemberAccessReceiverChain(string content, int cursorOffset, out IReadOnlyList<string> receiverChain)
     {
-        receiverName = string.Empty;
+        receiverChain = Array.Empty<string>();
         if (cursorOffset < 0 || cursorOffset > content.Length)
         {
             return false;
@@ -254,9 +262,9 @@ public class CompletionHandler : CompletionHandlerBase
 
         // Find the dot token for the member access immediately before the cursor.
         var dotIndex = cursorOffset - 1;
-        while (dotIndex >= 0 && char.IsWhiteSpace(content[dotIndex]))
+        if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
         {
-            dotIndex--;
+            return false;
         }
 
         // If we're in the middle of typing an identifier, walk backwards to find the dot.
@@ -267,9 +275,9 @@ public class CompletionHandler : CompletionHandlerBase
         }
 
         dotIndex = identStart;
-        while (dotIndex >= 0 && char.IsWhiteSpace(content[dotIndex]))
+        if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
         {
-            dotIndex--;
+            return false;
         }
 
         if (dotIndex < 0 || content[dotIndex] != '.')
@@ -277,28 +285,131 @@ public class CompletionHandler : CompletionHandlerBase
             return false;
         }
 
-        // Extract receiver identifier to the left of '.'.
+        // Extract receiver chain to the left of '.'.
+        var names = new Stack<string>();
         var i = dotIndex - 1;
-        while (i >= 0 && char.IsWhiteSpace(content[i]))
+        while (true)
         {
-            i--;
+            if (!TrySkipInlineWhitespaceLeft(content, ref i))
+            {
+                break;
+            }
+
+            if (i < 0)
+            {
+                break;
+            }
+
+            var end = i;
+            while (i >= 0 && IsIdentifierChar(content[i]))
+            {
+                i--;
+            }
+
+            var start = i + 1;
+            if (start > end)
+            {
+                break;
+            }
+
+            names.Push(content.Substring(start, end - start + 1));
+
+            if (!TrySkipInlineWhitespaceLeft(content, ref i))
+            {
+                break;
+            }
+
+            if (i >= 0 && content[i] == '.')
+            {
+                i--;
+                continue;
+            }
+
+            break;
         }
 
-        var end = i;
-        while (i >= 0 && IsIdentifierChar(content[i]))
-        {
-            i--;
-        }
-
-        var start = i + 1;
-        if (start > end)
+        if (names.Count == 0)
         {
             return false;
         }
 
-        receiverName = content.Substring(start, end - start + 1);
-        return receiverName.Length > 0;
+        receiverChain = names.ToArray();
+        return true;
     }
 
     private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    private static bool TrySkipInlineWhitespaceLeft(string content, ref int index)
+    {
+        while (index >= 0 && char.IsWhiteSpace(content[index]))
+        {
+            if (content[index] == '\n' || content[index] == '\r')
+            {
+                return false;
+            }
+            index--;
+        }
+
+        return true;
+    }
+
+    private static string? ResolveMemberChain(string? baseTypeName, IReadOnlyList<string> receiverChain, SymbolIndex? index)
+    {
+        if (string.IsNullOrEmpty(baseTypeName))
+        {
+            return null;
+        }
+
+        if (receiverChain.Count <= 1)
+        {
+            return baseTypeName;
+        }
+
+        if (index == null)
+        {
+            return null;
+        }
+
+        var currentType = baseTypeName;
+        for (var i = 1; i < receiverChain.Count; i++)
+        {
+            var memberName = receiverChain[i];
+            if (index.GetStruct(currentType) is not { } structSymbol)
+            {
+                return null;
+            }
+
+            var field = structSymbol.Fields.FirstOrDefault(f => string.Equals(f.Name, memberName, StringComparison.Ordinal));
+            if (field == null)
+            {
+                return null;
+            }
+
+            currentType = ExtractNamedTypeName(field.TypeText);
+            if (string.IsNullOrEmpty(currentType))
+            {
+                return null;
+            }
+        }
+
+        return currentType;
+    }
+
+    private static string? ExtractNamedTypeName(string typeText)
+    {
+        if (string.IsNullOrEmpty(typeText))
+        {
+            return null;
+        }
+
+        typeText = typeText.Trim();
+
+        var bracketIndex = typeText.IndexOf('[');
+        if (bracketIndex >= 0)
+        {
+            return null;
+        }
+
+        return typeText;
+    }
 }

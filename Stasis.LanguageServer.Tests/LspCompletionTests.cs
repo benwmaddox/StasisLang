@@ -6,7 +6,9 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using LspServer = OmniSharp.Extensions.LanguageServer.Server.LanguageServer;
 using Stasis.LanguageServer.Handlers;
 using Stasis.LanguageServer.Services;
+using Stasis.Compiler;
 using Xunit;
+using System.Reflection;
 
 namespace Stasis.LanguageServer.Tests;
 
@@ -42,6 +44,175 @@ public sealed class LspCompletionTests
         var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
         Assert.Contains("foo", labels);
         Assert.Contains("bar", labels);
+    }
+
+    [Fact]
+    public async Task CompletesNestedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct GameState {",
+            "    rng_state: i32;",
+            "    score: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    game: GameState;",
+            "}",
+            "",
+            "global state: GlobalState;",
+            "",
+            "function main(): i32 {",
+            "    state.game.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_nested.stasis";
+        var position = GetPositionAfter(document, "state.game.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("rng_state", labels);
+        Assert.Contains("score", labels);
+    }
+
+    [Fact]
+    public async Task CompletesChainedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig {",
+            "    width: i32;",
+            "    height: i32;",
+            "}",
+            "",
+            "struct GlobalConfig {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct Sprites {",
+            "    paddle: i32;",
+            "    ball: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    config: GlobalConfig;",
+            "    sprites: Sprites;",
+            "}",
+            "",
+            "global state: GlobalState;",
+            "",
+            "function main(): i32 {",
+            "    state.config.screen.",
+            "    state.sprites.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_chain.stasis";
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var screenPosition = GetPositionAfter(document, "state.config.screen.");
+        var screenLabels = await harness.RequestCompletionLabelsAsync(uri, screenPosition.Line, screenPosition.Character, cts.Token);
+        Assert.Contains("width", screenLabels);
+        Assert.Contains("height", screenLabels);
+
+        var spritesPosition = GetPositionAfter(document, "state.sprites.");
+        var spritesLabels = await harness.RequestCompletionLabelsAsync(uri, spritesPosition.Line, spritesPosition.Character, cts.Token);
+        Assert.Contains("paddle", spritesLabels);
+        Assert.Contains("ball", spritesLabels);
+    }
+
+    [Fact]
+    public void BuildsSymbolIndexForNestedStructs()
+    {
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig {",
+            "    width: i32;",
+            "    height: i32;",
+            "}",
+            "",
+            "struct GlobalConfig {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct Sprites {",
+            "    paddle: i32;",
+            "    ball: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    config: GlobalConfig;",
+            "    sprites: Sprites;",
+            "}",
+            "",
+            "global state: GlobalState;"
+        });
+
+        var parse = Parser.Parse(document);
+        var index = SymbolIndex.Build(parse.CompilationUnit);
+
+        var sprites = index.GetStruct("Sprites");
+        Assert.NotNull(sprites);
+        Assert.Contains(sprites!.Fields, f => f.Name == "paddle");
+        Assert.Contains(sprites.Fields, f => f.Name == "ball");
+
+        var global = index.GetStruct("GlobalState");
+        Assert.NotNull(global);
+        Assert.Contains(global!.Fields, f => f.Name == "sprites");
+    }
+
+    [Fact]
+    public void ExtractsReceiverChainsForMultipleMemberAccess()
+    {
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig { width: i32; }",
+            "struct GlobalConfig { screen: ScreenConfig; }",
+            "struct Sprites { paddle: i32; }",
+            "struct GlobalState { config: GlobalConfig; sprites: Sprites; }",
+            "global state: GlobalState;",
+            "function main(): i32 {",
+            "    state.config.screen.",
+            "    state.sprites.",
+            "    return 0;",
+            "}"
+        });
+
+        var screenPos = GetPositionAfter(document, "state.config.screen.");
+        var spritesPos = GetPositionAfter(document, "state.sprites.");
+
+        var screenOffset = TextPositionConverter.PositionToOffset(document, new Position(screenPos.Line, screenPos.Character));
+        var spritesOffset = TextPositionConverter.PositionToOffset(document, new Position(spritesPos.Line, spritesPos.Character));
+
+        var method = typeof(CompletionHandler).GetMethod(
+            "TryGetMemberAccessReceiverChain",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var screenArgs = new object?[] { document, screenOffset, null };
+        var screenOk = (bool)method!.Invoke(null, screenArgs)!;
+        Assert.True(screenOk);
+        var screenChain = (IReadOnlyList<string>)screenArgs[2]!;
+        Assert.Equal(new[] { "state", "config", "screen" }, screenChain);
+
+        var spritesArgs = new object?[] { document, spritesOffset, null };
+        var spritesOk = (bool)method!.Invoke(null, spritesArgs)!;
+        Assert.True(spritesOk);
+        var spritesChain = (IReadOnlyList<string>)spritesArgs[2]!;
+        Assert.Equal(new[] { "state", "sprites" }, spritesChain);
     }
 
     private static (int Line, int Character) GetPositionAfter(string content, string marker)
