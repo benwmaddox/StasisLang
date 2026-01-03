@@ -389,11 +389,17 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
+        var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
+        if (linkDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(linkDiagnostics, source, path);
+            return 1;
+        }
 
         // Auto-detect runtime usage via stdlib module imports or link directives if not explicitly enabled.
         // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
         if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) &&
-            (runtimeImports.graphics || runtimeImports.audio || linkLibraries.Contains("stasis_graphics", StringComparer.OrdinalIgnoreCase)))
+            (runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics")))
         {
             enableGraphics = true;
         }
@@ -1713,6 +1719,10 @@ static IReadOnlyList<string> CollectLinkDirectives(CompilationUnitSyntax compila
     var links = new List<string>();
     foreach (var directive in compilationUnit.Declarations.OfType<LinkDirectiveSyntax>())
     {
+        if (!string.Equals(directive.Name.Text, "link", StringComparison.Ordinal))
+        {
+            continue;
+        }
         var raw = directive.Value.Text;
         if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
         {
@@ -1722,8 +1732,131 @@ static IReadOnlyList<string> CollectLinkDirectives(CompilationUnitSyntax compila
     return links;
 }
 
-static bool HasLinkDirective(CompilationUnitSyntax compilationUnit, string name) =>
-    CollectLinkDirectives(compilationUnit).Contains(name, StringComparer.OrdinalIgnoreCase);
+static bool HasLinkDirective(IReadOnlyList<string> directives, string name) =>
+    directives.Any(d => string.Equals(NormalizeLinkName(d), name, StringComparison.OrdinalIgnoreCase));
+
+static IReadOnlyList<Diagnostic> ValidateLinkDirectives(IReadOnlyList<string> directives, CompilationUnitSyntax compilationUnit)
+{
+    var diagnostics = new List<Diagnostic>();
+    var directiveList = compilationUnit.Declarations
+        .OfType<LinkDirectiveSyntax>()
+        .Where(d => string.Equals(d.Name.Text, "link", StringComparison.Ordinal))
+        .ToList();
+    var searchPaths = GetLinkSearchPaths().ToArray();
+    var extensions = GetLinkExtensions();
+
+    for (var i = 0; i < directives.Count; i++)
+    {
+        var directive = directives[i];
+        var matches = ResolveLinkDirectiveMatches(directive, searchPaths, extensions);
+        if (matches.Count > 1)
+        {
+            var span = i < directiveList.Count ? directiveList[i].Span : new SourceSpan(0, 0);
+            diagnostics.Add(new Diagnostic($"@link(\"{directive}\") matches multiple files; use a more specific name.", span));
+        }
+    }
+
+    return diagnostics;
+}
+
+static IReadOnlyList<string> ResolveLinkDirectiveMatches(string name, string[] searchPaths, string[] extensions)
+{
+    if (Path.IsPathRooted(name) || name.Contains('/') || name.Contains('\\'))
+    {
+        var resolved = Path.GetFullPath(name);
+        return File.Exists(resolved) ? new[] { resolved } : Array.Empty<string>();
+    }
+
+    var hasExtension = Path.HasExtension(name);
+    var candidates = new List<string>();
+    if (hasExtension)
+    {
+        candidates.Add(name);
+    }
+    else
+    {
+        var baseName = name;
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var ext in extensions)
+            {
+                candidates.Add(baseName + ext);
+            }
+        }
+        else
+        {
+            foreach (var ext in extensions)
+            {
+                candidates.Add("lib" + baseName + ext);
+            }
+        }
+    }
+
+    foreach (var dir in searchPaths)
+    {
+        var matches = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            var path = Path.Combine(dir, candidate);
+            if (File.Exists(path))
+            {
+                matches.Add(Path.GetFullPath(path));
+            }
+        }
+
+        if (matches.Count > 0)
+        {
+            return matches.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+    }
+
+    return Array.Empty<string>();
+}
+
+static string NormalizeLinkName(string name)
+{
+    var fileName = Path.GetFileName(name);
+    var baseName = Path.GetFileNameWithoutExtension(fileName);
+    if (!OperatingSystem.IsWindows() && baseName.StartsWith("lib", StringComparison.OrdinalIgnoreCase))
+    {
+        baseName = baseName.Substring(3);
+    }
+    return baseName;
+}
+
+static string[] GetLinkExtensions()
+{
+    if (OperatingSystem.IsWindows())
+    {
+        return new[] { ".lib", ".a" };
+    }
+    if (OperatingSystem.IsMacOS())
+    {
+        return new[] { ".dylib", ".a" };
+    }
+    return new[] { ".so", ".a" };
+}
+
+static IEnumerable<string> GetLinkSearchPaths()
+{
+    var searchPaths = new List<string>();
+    var exeDir = AppContext.BaseDirectory;
+    searchPaths.Add(exeDir);
+    searchPaths.Add(Path.Combine(exeDir, "runtime"));
+
+    var cwd = Directory.GetCurrentDirectory();
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "bin", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
+    searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(Path.Combine(cwd, "build"));
+    searchPaths.Add(cwd);
+
+    return searchPaths;
+}
 
 static bool DetectsModuleImport(string entryPath, string moduleFileName)
 {
@@ -2507,7 +2640,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath) || HasLinkDirective(parse.CompilationUnit, "stasis_graphics");
+        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath) || HasLinkDirective(CollectLinkDirectives(parse.CompilationUnit), "stasis_graphics");
         var parse = Parser.Parse(source);
         parseMs = phase.ElapsedMilliseconds;
         phase.Restart();
@@ -3166,7 +3299,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         }
         // Tests should be deterministic and avoid IO-heavy dependencies, but the Cranelift backend still relies on
         // runtime hooks for some builtins (e.g., get_time_ms), so keep auto-detection there.
-        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : (DetectsRuntimeImports(path) || HasLinkDirective(parse.CompilationUnit, "stasis_graphics"));
+        var usesGraphics = includeTests && backend == BackendType.Llvm ? false : (DetectsRuntimeImports(path) || HasLinkDirective(CollectLinkDirectives(parse.CompilationUnit), "stasis_graphics"));
         var effectiveGraphics = enableGraphics || usesGraphics;
         TestCacheLocation? testCacheLocation = null;
         var craneliftTargetTriple = backend == BackendType.Cranelift ? GetCraneliftTargetTriple() : null;
