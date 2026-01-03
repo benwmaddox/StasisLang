@@ -485,7 +485,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     if (useCraneliftRunner)
                     {
                         var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null, normalizeTestOutput: mode == "test");
                     }
                     return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
                 }
@@ -524,7 +524,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
                     var runSw = Stopwatch.StartNew();
                     var entryName = $"{moduleName}__{entryBase}";
-                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null);
+                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, tickHostFps: hasTick ? tickHostFps : null, normalizeTestOutput: mode == "test");
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -766,7 +766,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
                     }
                 }
             }
-        });
+        }, normalizeTestOutput: mode == "test");
     }
     finally
     {
@@ -842,7 +842,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         {
             runnerArgs += $" --fps {tickHostFps.Value}";
         }
-        var runExit = RunProcess(runnerPath, runnerArgs);
+        var runExit = RunProcess(runnerPath, runnerArgs, normalizeTestOutput: mode == "test");
         runMs = runStopwatch.ElapsedMilliseconds;
         return runExit;
     }
@@ -1487,7 +1487,7 @@ static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, strin
     var interpreterArguments = mode == "test"
         ? $"-entry-function=run_tests \"{llvmIrPath}\""
         : $"\"{llvmIrPath}\"";
-    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments);
+    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, normalizeTestOutput: mode == "test");
     if (interpreterExitCode == 0)
     {
         return 0;
@@ -1521,7 +1521,7 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
             return true;
         }
 
-        exitCode = RunProcess(executablePath, string.Empty);
+        exitCode = RunProcess(executablePath, string.Empty, normalizeTestOutput: mode == "test");
         return true;
     }
     finally
@@ -1901,7 +1901,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, bool normalizeTestOutput = false)
 {
     if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
     {
@@ -1918,7 +1918,7 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
     var assetRoot = Directory.GetCurrentDirectory();
     psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = assetRoot;
     configure?.Invoke(psi);
-    if (suppressOutput)
+    if (suppressOutput || normalizeTestOutput)
     {
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
@@ -1936,6 +1936,18 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         stdErr = proc.StandardError.ReadToEnd();
     }
     proc.WaitForExit();
+    if (normalizeTestOutput)
+    {
+        if (!string.IsNullOrWhiteSpace(stdOut))
+        {
+            Console.Write(NormalizeTestOutput(stdOut));
+        }
+        if (!string.IsNullOrWhiteSpace(stdErr))
+        {
+            Console.Error.Write(stdErr);
+        }
+        return proc.ExitCode;
+    }
     if (proc.ExitCode != 0)
     {
         if (!string.IsNullOrWhiteSpace(stdOut))
@@ -1948,6 +1960,39 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         }
     }
     return proc.ExitCode;
+}
+
+static string NormalizeTestOutput(string output)
+{
+    var lines = output.Split('\n');
+    var summaryLines = new List<string>();
+    var otherLines = new List<string>();
+    foreach (var raw in lines)
+    {
+        var line = raw.TrimEnd('\r');
+        if (IsTestSummaryLine(line))
+        {
+            summaryLines.Add(line);
+        }
+        else if (!string.IsNullOrEmpty(line))
+        {
+            otherLines.Add(line);
+        }
+    }
+
+    if (summaryLines.Count == 0)
+    {
+        return output;
+    }
+
+    var result = otherLines.Concat(summaryLines);
+    return string.Join(Environment.NewLine, result) + Environment.NewLine;
+}
+
+static bool IsTestSummaryLine(string line)
+{
+    var stripped = Regex.Replace(line, @"\x1B\[[0-9;]*m", "");
+    return stripped.TrimStart().StartsWith("Tests: passed=", StringComparison.Ordinal);
 }
 
 
@@ -3243,10 +3288,10 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
                 }
             }
         }
-    });
+    }, normalizeTestOutput: mode == "test");
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, int? tickHostFps = null)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, int? tickHostFps = null, bool normalizeTestOutput = false)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -3274,7 +3319,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
     {
         args += $" --fps {tickHostFps.Value}";
     }
-    return RunProcess(runnerPath, args);
+    return RunProcess(runnerPath, args, normalizeTestOutput: normalizeTestOutput);
 }
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
@@ -3585,12 +3630,12 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, normalizeTestOutput: true);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath);
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, normalizeTestOutput: true);
                 }
             }
             else
