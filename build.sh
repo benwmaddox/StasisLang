@@ -3,6 +3,11 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y libsdl2-dev libglew-dev
+fi
+
 pushd "${script_dir}/tools/cranelift-aot" >/dev/null
 cargo build -p stasis-cranelift-aot --release
 popd >/dev/null
