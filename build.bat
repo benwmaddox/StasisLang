@@ -22,6 +22,10 @@ popd
 dotnet build Stasis.sln
 if errorlevel 1 exit /b 1
 
+set LSP_DIR=%CD%\vscode-stasis\server
+dotnet publish Stasis.LanguageServer\Stasis.LanguageServer.csproj -c Release -r win-x64 -o "%LSP_DIR%"
+if errorlevel 1 exit /b 1
+
 REM Validate SVG assets (Rule 20: fail pipeline on violations)
 if exist assets_src (
   for /r assets_src %%f in (*.svg) do (

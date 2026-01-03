@@ -1,7 +1,0 @@
-{
-  Stdout:
-PASS: `adds numbers`
-PASS: `true is true`
-Tests: passed=2 failed=0,
-  Stderr: 
-}
