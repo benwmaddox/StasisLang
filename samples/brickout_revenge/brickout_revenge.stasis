@@ -26,12 +26,14 @@ struct Sprites {
     brick_armored_fx: i32;
     brick_reflector_base: i32;
     brick_reflector_fx: i32;
+
 }
 
 struct GameState { 
     rng_state : i32;
 }
-struct GlobalState {
+struct GlobalState {     
+    game : GameState;
     config : GlobalConfig;
     sprites : Sprites;    
     initialized: bool;
@@ -52,22 +54,21 @@ function main(): i32 {
     let init_ok: bool = init_window(state.config.screen.width, state.config.screen.height, "Brickout Revenge");
     if (!init_ok) {
         return 1;
-    }
-
+    }    
 
     state.sprites.paddle = gfx_load_sprite("samples/brickout_revenge/assets/paddle.svg", 128, 24);
     state.sprites.ball = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 32, 32);
     state.sprites.brick_basic_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic.svg", 160, 64);
     state.sprites.brick_basic_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_turret.svg", 160, 64);
-    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg", 160, 64);
-    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg", 160, 64);
-    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg", 160, 64); 
+    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg", 160, 64);    
+    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg", 160, 64);    
     state.sprites.brick_armored_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_fx.svg", 160, 64);
     state.sprites.brick_reflector_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector.svg", 160, 64);
     state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == false) {
-        state.game.seed_rng = time();
+        state.game.rng_state = time();
         //init_game(true);
         //setup_default_bricks();
         //start_wave();
@@ -81,6 +82,10 @@ function main(): i32 {
 
     state.timers.last_time = get_time_ms();
     return 0;
+}
+
+function draw_level() {
+
 }
 
 function tick(): i32 {
