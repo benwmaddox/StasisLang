@@ -327,7 +327,7 @@ static int read_text_file(const char *path, char *out, size_t out_cap)
     return out[0] == '\0' ? 1 : 0;
 }
 
-static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes)
+static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
 {
     (void)total_bytes;
     for (uint32_t i = 0; i < sym_count; i++)
@@ -335,6 +335,15 @@ static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t
         FARPROC addr = GetProcAddress(lib, syms[i].name);
         if (!addr)
         {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                memset(buffer + syms[i].offset, 0, syms[i].size);
+                continue;
+            }
             fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
             return 1;
         }
@@ -343,7 +352,7 @@ static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t
     return 0;
 }
 
-static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes)
+static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
 {
     (void)total_bytes;
     for (uint32_t i = 0; i < sym_count; i++)
@@ -351,6 +360,14 @@ static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32
         FARPROC addr = GetProcAddress(lib, syms[i].name);
         if (!addr)
         {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                continue;
+            }
             fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
             return 1;
         }
@@ -847,6 +864,8 @@ int main(int argc, char **argv)
                             fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
 
                             uint8_t *buffer = NULL;
+                            uint32_t missing_save = 0;
+                            uint32_t missing_restore = 0;
                             long long save_us = 0;
                             long long load_us = 0;
                             long long tick_us = 0;
@@ -861,7 +880,7 @@ int main(int argc, char **argv)
                                     break;
                                 }
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes) != 0)
+                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
                                 {
                                     free(buffer);
                                     result = 1;
@@ -899,7 +918,7 @@ int main(int argc, char **argv)
                             if (buffer)
                             {
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes) != 0)
+                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
                                 {
                                     FreeLibrary(new_lib);
                                     free(buffer);
@@ -910,6 +929,10 @@ int main(int argc, char **argv)
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
                                 fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                if (missing_save > 0 || missing_restore > 0)
+                                {
+                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                }
                             }
                             else
                             {
