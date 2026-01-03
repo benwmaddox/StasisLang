@@ -60,6 +60,7 @@ jobs:
           ./build.sh
 
       - name: Build
+        if: matrix.os == 'windows-latest'
         run: dotnet build Stasis.sln -c Release --no-restore
 
       - name: Validate SVG assets
