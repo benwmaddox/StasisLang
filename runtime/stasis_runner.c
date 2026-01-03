@@ -359,6 +359,44 @@ static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32
     return 0;
 }
 
+static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap)
+{
+    const char *suffix_a = ".swapA.dll";
+    const char *suffix_b = ".swapB.dll";
+    const char *fixed = ".swap.dll";
+    size_t len = strlen(input);
+    size_t a_len = strlen(suffix_a);
+    size_t b_len = strlen(suffix_b);
+
+    if (len >= a_len && _stricmp(input + len - a_len, suffix_a) == 0)
+    {
+        size_t base_len = len - a_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    if (len >= b_len && _stricmp(input + len - b_len, suffix_b) == 0)
+    {
+        size_t base_len = len - b_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    return 0;
+}
+
 static DWORD WINAPI hot_exit_thread(LPVOID user_data)
 {
     stasis_hot_exit_args *args = (stasis_hot_exit_args *)user_data;
@@ -787,10 +825,31 @@ int main(int argc, char **argv)
                             LARGE_INTEGER sw_t0;
                             LARGE_INTEGER sw_t1;
                             QueryPerformanceFrequency(&sw_freq);
+                            char fixed_path[2048];
+                            const char *load_path = new_path;
+                            HMODULE old_lib = lib;
+
+                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                            {
+                                FreeLibrary(old_lib);
+                                old_lib = NULL;
+                                if (!MoveFileExA(new_path, fixed_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+                                {
+                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
+                                    load_path = new_path;
+                                }
+                                else
+                                {
+                                    load_path = fixed_path;
+                                }
+                            }
+
+                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
 
                             uint8_t *buffer = NULL;
                             long long save_us = 0;
                             long long load_us = 0;
+                            long long tick_us = 0;
                             long long restore_us = 0;
                             if (state_map_path)
                             {
@@ -813,21 +872,24 @@ int main(int argc, char **argv)
                             }
 
                             QueryPerformanceCounter(&sw_t0);
-                            HMODULE new_lib = LoadLibraryA(new_path);
+                            HMODULE new_lib = LoadLibraryA(load_path);
                             QueryPerformanceCounter(&sw_t1);
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
                             {
-                                fprintf(stderr, "error: failed to load %s\n", new_path);
+                                fprintf(stderr, "error: failed to load %s\n", load_path);
                                 free(buffer);
                                 result = 1;
                                 break;
                             }
 
+                            QueryPerformanceCounter(&sw_t0);
                             FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
+                            QueryPerformanceCounter(&sw_t1);
+                            tick_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_tick_sym)
                             {
-                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
                                 FreeLibrary(new_lib);
                                 free(buffer);
                                 result = 1;
@@ -847,14 +909,17 @@ int main(int argc, char **argv)
                                 QueryPerformanceCounter(&sw_t1);
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
-                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, restore_us, total_bytes, sym_count);
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
                             }
                             else
                             {
-                                fprintf(stderr, "HOTSWAP ok: load=%lldus\n", load_us);
+                                fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
                             }
 
-                            FreeLibrary(lib);
+                            if (old_lib)
+                            {
+                                FreeLibrary(old_lib);
+                            }
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
 
