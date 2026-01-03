@@ -81,9 +81,25 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body.Statements));
+        Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body!.Statements));
         var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("must be initialized"));
+    }
+
+    [Fact]
+    public void Parses_extern_function_declaration()
+    {
+        var source = """
+            extern function init_window(width: i32, height: i32, title: string): bool;
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.True(func.IsExtern);
+        Assert.Null(func.Body);
+        Assert.NotNull(func.Semicolon);
     }
 
     [Fact]
@@ -99,7 +115,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
+        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
     }
 
@@ -116,7 +132,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var ifStmt = Assert.IsType<IfStatementSyntax>(Assert.Single(func.Body.Statements));
+        var ifStmt = Assert.IsType<IfStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.IsType<BinaryExpressionSyntax>(ifStmt.Condition);
     }
 
@@ -135,10 +151,10 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        Assert.Equal(3, func.Body.Statements.Count);
-        var if1 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[0]);
-        var if2 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[1]);
-        var if3 = Assert.IsType<IfStatementSyntax>(func.Body.Statements[2]);
+        Assert.Equal(3, func.Body!.Statements.Count);
+        var if1 = Assert.IsType<IfStatementSyntax>(func.Body!.Statements[0]);
+        var if2 = Assert.IsType<IfStatementSyntax>(func.Body!.Statements[1]);
+        var if3 = Assert.IsType<IfStatementSyntax>(func.Body!.Statements[2]);
         Assert.Equal(TokenKind.LessEqual, Assert.IsType<BinaryExpressionSyntax>(if1.Condition).OperatorToken.Kind);
         Assert.Equal(TokenKind.GreaterEqual, Assert.IsType<BinaryExpressionSyntax>(if2.Condition).OperatorToken.Kind);
         Assert.Equal(TokenKind.BangEqual, Assert.IsType<BinaryExpressionSyntax>(if3.Condition).OperatorToken.Kind);
@@ -157,7 +173,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
+        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body!.Statements));
         var assignment = Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
         Assert.Equal(TokenKind.PlusEqual, assignment.OperatorToken.Kind);
     }
@@ -175,7 +191,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body.Statements));
+        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body!.Statements));
         var add = Assert.IsType<BinaryExpressionSyntax>(ret.Expression);
         Assert.Equal(TokenKind.Plus, add.OperatorToken.Kind);
         var rhs = Assert.IsType<BinaryExpressionSyntax>(add.Right);
@@ -196,7 +212,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var forStmt = Assert.IsType<ForStatementSyntax>(Assert.Single(func.Body.Statements));
+        var forStmt = Assert.IsType<ForStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.NotNull(forStmt.Initializer);
     }
 
@@ -213,7 +229,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
-        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body.Statements));
+        var exprStmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.IsType<AssignmentExpressionSyntax>(exprStmt.Expression);
     }
 
@@ -232,7 +248,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
-        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.Equal("v", foreachStmt.Iterator.Text);
         Assert.Null(foreachStmt.IndexVariable);
         Assert.True(foreachStmt.BindByElement);
@@ -253,7 +269,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
-        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.Equal("v", foreachStmt.Iterator.Text);
         Assert.NotNull(foreachStmt.IndexVariable);
         Assert.Equal("i", foreachStmt.IndexVariable.Text);
@@ -275,7 +291,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
-        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body.Statements));
+        var foreachStmt = Assert.IsType<ForeachStatementSyntax>(Assert.Single(func.Body!.Statements));
         Assert.Equal("i", foreachStmt.Iterator.Text);
         Assert.Null(foreachStmt.IndexVariable);
         Assert.False(foreachStmt.BindByElement);
@@ -346,7 +362,7 @@ public class ParserTests
 
         Assert.Empty(result.Diagnostics);
         var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[1]);
-        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body.Statements));
+        var ret = Assert.IsType<ReturnStatementSyntax>(Assert.Single(func.Body!.Statements));
         var memberAccess = Assert.IsType<MemberAccessExpressionSyntax>(ret.Expression);
         var receiver = Assert.IsType<IdentifierExpressionSyntax>(memberAccess.Receiver);
         Assert.Equal("State", receiver.Identifier.Text);

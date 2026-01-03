@@ -100,11 +100,11 @@ GlobalDecl       -> "global" Identifier ":" Type ";"
 ## 2.4 Function Declarations
 
 ```
-FunctionDecl     -> ExportOpt
+FunctionDecl     -> ExportOpt ExternOpt
                     "function" AttributeListOpt Identifier
                     "(" ParamListOpt ")"
                     ReturnTypeOpt
-                    Block
+                    FunctionBody
 ```
 
 ```
@@ -116,6 +116,16 @@ Attribute        -> "@" Identifier
 ```
 ExportOpt        -> "export"
                   | <empty>
+```
+
+```
+ExternOpt        -> "extern"
+                  | <empty>
+```
+
+```
+FunctionBody     -> Block
+                  | ";"
 ```
 
 ```

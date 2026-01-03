@@ -652,6 +652,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             {
                 continue;
             }
+            if (func.IsExtern || func.Body is null)
+            {
+                continue;
+            }
             if (!symbols.TryGetValue(func.Name.Text, out var symbol))
                 continue;
 
@@ -974,6 +978,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
+            if (func.Body is null)
             {
                 continue;
             }

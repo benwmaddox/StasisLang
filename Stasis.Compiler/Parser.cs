@@ -46,7 +46,7 @@ public sealed class Parser
             TokenKind.EnumKeyword => ParseEnum(),
             TokenKind.GlobalKeyword => ParseGlobal(),
             TokenKind.ConstKeyword => ParseConst(),
-            TokenKind.ExportKeyword or TokenKind.FunctionKeyword => ParseFunction(),
+            TokenKind.ExportKeyword or TokenKind.ExternKeyword or TokenKind.FunctionKeyword => ParseFunction(),
             TokenKind.TestKeyword => ParseTest(),
             _ => UnexpectedTopLevel()
         };
@@ -160,6 +160,12 @@ public sealed class Parser
             exportKeyword = Previous;
         }
 
+        Token? externKeyword = null;
+        if (Match(TokenKind.ExternKeyword))
+        {
+            externKeyword = Previous;
+        }
+
         var functionKeyword = Consume(TokenKind.FunctionKeyword, "Expected 'function'.");
         var attributes = new List<Token>();
         while (Match(TokenKind.At))
@@ -184,8 +190,14 @@ public sealed class Parser
             returnType = ParseType();
         }
 
+        if (externKeyword is not null)
+        {
+            var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after extern function declaration.");
+            return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, Body: null, Semicolon: semicolon);
+        }
+
         var body = ParseBlock();
-        return new FunctionDeclarationSyntax(functionKeyword, attributes, name, parameters, returnType, body, exportKeyword);
+        return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, body, Semicolon: null);
     }
 
     private TestDeclarationSyntax ParseTest()

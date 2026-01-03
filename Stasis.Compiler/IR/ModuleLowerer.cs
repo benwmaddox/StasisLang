@@ -1359,6 +1359,10 @@ public sealed class ModuleLowerer
                 {
                     continue;
                 }
+                if (fn.IsExtern)
+                {
+                    continue;
+                }
                 LowerFunction(fn);
             }
 
@@ -1373,6 +1377,10 @@ public sealed class ModuleLowerer
 
         private void LowerFunction(FunctionDeclarationSyntax fn)
         {
+            if (fn.Body is null)
+            {
+                return;
+            }
             LowerFunctionCore(fn.Name.Text, fn.Parameters, fn.ReturnType, fn.Body, isTest: false);
         }
 

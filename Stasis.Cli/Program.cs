@@ -395,7 +395,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return 1;
         }
 
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         if (logPhaseTiming)
         {
             semaMs = phaseStopwatch.ElapsedMilliseconds;
@@ -2497,7 +2497,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         var runtimeImports = GetRuntimeImportFlags(sourcePath);
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
@@ -3170,7 +3170,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         }
 
         var runtimeImports = GetRuntimeImportFlags(path);
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {
