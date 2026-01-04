@@ -197,6 +197,10 @@ public class CompletionHandler : CompletionHandlerBase
             switch (decl)
             {
                 case FunctionDeclarationSyntax fn when ContainsOffset(fn.Span, cursorOffset):
+                    if (fn.Body == null)
+                    {
+                        break;
+                    }
                     parameters = fn.Parameters;
                     body = fn.Body;
                     return true;
