@@ -4,6 +4,9 @@
 
 This document explores adding an Age of Empires 2-inspired economic layer to Brickout Revenge. The core tension: **you can't just build defenses**. You must balance resource generation, defensive structures, and offensive capabilities to survive escalating waves.
 
+Design reference:
+- `docs/brickout-revenge-brainstorm.md` for the broader game concept, layout targets, and monetization assumptions.
+
 ---
 
 ## Current State
