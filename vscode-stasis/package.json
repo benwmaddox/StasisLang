@@ -42,6 +42,9 @@
     "watch": "tsc -p . -w",
     "package": "vsce package"
   },
+  "bundledDependencies": [
+    "vscode-languageclient"
+  ],
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },

@@ -6,7 +6,11 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using LspServer = OmniSharp.Extensions.LanguageServer.Server.LanguageServer;
 using Stasis.LanguageServer.Handlers;
 using Stasis.LanguageServer.Services;
+using Stasis.Compiler;
 using Xunit;
+using System.Reflection;
+using System.IO;
+using LspRange = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
 
 namespace Stasis.LanguageServer.Tests;
 
@@ -44,6 +48,474 @@ public sealed class LspCompletionTests
         Assert.Contains("bar", labels);
     }
 
+    [Fact]
+    public async Task CompletesNestedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct GameState {",
+            "    rng_state: i32;",
+            "    score: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    game: GameState;",
+            "}",
+            "",
+            "global state: GlobalState;",
+            "",
+            "function main(): i32 {",
+            "    state.game.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_nested.stasis";
+        var position = GetPositionAfter(document, "state.game.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("rng_state", labels);
+        Assert.Contains("score", labels);
+    }
+
+    [Fact]
+    public async Task CompletesChainedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig {",
+            "    width: i32;",
+            "    height: i32;",
+            "}",
+            "",
+            "struct GlobalConfig {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct Sprites {",
+            "    paddle: i32;",
+            "    ball: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    config: GlobalConfig;",
+            "    sprites: Sprites;",
+            "}",
+            "",
+            "global state: GlobalState;",
+            "",
+            "function main(): i32 {",
+            "    state.config.screen.",
+            "    state.sprites.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_chain.stasis";
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var screenPosition = GetPositionAfter(document, "state.config.screen.");
+        var screenLabels = await harness.RequestCompletionLabelsAsync(uri, screenPosition.Line, screenPosition.Character, cts.Token);
+        Assert.Contains("width", screenLabels);
+        Assert.Contains("height", screenLabels);
+
+        var spritesPosition = GetPositionAfter(document, "state.sprites.");
+        var spritesLabels = await harness.RequestCompletionLabelsAsync(uri, spritesPosition.Line, spritesPosition.Character, cts.Token);
+        Assert.Contains("paddle", spritesLabels);
+        Assert.Contains("ball", spritesLabels);
+    }
+
+    [Fact]
+    public async Task CompletesDeepNestedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig {",
+            "    width: i32;",
+            "    height: i32;",
+            "}",
+            "",
+            "struct BrickConfig {",
+            "    width: f32;",
+            "    height: f32;",
+            "}",
+            "",
+            "struct Config {",
+            "    screen: ScreenConfig;",
+            "    brick: BrickConfig;",
+            "}",
+            "",
+            "struct GameState {",
+            "    config: Config;",
+            "}",
+            "",
+            "global state: GameState;",
+            "",
+            "function main(): i32 {",
+            "    state.config.brick.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_deep.stasis";
+        var position = GetPositionAfter(document, "state.config.brick.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("width", labels);
+        Assert.Contains("height", labels);
+    }
+
+    [Fact]
+    public async Task CompletesParameterStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct Vec2 {",
+            "    x: f32;",
+            "    y: f32;",
+            "}",
+            "",
+            "function move(pos: Vec2): i32 {",
+            "    pos.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_param.stasis";
+        var position = GetPositionAfter(document, "pos.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("x", labels);
+        Assert.Contains("y", labels);
+    }
+
+    [Fact]
+    public async Task CompletesLocalStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct Vec2 {",
+            "    x: f32;",
+            "    y: f32;",
+            "}",
+            "",
+            "function main(): i32 {",
+            "    let pos: Vec2 = 0;",
+            "    pos.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_local.stasis";
+        var position = GetPositionAfter(document, "pos.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("x", labels);
+        Assert.Contains("y", labels);
+    }
+
+    [Fact]
+    public async Task CompletesEnumMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "enum Phase {",
+            "    Idle,",
+            "    Running,",
+            "}",
+            "",
+            "function main(): i32 {",
+            "    Phase.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_enum.stasis";
+        var position = GetPositionAfter(document, "Phase.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("Idle", labels);
+        Assert.Contains("Running", labels);
+    }
+
+    [Fact]
+    public async Task CompletesNestedMembersWithOtherStateUsesInFile()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct Config {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct ScreenConfig {",
+            "    w: i32;",
+            "    h: i32;",
+            "}",
+            "",
+            "struct GameState {",
+            "    config: Config;",
+            "    game: i32;",
+            "}",
+            "",
+            "global state: GameState;",
+            "",
+            "function foo(): void {",
+            "    state.game = 1;",
+            "}",
+            "",
+            "function main(): i32 {",
+            "    state.config.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_state_variants.stasis";
+        var position = GetPositionAfter(document, "state.config.");
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("screen", labels);
+    }
+
+    [Fact]
+    public void BuildsSymbolIndexForNestedStructs()
+    {
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig {",
+            "    width: i32;",
+            "    height: i32;",
+            "}",
+            "",
+            "struct GlobalConfig {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct Sprites {",
+            "    paddle: i32;",
+            "    ball: i32;",
+            "}",
+            "",
+            "struct GlobalState {",
+            "    config: GlobalConfig;",
+            "    sprites: Sprites;",
+            "}",
+            "",
+            "global state: GlobalState;"
+        });
+
+        var parse = Parser.Parse(document);
+        var index = SymbolIndex.Build(parse.CompilationUnit);
+
+        var sprites = index.GetStruct("Sprites");
+        Assert.NotNull(sprites);
+        Assert.Contains(sprites!.Fields, f => f.Name == "paddle");
+        Assert.Contains(sprites.Fields, f => f.Name == "ball");
+
+        var global = index.GetStruct("GlobalState");
+        Assert.NotNull(global);
+        Assert.Contains(global!.Fields, f => f.Name == "sprites");
+    }
+
+    [Fact]
+    public void ExtractsReceiverChainsForMultipleMemberAccess()
+    {
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig { width: i32; }",
+            "struct GlobalConfig { screen: ScreenConfig; }",
+            "struct Sprites { paddle: i32; }",
+            "struct GlobalState { config: GlobalConfig; sprites: Sprites; }",
+            "global state: GlobalState;",
+            "function main(): i32 {",
+            "    state.config.screen.",
+            "    state.sprites.",
+            "    return 0;",
+            "}"
+        });
+
+        var screenPos = GetPositionAfter(document, "state.config.screen.");
+        var spritesPos = GetPositionAfter(document, "state.sprites.");
+
+        var screenOffset = TextPositionConverter.PositionToOffset(document, new Position(screenPos.Line, screenPos.Character));
+        var spritesOffset = TextPositionConverter.PositionToOffset(document, new Position(spritesPos.Line, spritesPos.Character));
+        var spritesDotOffset = TextPositionConverter.PositionToOffset(document, new Position(spritesPos.Line, Math.Max(0, spritesPos.Character - 1)));
+
+        var method = typeof(CompletionHandler).GetMethod(
+            "TryGetMemberAccessReceiverChain",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var screenArgs = new object?[] { document, screenOffset, null };
+        var screenOk = (bool)method!.Invoke(null, screenArgs)!;
+        Assert.True(screenOk);
+        var screenChain = (IReadOnlyList<string>)screenArgs[2]!;
+        Assert.Equal(new[] { "state", "config", "screen" }, screenChain);
+
+        var spritesArgs = new object?[] { document, spritesOffset, null };
+        var spritesOk = (bool)method!.Invoke(null, spritesArgs)!;
+        Assert.True(spritesOk);
+        var spritesChain = (IReadOnlyList<string>)spritesArgs[2]!;
+        Assert.Equal(new[] { "state", "sprites" }, spritesChain);
+
+        var spritesDotArgs = new object?[] { document, spritesDotOffset, null };
+        var spritesDotOk = (bool)method!.Invoke(null, spritesDotArgs)!;
+        Assert.True(spritesDotOk);
+        var spritesDotChain = (IReadOnlyList<string>)spritesDotArgs[2]!;
+        Assert.Equal(new[] { "state", "sprites" }, spritesDotChain);
+    }
+
+    [Fact]
+    public void ExtractsReceiverChainsForDeepMemberAccess()
+    {
+        var document = string.Join("\n", new[]
+        {
+            "struct ScreenConfig { width: i32; }",
+            "struct BrickConfig { width: f32; }",
+            "struct Config { screen: ScreenConfig; brick: BrickConfig; }",
+            "struct GameState { config: Config; }",
+            "global state: GameState;",
+            "function main(): i32 {",
+            "    state.config.brick.",
+            "    return 0;",
+            "}"
+        });
+
+        var pos = GetPositionAfter(document, "state.config.brick.");
+        var offset = TextPositionConverter.PositionToOffset(document, new Position(pos.Line, pos.Character));
+
+        var method = typeof(CompletionHandler).GetMethod(
+            "TryGetMemberAccessReceiverChain",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var args = new object?[] { document, offset, null };
+        var ok = (bool)method!.Invoke(null, args)!;
+        Assert.True(ok);
+        var chain = (IReadOnlyList<string>)args[2]!;
+        Assert.Equal(new[] { "state", "config", "brick" }, chain);
+    }
+
+    [Fact]
+    public async Task CompletesAfterIncrementalChange()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var document = string.Join("\n", new[]
+        {
+            "struct Config {",
+            "    screen: ScreenConfig;",
+            "}",
+            "",
+            "struct ScreenConfig {",
+            "    w: i32;",
+            "    h: i32;",
+            "}",
+            "",
+            "struct GameState {",
+            "    config: Config;",
+            "}",
+            "",
+            "global state: GameState;",
+            "",
+            "function main(): i32 {",
+            "    state.",
+            "    return 0;",
+            "}"
+        });
+
+        var uri = "file:///test/test_incremental.stasis";
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var replacement = "    state.config.";
+        var editOffset = document.IndexOf("    state.", StringComparison.Ordinal);
+        Assert.True(editOffset >= 0, "Expected to find state line for incremental update.");
+        var editStart = GetPositionAt(document, editOffset);
+        var editEnd = new Position(editStart.Line, editStart.Character + "    state.".Length);
+        await harness.DidChangeAsync(uri, new[]
+        {
+            new TextDocumentContentChangeEvent
+            {
+                Range = new LspRange(editStart, editEnd),
+                Text = replacement
+            }
+        }, 2, cts.Token);
+
+        var updatedDocument = document.Replace("    state.", replacement);
+        var position = GetPositionAfter(updatedDocument, "state.config.");
+        var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+        Assert.Contains("screen", labels);
+    }
+
+    [Fact]
+    public async Task CompletesNestedMembersInBrickoutSample()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../"));
+        var samplePath = Path.Combine(repoRoot, "samples", "brickout_revenge", "brickout_revenge.stasis");
+        Assert.True(File.Exists(samplePath), $"Missing sample file: {samplePath}");
+
+        var document = await File.ReadAllTextAsync(samplePath, cts.Token);
+        var uri = "file:///samples/brickout_revenge/brickout_revenge.stasis";
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var configPos = GetPositionAfter(document, "state.config.");
+        var configLabels = await harness.RequestCompletionLabelsAsync(uri, configPos.Line, configPos.Character, cts.Token);
+        Assert.Contains("screen", configLabels);
+        Assert.Contains("brick", configLabels);
+
+        var brickPos = GetPositionAfter(document, "state.config.brick.");
+        var brickLabels = await harness.RequestCompletionLabelsAsync(uri, brickPos.Line, brickPos.Character, cts.Token);
+        Assert.Contains("width", brickLabels);
+        Assert.Contains("height", brickLabels);
+    }
+
     private static (int Line, int Character) GetPositionAfter(string content, string marker)
     {
         var index = content.IndexOf(marker, StringComparison.Ordinal);
@@ -53,9 +525,15 @@ public sealed class LspCompletionTests
         }
 
         var offset = index + marker.Length;
+        var position = GetPositionAt(content, offset);
+        return (position.Line, position.Character);
+    }
+
+    private static Position GetPositionAt(string content, int offset)
+    {
         var line = 0;
         var column = 0;
-        for (var i = 0; i < offset; i++)
+        for (var i = 0; i < offset && i < content.Length; i++)
         {
             if (content[i] == '\n')
             {
@@ -68,7 +546,7 @@ public sealed class LspCompletionTests
             }
         }
 
-        return (line, column);
+        return new Position(line, column);
     }
 }
 
@@ -156,6 +634,30 @@ internal sealed class LspTestHarness : IAsyncDisposable
             }
         };
         return SendNotificationAsync("textDocument/didOpen", @params, cancellationToken);
+    }
+
+    public Task DidChangeAsync(
+        string uri,
+        IReadOnlyList<TextDocumentContentChangeEvent> changes,
+        int version,
+        CancellationToken cancellationToken)
+    {
+        var @params = new
+        {
+            textDocument = new
+            {
+                uri,
+                version
+            },
+            contentChanges = changes.Select(c => new
+            {
+                range = c.Range,
+                rangeLength = c.RangeLength,
+                text = c.Text
+            })
+        };
+
+        return SendNotificationAsync("textDocument/didChange", @params, cancellationToken);
     }
 
     public async Task<IReadOnlyList<string>> RequestCompletionLabelsAsync(

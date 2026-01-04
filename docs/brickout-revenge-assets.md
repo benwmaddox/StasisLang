@@ -2,6 +2,9 @@
 
 This document defines a simple, dev-friendly way to author and hot-reload visuals for `samples/brickout_revenge/brickout_revenge.stasis` without adding CLI flags.
 
+Design reference:
+- See `docs/brickout-revenge-brainstorm.md` for the high-level game goals (layout, level editor, economy, and monetization assumptions).
+
 Goals:
 - Author visuals as small vector-like source files.
 - Bake to textures at startup or first use (runtime-managed).
