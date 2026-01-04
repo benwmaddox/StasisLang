@@ -411,7 +411,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             enableGraphics = true;
         }
 
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         if (logPhaseTiming)
         {
             semaMs = phaseStopwatch.ElapsedMilliseconds;
@@ -1768,7 +1768,7 @@ static IReadOnlyList<Diagnostic> ValidateLinkDirectives(IReadOnlyList<string> di
     {
         var directive = directives[i];
         var matches = ResolveLinkDirectiveMatches(directive, searchPaths, extensions);
-        if (matches.Count > 1)
+        if (matches.Count > 1 && (IsLinkPathLike(directive) || Path.HasExtension(directive)))
         {
             var span = i < directiveList.Count ? directiveList[i].Span : new SourceSpan(0, 0);
             diagnostics.Add(new Diagnostic($"@link(\"{directive}\") matches multiple files; use a more specific name.", span));
@@ -2784,7 +2784,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         var runtimeImports = GetRuntimeImportFlags(sourcePath);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
@@ -3461,7 +3461,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         }
 
         var runtimeImports = GetRuntimeImportFlags(path);
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {
