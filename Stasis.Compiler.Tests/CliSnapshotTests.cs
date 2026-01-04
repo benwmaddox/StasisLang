@@ -233,7 +233,8 @@ public class CliSnapshotTests
             return Task.CompletedTask;
         }
 
-        var temp = Path.GetTempFileName();
+        var tempDir = Directory.CreateTempSubdirectory("stasis_graphics_import");
+        var temp = Path.Combine(tempDir.FullName, "graphics_import.stasis");
         File.WriteAllText(temp, """
             test `dummy`(): bool {
                 return true;
@@ -256,7 +257,7 @@ public class CliSnapshotTests
         }
         finally
         {
-            File.Delete(temp);
+            tempDir.Delete(true);
         }
 
         return Task.CompletedTask;

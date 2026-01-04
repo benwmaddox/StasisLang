@@ -1,3 +1,4 @@
+import "graphics.stasis";
 // Game drawing helpers (not loaded by default).
 
 const GAME_PI2: f32 = 6.2831853;

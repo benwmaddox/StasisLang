@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
 
 // Input pointers sample: draws a crosshair at each active pointer (mouse + touch).
 // Uses the input snapshot builtins:

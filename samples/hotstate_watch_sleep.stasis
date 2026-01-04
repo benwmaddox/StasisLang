@@ -1,3 +1,4 @@
+import "../src/stdlib/graphics.stasis";
 struct SleepState {
     counter: i32;
     start_ms: i32;
