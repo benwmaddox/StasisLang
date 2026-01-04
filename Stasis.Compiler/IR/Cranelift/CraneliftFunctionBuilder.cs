@@ -3190,7 +3190,10 @@ public sealed class CraneliftFunctionBuilder
         }
         else
         {
-            _diagnostics.Add(new Diagnostic($"Member access not supported in Cranelift backend: .{member.Member.Text}", member.Span));
+            _diagnostics.Add(new Diagnostic(
+                $"Member access not supported in Cranelift backend: .{member.Member.Text}. " +
+                "Use --backend llvm, or avoid nested struct access in Cranelift builds.",
+                member.Span));
             _instructions.AppendLine($"    {result} = iconst.i32 0");
         }
 

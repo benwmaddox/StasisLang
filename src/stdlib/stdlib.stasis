@@ -1,5 +1,6 @@
 // Stasis standard library (stub).
 // Import explicitly: import "src/stdlib/stdlib.stasis";
+// For runtime bindings: import "src/stdlib/graphics.stasis" and/or "src/stdlib/audio.stasis".
 
 function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     if (dst_max <= 0) {

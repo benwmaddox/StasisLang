@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
 
 // Asteroids - Minimal Vector Graphics Demo
 // Controls: A/D or Arrow keys to rotate, W or Up to thrust, Space to fire, Escape to quit
@@ -41,7 +42,7 @@ const PI: f32 = 3.14159;
 
 // FPS control (host-controlled in tick mode)
 const TARGET_FPS: i32 = 60;
-const FRAME_TIME_MS: i32 = 16; // 1000ms / 60fps ≈ 16.67ms
+const FRAME_TIME_MS: i32 = 16; // 1000ms / 60fps ??? 16.67ms
 
 // Struct definitions
 struct Ship {

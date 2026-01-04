@@ -1,5 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
 import "flappy_birds_core.stasis";
+import "../src/stdlib/graphics.stasis";
 
 const SCREEN_W: i32 = 400;
 const SCREEN_H: i32 = 240;

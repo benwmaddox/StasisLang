@@ -327,7 +327,82 @@ static int read_text_file(const char *path, char *out, size_t out_cap)
     return out[0] == '\0' ? 1 : 0;
 }
 
-static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes)
+static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char *map_out, size_t map_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return 1;
+    }
+
+    if (!fgets(dll_out, (int)dll_cap, f))
+    {
+        fclose(f);
+        return 1;
+    }
+    if (dll_out[0] == '\0')
+    {
+        fclose(f);
+        return 1;
+    }
+
+    size_t dll_len = strlen(dll_out);
+    while (dll_len > 0 && (dll_out[dll_len - 1] == '\n' || dll_out[dll_len - 1] == '\r' || dll_out[dll_len - 1] == ' ' || dll_out[dll_len - 1] == '\t'))
+    {
+        dll_out[--dll_len] = '\0';
+    }
+    size_t start = 0;
+    while (dll_out[start] == ' ' || dll_out[start] == '\t')
+    {
+        start++;
+    }
+    if (start > 0)
+    {
+        memmove(dll_out, dll_out + start, strlen(dll_out + start) + 1);
+    }
+
+    if (map_out && map_cap > 0)
+    {
+        map_out[0] = '\0';
+        if (fgets(map_out, (int)map_cap, f))
+        {
+            size_t map_len = strlen(map_out);
+            while (map_len > 0 && (map_out[map_len - 1] == '\n' || map_out[map_len - 1] == '\r' || map_out[map_len - 1] == ' ' || map_out[map_len - 1] == '\t'))
+            {
+                map_out[--map_len] = '\0';
+            }
+            size_t map_start = 0;
+            while (map_out[map_start] == ' ' || map_out[map_start] == '\t')
+            {
+                map_start++;
+            }
+            if (map_start > 0)
+            {
+                memmove(map_out, map_out + map_start, strlen(map_out + map_start) + 1);
+            }
+        }
+    }
+
+    fclose(f);
+    return dll_out[0] == '\0' ? 1 : 0;
+}
+
+static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
+{
+    if (!syms || !*syms || !sym_count)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < *sym_count; i++)
+    {
+        free((*syms)[i].name);
+    }
+    free(*syms);
+    *syms = NULL;
+    *sym_count = 0;
+}
+
+static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
 {
     (void)total_bytes;
     for (uint32_t i = 0; i < sym_count; i++)
@@ -335,6 +410,15 @@ static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t
         FARPROC addr = GetProcAddress(lib, syms[i].name);
         if (!addr)
         {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                memset(buffer + syms[i].offset, 0, syms[i].size);
+                continue;
+            }
             fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
             return 1;
         }
@@ -343,7 +427,7 @@ static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t
     return 0;
 }
 
-static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes)
+static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
 {
     (void)total_bytes;
     for (uint32_t i = 0; i < sym_count; i++)
@@ -351,11 +435,57 @@ static int copy_state_from_buffer(HMODULE lib, stasis_state_symbol *syms, uint32
         FARPROC addr = GetProcAddress(lib, syms[i].name);
         if (!addr)
         {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                continue;
+            }
             fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
             return 1;
         }
         memcpy((void *)addr, buffer + syms[i].offset, syms[i].size);
     }
+    return 0;
+}
+
+static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap)
+{
+    const char *suffix_a = ".swapA.dll";
+    const char *suffix_b = ".swapB.dll";
+    const char *fixed = ".swap.dll";
+    size_t len = strlen(input);
+    size_t a_len = strlen(suffix_a);
+    size_t b_len = strlen(suffix_b);
+
+    if (len >= a_len && _stricmp(input + len - a_len, suffix_a) == 0)
+    {
+        size_t base_len = len - a_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    if (len >= b_len && _stricmp(input + len - b_len, suffix_b) == 0)
+    {
+        size_t base_len = len - b_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
     return 0;
 }
 
@@ -438,6 +568,8 @@ int main(int argc, char **argv)
     const char *entry_name = NULL;
     const char *state_path = NULL;
     const char *state_map_path = NULL;
+    char state_map_buf[2048];
+    state_map_buf[0] = '\0';
     const char *hot_exit_path = NULL;
     const char *swap_file_path = NULL;
     const char *data_bind_json = NULL;
@@ -591,6 +723,9 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--state-map") == 0 && i + 1 < argc)
         {
             state_map_path = argv[++i];
+            strncpy(state_map_buf, state_map_path, sizeof(state_map_buf) - 1);
+            state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+            state_map_path = state_map_buf;
             continue;
         }
         if (strcmp(argv[i], "--hot-exit-file") == 0 && i + 1 < argc)
@@ -779,18 +914,62 @@ int main(int argc, char **argv)
                     if (swap_file_path && file_exists(swap_file_path))
                     {
                         char new_path[2048];
-                        if (read_text_file(swap_file_path, new_path, sizeof(new_path)) == 0)
+                        char map_path[2048];
+                        map_path[0] = '\0';
+                        if (read_swap_file(swap_file_path, new_path, sizeof(new_path), map_path, sizeof(map_path)) == 0)
                         {
                             DeleteFileA(swap_file_path);
+                            if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+                            {
+                                uint64_t new_hash = 0;
+                                uint32_t new_count = 0;
+                                uint32_t new_total = 0;
+                                stasis_state_symbol *new_syms = NULL;
+                                if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
+                                {
+                                    free_state_map(&syms, &sym_count);
+                                    syms = new_syms;
+                                    sym_count = new_count;
+                                    total_bytes = new_total;
+                                    map_hash = new_hash;
+                                    strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
+                                    state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                                    state_map_path = state_map_buf;
+                                    fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                }
+                            }
 
                             LARGE_INTEGER sw_freq;
                             LARGE_INTEGER sw_t0;
                             LARGE_INTEGER sw_t1;
                             QueryPerformanceFrequency(&sw_freq);
+                            char fixed_path[2048];
+                            const char *load_path = new_path;
+                            HMODULE old_lib = lib;
+
+                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                            {
+                                FreeLibrary(old_lib);
+                                old_lib = NULL;
+                                if (!MoveFileExA(new_path, fixed_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+                                {
+                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
+                                    load_path = new_path;
+                                }
+                                else
+                                {
+                                    load_path = fixed_path;
+                                }
+                            }
+
+                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
 
                             uint8_t *buffer = NULL;
+                            uint32_t missing_save = 0;
+                            uint32_t missing_restore = 0;
                             long long save_us = 0;
                             long long load_us = 0;
+                            long long tick_us = 0;
                             long long restore_us = 0;
                             if (state_map_path)
                             {
@@ -802,7 +981,7 @@ int main(int argc, char **argv)
                                     break;
                                 }
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes) != 0)
+                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
                                 {
                                     free(buffer);
                                     result = 1;
@@ -813,21 +992,24 @@ int main(int argc, char **argv)
                             }
 
                             QueryPerformanceCounter(&sw_t0);
-                            HMODULE new_lib = LoadLibraryA(new_path);
+                            HMODULE new_lib = LoadLibraryA(load_path);
                             QueryPerformanceCounter(&sw_t1);
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
                             {
-                                fprintf(stderr, "error: failed to load %s\n", new_path);
+                                fprintf(stderr, "error: failed to load %s\n", load_path);
                                 free(buffer);
                                 result = 1;
                                 break;
                             }
 
+                            QueryPerformanceCounter(&sw_t0);
                             FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
+                            QueryPerformanceCounter(&sw_t1);
+                            tick_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_tick_sym)
                             {
-                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
                                 FreeLibrary(new_lib);
                                 free(buffer);
                                 result = 1;
@@ -837,7 +1019,7 @@ int main(int argc, char **argv)
                             if (buffer)
                             {
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes) != 0)
+                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
                                 {
                                     FreeLibrary(new_lib);
                                     free(buffer);
@@ -847,14 +1029,21 @@ int main(int argc, char **argv)
                                 QueryPerformanceCounter(&sw_t1);
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
-                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, restore_us, total_bytes, sym_count);
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                if (missing_save > 0 || missing_restore > 0)
+                                {
+                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                }
                             }
                             else
                             {
-                                fprintf(stderr, "HOTSWAP ok: load=%lldus\n", load_us);
+                                fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
                             }
 
-                            FreeLibrary(lib);
+                            if (old_lib)
+                            {
+                                FreeLibrary(old_lib);
+                            }
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
 

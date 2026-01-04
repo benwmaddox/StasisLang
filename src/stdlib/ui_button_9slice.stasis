@@ -1,3 +1,4 @@
+import "graphics.stasis";
 // Shared 9-slice button helpers for sprite-based UI.
 // Background uses 9 sprites (3x3 grid). Icons are sprites; text uses draw_text.
 

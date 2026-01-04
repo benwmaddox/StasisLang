@@ -1,0 +1,2 @@
+// Graphics/runtime bindings (marker module).
+// Import explicitly: import "src/stdlib/graphics.stasis";

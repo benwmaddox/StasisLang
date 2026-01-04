@@ -1,4 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
 
 // Render command buffer microbench:
 // - Per-call: many draw_line() calls from Stasis.
