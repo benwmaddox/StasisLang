@@ -2,6 +2,9 @@
 
 This plan aims to produce a runnable **debug** build of Brickout Revenge on an Android phone, with a tight "edit -> rebuild -> install -> run" loop, and a simple way to push assets/data to the device for testing.
 
+Design reference:
+- `docs/brickout-revenge-brainstorm.md` captures the current game concept, layout goals (4x5 grid), and economy direction.
+
 Scope: this is a developer workflow for local iteration, not a polished Play Store pipeline.
 
 ## Goals

@@ -40,9 +40,9 @@ function tryServerCommand(extensionPath: string): { command: string; args: strin
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const output = vscode.window.createOutputChannel("Stasis");
   const server = tryServerCommand(context.extensionPath);
   if (!server) {
-    const output = vscode.window.createOutputChannel("Stasis");
     output.appendLine(
       "Stasis Language Server binary not found. LSP features are disabled; syntax highlighting still works."
     );
@@ -55,11 +55,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     command: server.command,
     args: server.args,
     transport: TransportKind.stdio,
+    options: {
+      cwd: path.join(context.extensionPath, "server"),
+    },
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "stasis" }],
+    outputChannel: output,
+    traceOutputChannel: output,
+    middleware: {
+      didChange: async (event, next) => {
+        // Force full-text sync to keep the server document in sync for large files.
+        const doc = event.document;
+        const end = doc.lineAt(doc.lineCount - 1).range.end;
+        const fullText = doc.getText();
+        output.appendLine(`[didChange] ${doc.uri.toString()} len=${fullText.length} lines=${doc.lineCount}`);
+        const fullEvent = {
+          document: doc,
+          contentChanges: [
+            {
+              range: new vscode.Range(0, 0, end.line, end.character),
+              rangeOffset: 0,
+              rangeLength: fullText.length,
+              text: fullText,
+            },
+          ],
+          reason: event.reason,
+        };
+        return next(fullEvent);
+      },
+    },
   };
+
+  output.appendLine(`Starting Stasis LSP: ${server.command} ${server.args.join(" ")}`.trim());
 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
   void client.start();
