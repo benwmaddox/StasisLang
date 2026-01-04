@@ -6,21 +6,28 @@ public static class TextPositionConverter
 {
     public static int PositionToOffset(string text, Position position)
     {
+        if (position.Line < 0 || position.Character < 0)
+        {
+            return 0;
+        }
+
         int offset = 0;
         int line = 0;
-        int character = 0;
+        int lineStart = 0;
 
         while (offset < text.Length)
         {
-            if (line == position.Line && character == position.Character)
-            {
-                return offset;
-            }
-
             var ch = text[offset];
-            if (ch == '\r')
+            if (ch == '\r' || ch == '\n')
             {
-                if (offset + 1 < text.Length && text[offset + 1] == '\n')
+                if (line == position.Line)
+                {
+                    var lineLength = offset - lineStart;
+                    var clamped = Math.Min(position.Character, lineLength);
+                    return lineStart + clamped;
+                }
+
+                if (ch == '\r' && offset + 1 < text.Length && text[offset + 1] == '\n')
                 {
                     offset += 2;
                 }
@@ -30,20 +37,18 @@ public static class TextPositionConverter
                 }
 
                 line++;
-                character = 0;
-                continue;
-            }
-
-            if (ch == '\n')
-            {
-                offset += 1;
-                line++;
-                character = 0;
+                lineStart = offset;
                 continue;
             }
 
             offset += 1;
-            character++;
+        }
+
+        if (line == position.Line)
+        {
+            var lineLength = offset - lineStart;
+            var clamped = Math.Min(position.Character, lineLength);
+            return lineStart + clamped;
         }
 
         return text.Length;
@@ -98,4 +103,3 @@ public static class TextPositionConverter
         return new Position(line, character);
     }
 }
-
