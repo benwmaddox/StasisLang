@@ -375,6 +375,13 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
         var runtimeImports = GetRuntimeImportFlags(path);
 
+        // Auto-detect runtime usage via stdlib module imports if not explicitly enabled.
+        // Keep LLVM tests deterministic by default; Cranelift tests need the runtime hooks for some programs.
+        if (!enableGraphics && (mode != "test" || backend == BackendType.Cranelift) && (runtimeImports.graphics || runtimeImports.audio))
+        {
+            enableGraphics = true;
+        }
+
         var parse = Parser.Parse(source);
         if (logPhaseTiming)
         {
@@ -404,7 +411,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             enableGraphics = true;
         }
 
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         if (logPhaseTiming)
         {
             semaMs = phaseStopwatch.ElapsedMilliseconds;
@@ -2775,8 +2782,9 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             PrintDiagnostics(linkDiagnostics, source, sourcePath);
             return 1;
         }
-        var usesGraphics = enableGraphics || DetectsRuntimeImports(sourcePath) || HasLinkDirective(linkLibraries, "stasis_graphics");
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
@@ -3452,7 +3460,8 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
             return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, linkLibraries, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
 
-        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        var runtimeImports = GetRuntimeImportFlags(path);
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(runtimeImports.graphics, runtimeImports.audio)).Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
         if (sema.Diagnostics.Count > 0)
         {

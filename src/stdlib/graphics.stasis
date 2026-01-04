@@ -1,5 +1,5 @@
 @link("stasis_graphics");
-// Graphics/runtime bindings.
+// Graphics/runtime bindings (marker module).
 // Import explicitly: import "src/stdlib/graphics.stasis";
 
 extern function time(): i32;
