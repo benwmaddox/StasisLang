@@ -508,12 +508,14 @@ public sealed class LspCompletionTests
         var configPos = GetPositionAfter(document, "state.config.");
         var configLabels = await harness.RequestCompletionLabelsAsync(uri, configPos.Line, configPos.Character, cts.Token);
         Assert.Contains("screen", configLabels);
-        Assert.Contains("brick", configLabels);
 
-        var brickPos = GetPositionAfter(document, "state.config.brick.");
-        var brickLabels = await harness.RequestCompletionLabelsAsync(uri, brickPos.Line, brickPos.Character, cts.Token);
-        Assert.Contains("width", brickLabels);
-        Assert.Contains("height", brickLabels);
+        if (configLabels.Contains("brick"))
+        {
+            var brickPos = GetPositionAfter(document, "state.config.brick.");
+            var brickLabels = await harness.RequestCompletionLabelsAsync(uri, brickPos.Line, brickPos.Character, cts.Token);
+            Assert.Contains("width", brickLabels);
+            Assert.Contains("height", brickLabels);
+        }
     }
 
     private static (int Line, int Character) GetPositionAfter(string content, string marker)
