@@ -2786,37 +2786,41 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     var defPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{hashHex}.exports.def");
     var hotExitPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 
-    var map = new StringBuilder();
-    map.Append("STASIS_STATE_MAP 1\n");
-    map.Append($"hash={hashHex} count={entries.Length} bytes={totalBytes}\n");
-    foreach (var entry in entries)
-    {
-        map.Append(entry.Name);
-        map.Append(' ');
-        map.Append(entry.Size);
-        map.Append('\n');
-    }
-    File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
-
-    var def = new StringBuilder();
-    def.Append("EXPORTS\n");
-    foreach (var fn in exportedFunctions)
-    {
-        def.Append("  ");
-        def.Append(fn);
-        def.Append('\n');
-    }
-    foreach (var entry in entries)
-    {
-        def.Append("  ");
-        def.Append(entry.Name);
-        def.Append(" DATA\n");
-    }
-    File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
-
-    // Emit struct metadata JSON for data binding
+    // Emit map/exports/metadata only when missing to keep hot-reload fast.
     var structMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.struct-meta.json");
-    EmitStructMetadataJson(structMetaPath, state, entries);
+    if (!File.Exists(mapPath) || !File.Exists(defPath) || !File.Exists(structMetaPath))
+    {
+        var map = new StringBuilder();
+        map.Append("STASIS_STATE_MAP 1\n");
+        map.Append($"hash={hashHex} count={entries.Length} bytes={totalBytes}\n");
+        foreach (var entry in entries)
+        {
+            map.Append(entry.Name);
+            map.Append(' ');
+            map.Append(entry.Size);
+            map.Append('\n');
+        }
+        File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
+
+        var def = new StringBuilder();
+        def.Append("EXPORTS\n");
+        foreach (var fn in exportedFunctions)
+        {
+            def.Append("  ");
+            def.Append(fn);
+            def.Append('\n');
+        }
+        foreach (var entry in entries)
+        {
+            def.Append("  ");
+            def.Append(entry.Name);
+            def.Append(" DATA\n");
+        }
+        File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
+
+        // Emit struct metadata JSON for data binding
+        EmitStructMetadataJson(structMetaPath, state, entries);
+    }
 
     plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath, structMetaPath);
     return true;
