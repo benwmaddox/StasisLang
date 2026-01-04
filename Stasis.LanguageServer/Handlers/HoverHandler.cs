@@ -27,8 +27,12 @@ public class HoverHandler : HoverHandlerBase
         if (doc?.SemanticResult == null || doc.ParseResult == null)
             return Task.FromResult<Hover?>(null);
 
+        var compilationUnit = doc.ParseResult.CompilationUnit;
+        if (compilationUnit == null)
+            return Task.FromResult<Hover?>(null);
+
         var offset = TextPositionConverter.PositionToOffset(doc.Content, request.Position);
-        var node = FindNodeAtPosition(doc.ParseResult.CompilationUnit, offset);
+        var node = FindNodeAtPosition(compilationUnit, offset);
 
         if (node == null)
             return Task.FromResult<Hover?>(null);
@@ -76,7 +80,8 @@ public class HoverHandler : HoverHandlerBase
     {
         return decl switch
         {
-            FunctionDeclarationSyntax func => FindNodeAtPosition(func.Body, offset) ?? decl,
+            FunctionDeclarationSyntax func when func.Body != null =>
+                FindNodeAtPosition(func.Body, offset) ?? decl,
             _ => decl
         };
     }
