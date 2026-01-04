@@ -17,28 +17,49 @@ public class CompletionHandler : CompletionHandlerBase
         _documentManager = documentManager;
     }
 
-    public override Task<CompletionList> Handle(CompletionParams request, CancellationToken cancellationToken)
+    public override async Task<CompletionList> Handle(CompletionParams request, CancellationToken cancellationToken)
     {
         var uri = request.TextDocument.Uri.ToString();
         var doc = _documentManager.GetDocument(uri);
 
         if (doc?.ParseResult == null || doc.SymbolIndex == null)
-            return Task.FromResult(new CompletionList());
-
-        var offset = TextPositionConverter.PositionToOffset(doc.Content, request.Position);
-        if (!TryGetMemberAccessReceiverChain(doc.Content, offset, out var receiverChain))
         {
-            return Task.FromResult(new CompletionList());
+            await Console.Error.WriteLineAsync($"[completion] {uri} missing parse/symbol data");
+            return new CompletionList();
+        }
+
+        var lineSpan = GetLineSpan(doc.Content, request.Position.Line);
+        var lineOffset = lineSpan.Start + Math.Min(request.Position.Character, lineSpan.Text.Length);
+        var offset = lineOffset;
+        var triggerChar = request.Context?.TriggerCharacter;
+        if (!TryGetMemberAccessReceiverChainFromLinePrefix(lineSpan.Text, request.Position.Character, out var receiverChain) &&
+            !TryGetMemberAccessReceiverChain(doc.Content, offset, out receiverChain))
+        {
+            if (triggerChar == "." && TryGetMemberAccessReceiverChainFromPosition(doc.Content, offset, out receiverChain))
+            {
+                await Console.Error.WriteLineAsync($"[completion] {uri} fallback chain {string.Join(".", receiverChain)}");
+            }
+            else
+            {
+                var posInfo = $"{request.Position.Line}:{request.Position.Character}";
+                var snippet = GetSnippet(doc.Content, offset, 40);
+                await Console.Error.WriteLineAsync($"[completion] {uri} no member access at offset {offset} (len {doc.Content.Length}, pos {posInfo}, trigger {triggerChar ?? "null"}, lines {lineSpan.LineCount}) :: {snippet} :: line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
+                return new CompletionList();
+            }
         }
 
         var receiverTypeName = ResolveReceiverTypeName(receiverChain, doc, offset);
         if (string.IsNullOrEmpty(receiverTypeName))
         {
-            return Task.FromResult(new CompletionList());
+            await Console.Error.WriteLineAsync($"[completion] {uri} unresolved chain {string.Join(".", receiverChain)}");
+            return new CompletionList();
         }
 
         var items = GetMemberCompletions(receiverTypeName, doc.SymbolIndex);
-        return Task.FromResult(new CompletionList(items));
+        var preview = string.Join(", ", items.Take(10).Select(i => i.Label));
+        var posInfoOk = $"{request.Position.Line}:{request.Position.Character}";
+        await Console.Error.WriteLineAsync($"[completion] {uri} {string.Join(".", receiverChain)} -> {receiverTypeName} ({items.Count}) [{preview}] pos {posInfoOk} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
+        return new CompletionList(items);
     }
 
     public override Task<CompletionItem> Handle(CompletionItem request, CancellationToken cancellationToken)
@@ -261,28 +282,36 @@ public class CompletionHandler : CompletionHandlerBase
         }
 
         // Find the dot token for the member access immediately before the cursor.
-        var dotIndex = cursorOffset - 1;
-        if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
+        var dotIndex = cursorOffset;
+        if (dotIndex < content.Length && content[dotIndex] == '.')
         {
-            return false;
+            // dotIndex already points at the dot
         }
-
-        // If we're in the middle of typing an identifier, walk backwards to find the dot.
-        var identStart = dotIndex;
-        while (identStart >= 0 && IsIdentifierChar(content[identStart]))
+        else
         {
-            identStart--;
-        }
+            dotIndex = cursorOffset - 1;
+            if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
+            {
+                return false;
+            }
 
-        dotIndex = identStart;
-        if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
-        {
-            return false;
-        }
+            // If we're in the middle of typing an identifier, walk backwards to find the dot.
+            var identStart = dotIndex;
+            while (identStart >= 0 && IsIdentifierChar(content[identStart]))
+            {
+                identStart--;
+            }
 
-        if (dotIndex < 0 || content[dotIndex] != '.')
-        {
-            return false;
+            dotIndex = identStart;
+            if (!TrySkipInlineWhitespaceLeft(content, ref dotIndex))
+            {
+                return false;
+            }
+
+            if (dotIndex < 0 || content[dotIndex] != '.')
+            {
+                return false;
+            }
         }
 
         // Extract receiver chain to the left of '.'.
@@ -338,6 +367,149 @@ public class CompletionHandler : CompletionHandlerBase
     }
 
     private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    private static bool TryGetMemberAccessReceiverChainFromPosition(string content, int cursorOffset, out IReadOnlyList<string> receiverChain)
+    {
+        receiverChain = Array.Empty<string>();
+        if (cursorOffset <= 0 || cursorOffset > content.Length)
+        {
+            return false;
+        }
+
+        var names = new Stack<string>();
+        var i = cursorOffset - 1;
+
+        if (!TrySkipInlineWhitespaceLeft(content, ref i) || i < 0)
+        {
+            return false;
+        }
+
+        while (true)
+        {
+            var end = i;
+            while (i >= 0 && IsIdentifierChar(content[i]))
+            {
+                i--;
+            }
+
+            var start = i + 1;
+            if (start > end)
+            {
+                break;
+            }
+
+            names.Push(content.Substring(start, end - start + 1));
+
+            if (!TrySkipInlineWhitespaceLeft(content, ref i))
+            {
+                break;
+            }
+
+            if (i >= 0 && content[i] == '.')
+            {
+                i--;
+                if (!TrySkipInlineWhitespaceLeft(content, ref i))
+                {
+                    break;
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        if (names.Count == 0)
+        {
+            return false;
+        }
+
+        receiverChain = names.ToArray();
+        return true;
+    }
+
+    private static bool TryGetMemberAccessReceiverChainFromLinePrefix(string lineText, int character, out IReadOnlyList<string> receiverChain)
+    {
+        receiverChain = Array.Empty<string>();
+        if (character < 0)
+        {
+            return false;
+        }
+
+        var names = new Stack<string>();
+        var endIndex = Math.Min(character, lineText.Length) - 1;
+        while (endIndex >= 0 && char.IsWhiteSpace(lineText[endIndex]))
+        {
+            endIndex--;
+        }
+
+        if (endIndex < 0)
+        {
+            return false;
+        }
+
+        if (lineText[endIndex] == '.')
+        {
+            endIndex--;
+            while (endIndex >= 0 && char.IsWhiteSpace(lineText[endIndex]))
+            {
+                endIndex--;
+            }
+        }
+
+        if (endIndex < 0 || lineText.LastIndexOf('.', endIndex) < 0)
+        {
+            return false;
+        }
+
+        var i = endIndex;
+        while (true)
+        {
+            if (!TrySkipInlineWhitespaceLeft(lineText, ref i))
+            {
+                break;
+            }
+
+            if (i < 0)
+            {
+                break;
+            }
+
+            var end = i;
+            while (i >= 0 && IsIdentifierChar(lineText[i]))
+            {
+                i--;
+            }
+
+            var start = i + 1;
+            if (start > end)
+            {
+                break;
+            }
+
+            names.Push(lineText.Substring(start, end - start + 1));
+
+            if (!TrySkipInlineWhitespaceLeft(lineText, ref i))
+            {
+                break;
+            }
+
+            if (i >= 0 && lineText[i] == '.')
+            {
+                i--;
+                continue;
+            }
+
+            break;
+        }
+
+        if (names.Count == 0)
+        {
+            return false;
+        }
+
+        receiverChain = names.ToArray();
+        return true;
+    }
 
     private static bool TrySkipInlineWhitespaceLeft(string content, ref int index)
     {
@@ -412,4 +584,67 @@ public class CompletionHandler : CompletionHandlerBase
 
         return typeText;
     }
+
+    private static string GetSnippet(string content, int offset, int radius)
+    {
+        if (offset < 0)
+        {
+            offset = 0;
+        }
+        if (offset > content.Length)
+        {
+            offset = content.Length;
+        }
+
+        var start = Math.Max(0, offset - radius);
+        var length = Math.Min(content.Length - start, radius * 2);
+        var snippet = content.Substring(start, length);
+        return snippet.Replace("\r", "\\r").Replace("\n", "\\n");
+    }
+
+    private static (string Text, int Start, int LineCount) GetLineSpan(string content, int lineIndex)
+    {
+        var line = 0;
+        var lineStart = 0;
+        var offset = 0;
+
+        while (offset < content.Length)
+        {
+            var ch = content[offset];
+            if (ch == '\r' || ch == '\n')
+            {
+                if (line == lineIndex)
+                {
+                    var lineText = content.Substring(lineStart, offset - lineStart);
+                    return (lineText, lineStart, line + 1);
+                }
+
+                if (ch == '\r' && offset + 1 < content.Length && content[offset + 1] == '\n')
+                {
+                    offset += 2;
+                }
+                else
+                {
+                    offset += 1;
+                }
+
+                line++;
+                lineStart = offset;
+                continue;
+            }
+
+            offset += 1;
+        }
+
+        if (line == lineIndex)
+        {
+            var lineText = content.Substring(lineStart, offset - lineStart);
+            return (lineText, lineStart, line + 1);
+        }
+
+        return (string.Empty, lineStart, line + 1);
+    }
+
+    private static string EscapeLine(string lineText) =>
+        lineText.Replace("\r", "\\r").Replace("\n", "\\n");
 }
