@@ -16,7 +16,7 @@ function sh_lex_begin(file_idx: i32): bool {
     sh.lex_pos = 0;
     sh.lex_error_count = 0;
     sh.lex_error_printed = 0;
-    sh.lex_quiet = 0;
+    sh.lex_quiet = sh.quiet;
     sh.tok_start = 0;
     sh.tok_len = 0;
     return true;
