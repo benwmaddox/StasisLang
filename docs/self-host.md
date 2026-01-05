@@ -99,3 +99,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: created branch `self-host` from updated `main`; added this document.
 - 2026-01-05: added `runtime/stasis_sys.c` + `stasis_sys_static` build target (argv/file/exec), and wired `sys_*` builtins through LLVM + Cranelift + CLI linking.
 - 2026-01-05: added `tests/syscalls_basic.stasis` smoke tests for `sys_*`.
+- 2026-01-05: added `src/stasisc_self/main.stasis` minimal standalone CLI (argv + read_file smoke).
