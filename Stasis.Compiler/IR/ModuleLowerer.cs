@@ -2110,6 +2110,31 @@ public sealed class ModuleLowerer
                 return builder.BuildLoad2(layout.DescriptorType, binding.Value, $"{id.Identifier.Text}.desc");
             }
 
+            if (expr is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+            {
+                if (layout.IsStructArray)
+                {
+                    AddDiagnostic("String literal array arguments are only supported for primitive byte arrays.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+
+                var elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                if (elemType.Kind != LLVMTypeKind.LLVMIntegerTypeKind || elemType.IntWidth != 8)
+                {
+                    AddDiagnostic("String literal array arguments require element type u8.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+
+                var text = UnescapeString(lit.Literal.Text);
+                var ptr = EmitUtf8Literal(builder, text);
+                var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)(Encoding.UTF8.GetByteCount(text) + 1), true);
+
+                var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                desc = builder.BuildInsertValue(desc, ptr, 0, "lit.ptr");
+                desc = builder.BuildInsertValue(desc, lenVal, 1, "lit.len");
+                return desc;
+            }
+
             string? baseName = null;
             var resolvedLength = ResolveArrayLength(expr, arrayType);
             if (expr is IdentifierExpressionSyntax globalId)
