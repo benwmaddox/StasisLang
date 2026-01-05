@@ -87,6 +87,24 @@ test `stasis import graph loads files`() {
         return false;
     }
 
+    let idx_common: i32 = sh_find_file(t_path_common);
+    let idx_a: i32 = sh_find_file(t_path_a);
+    let idx_entry: i32 = sh_find_file(t_path_entry);
+    if (idx_common < 0 || idx_a < 0 || idx_entry < 0) {
+        return false;
+    }
+
+    if (sh_files[idx_common].imports_len != 0) { return false; }
+    if (sh_files[idx_a].imports_len != 1) { return false; }
+    if (sh_files[idx_entry].imports_len != 2) { return false; }
+
+    let off_a: i32 = sh_files[idx_a].imports_off;
+    if (sh_imports[off_a] != idx_common) { return false; }
+
+    let off_entry: i32 = sh_files[idx_entry].imports_off;
+    if (sh_imports[off_entry] != idx_a) { return false; }
+    if (sh_imports[off_entry + 1] != idx_common) { return false; }
+
     return sh_find_file(t_path_common) >= 0
         && sh_find_file(t_path_a) >= 0
         && sh_find_file(t_path_entry) >= 0

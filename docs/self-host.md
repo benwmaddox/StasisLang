@@ -71,6 +71,7 @@ The compiler operates on a "source graph":
 - Each file is loaded once into a fixed-capacity byte pool.
 - A file table records `(module, path, offset, len, mtime_ms)` for all files in the build.
 - Imports are scanned from each loaded file; newly discovered files are appended to the table and scanned in turn.
+- Import edges are recorded per file (fixed-capacity table) for later module resolution and diagnostics.
 - Later passes (lexer/parser/sema/codegen) iterate the file table; no pass requires a single concatenated source blob.
 
 This matches the user-facing intent: "just reference other files" rather than expanding imports into one file.
@@ -238,3 +239,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed LLVM lowering for nested short-circuit `&&`/`||` so verifier passes when RHS emits control flow.
 - 2026-01-05: added `src/stasis/parsing.stasis` minimal parse pass (balance check) + `tests/stasis_parsing.stasis`; wired `stasis check` to run lexer+parse across the loaded source graph.
 - 2026-01-05: imports now assign a deterministic module name per file (derived from basename) and reject duplicate module names.
+- 2026-01-05: import scanning now records per-file import edges (fixed table) for future semantic module resolution.

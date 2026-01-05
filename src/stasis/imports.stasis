@@ -7,12 +7,15 @@ const SH_MAX_MOD_BYTES: i32 = 96;
 const SH_POOL_CAP: i32 = 16000000;
 const SH_PATH_POOL_CAP: i32 = 90000;
 const SH_MOD_POOL_CAP: i32 = 20000;
+const SH_IMPORTS_CAP: i32 = 90000;
 
 struct ShFile {
     path_off: i32;
     path_len: i32;
     mod_off: i32;
     mod_len: i32;
+    imports_off: i32;
+    imports_len: i32;
     offset: i32;
     len: i32;
     mtime_ms: i32;
@@ -30,6 +33,9 @@ global sh_path_pool_len: i32;
 global sh_mod_pool: u8[20000];
 global sh_mod_pool_len: i32;
 
+global sh_imports: i32[90000];
+global sh_imports_len: i32;
+
 global sh_read: u8[51201];
 
 global sh_scratch_import: ascii[260];
@@ -46,6 +52,7 @@ function sh_reset() {
     sh_pool_len = 0;
     sh_path_pool_len = 0;
     sh_mod_pool_len = 0;
+    sh_imports_len = 0;
     ascii_clear(sh_scratch_import);
     ascii_clear(sh_scratch_dir);
     ascii_clear(sh_scratch_resolved);
@@ -247,6 +254,22 @@ function sh_module_name_from_path(dst: ascii[], path: ascii[]): bool {
     return out_i > 0;
 }
 
+function sh_file_imports_contains(file_idx: i32, imported: i32): bool {
+    if (file_idx < 0 || file_idx >= sh_file_count) {
+        return false;
+    }
+
+    let off: i32 = sh_files[file_idx].imports_off;
+    let count: i32 = sh_files[file_idx].imports_len;
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        if (sh_imports[off + i] == imported) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function sh_load_file(path: ascii[]): i32 {
     let existing: i32 = sh_find_file(path);
     if (existing >= 0) {
@@ -386,6 +409,8 @@ function sh_load_file(path: ascii[]): i32 {
     sh_files[idx].path_len = path_len;
     sh_files[idx].mod_off = mod_off;
     sh_files[idx].mod_len = mod_len;
+    sh_files[idx].imports_off = 0;
+    sh_files[idx].imports_len = 0;
     sh_files[idx].offset = off;
     sh_files[idx].len = read_n;
     sh_files[idx].mtime_ms = sys_file_mtime_ms(path);
@@ -531,6 +556,9 @@ function sh_scan_file_imports(file_idx: i32): bool {
         return false;
     }
 
+    sh_files[file_idx].imports_off = sh_imports_len;
+    sh_files[file_idx].imports_len = 0;
+
     let base: i32 = sh_files[file_idx].offset;
     let len: i32 = sh_files[file_idx].len;
 
@@ -556,6 +584,18 @@ function sh_scan_file_imports(file_idx: i32): bool {
                 let imported: i32 = sh_load_file(sh_scratch_resolved);
                 if (imported < 0) {
                     return false;
+                }
+
+                if (!sh_file_imports_contains(file_idx, imported)) {
+                    if (sh_imports_len >= SH_IMPORTS_CAP) {
+                        if (sh_quiet == 0) {
+                            print_string("error: exceeded import edge capacity\n");
+                        }
+                        return false;
+                    }
+                    sh_imports[sh_imports_len] = imported;
+                    sh_imports_len = sh_imports_len + 1;
+                    sh_files[file_idx].imports_len = sh_files[file_idx].imports_len + 1;
                 }
             }
 
