@@ -3,6 +3,8 @@ import "imports.stasis";
 
 // Token kinds: enum ShTok (with explicit numeric values) lives in state.stasis.
 
+const SH_LEX_ERR_PRINT_CAP: i32 = 8;
+
 function sh_lex_begin(file_idx: i32): bool {
     if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
@@ -13,9 +15,57 @@ function sh_lex_begin(file_idx: i32): bool {
     sh.lex_len = sh.files[file_idx].len;
     sh.lex_pos = 0;
     sh.lex_error_count = 0;
+    sh.lex_error_printed = 0;
+    sh.lex_quiet = 0;
     sh.tok_start = 0;
     sh.tok_len = 0;
     return true;
+}
+
+function sh_lex_print_err(file_idx: i32, msg: ascii[], at: i32): void {
+    if (sh.lex_quiet != 0) {
+        return;
+    }
+    if (sh.lex_error_printed >= SH_LEX_ERR_PRINT_CAP) {
+        return;
+    }
+
+    if (!sh_copy_file_path(sh.lex_path, file_idx)) {
+        ascii_copy(sh.lex_path, "<unknown>");
+    }
+
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    print_string(sh.lex_path);
+    print_char(58); // ':'
+    print_int(at);
+    print_char(10);
+    sh.lex_error_printed = sh.lex_error_printed + 1;
+}
+
+function sh_lex_print_err_byte(file_idx: i32, msg: ascii[], at: i32, b: u8): void {
+    if (sh.lex_quiet != 0) {
+        return;
+    }
+    if (sh.lex_error_printed >= SH_LEX_ERR_PRINT_CAP) {
+        return;
+    }
+
+    if (!sh_copy_file_path(sh.lex_path, file_idx)) {
+        ascii_copy(sh.lex_path, "<unknown>");
+    }
+
+    print_string("error: ");
+    print_string(msg);
+    print_string(" (byte=");
+    print_int(u8_to_i32(b));
+    print_string("): ");
+    print_string(sh.lex_path);
+    print_char(58); // ':'
+    print_int(at);
+    print_char(10);
+    sh.lex_error_printed = sh.lex_error_printed + 1;
 }
 
 function sh_is_alpha(b: u8): bool {
@@ -200,6 +250,11 @@ function sh_lex_string_like(quote: u8, kind: ShTok): ShTok {
 
     if (sh_lex_is_at_end()) {
         sh.lex_error_count = sh.lex_error_count + 1;
+        if (kind == ShTok.StringLiteral) {
+            sh_lex_print_err(sh.lex_file_idx, "unterminated string literal", start);
+        } else {
+            sh_lex_print_err(sh.lex_file_idx, "unterminated backtick literal", start);
+        }
         sh.tok_start = start;
         sh.tok_len = sh.lex_pos - start;
         return kind;
@@ -253,6 +308,7 @@ function sh_lex_next_kind(): ShTok {
             return ShTok.AmpAmp;
         }
         sh.lex_error_count = sh.lex_error_count + 1;
+        sh_lex_print_err_byte(sh.lex_file_idx, "unexpected '&' (use &&)", start, b);
         return ShTok.Unknown;
     }
 
@@ -263,6 +319,7 @@ function sh_lex_next_kind(): ShTok {
             return ShTok.PipePipe;
         }
         sh.lex_error_count = sh.lex_error_count + 1;
+        sh_lex_print_err_byte(sh.lex_file_idx, "unexpected '|' (use ||)", start, b);
         return ShTok.Unknown;
     }
 
@@ -359,5 +416,6 @@ function sh_lex_next_kind(): ShTok {
     if (b == 59) { return ShTok.Semicolon; } // ';'
 
     sh.lex_error_count = sh.lex_error_count + 1;
+    sh_lex_print_err_byte(sh.lex_file_idx, "unexpected byte", start, b);
     return ShTok.Unknown;
 }

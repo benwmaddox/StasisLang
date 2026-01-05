@@ -116,6 +116,9 @@ struct ShState {
     lex_len: i32;
     lex_pos: i32;
     lex_error_count: i32;
+    lex_error_printed: i32;
+    lex_quiet: i32;
+    lex_path: ascii[260];
     tok_start: i32;
     tok_len: i32;
 
