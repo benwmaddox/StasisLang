@@ -249,3 +249,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: clarified module import semantics: imported module members are in scope by default; use `ModuleName.symbol` only to disambiguate.
 - 2026-01-05: `stasis check` now prints lexer error diagnostics (file + byte offset) for unknown bytes and unterminated string literals.
 - 2026-01-05: added `--quiet` to `stasis check` and `stasis watch check` to suppress diagnostics (useful for scripting/watch output).
+- 2026-01-05: made `src/stasis/*.stasis` imports explicit (avoid relying on transitive imports under the module model).

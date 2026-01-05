@@ -1,4 +1,6 @@
+import "../stdlib/stdlib.stasis";
 import "state.stasis";
+import "imports.stasis";
 import "lexing.stasis";
 
 const SH_PARSE_STACK_CAP: i32 = 4096;
