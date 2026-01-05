@@ -82,7 +82,7 @@ This matches the user-facing intent: "just reference other files" rather than ex
 Each imported file is treated as a module.
 
 - Module name is derived from the imported file basename (strip extension, map `-` and other non-identifier bytes to `_`).
-- Duplicate module names are rejected (fail-fast with a clear diagnostic); aliasing will be added if we need it.
+- Duplicate module names are rejected (fail-fast with a clear diagnostic). Import aliasing is intentionally not supported for now.
 - The frontend will resolve `ModuleName.symbol` as a module-member reference during semantic analysis.
 
 ## Iteration First (Avoid Recursion Where Possible)
