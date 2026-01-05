@@ -1,0 +1,69 @@
+// Self-hosted compiler state.
+//
+// Stasis convention: prefer a single global struct that owns all static memory
+// needed by the program. This keeps memory layout deterministic and makes it
+// easy to reason about limits.
+
+struct ShFile {
+    path_off: i32;
+    path_len: i32;
+    mod_off: i32;
+    mod_len: i32;
+    imports_off: i32;
+    imports_len: i32;
+    offset: i32;
+    len: i32;
+    mtime_ms: i32;
+}
+
+struct ShState {
+    // CLI scratch
+    cmd: ascii[64];
+    subcmd: ascii[64];
+    arg_entry: ascii[260];
+
+    // Import/source graph
+    files: ShFile[300];
+    file_count: i32;
+
+    pool: u8[16000000];
+    pool_len: i32;
+
+    path_pool: u8[90000];
+    path_pool_len: i32;
+
+    mod_pool: u8[20000];
+    mod_pool_len: i32;
+
+    imports: i32[90000];
+    imports_len: i32;
+
+    read: u8[51201];
+
+    scratch_import: ascii[260];
+    scratch_dir: ascii[260];
+    scratch_resolved: ascii[260];
+    scratch_watch_path: ascii[260];
+    scratch_mod: ascii[96];
+
+    quiet: i32;
+
+    // Lexer (streaming)
+    lex_file_idx: i32;
+    lex_base: i32;
+    lex_len: i32;
+    lex_pos: i32;
+    lex_error_count: i32;
+    tok_start: i32;
+    tok_len: i32;
+
+    // Parser (currently: balance check)
+    parse_stack_kind: i32[4096];
+    parse_stack_start: i32[4096];
+    parse_stack_len: i32;
+    parse_path: ascii[260];
+    parse_quiet: i32;
+}
+
+global sh: ShState;
+

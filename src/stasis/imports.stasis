@@ -1,4 +1,5 @@
 import "../stdlib/stdlib.stasis";
+import "state.stasis";
 
 const SH_MAX_FILES: i32 = 300;
 const SH_MAX_FILE_BYTES: i32 = 51200;
@@ -9,55 +10,17 @@ const SH_PATH_POOL_CAP: i32 = 90000;
 const SH_MOD_POOL_CAP: i32 = 20000;
 const SH_IMPORTS_CAP: i32 = 90000;
 
-struct ShFile {
-    path_off: i32;
-    path_len: i32;
-    mod_off: i32;
-    mod_len: i32;
-    imports_off: i32;
-    imports_len: i32;
-    offset: i32;
-    len: i32;
-    mtime_ms: i32;
-}
-
-global sh_files: ShFile[300];
-global sh_file_count: i32;
-
-global sh_pool: u8[16000000];
-global sh_pool_len: i32;
-
-global sh_path_pool: u8[90000];
-global sh_path_pool_len: i32;
-
-global sh_mod_pool: u8[20000];
-global sh_mod_pool_len: i32;
-
-global sh_imports: i32[90000];
-global sh_imports_len: i32;
-
-global sh_read: u8[51201];
-
-global sh_scratch_import: ascii[260];
-global sh_scratch_dir: ascii[260];
-global sh_scratch_resolved: ascii[260];
-global sh_scratch_watch_path: ascii[260];
-global sh_scratch_mod: ascii[96];
-
-// When set to 1, suppresses stderr-style prints for expected failures (useful in tests).
-global sh_quiet: i32;
-
 function sh_reset() {
-    sh_file_count = 0;
-    sh_pool_len = 0;
-    sh_path_pool_len = 0;
-    sh_mod_pool_len = 0;
-    sh_imports_len = 0;
-    ascii_clear(sh_scratch_import);
-    ascii_clear(sh_scratch_dir);
-    ascii_clear(sh_scratch_resolved);
-    ascii_clear(sh_scratch_watch_path);
-    ascii_clear(sh_scratch_mod);
+    sh.file_count = 0;
+    sh.pool_len = 0;
+    sh.path_pool_len = 0;
+    sh.mod_pool_len = 0;
+    sh.imports_len = 0;
+    ascii_clear(sh.scratch_import);
+    ascii_clear(sh.scratch_dir);
+    ascii_clear(sh.scratch_resolved);
+    ascii_clear(sh.scratch_watch_path);
+    ascii_clear(sh.scratch_mod);
 }
 
 function sh_is_space(b: u8): bool {
@@ -126,18 +89,18 @@ function sh_path_pool_eq(path_off: i32, path_len: i32, path: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < path_len; i = i + 1) {
-        if (sh_path_pool[path_off + i] != path[i]) {
+        if (sh.path_pool[path_off + i] != path[i]) {
             return false;
         }
     }
 
-    return sh_path_pool[path_off + path_len] == 0 && path[path_len] == 0;
+    return sh.path_pool[path_off + path_len] == 0 && path[path_len] == 0;
 }
 
 function sh_find_file(path: ascii[]): i32 {
     let i: i32 = 0;
-    for (i = 0; i < sh_file_count; i = i + 1) {
-        if (sh_path_pool_eq(sh_files[i].path_off, sh_files[i].path_len, path)) {
+    for (i = 0; i < sh.file_count; i = i + 1) {
+        if (sh_path_pool_eq(sh.files[i].path_off, sh.files[i].path_len, path)) {
             return i;
         }
     }
@@ -151,18 +114,18 @@ function sh_mod_pool_eq(mod_off: i32, mod_len: i32, mod: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < mod_len; i = i + 1) {
-        if (sh_mod_pool[mod_off + i] != mod[i]) {
+        if (sh.mod_pool[mod_off + i] != mod[i]) {
             return false;
         }
     }
 
-    return sh_mod_pool[mod_off + mod_len] == 0 && mod[mod_len] == 0;
+    return sh.mod_pool[mod_off + mod_len] == 0 && mod[mod_len] == 0;
 }
 
 function sh_find_module(mod: ascii[]): i32 {
     let i: i32 = 0;
-    for (i = 0; i < sh_file_count; i = i + 1) {
-        if (sh_mod_pool_eq(sh_files[i].mod_off, sh_files[i].mod_len, mod)) {
+    for (i = 0; i < sh.file_count; i = i + 1) {
+        if (sh_mod_pool_eq(sh.files[i].mod_off, sh.files[i].mod_len, mod)) {
             return i;
         }
     }
@@ -172,19 +135,19 @@ function sh_find_module(mod: ascii[]): i32 {
 function sh_copy_file_module(dst: ascii[], file_idx: i32): bool {
     ascii_clear(dst);
 
-    if (file_idx < 0 || file_idx >= sh_file_count) {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
     }
 
-    let off: i32 = sh_files[file_idx].mod_off;
-    let len: i32 = sh_files[file_idx].mod_len;
+    let off: i32 = sh.files[file_idx].mod_off;
+    let len: i32 = sh.files[file_idx].mod_len;
     if (len <= 0 || len >= SH_MAX_MOD_BYTES) {
         return false;
     }
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        dst[i] = sh_mod_pool[off + i];
+        dst[i] = sh.mod_pool[off + i];
     }
     dst[len] = 0;
     ascii_set_len(dst, len);
@@ -255,15 +218,15 @@ function sh_module_name_from_path(dst: ascii[], path: ascii[]): bool {
 }
 
 function sh_file_imports_contains(file_idx: i32, imported: i32): bool {
-    if (file_idx < 0 || file_idx >= sh_file_count) {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
     }
 
-    let off: i32 = sh_files[file_idx].imports_off;
-    let count: i32 = sh_files[file_idx].imports_len;
+    let off: i32 = sh.files[file_idx].imports_off;
+    let count: i32 = sh.files[file_idx].imports_len;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        if (sh_imports[off + i] == imported) {
+        if (sh.imports[off + i] == imported) {
             return true;
         }
     }
@@ -276,8 +239,8 @@ function sh_load_file(path: ascii[]): i32 {
         return existing;
     }
 
-    if (sh_file_count >= SH_MAX_FILES) {
-        if (sh_quiet == 0) {
+    if (sh.file_count >= SH_MAX_FILES) {
+        if (sh.quiet == 0) {
             print_string("error: exceeded max import files (300)\n");
         }
         return -1;
@@ -285,7 +248,7 @@ function sh_load_file(path: ascii[]): i32 {
 
     let size: i32 = sys_file_size(path);
     if (size < 0) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: unable to stat file: ");
             print_string(path);
             print_char(10);
@@ -293,7 +256,7 @@ function sh_load_file(path: ascii[]): i32 {
         return -1;
     }
     if (size > SH_MAX_FILE_BYTES) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: file exceeds 50KiB limit: ");
             print_string(path);
             print_char(10);
@@ -301,8 +264,8 @@ function sh_load_file(path: ascii[]): i32 {
         return -1;
     }
 
-    if (sh_pool_len + size + 1 > SH_POOL_CAP) {
-        if (sh_quiet == 0) {
+    if (sh.pool_len + size + 1 > SH_POOL_CAP) {
+        if (sh.quiet == 0) {
             print_string("error: exceeded total source pool capacity\n");
         }
         return -1;
@@ -310,28 +273,28 @@ function sh_load_file(path: ascii[]): i32 {
 
     let path_len: i32 = ascii_len(path);
     if (path_len <= 0) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: empty path\n");
         }
         return -1;
     }
     if (path_len >= SH_MAX_PATH_BYTES) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: path too long (max 260 bytes): ");
             print_string(path);
             print_char(10);
         }
         return -1;
     }
-    if (sh_path_pool_len + path_len + 1 > SH_PATH_POOL_CAP) {
-        if (sh_quiet == 0) {
+    if (sh.path_pool_len + path_len + 1 > SH_PATH_POOL_CAP) {
+        if (sh.quiet == 0) {
             print_string("error: exceeded path pool capacity\n");
         }
         return -1;
     }
 
-    if (!sh_module_name_from_path(sh_scratch_mod, path)) {
-        if (sh_quiet == 0) {
+    if (!sh_module_name_from_path(sh.scratch_mod, path)) {
+        if (sh.quiet == 0) {
             print_string("error: unable to derive module name: ");
             print_string(path);
             print_char(10);
@@ -339,39 +302,39 @@ function sh_load_file(path: ascii[]): i32 {
         return -1;
     }
 
-    let mod_len: i32 = ascii_len(sh_scratch_mod);
+    let mod_len: i32 = ascii_len(sh.scratch_mod);
     if (mod_len <= 0 || mod_len >= SH_MAX_MOD_BYTES) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: module name too long (max 96 bytes)\n");
         }
         return -1;
     }
 
-    let mod_dup: i32 = sh_find_module(sh_scratch_mod);
+    let mod_dup: i32 = sh_find_module(sh.scratch_mod);
     if (mod_dup >= 0) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: duplicate module name: ");
-            print_string(sh_scratch_mod);
+            print_string(sh.scratch_mod);
             print_char(10);
-            if (sh_copy_file_path(sh_scratch_dir, mod_dup)) {
+            if (sh_copy_file_path(sh.scratch_dir, mod_dup)) {
                 print_string("note: module already used by: ");
-                print_string(sh_scratch_dir);
+                print_string(sh.scratch_dir);
                 print_char(10);
             }
         }
         return -1;
     }
 
-    if (sh_mod_pool_len + mod_len + 1 > SH_MOD_POOL_CAP) {
-        if (sh_quiet == 0) {
+    if (sh.mod_pool_len + mod_len + 1 > SH_MOD_POOL_CAP) {
+        if (sh.quiet == 0) {
             print_string("error: exceeded module name pool capacity\n");
         }
         return -1;
     }
 
-    let read_n: i32 = sys_read_file(path, sh_read, SH_MAX_FILE_BYTES + 1);
+    let read_n: i32 = sys_read_file(path, sh.read, SH_MAX_FILE_BYTES + 1);
     if (read_n < 0) {
-        if (sh_quiet == 0) {
+        if (sh.quiet == 0) {
             print_string("error: unable to read file: ");
             print_string(path);
             print_char(10);
@@ -380,40 +343,40 @@ function sh_load_file(path: ascii[]): i32 {
     }
 
     // Copy into the global pool (stable across full graph load).
-    let off: i32 = sh_pool_len;
+    let off: i32 = sh.pool_len;
     let i: i32 = 0;
     for (i = 0; i < read_n; i = i + 1) {
-        sh_pool[off + i] = sh_read[i];
+        sh.pool[off + i] = sh.read[i];
     }
-    sh_pool[off + read_n] = 0;
-    sh_pool_len = sh_pool_len + read_n + 1;
+    sh.pool[off + read_n] = 0;
+    sh.pool_len = sh.pool_len + read_n + 1;
 
-    let idx: i32 = sh_file_count;
-    sh_file_count = sh_file_count + 1;
+    let idx: i32 = sh.file_count;
+    sh.file_count = sh.file_count + 1;
 
-    let path_off: i32 = sh_path_pool_len;
+    let path_off: i32 = sh.path_pool_len;
     for (i = 0; i < path_len; i = i + 1) {
-        sh_path_pool[path_off + i] = path[i];
+        sh.path_pool[path_off + i] = path[i];
     }
-    sh_path_pool[path_off + path_len] = 0;
-    sh_path_pool_len = sh_path_pool_len + path_len + 1;
+    sh.path_pool[path_off + path_len] = 0;
+    sh.path_pool_len = sh.path_pool_len + path_len + 1;
 
-    let mod_off: i32 = sh_mod_pool_len;
+    let mod_off: i32 = sh.mod_pool_len;
     for (i = 0; i < mod_len; i = i + 1) {
-        sh_mod_pool[mod_off + i] = sh_scratch_mod[i];
+        sh.mod_pool[mod_off + i] = sh.scratch_mod[i];
     }
-    sh_mod_pool[mod_off + mod_len] = 0;
-    sh_mod_pool_len = sh_mod_pool_len + mod_len + 1;
+    sh.mod_pool[mod_off + mod_len] = 0;
+    sh.mod_pool_len = sh.mod_pool_len + mod_len + 1;
 
-    sh_files[idx].path_off = path_off;
-    sh_files[idx].path_len = path_len;
-    sh_files[idx].mod_off = mod_off;
-    sh_files[idx].mod_len = mod_len;
-    sh_files[idx].imports_off = 0;
-    sh_files[idx].imports_len = 0;
-    sh_files[idx].offset = off;
-    sh_files[idx].len = read_n;
-    sh_files[idx].mtime_ms = sys_file_mtime_ms(path);
+    sh.files[idx].path_off = path_off;
+    sh.files[idx].path_len = path_len;
+    sh.files[idx].mod_off = mod_off;
+    sh.files[idx].mod_len = mod_len;
+    sh.files[idx].imports_off = 0;
+    sh.files[idx].imports_len = 0;
+    sh.files[idx].offset = off;
+    sh.files[idx].len = read_n;
+    sh.files[idx].mtime_ms = sys_file_mtime_ms(path);
 
     return idx;
 }
@@ -421,19 +384,19 @@ function sh_load_file(path: ascii[]): i32 {
 function sh_copy_file_path(dst: ascii[], file_idx: i32): bool {
     ascii_clear(dst);
 
-    if (file_idx < 0 || file_idx >= sh_file_count) {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
     }
 
-    let off: i32 = sh_files[file_idx].path_off;
-    let len: i32 = sh_files[file_idx].path_len;
+    let off: i32 = sh.files[file_idx].path_off;
+    let len: i32 = sh.files[file_idx].path_len;
     if (len <= 0 || len >= SH_MAX_PATH_BYTES) {
         return false;
     }
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        dst[i] = sh_path_pool[off + i];
+        dst[i] = sh.path_pool[off + i];
     }
     dst[len] = 0;
     ascii_set_len(dst, len);
@@ -442,12 +405,12 @@ function sh_copy_file_path(dst: ascii[], file_idx: i32): bool {
 
 function sh_any_file_mtime_changed(): bool {
     let i: i32 = 0;
-    for (i = 0; i < sh_file_count; i = i + 1) {
-        if (!sh_copy_file_path(sh_scratch_watch_path, i)) {
+    for (i = 0; i < sh.file_count; i = i + 1) {
+        if (!sh_copy_file_path(sh.scratch_watch_path, i)) {
             return true;
         }
-        let now: i32 = sys_file_mtime_ms(sh_scratch_watch_path);
-        if (now != sh_files[i].mtime_ms) {
+        let now: i32 = sys_file_mtime_ms(sh.scratch_watch_path);
+        if (now != sh.files[i].mtime_ms) {
             return true;
         }
     }
@@ -455,56 +418,56 @@ function sh_any_file_mtime_changed(): bool {
 }
 
 function sh_try_parse_import(file_idx: i32, line_start: i32, line_end: i32): bool {
-    ascii_clear(sh_scratch_import);
+    ascii_clear(sh.scratch_import);
 
-    let base: i32 = sh_files[file_idx].offset;
+    let base: i32 = sh.files[file_idx].offset;
     let i: i32 = line_start;
-    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && sh_is_space(sh.pool[base + i]); i = i + 1) {
     }
 
     if (i + 6 > line_end) {
         return false;
     }
 
-    if (sh_pool[base + i + 0] != 105) { return false; } // i
-    if (sh_pool[base + i + 1] != 109) { return false; } // m
-    if (sh_pool[base + i + 2] != 112) { return false; } // p
-    if (sh_pool[base + i + 3] != 111) { return false; } // o
-    if (sh_pool[base + i + 4] != 114) { return false; } // r
-    if (sh_pool[base + i + 5] != 116) { return false; } // t
+    if (sh.pool[base + i + 0] != 105) { return false; } // i
+    if (sh.pool[base + i + 1] != 109) { return false; } // m
+    if (sh.pool[base + i + 2] != 112) { return false; } // p
+    if (sh.pool[base + i + 3] != 111) { return false; } // o
+    if (sh.pool[base + i + 4] != 114) { return false; } // r
+    if (sh.pool[base + i + 5] != 116) { return false; } // t
 
     i = i + 6;
-    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && sh_is_space(sh.pool[base + i]); i = i + 1) {
     }
 
-    if (i >= line_end || sh_pool[base + i] != 34) {
+    if (i >= line_end || sh.pool[base + i] != 34) {
         return false;
     }
     i = i + 1;
 
     let out_i: i32 = 0;
-    for (i = i; i < line_end && sh_pool[base + i] != 34; i = i + 1) {
+    for (i = i; i < line_end && sh.pool[base + i] != 34; i = i + 1) {
         if (out_i + 1 >= SH_MAX_PATH_BYTES) {
             return false;
         }
-        sh_scratch_import[out_i] = sh_pool[base + i];
+        sh.scratch_import[out_i] = sh.pool[base + i];
         out_i = out_i + 1;
     }
 
-    if (i >= line_end || sh_pool[base + i] != 34) {
+    if (i >= line_end || sh.pool[base + i] != 34) {
         return false;
     }
 
-    sh_scratch_import[out_i] = 0;
-    ascii_set_len(sh_scratch_import, out_i);
+    sh.scratch_import[out_i] = 0;
+    ascii_set_len(sh.scratch_import, out_i);
 
     i = i + 1;
-    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && sh_is_space(sh.pool[base + i]); i = i + 1) {
     }
 
-    if (i < line_end && sh_pool[base + i] == 59) {
+    if (i < line_end && sh.pool[base + i] == 59) {
         i = i + 1;
-        for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+        for (i = i; i < line_end && sh_is_space(sh.pool[base + i]); i = i + 1) {
         }
     }
 
@@ -517,7 +480,7 @@ function sh_path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): 
     let cut: i32 = -1;
     let i: i32 = 0;
     for (i = 0; i < path_len; i = i + 1) {
-        let b: u8 = sh_path_pool[path_off + i];
+        let b: u8 = sh.path_pool[path_off + i];
         if (b == 47 || b == 92) {
             cut = i;
         }
@@ -532,7 +495,7 @@ function sh_path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): 
         limit = SH_MAX_PATH_BYTES - 1;
     }
     for (i = 0; i < limit; i = i + 1) {
-        dst[i] = sh_path_pool[path_off + i];
+        dst[i] = sh.path_pool[path_off + i];
     }
     dst[i] = 0;
     ascii_set_len(dst, i);
@@ -540,27 +503,27 @@ function sh_path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): 
 }
 
 function sh_resolve_import(file_idx: i32): bool {
-    ascii_clear(sh_scratch_resolved);
-    if (sh_path_is_abs(sh_scratch_import)) {
-        ascii_copy(sh_scratch_resolved, sh_scratch_import);
+    ascii_clear(sh.scratch_resolved);
+    if (sh_path_is_abs(sh.scratch_import)) {
+        ascii_copy(sh.scratch_resolved, sh.scratch_import);
         return true;
     }
 
-    sh_path_dirname_from_pool(sh_scratch_dir, sh_files[file_idx].path_off, sh_files[file_idx].path_len);
-    sh_path_join(sh_scratch_resolved, sh_scratch_dir, sh_scratch_import);
+    sh_path_dirname_from_pool(sh.scratch_dir, sh.files[file_idx].path_off, sh.files[file_idx].path_len);
+    sh_path_join(sh.scratch_resolved, sh.scratch_dir, sh.scratch_import);
     return true;
 }
 
 function sh_scan_file_imports(file_idx: i32): bool {
-    if (file_idx < 0 || file_idx >= sh_file_count) {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
     }
 
-    sh_files[file_idx].imports_off = sh_imports_len;
-    sh_files[file_idx].imports_len = 0;
+    sh.files[file_idx].imports_off = sh.imports_len;
+    sh.files[file_idx].imports_len = 0;
 
-    let base: i32 = sh_files[file_idx].offset;
-    let len: i32 = sh_files[file_idx].len;
+    let base: i32 = sh.files[file_idx].offset;
+    let len: i32 = sh.files[file_idx].len;
 
     let line_start: i32 = 0;
     let i: i32 = 0;
@@ -568,12 +531,12 @@ function sh_scan_file_imports(file_idx: i32): bool {
         let is_end: bool = i == len;
         let b: u8 = 10;
         if (!is_end) {
-            b = sh_pool[base + i];
+            b = sh.pool[base + i];
         }
 
         if (b == 10 || is_end) {
             let line_end: i32 = i;
-            if (line_end > line_start && sh_pool[base + line_end - 1] == 13) {
+            if (line_end > line_start && sh.pool[base + line_end - 1] == 13) {
                 line_end = line_end - 1;
             }
 
@@ -581,21 +544,21 @@ function sh_scan_file_imports(file_idx: i32): bool {
                 if (!sh_resolve_import(file_idx)) {
                     return false;
                 }
-                let imported: i32 = sh_load_file(sh_scratch_resolved);
+                let imported: i32 = sh_load_file(sh.scratch_resolved);
                 if (imported < 0) {
                     return false;
                 }
 
                 if (!sh_file_imports_contains(file_idx, imported)) {
-                    if (sh_imports_len >= SH_IMPORTS_CAP) {
-                        if (sh_quiet == 0) {
+                    if (sh.imports_len >= SH_IMPORTS_CAP) {
+                        if (sh.quiet == 0) {
                             print_string("error: exceeded import edge capacity\n");
                         }
                         return false;
                     }
-                    sh_imports[sh_imports_len] = imported;
-                    sh_imports_len = sh_imports_len + 1;
-                    sh_files[file_idx].imports_len = sh_files[file_idx].imports_len + 1;
+                    sh.imports[sh.imports_len] = imported;
+                    sh.imports_len = sh.imports_len + 1;
+                    sh.files[file_idx].imports_len = sh.files[file_idx].imports_len + 1;
                 }
             }
 
@@ -615,7 +578,7 @@ function sh_load_graph(entry_path: ascii[]): i32 {
     }
 
     let i: i32 = 0;
-    for (i = 0; i < sh_file_count; i = i + 1) {
+    for (i = 0; i < sh.file_count; i = i + 1) {
         if (!sh_scan_file_imports(i)) {
             return 1;
         }

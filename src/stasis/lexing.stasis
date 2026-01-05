@@ -1,3 +1,4 @@
+import "state.stasis";
 import "imports.stasis";
 
 // Token kinds (mirrors Stasis.Compiler TokenKind ordering).
@@ -60,28 +61,18 @@ const SH_TOK_RBRACKET: i32 = 51;
 const SH_TOK_COMMA: i32 = 52;
 const SH_TOK_SEMICOLON: i32 = 53;
 
-global sh_lex_file_idx: i32;
-global sh_lex_base: i32;
-global sh_lex_len: i32;
-global sh_lex_pos: i32;
-
-global sh_lex_error_count: i32;
-
-global sh_tok_start: i32;
-global sh_tok_len: i32;
-
 function sh_lex_begin(file_idx: i32): bool {
-    if (file_idx < 0 || file_idx >= sh_file_count) {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
         return false;
     }
 
-    sh_lex_file_idx = file_idx;
-    sh_lex_base = sh_files[file_idx].offset;
-    sh_lex_len = sh_files[file_idx].len;
-    sh_lex_pos = 0;
-    sh_lex_error_count = 0;
-    sh_tok_start = 0;
-    sh_tok_len = 0;
+    sh.lex_file_idx = file_idx;
+    sh.lex_base = sh.files[file_idx].offset;
+    sh.lex_len = sh.files[file_idx].len;
+    sh.lex_pos = 0;
+    sh.lex_error_count = 0;
+    sh.tok_start = 0;
+    sh.tok_len = 0;
     return true;
 }
 
@@ -121,26 +112,26 @@ function sh_is_ident_continue(b: u8): bool {
 }
 
 function sh_lex_is_at_end(): bool {
-    return sh_lex_pos >= sh_lex_len;
+    return sh.lex_pos >= sh.lex_len;
 }
 
 function sh_lex_current(): u8 {
-    if (sh_lex_pos >= sh_lex_len) {
+    if (sh.lex_pos >= sh.lex_len) {
         return i32_to_u8_trunc(0);
     }
-    return sh_pool[sh_lex_base + sh_lex_pos];
+    return sh.pool[sh.lex_base + sh.lex_pos];
 }
 
 function sh_lex_peek(): u8 {
-    let next: i32 = sh_lex_pos + 1;
-    if (next >= sh_lex_len) {
+    let next: i32 = sh.lex_pos + 1;
+    if (next >= sh.lex_len) {
         return i32_to_u8_trunc(0);
     }
-    return sh_pool[sh_lex_base + next];
+    return sh.pool[sh.lex_base + next];
 }
 
 function sh_lex_advance(): void {
-    sh_lex_pos = sh_lex_pos + 1;
+    sh.lex_pos = sh.lex_pos + 1;
 }
 
 function sh_lex_skip_ws_and_comments(): void {
@@ -192,7 +183,7 @@ function sh_lex_bytes_eq_lit(start: i32, len: i32, lit: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        if (sh_pool[sh_lex_base + start + i] != lit[i]) {
+        if (sh.pool[sh.lex_base + start + i] != lit[i]) {
             return false;
         }
     }
@@ -220,17 +211,17 @@ function sh_lex_keyword_kind(start: i32, len: i32): i32 {
 }
 
 function sh_lex_identifier_or_keyword(): i32 {
-    let start: i32 = sh_lex_pos;
+    let start: i32 = sh.lex_pos;
     for (; !sh_lex_is_at_end() && sh_is_ident_continue(sh_lex_current()); ) {
         sh_lex_advance();
     }
-    sh_tok_start = start;
-    sh_tok_len = sh_lex_pos - start;
-    return sh_lex_keyword_kind(start, sh_tok_len);
+    sh.tok_start = start;
+    sh.tok_len = sh.lex_pos - start;
+    return sh_lex_keyword_kind(start, sh.tok_len);
 }
 
 function sh_lex_number(): i32 {
-    let start: i32 = sh_lex_pos;
+    let start: i32 = sh.lex_pos;
     let has_dot: i32 = 0;
 
     let done: i32 = 0;
@@ -249,8 +240,8 @@ function sh_lex_number(): i32 {
         }
     }
 
-    sh_tok_start = start;
-    sh_tok_len = sh_lex_pos - start;
+    sh.tok_start = start;
+    sh.tok_len = sh.lex_pos - start;
     if (has_dot != 0) {
         return SH_TOK_FLOAT_LITERAL;
     }
@@ -258,7 +249,7 @@ function sh_lex_number(): i32 {
 }
 
 function sh_lex_string_like(quote: u8, kind: i32): i32 {
-    let start: i32 = sh_lex_pos;
+    let start: i32 = sh.lex_pos;
     sh_lex_advance(); // opening quote/backtick
 
     for (; !sh_lex_is_at_end() && sh_lex_current() != quote; ) {
@@ -266,15 +257,15 @@ function sh_lex_string_like(quote: u8, kind: i32): i32 {
     }
 
     if (sh_lex_is_at_end()) {
-        sh_lex_error_count = sh_lex_error_count + 1;
-        sh_tok_start = start;
-        sh_tok_len = sh_lex_pos - start;
+        sh.lex_error_count = sh.lex_error_count + 1;
+        sh.tok_start = start;
+        sh.tok_len = sh.lex_pos - start;
         return kind;
     }
 
     sh_lex_advance(); // closing quote/backtick
-    sh_tok_start = start;
-    sh_tok_len = sh_lex_pos - start;
+    sh.tok_start = start;
+    sh.tok_len = sh.lex_pos - start;
     return kind;
 }
 
@@ -282,12 +273,12 @@ function sh_lex_next_kind(): i32 {
     sh_lex_skip_ws_and_comments();
 
     if (sh_lex_is_at_end()) {
-        sh_tok_start = sh_lex_pos;
-        sh_tok_len = 0;
+        sh.tok_start = sh.lex_pos;
+        sh.tok_len = 0;
         return SH_TOK_EOF;
     }
 
-    let start: i32 = sh_lex_pos;
+    let start: i32 = sh.lex_pos;
     let b: u8 = sh_lex_current();
 
     if (sh_is_alpha(b)) {
@@ -307,8 +298,8 @@ function sh_lex_next_kind(): i32 {
 
     // One and two byte tokens.
     sh_lex_advance();
-    sh_tok_start = start;
-    sh_tok_len = 1;
+    sh.tok_start = start;
+    sh.tok_len = 1;
 
     if (b == 46) { return SH_TOK_DOT; } // '.'
     if (b == 64) { return SH_TOK_AT; } // '@'
@@ -316,27 +307,27 @@ function sh_lex_next_kind(): i32 {
     if (b == 38) { // '&'
         if (sh_lex_current() == 38) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_AMP_AMP;
         }
-        sh_lex_error_count = sh_lex_error_count + 1;
+        sh.lex_error_count = sh.lex_error_count + 1;
         return SH_TOK_UNKNOWN;
     }
 
     if (b == 124) { // '|'
         if (sh_lex_current() == 124) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_PIPE_PIPE;
         }
-        sh_lex_error_count = sh_lex_error_count + 1;
+        sh.lex_error_count = sh.lex_error_count + 1;
         return SH_TOK_UNKNOWN;
     }
 
     if (b == 33) { // '!'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_BANG_EQUAL;
         }
         return SH_TOK_BANG;
@@ -345,7 +336,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 43) { // '+'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_PLUS_EQUAL;
         }
         return SH_TOK_PLUS;
@@ -354,7 +345,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 45) { // '-'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_MINUS_EQUAL;
         }
         return SH_TOK_MINUS;
@@ -363,7 +354,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 42) { // '*'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_STAR_EQUAL;
         }
         return SH_TOK_STAR;
@@ -372,7 +363,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 47) { // '/'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_SLASH_EQUAL;
         }
         return SH_TOK_SLASH;
@@ -381,7 +372,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 37) { // '%'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_PERCENT_EQUAL;
         }
         return SH_TOK_PERCENT;
@@ -390,7 +381,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 60) { // '<'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_LESS_EQUAL;
         }
         return SH_TOK_LESS;
@@ -399,7 +390,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 62) { // '>'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_GREATER_EQUAL;
         }
         return SH_TOK_GREATER;
@@ -410,7 +401,7 @@ function sh_lex_next_kind(): i32 {
     if (b == 61) { // '='
         if (sh_lex_current() == 61) {
             sh_lex_advance();
-            sh_tok_len = 2;
+            sh.tok_len = 2;
             return SH_TOK_EQUAL_EQUAL;
         }
         return SH_TOK_EQUAL;
@@ -425,6 +416,6 @@ function sh_lex_next_kind(): i32 {
     if (b == 44) { return SH_TOK_COMMA; } // ','
     if (b == 59) { return SH_TOK_SEMICOLON; } // ';'
 
-    sh_lex_error_count = sh_lex_error_count + 1;
+    sh.lex_error_count = sh.lex_error_count + 1;
     return SH_TOK_UNKNOWN;
 }

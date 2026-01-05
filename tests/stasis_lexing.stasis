@@ -79,7 +79,7 @@ test `stasis lexer basic tokens`() {
     if (n != 35) {
         return false;
     }
-    if (sh_lex_error_count != 0) {
+    if (sh.lex_error_count != 0) {
         return false;
     }
 
@@ -144,7 +144,7 @@ test `stasis lexer unknown char`() {
     if (n <= 0) {
         return false;
     }
-    if (sh_lex_error_count != 1) {
+    if (sh.lex_error_count != 1) {
         return false;
     }
 
@@ -161,4 +161,3 @@ test `stasis lexer unknown char`() {
 
     return true;
 }
-
