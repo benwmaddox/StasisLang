@@ -1,6 +1,9 @@
 import "../stdlib/stdlib.stasis";
+import "imports.stasis";
 
 global sh_cmd: ascii[64];
+global sh_arg_entry: ascii[260];
+global sh_arg_out: ascii[260];
 
 function sh_usage(): void {
     print_string("stasisc-self (WIP self-hosted compiler)\n");
@@ -40,8 +43,20 @@ function main(): i32 {
     }
 
     if (ascii_eq(sh_cmd, "expand")) {
-        print_string("error: expand is not implemented yet\n");
-        return 2;
+        if (argc != 4) {
+            print_string("error: expand expects 2 arguments\n");
+            sh_usage();
+            return 1;
+        }
+        if (!sh_read_arg(2, sh_arg_entry, 260)) {
+            print_string("error: failed to read <entry.stasis>\n");
+            return 1;
+        }
+        if (!sh_read_arg(3, sh_arg_out, 260)) {
+            print_string("error: failed to read <out.stasis>\n");
+            return 1;
+        }
+        return sh_expand_entry(sh_arg_entry, sh_arg_out);
     }
 
     print_string("error: unknown command: ");
@@ -50,4 +65,3 @@ function main(): i32 {
     sh_usage();
     return 1;
 }
-

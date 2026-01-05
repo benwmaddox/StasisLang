@@ -1,0 +1,412 @@
+import "../stdlib/stdlib.stasis";
+
+const SH_MAX_FILES: i32 = 300;
+const SH_MAX_FILE_BYTES: i32 = 51200;
+const SH_MAX_PATH_BYTES: i32 = 260;
+const SH_POOL_CAP: i32 = 16000000;
+const SH_OUT_CAP: i32 = 16000000;
+const SH_PATH_POOL_CAP: i32 = 90000;
+
+struct ShFile {
+    path_off: i32;
+    path_len: i32;
+    offset: i32;
+    len: i32;
+    expanded: i32;
+}
+
+global sh_files: ShFile[300];
+global sh_file_count: i32;
+
+global sh_pool: u8[16000000];
+global sh_pool_len: i32;
+
+global sh_path_pool: u8[90000];
+global sh_path_pool_len: i32;
+
+global sh_out: u8[16000000];
+global sh_out_len: i32;
+
+global sh_read: u8[51201];
+
+global sh_scratch_import: ascii[260];
+global sh_scratch_dir: ascii[260];
+global sh_scratch_resolved: ascii[260];
+
+function sh_reset() {
+    sh_file_count = 0;
+    sh_pool_len = 0;
+    sh_path_pool_len = 0;
+    sh_out_len = 0;
+    sh_out[0] = 0;
+    ascii_clear(sh_scratch_import);
+    ascii_clear(sh_scratch_dir);
+    ascii_clear(sh_scratch_resolved);
+}
+
+function sh_is_space(b: u8): bool {
+    return b == 32 || b == 9;
+}
+
+function sh_path_is_abs(path: ascii[]): bool {
+    let b0: u8 = path[0];
+    if (b0 == 47 || b0 == 92) {
+        return true;
+    }
+    let b1: u8 = path[1];
+    return b0 != 0 && b1 == 58;
+}
+
+function sh_path_dirname(dst: ascii[], path: ascii[]): i32 {
+    ascii_clear(dst);
+
+    let i_slash: i32 = ascii_find_last_byte(path, 47);
+    let i_bslash: i32 = ascii_find_last_byte(path, 92);
+    let cut: i32 = i_slash;
+    if (i_bslash > cut) {
+        cut = i_bslash;
+    }
+    if (cut < 0) {
+        return 0;
+    }
+
+    let i: i32 = 0;
+    let limit: i32 = cut;
+    if (limit > SH_MAX_PATH_BYTES - 1) {
+        limit = SH_MAX_PATH_BYTES - 1;
+    }
+    for (i = 0; i < limit; i = i + 1) {
+        dst[i] = path[i];
+    }
+    dst[i] = 0;
+    ascii_set_len(dst, i);
+    return i;
+}
+
+function sh_path_join(dst: ascii[], dir: ascii[], rel: ascii[]): i32 {
+    ascii_clear(dst);
+    if (ascii_is_empty(dir)) {
+        ascii_copy(dst, rel);
+        return ascii_len(dst);
+    }
+
+    ascii_copy(dst, dir);
+    let dlen: i32 = ascii_len(dst);
+    if (dlen > 0) {
+        let last: u8 = dst[dlen - 1];
+        if (last != 47 && last != 92) {
+            ascii_append_byte(dst, 47);
+        }
+    }
+
+    ascii_append(dst, rel);
+    return ascii_len(dst);
+}
+
+function sh_path_pool_eq(path_off: i32, path_len: i32, path: ascii[]): bool {
+    if (path_len != ascii_len(path)) {
+        return false;
+    }
+
+    let i: i32 = 0;
+    for (i = 0; i < path_len; i = i + 1) {
+        if (sh_path_pool[path_off + i] != path[i]) {
+            return false;
+        }
+    }
+
+    return sh_path_pool[path_off + path_len] == 0 && path[path_len] == 0;
+}
+
+function sh_find_file(path: ascii[]): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh_file_count; i = i + 1) {
+        if (sh_path_pool_eq(sh_files[i].path_off, sh_files[i].path_len, path)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function sh_out_append_byte(b: u8): bool {
+    if (sh_out_len + 2 > SH_OUT_CAP) {
+        return false;
+    }
+    sh_out[sh_out_len] = b;
+    sh_out_len = sh_out_len + 1;
+    sh_out[sh_out_len] = 0;
+    return true;
+}
+
+function sh_out_append_from_pool(src_off: i32, count: i32): bool {
+    if (count < 0) {
+        return false;
+    }
+    if (sh_out_len + count + 1 > SH_OUT_CAP) {
+        return false;
+    }
+
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        sh_out[sh_out_len + i] = sh_pool[src_off + i];
+    }
+    sh_out_len = sh_out_len + count;
+    sh_out[sh_out_len] = 0;
+    return true;
+}
+
+function sh_load_file(path: ascii[]): i32 {
+    let existing: i32 = sh_find_file(path);
+    if (existing >= 0) {
+        return existing;
+    }
+
+    if (sh_file_count >= SH_MAX_FILES) {
+        print_string("error: exceeded max import files (300)\n");
+        return -1;
+    }
+
+    let size: i32 = sys_file_size(path);
+    if (size < 0) {
+        print_string("error: unable to stat file: ");
+        print_string(path);
+        print_char(10);
+        return -1;
+    }
+    if (size > SH_MAX_FILE_BYTES) {
+        print_string("error: file exceeds 50KiB limit: ");
+        print_string(path);
+        print_char(10);
+        return -1;
+    }
+
+    if (sh_pool_len + size + 1 > SH_POOL_CAP) {
+        print_string("error: exceeded total source pool capacity\n");
+        return -1;
+    }
+
+    let path_len: i32 = ascii_len(path);
+    if (path_len <= 0) {
+        print_string("error: empty path\n");
+        return -1;
+    }
+    if (path_len >= SH_MAX_PATH_BYTES) {
+        print_string("error: path too long (max 260 bytes): ");
+        print_string(path);
+        print_char(10);
+        return -1;
+    }
+    if (sh_path_pool_len + path_len + 1 > SH_PATH_POOL_CAP) {
+        print_string("error: exceeded path pool capacity\n");
+        return -1;
+    }
+
+    let read_n: i32 = sys_read_file(path, sh_read, SH_MAX_FILE_BYTES + 1);
+    if (read_n < 0) {
+        print_string("error: unable to read file: ");
+        print_string(path);
+        print_char(10);
+        return -1;
+    }
+
+    // Copy into the global pool (stable across recursive expansion).
+    let off: i32 = sh_pool_len;
+    let i: i32 = 0;
+    for (i = 0; i < read_n; i = i + 1) {
+        sh_pool[off + i] = sh_read[i];
+    }
+    sh_pool[off + read_n] = 0;
+    sh_pool_len = sh_pool_len + read_n + 1;
+
+    let idx: i32 = sh_file_count;
+    sh_file_count = sh_file_count + 1;
+
+    let path_off: i32 = sh_path_pool_len;
+    for (i = 0; i < path_len; i = i + 1) {
+        sh_path_pool[path_off + i] = path[i];
+    }
+    sh_path_pool[path_off + path_len] = 0;
+    sh_path_pool_len = sh_path_pool_len + path_len + 1;
+
+    sh_files[idx].path_off = path_off;
+    sh_files[idx].path_len = path_len;
+    sh_files[idx].offset = off;
+    sh_files[idx].len = read_n;
+    sh_files[idx].expanded = 0;
+
+    return idx;
+}
+
+function sh_try_parse_import(file_idx: i32, line_start: i32, line_end: i32): bool {
+    ascii_clear(sh_scratch_import);
+
+    let base: i32 = sh_files[file_idx].offset;
+    let i: i32 = line_start;
+    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    }
+
+    if (i + 6 > line_end) {
+        return false;
+    }
+
+    if (sh_pool[base + i + 0] != 105) { return false; } // i
+    if (sh_pool[base + i + 1] != 109) { return false; } // m
+    if (sh_pool[base + i + 2] != 112) { return false; } // p
+    if (sh_pool[base + i + 3] != 111) { return false; } // o
+    if (sh_pool[base + i + 4] != 114) { return false; } // r
+    if (sh_pool[base + i + 5] != 116) { return false; } // t
+
+    i = i + 6;
+    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    }
+
+    if (i >= line_end || sh_pool[base + i] != 34) {
+        return false;
+    }
+    i = i + 1;
+
+    let out_i: i32 = 0;
+    for (i = i; i < line_end && sh_pool[base + i] != 34; i = i + 1) {
+        if (out_i + 1 >= SH_MAX_PATH_BYTES) {
+            return false;
+        }
+        sh_scratch_import[out_i] = sh_pool[base + i];
+        out_i = out_i + 1;
+    }
+
+    if (i >= line_end || sh_pool[base + i] != 34) {
+        return false;
+    }
+
+    sh_scratch_import[out_i] = 0;
+    ascii_set_len(sh_scratch_import, out_i);
+
+    i = i + 1;
+    for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+    }
+
+    if (i < line_end && sh_pool[base + i] == 59) {
+        i = i + 1;
+        for (i = i; i < line_end && sh_is_space(sh_pool[base + i]); i = i + 1) {
+        }
+    }
+
+    return i == line_end;
+}
+
+function sh_path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): i32 {
+    ascii_clear(dst);
+
+    let cut: i32 = -1;
+    let i: i32 = 0;
+    for (i = 0; i < path_len; i = i + 1) {
+        let b: u8 = sh_path_pool[path_off + i];
+        if (b == 47 || b == 92) {
+            cut = i;
+        }
+    }
+
+    if (cut < 0) {
+        return 0;
+    }
+
+    let limit: i32 = cut;
+    if (limit > SH_MAX_PATH_BYTES - 1) {
+        limit = SH_MAX_PATH_BYTES - 1;
+    }
+    for (i = 0; i < limit; i = i + 1) {
+        dst[i] = sh_path_pool[path_off + i];
+    }
+    dst[i] = 0;
+    ascii_set_len(dst, i);
+    return i;
+}
+
+function sh_resolve_import(file_idx: i32): bool {
+    ascii_clear(sh_scratch_resolved);
+    if (sh_path_is_abs(sh_scratch_import)) {
+        ascii_copy(sh_scratch_resolved, sh_scratch_import);
+        return true;
+    }
+
+    sh_path_dirname_from_pool(sh_scratch_dir, sh_files[file_idx].path_off, sh_files[file_idx].path_len);
+    sh_path_join(sh_scratch_resolved, sh_scratch_dir, sh_scratch_import);
+    return true;
+}
+
+function sh_expand_file(file_idx: i32): bool {
+    if (sh_files[file_idx].expanded != 0) {
+        return true;
+    }
+    sh_files[file_idx].expanded = 1;
+
+    let base: i32 = sh_files[file_idx].offset;
+    let len: i32 = sh_files[file_idx].len;
+
+    let line_start: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i <= len; i = i + 1) {
+        let is_end: bool = i == len;
+        let b: u8 = 10;
+        if (!is_end) {
+            b = sh_pool[base + i];
+        }
+
+        if (b == 10 || is_end) {
+            let line_end: i32 = i;
+            if (line_end > line_start && sh_pool[base + line_end - 1] == 13) {
+                line_end = line_end - 1;
+            }
+
+            if (sh_try_parse_import(file_idx, line_start, line_end)) {
+                if (!sh_resolve_import(file_idx)) {
+                    return false;
+                }
+                let imported: i32 = sh_load_file(sh_scratch_resolved);
+                if (imported < 0) {
+                    return false;
+                }
+                if (!sh_expand_file(imported)) {
+                    return false;
+                }
+            } else {
+                let count: i32 = line_end - line_start;
+                if (!sh_out_append_from_pool(base + line_start, count)) {
+                    print_string("error: expanded output exceeded capacity\n");
+                    return false;
+                }
+                if (!sh_out_append_byte(10)) {
+                    print_string("error: expanded output exceeded capacity\n");
+                    return false;
+                }
+            }
+
+            line_start = i + 1;
+        }
+    }
+
+    return true;
+}
+
+function sh_expand_entry(entry_path: ascii[], out_path: ascii[]): i32 {
+    sh_reset();
+
+    let entry: i32 = sh_load_file(entry_path);
+    if (entry < 0) {
+        return 1;
+    }
+
+    if (!sh_expand_file(entry)) {
+        return 1;
+    }
+
+    if (!sys_write_file(out_path, sh_out, sh_out_len)) {
+        print_string("error: unable to write output file: ");
+        print_string(out_path);
+        print_char(10);
+        return 1;
+    }
+
+    return 0;
+}
+
