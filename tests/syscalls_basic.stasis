@@ -47,3 +47,7 @@ test `sys_file_mtime_ms returns a value`() {
     let t: i32 = sys_file_mtime_ms(argv0);
     return t >= 0;
 }
+
+test `sys_sleep_ms returns 0`() {
+    return sys_sleep_ms(0) == 0;
+}
