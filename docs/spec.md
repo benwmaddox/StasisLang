@@ -168,17 +168,17 @@ These are host-provided helpers intended for tooling and self-hosted programs (c
 
 ### Imports
 
-Stasis supports source-level imports that inline another `.stasis` file before parsing.
+Stasis supports compilation-unit imports that reference another `.stasis` file as part of the build.
 
 ```
 import "relative/path/to/file.stasis";
 ```
 
 - Imports are resolved relative to the importing file.
-- Imported content is inlined once (duplicate imports are ignored).
-- Import directives are removed before parsing, so only top-level declarations remain.
+- Imported files are included once (duplicate imports are ignored).
+- Compilers may implement imports via textual inlining or as a multi-file source graph; diagnostics should preserve per-file spans.
 - Standard library modules are regular imports; the compiler does not auto-include them.
-- TODO: consider preserving per-file source maps (instead of raw concatenation) for more precise diagnostics.
+- If an implementation uses concatenation internally, it should keep a source map so diagnostics still reference the original file.
 
 ### Struct Types
 

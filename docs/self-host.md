@@ -20,9 +20,6 @@ Initial deliverables should keep the CLI small but stable. The intent is to matc
 
 Commands (final shape; implemented incrementally):
 
-- `stasisc-self expand <entry.stasis> <out.stasis>`
-  - Expands imports into a single file (duplicate imports removed).
-  - Enforces file/count limits early, before parsing.
 - `stasisc-self check <entry.stasis> [--backend cranelift|llvm]`
   - Parses + semantics only (fast feedback, no codegen), later used by `watch`.
 - `stasisc-self build <entry.stasis> -o <out.exe|out.wasm> [--backend ...] [--release]`
@@ -69,8 +66,8 @@ Build prerequisites:
 - LLVM: `.\stasis.bat build src\stasisc_self\main.stasis --backend llvm --out build\stasisc-self-llvm.exe`
 
 3) Run the currently-implemented command:
-- `.\build\stasisc-self.exe expand <entry.stasis> <out.stasis>`
-- `.\build\stasisc-self.exe watch expand <entry.stasis> <out.stasis>` (polling watch; rebuilds on mtime changes)
+- `.\build\stasisc-self.exe check <entry.stasis>`
+- `.\build\stasisc-self.exe watch check <entry.stasis>` (polling watch; rebuilds on mtime changes)
 
 Notes:
 - Stage0 `stasisc run` does not currently forward argv to programs; build the EXE and run it directly.
@@ -86,8 +83,8 @@ Hard limits (per compilation):
 
 Planned static allocations in `stasisc-self` (tunable as we learn real-world pressure):
 
-- Source pool: ~16 MiB (all expanded file contents, null-sentinels between files)
-- Expanded output buffer (for `expand` and for "single-file parse" bootstrap): ~16 MiB
+- Source pool: ~16 MiB (all source file contents, null-sentinels between files)
+- Text output buffer (IR/debug): ~16 MiB
 - Token buffer: fixed array sized for worst-case token density
   - Conservative estimate: 1 token per 2 bytes -> ~8 million tokens is too large; use a smaller cap and fail with a diagnostic if exceeded.
   - First implementation will target common code sizes and adjust once we have lexer metrics.
@@ -138,13 +135,13 @@ This milestone includes:
 
 - Parse argv, print usage
 - Read a single `.stasis` file into a fixed buffer
-- Implement import expansion (up to 300 files, 50 KiB each)
+- Load the import graph (up to 300 files, 50 KiB each) without flattening
 - Emit "phase timing" logs similar to the C# CLI (optional but useful for watch)
 
 Implementation notes:
-- Import expansion should preserve ordering (inline at first import site) and ignore duplicates (per `docs/spec.md` "Imports").
-- Import expansion should be implemented without recursion-dependent buffers (store file contents in a stable global pool).
-- First CLI command should be `expand` so later stages can reuse the "expanded single-file view" for lexer/parser bring-up.
+- Imports should ignore duplicates (per `docs/spec.md` "Imports") and preserve per-file spans for diagnostics.
+- The import graph loader should avoid recursion-dependent buffers (store file contents in a stable global pool).
+- First CLI command should be `check` so later stages can reuse the file table for lexer/parser bring-up.
 
 ### M2: Lexer (Stasis)
 
@@ -190,6 +187,6 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `src/stasisc_self/main.stasis` minimal standalone CLI (argv + read_file smoke).
 - 2026-01-05: fixed Cranelift backend to accept string literals for `sys_*` string args; updated syscalls smoke test to use `argv0` paths (backend-independent).
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
-- 2026-01-05: implemented `stasisc-self expand <entry> <out>` import expansion with the 300 file / 50 KiB limits; fixed Cranelift `print_string` to accept array/string args.
-- 2026-01-05: added `tests/stasisc_self_imports.stasis` coverage for import expansion + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasisc-self under LLVM).
-- 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasisc-self watch expand` based on `sys_file_mtime_ms`.
+- 2026-01-05: implemented import graph loading (300 files / 50 KiB limits) and fixed Cranelift `print_string` to accept array/string args.
+- 2026-01-05: added `tests/stasisc_self_imports.stasis` coverage for import graph loading + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasisc-self under LLVM).
+- 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasisc-self watch check` based on `sys_file_mtime_ms`.
