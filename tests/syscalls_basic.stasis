@@ -18,16 +18,27 @@ test `sys_argc and sys_argv work`() {
 }
 
 test `sys_file_exists and sys_read_file work`() {
-    if (!sys_file_exists("README.md")) {
+    let len: i32 = sys_argv(0, argv0, 1024);
+    if (len <= 0) {
+        return false;
+    }
+    utf8_set_len_ascii(argv0, len);
+
+    if (!sys_file_exists(argv0)) {
         return false;
     }
 
-    let n: i32 = sys_read_file("README.md", read_buf, 4096);
+    let n: i32 = sys_read_file(argv0, read_buf, 4096);
     return n > 0;
 }
 
 test `sys_file_mtime_ms returns a value`() {
-    let t: i32 = sys_file_mtime_ms("README.md");
+    let len: i32 = sys_argv(0, argv0, 1024);
+    if (len <= 0) {
+        return false;
+    }
+    utf8_set_len_ascii(argv0, len);
+
+    let t: i32 = sys_file_mtime_ms(argv0);
     return t >= 0;
 }
-

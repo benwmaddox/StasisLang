@@ -2886,7 +2886,19 @@ public sealed class CraneliftFunctionBuilder
 
     private bool TryGetStringArg(ExpressionSyntax argument, out string ptr)
     {
-        return TryLowerArrayPointer(argument, out ptr);
+        if (TryLowerArrayPointer(argument, out ptr, reportErrors: false))
+        {
+            return true;
+        }
+
+        if (argument is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+        {
+            ptr = LowerExpression(argument);
+            return true;
+        }
+
+        ptr = string.Empty;
+        return false;
     }
 
     private bool TryGetStringPair(IReadOnlyList<ExpressionSyntax> arguments, string name, out string ptrA, out string ptrB)
