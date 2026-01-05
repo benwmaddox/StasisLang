@@ -75,7 +75,7 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
         }
         if (Test-Path $errLog) {
             $lines = Get-Content $errLog -ErrorAction SilentlyContinue
-            if ($lines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" -or $_ -match "^warning: initial build failed" }) {
+            if ($lines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
                 return $true
             }
         }
@@ -93,7 +93,7 @@ if (-not (Wait-ForHotreload 300 $proc)) {
     $lateHotreload = $false
     if (Test-Path $errLog) {
         $lateLines = Get-Content $errLog -ErrorAction SilentlyContinue
-        if ($lateLines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" -or $_ -match "^warning: initial build failed" }) {
+        if ($lateLines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
             $lateHotreload = $true
         }
     }
@@ -121,9 +121,9 @@ $layoutWarnings = $errLines | Where-Object { $_ -match "^HOTSWAP warning: state 
 $reloads = @()
 $swaps = @()
 foreach ($line in $errLines) {
-    if ($line -match "^HOTRELOAD phases\\(ms\\):") {
+    if ($line -match "HOTRELOAD phases\\(ms\\):") {
         $fields = @{}
-        $parts = $line -replace "^HOTRELOAD phases\\(ms\\):\\s*", "" -split "\\s+"
+        $parts = $line -replace ".*HOTRELOAD phases\\(ms\\):\\s*", "" -split "\\s+"
         foreach ($p in $parts) {
             if ($p -match "^(\\w+)=([0-9]+)$") { $fields[$matches[1]] = [int]$matches[2] }
         }
