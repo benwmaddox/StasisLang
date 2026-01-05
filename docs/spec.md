@@ -152,6 +152,18 @@ ascii[N]   // ASCII-only string buffers with a single length header
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
 - String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
 
+### System/host helpers (`sys_*`)
+
+These are host-provided helpers intended for tooling and self-hosted programs (compilers, asset pipelines, etc.).
+
+- `sys_argc() -> i32`
+- `sys_argv(idx: i32, out: utf8[N], out_cap: i32) -> i32` (returns bytes written, `-1` on failure)
+- `sys_read_file(path: utf8[N], out: u8[M], out_cap: i32) -> i32` (returns bytes read, `-1` on failure; always writes a `0` sentinel when `out_cap > 0`)
+- `sys_write_file(path: utf8[N], data: u8[M], len: i32) -> bool`
+- `sys_file_exists(path: utf8[N]) -> bool`
+- `sys_file_mtime_ms(path: utf8[N]) -> i32` (returns ms since epoch on supported hosts, `-1` on failure)
+- `sys_exec(command: utf8[N]) -> i32` (process exit code)
+
 ### Imports
 
 Stasis supports source-level imports that inline another `.stasis` file before parsing.
