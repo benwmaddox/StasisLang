@@ -1,0 +1,32 @@
+import "../stdlib/stdlib.stasis";
+
+global arg1: utf8[1024];
+global file_buf: u8[60000];
+
+function main(): i32 {
+    if (sys_argc() < 2) {
+        print_string("usage: stasisc-self <file>\n");
+        return 1;
+    }
+
+    let arg_len: i32 = sys_argv(1, arg1, 1024);
+    if (arg_len <= 0) {
+        print_string("error: failed to read argv[1]\n");
+        return 1;
+    }
+    utf8_set_len_ascii(arg1, arg_len);
+
+    let n: i32 = sys_read_file(arg1, file_buf, 60000);
+    if (n < 0) {
+        print_string("error: failed to read file: ");
+        print_string(arg1);
+        print_char(10);
+        return 1;
+    }
+
+    print_string("read bytes=");
+    print_int(n);
+    print_char(10);
+    return 0;
+}
+
