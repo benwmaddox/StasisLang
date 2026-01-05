@@ -1,65 +1,7 @@
 import "state.stasis";
 import "imports.stasis";
 
-// Token kinds (mirrors Stasis.Compiler TokenKind ordering).
-const SH_TOK_EOF: i32 = 0;
-const SH_TOK_UNKNOWN: i32 = 1;
-
-const SH_TOK_IDENTIFIER: i32 = 2;
-const SH_TOK_INTEGER_LITERAL: i32 = 3;
-const SH_TOK_FLOAT_LITERAL: i32 = 4;
-const SH_TOK_STRING_LITERAL: i32 = 5;
-const SH_TOK_BACKTICK_LITERAL: i32 = 6;
-const SH_TOK_TRUE_KEYWORD: i32 = 7;
-const SH_TOK_FALSE_KEYWORD: i32 = 8;
-
-const SH_TOK_STRUCT_KEYWORD: i32 = 9;
-const SH_TOK_ENUM_KEYWORD: i32 = 10;
-const SH_TOK_GLOBAL_KEYWORD: i32 = 11;
-const SH_TOK_CONST_KEYWORD: i32 = 12;
-const SH_TOK_FUNCTION_KEYWORD: i32 = 13;
-const SH_TOK_EXPORT_KEYWORD: i32 = 14;
-const SH_TOK_TEST_KEYWORD: i32 = 15;
-const SH_TOK_RETURN_KEYWORD: i32 = 16;
-const SH_TOK_LET_KEYWORD: i32 = 17;
-const SH_TOK_IF_KEYWORD: i32 = 18;
-const SH_TOK_ELSE_KEYWORD: i32 = 19;
-const SH_TOK_FOR_KEYWORD: i32 = 20;
-const SH_TOK_FOREACH_KEYWORD: i32 = 21;
-const SH_TOK_IN_KEYWORD: i32 = 22;
-
-const SH_TOK_DOT: i32 = 23;
-const SH_TOK_PLUS: i32 = 24;
-const SH_TOK_MINUS: i32 = 25;
-const SH_TOK_STAR: i32 = 26;
-const SH_TOK_SLASH: i32 = 27;
-const SH_TOK_PERCENT: i32 = 28;
-const SH_TOK_PLUS_EQUAL: i32 = 29;
-const SH_TOK_MINUS_EQUAL: i32 = 30;
-const SH_TOK_STAR_EQUAL: i32 = 31;
-const SH_TOK_SLASH_EQUAL: i32 = 32;
-const SH_TOK_PERCENT_EQUAL: i32 = 33;
-const SH_TOK_AMP_AMP: i32 = 34;
-const SH_TOK_PIPE_PIPE: i32 = 35;
-const SH_TOK_LESS: i32 = 36;
-const SH_TOK_LESS_EQUAL: i32 = 37;
-const SH_TOK_GREATER: i32 = 38;
-const SH_TOK_GREATER_EQUAL: i32 = 39;
-const SH_TOK_EQUAL: i32 = 40;
-const SH_TOK_EQUAL_EQUAL: i32 = 41;
-const SH_TOK_BANG_EQUAL: i32 = 42;
-const SH_TOK_COLON: i32 = 43;
-const SH_TOK_BANG: i32 = 44;
-const SH_TOK_AT: i32 = 45;
-
-const SH_TOK_LPAREN: i32 = 46;
-const SH_TOK_RPAREN: i32 = 47;
-const SH_TOK_LBRACE: i32 = 48;
-const SH_TOK_RBRACE: i32 = 49;
-const SH_TOK_LBRACKET: i32 = 50;
-const SH_TOK_RBRACKET: i32 = 51;
-const SH_TOK_COMMA: i32 = 52;
-const SH_TOK_SEMICOLON: i32 = 53;
+// Token kinds: enum ShTok (with explicit numeric values) lives in state.stasis.
 
 function sh_lex_begin(file_idx: i32): bool {
     if (file_idx < 0 || file_idx >= sh.file_count) {
@@ -190,27 +132,27 @@ function sh_lex_bytes_eq_lit(start: i32, len: i32, lit: ascii[]): bool {
     return true;
 }
 
-function sh_lex_keyword_kind(start: i32, len: i32): i32 {
-    if (sh_lex_bytes_eq_lit(start, len, "struct")) { return SH_TOK_STRUCT_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "enum")) { return SH_TOK_ENUM_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "global")) { return SH_TOK_GLOBAL_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "const")) { return SH_TOK_CONST_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "function")) { return SH_TOK_FUNCTION_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "export")) { return SH_TOK_EXPORT_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "test")) { return SH_TOK_TEST_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "return")) { return SH_TOK_RETURN_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "let")) { return SH_TOK_LET_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "if")) { return SH_TOK_IF_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "else")) { return SH_TOK_ELSE_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "for")) { return SH_TOK_FOR_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "foreach")) { return SH_TOK_FOREACH_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "in")) { return SH_TOK_IN_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "true")) { return SH_TOK_TRUE_KEYWORD; }
-    if (sh_lex_bytes_eq_lit(start, len, "false")) { return SH_TOK_FALSE_KEYWORD; }
-    return SH_TOK_IDENTIFIER;
+function sh_lex_keyword_kind(start: i32, len: i32): ShTok {
+    if (sh_lex_bytes_eq_lit(start, len, "struct")) { return ShTok.StructKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "enum")) { return ShTok.EnumKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "global")) { return ShTok.GlobalKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "const")) { return ShTok.ConstKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "function")) { return ShTok.FunctionKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "export")) { return ShTok.ExportKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "test")) { return ShTok.TestKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "return")) { return ShTok.ReturnKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "let")) { return ShTok.LetKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "if")) { return ShTok.IfKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "else")) { return ShTok.ElseKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "for")) { return ShTok.ForKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "foreach")) { return ShTok.ForeachKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "in")) { return ShTok.InKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "true")) { return ShTok.TrueKeyword; }
+    if (sh_lex_bytes_eq_lit(start, len, "false")) { return ShTok.FalseKeyword; }
+    return ShTok.Identifier;
 }
 
-function sh_lex_identifier_or_keyword(): i32 {
+function sh_lex_identifier_or_keyword(): ShTok {
     let start: i32 = sh.lex_pos;
     for (; !sh_lex_is_at_end() && sh_is_ident_continue(sh_lex_current()); ) {
         sh_lex_advance();
@@ -220,7 +162,7 @@ function sh_lex_identifier_or_keyword(): i32 {
     return sh_lex_keyword_kind(start, sh.tok_len);
 }
 
-function sh_lex_number(): i32 {
+function sh_lex_number(): ShTok {
     let start: i32 = sh.lex_pos;
     let has_dot: i32 = 0;
 
@@ -243,12 +185,12 @@ function sh_lex_number(): i32 {
     sh.tok_start = start;
     sh.tok_len = sh.lex_pos - start;
     if (has_dot != 0) {
-        return SH_TOK_FLOAT_LITERAL;
+        return ShTok.FloatLiteral;
     }
-    return SH_TOK_INTEGER_LITERAL;
+    return ShTok.IntegerLiteral;
 }
 
-function sh_lex_string_like(quote: u8, kind: i32): i32 {
+function sh_lex_string_like(quote: u8, kind: ShTok): ShTok {
     let start: i32 = sh.lex_pos;
     sh_lex_advance(); // opening quote/backtick
 
@@ -269,13 +211,13 @@ function sh_lex_string_like(quote: u8, kind: i32): i32 {
     return kind;
 }
 
-function sh_lex_next_kind(): i32 {
+function sh_lex_next_kind(): ShTok {
     sh_lex_skip_ws_and_comments();
 
     if (sh_lex_is_at_end()) {
         sh.tok_start = sh.lex_pos;
         sh.tok_len = 0;
-        return SH_TOK_EOF;
+        return ShTok.Eof;
     }
 
     let start: i32 = sh.lex_pos;
@@ -290,10 +232,10 @@ function sh_lex_next_kind(): i32 {
     }
 
     if (b == 34) { // '"'
-        return sh_lex_string_like(34, SH_TOK_STRING_LITERAL);
+        return sh_lex_string_like(34, ShTok.StringLiteral);
     }
     if (b == 96) { // '`'
-        return sh_lex_string_like(96, SH_TOK_BACKTICK_LITERAL);
+        return sh_lex_string_like(96, ShTok.BacktickLiteral);
     }
 
     // One and two byte tokens.
@@ -301,121 +243,121 @@ function sh_lex_next_kind(): i32 {
     sh.tok_start = start;
     sh.tok_len = 1;
 
-    if (b == 46) { return SH_TOK_DOT; } // '.'
-    if (b == 64) { return SH_TOK_AT; } // '@'
+    if (b == 46) { return ShTok.Dot; } // '.'
+    if (b == 64) { return ShTok.At; } // '@'
 
     if (b == 38) { // '&'
         if (sh_lex_current() == 38) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_AMP_AMP;
+            return ShTok.AmpAmp;
         }
         sh.lex_error_count = sh.lex_error_count + 1;
-        return SH_TOK_UNKNOWN;
+        return ShTok.Unknown;
     }
 
     if (b == 124) { // '|'
         if (sh_lex_current() == 124) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_PIPE_PIPE;
+            return ShTok.PipePipe;
         }
         sh.lex_error_count = sh.lex_error_count + 1;
-        return SH_TOK_UNKNOWN;
+        return ShTok.Unknown;
     }
 
     if (b == 33) { // '!'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_BANG_EQUAL;
+            return ShTok.BangEqual;
         }
-        return SH_TOK_BANG;
+        return ShTok.Bang;
     }
 
     if (b == 43) { // '+'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_PLUS_EQUAL;
+            return ShTok.PlusEqual;
         }
-        return SH_TOK_PLUS;
+        return ShTok.Plus;
     }
 
     if (b == 45) { // '-'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_MINUS_EQUAL;
+            return ShTok.MinusEqual;
         }
-        return SH_TOK_MINUS;
+        return ShTok.Minus;
     }
 
     if (b == 42) { // '*'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_STAR_EQUAL;
+            return ShTok.StarEqual;
         }
-        return SH_TOK_STAR;
+        return ShTok.Star;
     }
 
     if (b == 47) { // '/'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_SLASH_EQUAL;
+            return ShTok.SlashEqual;
         }
-        return SH_TOK_SLASH;
+        return ShTok.Slash;
     }
 
     if (b == 37) { // '%'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_PERCENT_EQUAL;
+            return ShTok.PercentEqual;
         }
-        return SH_TOK_PERCENT;
+        return ShTok.Percent;
     }
 
     if (b == 60) { // '<'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_LESS_EQUAL;
+            return ShTok.LessEqual;
         }
-        return SH_TOK_LESS;
+        return ShTok.Less;
     }
 
     if (b == 62) { // '>'
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_GREATER_EQUAL;
+            return ShTok.GreaterEqual;
         }
-        return SH_TOK_GREATER;
+        return ShTok.Greater;
     }
 
-    if (b == 58) { return SH_TOK_COLON; } // ':'
+    if (b == 58) { return ShTok.Colon; } // ':'
 
     if (b == 61) { // '='
         if (sh_lex_current() == 61) {
             sh_lex_advance();
             sh.tok_len = 2;
-            return SH_TOK_EQUAL_EQUAL;
+            return ShTok.EqualEqual;
         }
-        return SH_TOK_EQUAL;
+        return ShTok.Equal;
     }
 
-    if (b == 40) { return SH_TOK_LPAREN; } // '('
-    if (b == 41) { return SH_TOK_RPAREN; } // ')'
-    if (b == 123) { return SH_TOK_LBRACE; } // '{'
-    if (b == 125) { return SH_TOK_RBRACE; } // '}'
-    if (b == 91) { return SH_TOK_LBRACKET; } // '['
-    if (b == 93) { return SH_TOK_RBRACKET; } // ']'
-    if (b == 44) { return SH_TOK_COMMA; } // ','
-    if (b == 59) { return SH_TOK_SEMICOLON; } // ';'
+    if (b == 40) { return ShTok.LParen; } // '('
+    if (b == 41) { return ShTok.RParen; } // ')'
+    if (b == 123) { return ShTok.LBrace; } // '{'
+    if (b == 125) { return ShTok.RBrace; } // '}'
+    if (b == 91) { return ShTok.LBracket; } // '['
+    if (b == 93) { return ShTok.RBracket; } // ']'
+    if (b == 44) { return ShTok.Comma; } // ','
+    if (b == 59) { return ShTok.Semicolon; } // ';'
 
     sh.lex_error_count = sh.lex_error_count + 1;
-    return SH_TOK_UNKNOWN;
+    return ShTok.Unknown;
 }

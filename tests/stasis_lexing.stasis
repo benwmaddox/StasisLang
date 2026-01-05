@@ -9,7 +9,7 @@ global t_path_sample: ascii[260];
 global t_path_unknown: ascii[260];
 
 global t_tmp: ascii[2048];
-global t_kinds: i32[128];
+global t_kinds: ShTok[128];
 
 function t_init_exe_dir(): bool {
     let n: i32 = sys_argv(0, t_argv0, 260);
@@ -47,7 +47,7 @@ function t_lex_file(path: ascii[]): i32 {
     let n: i32 = 0;
     for (n = 0; n < 128; n = n + 1) {
         t_kinds[n] = sh_lex_next_kind();
-        if (t_kinds[n] == SH_TOK_EOF) {
+        if (t_kinds[n] == ShTok.Eof) {
             return n + 1;
         }
     }
@@ -83,46 +83,46 @@ test `stasis lexer basic tokens`() {
         return false;
     }
 
-    if (t_kinds[0] != SH_TOK_GLOBAL_KEYWORD) { return false; }
-    if (t_kinds[1] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[2] != SH_TOK_COLON) { return false; }
-    if (t_kinds[3] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[4] != SH_TOK_SEMICOLON) { return false; }
+    if (t_kinds[0] != ShTok.GlobalKeyword) { return false; }
+    if (t_kinds[1] != ShTok.Identifier) { return false; }
+    if (t_kinds[2] != ShTok.Colon) { return false; }
+    if (t_kinds[3] != ShTok.Identifier) { return false; }
+    if (t_kinds[4] != ShTok.Semicolon) { return false; }
 
-    if (t_kinds[5] != SH_TOK_FUNCTION_KEYWORD) { return false; }
-    if (t_kinds[6] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[7] != SH_TOK_LPAREN) { return false; }
-    if (t_kinds[8] != SH_TOK_RPAREN) { return false; }
-    if (t_kinds[9] != SH_TOK_COLON) { return false; }
-    if (t_kinds[10] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[11] != SH_TOK_LBRACE) { return false; }
+    if (t_kinds[5] != ShTok.FunctionKeyword) { return false; }
+    if (t_kinds[6] != ShTok.Identifier) { return false; }
+    if (t_kinds[7] != ShTok.LParen) { return false; }
+    if (t_kinds[8] != ShTok.RParen) { return false; }
+    if (t_kinds[9] != ShTok.Colon) { return false; }
+    if (t_kinds[10] != ShTok.Identifier) { return false; }
+    if (t_kinds[11] != ShTok.LBrace) { return false; }
 
-    if (t_kinds[12] != SH_TOK_LET_KEYWORD) { return false; }
-    if (t_kinds[13] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[14] != SH_TOK_COLON) { return false; }
-    if (t_kinds[15] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[16] != SH_TOK_EQUAL) { return false; }
-    if (t_kinds[17] != SH_TOK_INTEGER_LITERAL) { return false; }
-    if (t_kinds[18] != SH_TOK_PLUS) { return false; }
-    if (t_kinds[19] != SH_TOK_INTEGER_LITERAL) { return false; }
-    if (t_kinds[20] != SH_TOK_STAR) { return false; }
-    if (t_kinds[21] != SH_TOK_INTEGER_LITERAL) { return false; }
-    if (t_kinds[22] != SH_TOK_SEMICOLON) { return false; }
+    if (t_kinds[12] != ShTok.LetKeyword) { return false; }
+    if (t_kinds[13] != ShTok.Identifier) { return false; }
+    if (t_kinds[14] != ShTok.Colon) { return false; }
+    if (t_kinds[15] != ShTok.Identifier) { return false; }
+    if (t_kinds[16] != ShTok.Equal) { return false; }
+    if (t_kinds[17] != ShTok.IntegerLiteral) { return false; }
+    if (t_kinds[18] != ShTok.Plus) { return false; }
+    if (t_kinds[19] != ShTok.IntegerLiteral) { return false; }
+    if (t_kinds[20] != ShTok.Star) { return false; }
+    if (t_kinds[21] != ShTok.IntegerLiteral) { return false; }
+    if (t_kinds[22] != ShTok.Semicolon) { return false; }
 
-    if (t_kinds[23] != SH_TOK_LET_KEYWORD) { return false; }
-    if (t_kinds[24] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[25] != SH_TOK_COLON) { return false; }
-    if (t_kinds[26] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[27] != SH_TOK_EQUAL) { return false; }
-    if (t_kinds[28] != SH_TOK_FLOAT_LITERAL) { return false; }
-    if (t_kinds[29] != SH_TOK_SEMICOLON) { return false; }
+    if (t_kinds[23] != ShTok.LetKeyword) { return false; }
+    if (t_kinds[24] != ShTok.Identifier) { return false; }
+    if (t_kinds[25] != ShTok.Colon) { return false; }
+    if (t_kinds[26] != ShTok.Identifier) { return false; }
+    if (t_kinds[27] != ShTok.Equal) { return false; }
+    if (t_kinds[28] != ShTok.FloatLiteral) { return false; }
+    if (t_kinds[29] != ShTok.Semicolon) { return false; }
 
-    if (t_kinds[30] != SH_TOK_RETURN_KEYWORD) { return false; }
-    if (t_kinds[31] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[32] != SH_TOK_SEMICOLON) { return false; }
+    if (t_kinds[30] != ShTok.ReturnKeyword) { return false; }
+    if (t_kinds[31] != ShTok.Identifier) { return false; }
+    if (t_kinds[32] != ShTok.Semicolon) { return false; }
 
-    if (t_kinds[33] != SH_TOK_RBRACE) { return false; }
-    if (t_kinds[34] != SH_TOK_EOF) { return false; }
+    if (t_kinds[33] != ShTok.RBrace) { return false; }
+    if (t_kinds[34] != ShTok.Eof) { return false; }
 
     return true;
 }
@@ -148,16 +148,16 @@ test `stasis lexer unknown char`() {
         return false;
     }
 
-    if (t_kinds[0] != SH_TOK_GLOBAL_KEYWORD) { return false; }
-    if (t_kinds[1] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[2] != SH_TOK_COLON) { return false; }
-    if (t_kinds[3] != SH_TOK_IDENTIFIER) { return false; }
-    if (t_kinds[4] != SH_TOK_EQUAL) { return false; }
-    if (t_kinds[5] != SH_TOK_INTEGER_LITERAL) { return false; }
-    if (t_kinds[6] != SH_TOK_UNKNOWN) { return false; }
-    if (t_kinds[7] != SH_TOK_INTEGER_LITERAL) { return false; }
-    if (t_kinds[8] != SH_TOK_SEMICOLON) { return false; }
-    if (t_kinds[9] != SH_TOK_EOF) { return false; }
+    if (t_kinds[0] != ShTok.GlobalKeyword) { return false; }
+    if (t_kinds[1] != ShTok.Identifier) { return false; }
+    if (t_kinds[2] != ShTok.Colon) { return false; }
+    if (t_kinds[3] != ShTok.Identifier) { return false; }
+    if (t_kinds[4] != ShTok.Equal) { return false; }
+    if (t_kinds[5] != ShTok.IntegerLiteral) { return false; }
+    if (t_kinds[6] != ShTok.Unknown) { return false; }
+    if (t_kinds[7] != ShTok.IntegerLiteral) { return false; }
+    if (t_kinds[8] != ShTok.Semicolon) { return false; }
+    if (t_kinds[9] != ShTok.Eof) { return false; }
 
     return true;
 }

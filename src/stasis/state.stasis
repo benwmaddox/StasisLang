@@ -4,6 +4,68 @@
 // needed by the program. This keeps memory layout deterministic and makes it
 // easy to reason about limits.
 
+// Token kinds (mirrors Stage0 TokenKind ordering).
+enum ShTok {
+    Eof = 0,
+    Unknown = 1,
+
+    Identifier = 2,
+    IntegerLiteral = 3,
+    FloatLiteral = 4,
+    StringLiteral = 5,
+    BacktickLiteral = 6,
+    TrueKeyword = 7,
+    FalseKeyword = 8,
+
+    StructKeyword = 9,
+    EnumKeyword = 10,
+    GlobalKeyword = 11,
+    ConstKeyword = 12,
+    FunctionKeyword = 13,
+    ExportKeyword = 14,
+    TestKeyword = 15,
+    ReturnKeyword = 16,
+    LetKeyword = 17,
+    IfKeyword = 18,
+    ElseKeyword = 19,
+    ForKeyword = 20,
+    ForeachKeyword = 21,
+    InKeyword = 22,
+
+    Dot = 23,
+    Plus = 24,
+    Minus = 25,
+    Star = 26,
+    Slash = 27,
+    Percent = 28,
+    PlusEqual = 29,
+    MinusEqual = 30,
+    StarEqual = 31,
+    SlashEqual = 32,
+    PercentEqual = 33,
+    AmpAmp = 34,
+    PipePipe = 35,
+    Less = 36,
+    LessEqual = 37,
+    Greater = 38,
+    GreaterEqual = 39,
+    Equal = 40,
+    EqualEqual = 41,
+    BangEqual = 42,
+    Colon = 43,
+    Bang = 44,
+    At = 45,
+
+    LParen = 46,
+    RParen = 47,
+    LBrace = 48,
+    RBrace = 49,
+    LBracket = 50,
+    RBracket = 51,
+    Comma = 52,
+    Semicolon = 53
+}
+
 struct ShFile {
     path_off: i32;
     path_len: i32;
@@ -58,7 +120,7 @@ struct ShState {
     tok_len: i32;
 
     // Parser (currently: balance check)
-    parse_stack_kind: i32[4096];
+    parse_stack_kind: ShTok[4096];
     parse_stack_start: i32[4096];
     parse_stack_len: i32;
     parse_path: ascii[260];
@@ -66,4 +128,3 @@ struct ShState {
 }
 
 global sh: ShState;
-

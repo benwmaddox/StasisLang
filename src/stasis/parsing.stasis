@@ -3,19 +3,19 @@ import "lexing.stasis";
 
 const SH_PARSE_STACK_CAP: i32 = 4096;
 
-function sh_parse_is_opener(k: i32): bool {
-    return k == SH_TOK_LPAREN || k == SH_TOK_LBRACE || k == SH_TOK_LBRACKET;
+function sh_parse_is_opener(k: ShTok): bool {
+    return k == ShTok.LParen || k == ShTok.LBrace || k == ShTok.LBracket;
 }
 
-function sh_parse_is_closer(k: i32): bool {
-    return k == SH_TOK_RPAREN || k == SH_TOK_RBRACE || k == SH_TOK_RBRACKET;
+function sh_parse_is_closer(k: ShTok): bool {
+    return k == ShTok.RParen || k == ShTok.RBrace || k == ShTok.RBracket;
 }
 
-function sh_parse_open_for_close(k: i32): i32 {
-    if (k == SH_TOK_RPAREN) { return SH_TOK_LPAREN; }
-    if (k == SH_TOK_RBRACE) { return SH_TOK_LBRACE; }
-    if (k == SH_TOK_RBRACKET) { return SH_TOK_LBRACKET; }
-    return -1;
+function sh_parse_open_for_close(k: ShTok): ShTok {
+    if (k == ShTok.RParen) { return ShTok.LParen; }
+    if (k == ShTok.RBrace) { return ShTok.LBrace; }
+    if (k == ShTok.RBracket) { return ShTok.LBracket; }
+    return ShTok.Unknown;
 }
 
 function sh_parse_print_err(file_idx: i32, msg: ascii[], at: i32): void {
@@ -51,8 +51,8 @@ function sh_parse_balance_file(file_idx: i32): i32 {
     let tok: i32 = 0;
     let done: i32 = 0;
     for (tok = 0; done == 0; tok = tok + 1) {
-        let k: i32 = sh_lex_next_kind();
-        if (k == SH_TOK_EOF) {
+        let k: ShTok = sh_lex_next_kind();
+        if (k == ShTok.Eof) {
             done = 1;
         } else {
 
@@ -71,8 +71,8 @@ function sh_parse_balance_file(file_idx: i32): i32 {
                         errors = errors + 1;
                         sh_parse_print_err(file_idx, "unexpected closing token", sh.tok_start);
                     } else {
-                        let expected_open: i32 = sh_parse_open_for_close(k);
-                        let open_k: i32 = sh.parse_stack_kind[sh.parse_stack_len - 1];
+                        let expected_open: ShTok = sh_parse_open_for_close(k);
+                        let open_k: ShTok = sh.parse_stack_kind[sh.parse_stack_len - 1];
                         if (open_k != expected_open) {
                             errors = errors + 1;
                             sh_parse_print_err(file_idx, "mismatched closing token", sh.tok_start);
