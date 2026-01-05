@@ -1,0 +1,33 @@
+import "../src/stdlib/stdlib.stasis";
+
+global argv0: utf8[1024];
+global read_buf: u8[4096];
+
+test `sys_argc and sys_argv work`() {
+    let argc: i32 = sys_argc();
+    if (argc < 1) {
+        return false;
+    }
+
+    let len: i32 = sys_argv(0, argv0, 1024);
+    if (len <= 0) {
+        return false;
+    }
+    utf8_set_len_ascii(argv0, len);
+    return true;
+}
+
+test `sys_file_exists and sys_read_file work`() {
+    if (!sys_file_exists("README.md")) {
+        return false;
+    }
+
+    let n: i32 = sys_read_file("README.md", read_buf, 4096);
+    return n > 0;
+}
+
+test `sys_file_mtime_ms returns a value`() {
+    let t: i32 = sys_file_mtime_ms("README.md");
+    return t >= 0;
+}
+
