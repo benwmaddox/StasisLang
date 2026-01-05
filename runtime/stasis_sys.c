@@ -210,6 +210,51 @@ int stasis_sys_file_exists(const char *path)
 #endif
 }
 
+int stasis_sys_file_size(const char *path)
+{
+    if (!path)
+    {
+        return -1;
+    }
+
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data))
+    {
+        return -1;
+    }
+
+    uint64_t size = ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
+    if (size > 0x7fffffffULL)
+    {
+        return 0x7fffffff;
+    }
+    return (int)size;
+#else
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0)
+    {
+        fclose(f);
+        return -1;
+    }
+    long size = ftell(f);
+    fclose(f);
+    if (size < 0)
+    {
+        return -1;
+    }
+    if ((uint64_t)size > 0x7fffffffULL)
+    {
+        return 0x7fffffff;
+    }
+    return (int)size;
+#endif
+}
+
 int stasis_sys_file_mtime_ms(const char *path)
 {
     if (!path)
@@ -254,4 +299,3 @@ int stasis_sys_exec(const char *command)
     }
     return system(command);
 }
-
