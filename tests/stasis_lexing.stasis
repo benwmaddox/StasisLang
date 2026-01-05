@@ -1,0 +1,164 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stasis/imports.stasis";
+import "../src/stasis/lexing.stasis";
+
+global t_argv0: ascii[260];
+global t_exe_dir: ascii[260];
+
+global t_path_sample: ascii[260];
+global t_path_unknown: ascii[260];
+
+global t_tmp: ascii[2048];
+global t_kinds: i32[128];
+
+function t_init_exe_dir(): bool {
+    let n: i32 = sys_argv(0, t_argv0, 260);
+    if (n <= 0) {
+        return false;
+    }
+    ascii_set_len(t_argv0, n);
+    sh_path_dirname(t_exe_dir, t_argv0);
+    return !ascii_is_empty(t_exe_dir);
+}
+
+function t_append_line(buf: ascii[], text: ascii[]): void {
+    ascii_append(buf, text);
+    ascii_append_byte(buf, 10);
+}
+
+function t_write_ascii(path: ascii[], text: ascii[]): bool {
+    return sys_write_file(path, text, ascii_len(text));
+}
+
+function t_lex_file(path: ascii[]): i32 {
+    let rc: i32 = sh_load_graph(path);
+    if (rc != 0) {
+        return -1;
+    }
+
+    let idx: i32 = sh_find_file(path);
+    if (idx < 0) {
+        return -1;
+    }
+    if (!sh_lex_begin(idx)) {
+        return -1;
+    }
+
+    let n: i32 = 0;
+    for (n = 0; n < 128; n = n + 1) {
+        t_kinds[n] = sh_lex_next_kind();
+        if (t_kinds[n] == SH_TOK_EOF) {
+            return n + 1;
+        }
+    }
+    return -1;
+}
+
+test `stasis lexer basic tokens`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path_sample, t_exe_dir, "sh_lex_sample.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "global x: i32;");
+    t_append_line(t_tmp, "function f(): i32 {");
+    t_append_line(t_tmp, "  let y: i32 = 1 + 2*3;");
+    t_append_line(t_tmp, "  // line comment");
+    t_append_line(t_tmp, "  /* block comment");
+    t_append_line(t_tmp, "     continues */");
+    t_append_line(t_tmp, "  let z: f32 = 1.25;");
+    t_append_line(t_tmp, "  return y;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path_sample, t_tmp)) {
+        return false;
+    }
+
+    let n: i32 = t_lex_file(t_path_sample);
+    if (n != 35) {
+        return false;
+    }
+    if (sh_lex_error_count != 0) {
+        return false;
+    }
+
+    if (t_kinds[0] != SH_TOK_GLOBAL_KEYWORD) { return false; }
+    if (t_kinds[1] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[2] != SH_TOK_COLON) { return false; }
+    if (t_kinds[3] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[4] != SH_TOK_SEMICOLON) { return false; }
+
+    if (t_kinds[5] != SH_TOK_FUNCTION_KEYWORD) { return false; }
+    if (t_kinds[6] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[7] != SH_TOK_LPAREN) { return false; }
+    if (t_kinds[8] != SH_TOK_RPAREN) { return false; }
+    if (t_kinds[9] != SH_TOK_COLON) { return false; }
+    if (t_kinds[10] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[11] != SH_TOK_LBRACE) { return false; }
+
+    if (t_kinds[12] != SH_TOK_LET_KEYWORD) { return false; }
+    if (t_kinds[13] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[14] != SH_TOK_COLON) { return false; }
+    if (t_kinds[15] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[16] != SH_TOK_EQUAL) { return false; }
+    if (t_kinds[17] != SH_TOK_INTEGER_LITERAL) { return false; }
+    if (t_kinds[18] != SH_TOK_PLUS) { return false; }
+    if (t_kinds[19] != SH_TOK_INTEGER_LITERAL) { return false; }
+    if (t_kinds[20] != SH_TOK_STAR) { return false; }
+    if (t_kinds[21] != SH_TOK_INTEGER_LITERAL) { return false; }
+    if (t_kinds[22] != SH_TOK_SEMICOLON) { return false; }
+
+    if (t_kinds[23] != SH_TOK_LET_KEYWORD) { return false; }
+    if (t_kinds[24] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[25] != SH_TOK_COLON) { return false; }
+    if (t_kinds[26] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[27] != SH_TOK_EQUAL) { return false; }
+    if (t_kinds[28] != SH_TOK_FLOAT_LITERAL) { return false; }
+    if (t_kinds[29] != SH_TOK_SEMICOLON) { return false; }
+
+    if (t_kinds[30] != SH_TOK_RETURN_KEYWORD) { return false; }
+    if (t_kinds[31] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[32] != SH_TOK_SEMICOLON) { return false; }
+
+    if (t_kinds[33] != SH_TOK_RBRACE) { return false; }
+    if (t_kinds[34] != SH_TOK_EOF) { return false; }
+
+    return true;
+}
+
+test `stasis lexer unknown char`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path_unknown, t_exe_dir, "sh_lex_unknown.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "global x: i32 = 1 & 2;");
+    if (!t_write_ascii(t_path_unknown, t_tmp)) {
+        return false;
+    }
+
+    let n: i32 = t_lex_file(t_path_unknown);
+    if (n <= 0) {
+        return false;
+    }
+    if (sh_lex_error_count != 1) {
+        return false;
+    }
+
+    if (t_kinds[0] != SH_TOK_GLOBAL_KEYWORD) { return false; }
+    if (t_kinds[1] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[2] != SH_TOK_COLON) { return false; }
+    if (t_kinds[3] != SH_TOK_IDENTIFIER) { return false; }
+    if (t_kinds[4] != SH_TOK_EQUAL) { return false; }
+    if (t_kinds[5] != SH_TOK_INTEGER_LITERAL) { return false; }
+    if (t_kinds[6] != SH_TOK_UNKNOWN) { return false; }
+    if (t_kinds[7] != SH_TOK_INTEGER_LITERAL) { return false; }
+    if (t_kinds[8] != SH_TOK_SEMICOLON) { return false; }
+    if (t_kinds[9] != SH_TOK_EOF) { return false; }
+
+    return true;
+}
+

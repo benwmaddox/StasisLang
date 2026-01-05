@@ -226,3 +226,5 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: implemented import graph loading (300 files / 50 KiB limits) and fixed Cranelift `print_string` to accept array/string args.
 - 2026-01-05: added `tests/stasis_imports.stasis` coverage for import graph loading + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasis under LLVM).
 - 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasis watch check` based on `sys_file_mtime_ms`.
+- 2026-01-05: added `src/stasis/lexing.stasis` streaming lexer + `tests/stasis_lexing.stasis` coverage (comments, numbers, keywords, punctuation).
+- 2026-01-05: fixed LLVM lowering for nested short-circuit `&&`/`||` so verifier passes when RHS emits control flow.
