@@ -477,8 +477,11 @@ Global arrays of struct references become SoA automatically.
 
 # **11. Modules**
 
-- File = Module
-- All top-level declarations are visible by filename-level import through `import "file.stasis";`
+- File = Module.
+- `import "relative/path/to/file.stasis";` adds that file's module to the build (no textual expansion required).
+- Imports introduce modules; later references can be qualified as `module_name.symbol`.
+  - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
+  - Duplicate module names are an error (use an aliasing form once added).
 - Compiled via signature-first pass, then tree shaking.
 
 ---

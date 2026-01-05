@@ -69,11 +69,19 @@ This keeps the scope to "frontend + textual IR emit" while retaining current cod
 The compiler operates on a "source graph":
 
 - Each file is loaded once into a fixed-capacity byte pool.
-- A file table records `(path, offset, len, mtime_ms)` for all files in the build.
+- A file table records `(module, path, offset, len, mtime_ms)` for all files in the build.
 - Imports are scanned from each loaded file; newly discovered files are appended to the table and scanned in turn.
 - Later passes (lexer/parser/sema/codegen) iterate the file table; no pass requires a single concatenated source blob.
 
 This matches the user-facing intent: "just reference other files" rather than expanding imports into one file.
+
+## Modules (Imports Introduce Modules)
+
+Each imported file is treated as a module.
+
+- Module name is derived from the imported file basename (strip extension, map `-` and other non-identifier bytes to `_`).
+- Duplicate module names are rejected (fail-fast with a clear diagnostic); aliasing will be added if we need it.
+- The frontend will resolve `ModuleName.symbol` as a module-member reference during semantic analysis.
 
 ## Iteration First (Avoid Recursion Where Possible)
 
@@ -229,3 +237,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `src/stasis/lexing.stasis` streaming lexer + `tests/stasis_lexing.stasis` coverage (comments, numbers, keywords, punctuation).
 - 2026-01-05: fixed LLVM lowering for nested short-circuit `&&`/`||` so verifier passes when RHS emits control flow.
 - 2026-01-05: added `src/stasis/parsing.stasis` minimal parse pass (balance check) + `tests/stasis_parsing.stasis`; wired `stasis check` to run lexer+parse across the loaded source graph.
+- 2026-01-05: imports now assign a deterministic module name per file (derived from basename) and reject duplicate module names.
