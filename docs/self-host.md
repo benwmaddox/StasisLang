@@ -14,6 +14,63 @@ This is a living design + progress document for the `self-host` branch.
   - LLVM IR text (executed via `lli` when possible, else `clang` link).
 - Remains deterministic: static memory only; explicit I/O; no hidden allocation.
 
+## CLI Contract (Target)
+
+Initial deliverables should keep the CLI small but stable. The intent is to match `stasis` behavior over time.
+
+Commands (final shape; implemented incrementally):
+
+- `stasisc-self expand <entry.stasis> <out.stasis>`
+  - Expands imports into a single file (duplicate imports removed).
+  - Enforces file/count limits early, before parsing.
+- `stasisc-self check <entry.stasis> [--backend cranelift|llvm]`
+  - Parses + semantics only (fast feedback, no codegen), later used by `watch`.
+- `stasisc-self build <entry.stasis> -o <out.exe|out.wasm> [--backend ...] [--release]`
+- `stasisc-self run <entry.stasis> [--backend ...] [--] <args...>`
+  - Build to a temp output then exec it; preserves exit code.
+- `stasisc-self test [path-or-glob] [--backend ...]`
+  - Discovers `.stasis` files; runs in-file `test` blocks; prints per-file timings.
+- `stasisc-self watch (check|build|run|test) ...`
+  - Polling-based watch loop first (mtime); event-based later.
+
+Notes:
+- Stasis has no dynamic allocation; CLI parsing uses fixed buffers and simple tokenization.
+- We keep path handling ASCII-first (Windows-friendly), but treat data as bytes on disk.
+
+## Backend Strategy (No Reimplementation of LLVM/Cranelift)
+
+The self-hosted compiler does not embed LLVM/Cranelift libraries.
+
+- Cranelift:
+  - Emit CLIF text compatible with the existing Rust tool `tools/cranelift-aot`.
+  - Invoke `stasis-cranelift-aot` via `sys_exec()` to produce a `.obj`, then link with `clang`.
+- LLVM:
+  - Emit LLVM IR text.
+  - If IR contains only libc intrinsics, `lli` can execute directly.
+  - If IR requires external runtime libs (for example `stasis_sys_*`), skip `lli` and go straight to `clang` link + execute.
+
+This keeps the scope to "frontend + textual IR emit" while retaining current codegen toolchains.
+
+## Fixed Memory Budgets (Static)
+
+Hard limits (per compilation):
+
+- Max files: 300
+- Max bytes per file: 51200 (50 KiB)
+- Max total source bytes: 300 * 51200 = 15360000
+
+Planned static allocations in `stasisc-self` (tunable as we learn real-world pressure):
+
+- Source pool: ~16 MiB (all expanded file contents, null-sentinels between files)
+- Expanded output buffer (for `expand` and for "single-file parse" bootstrap): ~16 MiB
+- Token buffer: fixed array sized for worst-case token density
+  - Conservative estimate: 1 token per 2 bytes -> ~8 million tokens is too large; use a smaller cap and fail with a diagnostic if exceeded.
+  - First implementation will target common code sizes and adjust once we have lexer metrics.
+- AST storage: arena-like arrays (nodes + edges) with fixed caps; fail with a diagnostic when exceeded.
+- Symbol/type tables: fixed arrays + simple string interner into a byte pool.
+
+All "out of memory" failures must name the pool/cap and the source span or file that caused it.
+
 ## Bootstrap Strategy
 
 Stage 0 (today): C# toolchain compiles `stasisc_self` (the Stasis compiler) so we can iterate.
@@ -58,6 +115,11 @@ This milestone includes:
 - Read a single `.stasis` file into a fixed buffer
 - Implement import expansion (up to 300 files, 50 KiB each)
 - Emit "phase timing" logs similar to the C# CLI (optional but useful for watch)
+
+Implementation notes:
+- Import expansion should preserve ordering (inline at first import site) and ignore duplicates (per `docs/spec.md` "Imports").
+- Import expansion should be implemented without recursion-dependent buffers (store file contents in a stable global pool).
+- First CLI command should be `expand` so later stages can reuse the "expanded single-file view" for lexer/parser bring-up.
 
 ### M2: Lexer (Stasis)
 
