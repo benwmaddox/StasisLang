@@ -28,6 +28,11 @@ test `sys_file_exists and sys_read_file work`() {
         return false;
     }
 
+    let size: i32 = sys_file_size(argv0);
+    if (size <= 0) {
+        return false;
+    }
+
     let n: i32 = sys_read_file(argv0, read_buf, 4096);
     return n > 0;
 }
