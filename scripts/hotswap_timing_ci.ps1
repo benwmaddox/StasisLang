@@ -36,15 +36,34 @@ $env:STASIS_HOTSWAP_KEEP_OLD = "1"
 New-Item -ItemType Directory -Force (Join-Path $root "build") | Out-Null
 Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 
+function Show-LogTail([string]$label, [string]$path) {
+    if (Test-Path $path) {
+        $info = Get-Item $path
+        Write-Host ("{0} size: {1} bytes" -f $label, $info.Length)
+        Get-Content $path | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host ("{0} log missing." -f $label)
+    }
+}
+
+function Fail([string]$message) {
+    Write-Host $message
+    Show-LogTail "ERR" $errLog
+    Show-LogTail "OUT" $outLog
+    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+    exit 1
+}
+
 Write-Host ("Runner: {0}" -f $runnerExe)
 if (Test-Path $aotTool) {
     Write-Host ("AOT: {0}" -f $aotTool)
 }
 Write-Host ("Sample: {0}" -f $sample)
 
-$cmd = Join-Path $root "stasis.bat"
-$args = @("run", $sample, "--backend", "cranelift", "--watch", "--fps", "30")
-$proc = Start-Process -FilePath $cmd -ArgumentList $args -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+$cliProject = Join-Path $root "Stasis.Cli\Stasis.Cli.csproj"
+$cmd = "dotnet"
+$args = @("run", "--no-build", "--configuration", "Release", "--project", $cliProject, "--", "run", $sample, "--backend", "cranelift", "--watch", "--fps", "30")
+$proc = Start-Process -FilePath $cmd -ArgumentList $args -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 Write-Host ("Started stasis: pid={0}" -f $proc.Id)
 
 function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
@@ -71,41 +90,10 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
 }
 
 if (-not (Wait-ForHotreload 300 $proc)) {
-    Write-Error "Timed out waiting for HOTRELOAD output. See $errLog."
-    if (Test-Path $errLog) {
-        $errInfo = Get-Item $errLog
-        Write-Host ("ERR size: {0} bytes" -f $errInfo.Length)
-        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "ERR log missing."
-    }
-    if (Test-Path $outLog) {
-        $outInfo = Get-Item $outLog
-        Write-Host ("OUT size: {0} bytes" -f $outInfo.Length)
-        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "OUT log missing."
-    }
-    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-    exit 1
+    Fail "Timed out waiting for HOTRELOAD output."
 }
 if ($proc.HasExited) {
-    Write-Error ("stasis run exited before producing HOTRELOAD output (exit={0}). See $errLog." -f $proc.ExitCode)
-    if (Test-Path $errLog) {
-        $errInfo = Get-Item $errLog
-        Write-Host ("ERR size: {0} bytes" -f $errInfo.Length)
-        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "ERR log missing."
-    }
-    if (Test-Path $outLog) {
-        $outInfo = Get-Item $outLog
-        Write-Host ("OUT size: {0} bytes" -f $outInfo.Length)
-        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "OUT log missing."
-    }
-    exit 1
+    Fail ("stasis run exited before producing HOTRELOAD output (exit={0})." -f $proc.ExitCode)
 }
 for ($i = 0; $i -lt 5; $i++) {
     (Get-Item $sample).LastWriteTime = Get-Date
@@ -140,40 +128,10 @@ foreach ($line in $errLines) {
 }
 
 if ($swaps.Count -eq 0) {
-    Write-Error "No HOTSWAP timings captured. See $errLog."
-    if (Test-Path $errLog) {
-        $errInfo = Get-Item $errLog
-        Write-Host ("ERR size: {0} bytes" -f $errInfo.Length)
-        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "ERR log missing."
-    }
-    if (Test-Path $outLog) {
-        $outInfo = Get-Item $outLog
-        Write-Host ("OUT size: {0} bytes" -f $outInfo.Length)
-        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "OUT log missing."
-    }
-    exit 1
+    Fail "No HOTSWAP timings captured."
 }
 if ($layoutWarnings.Count -gt 0) {
-    Write-Error "State layout warning detected during hot-swap (this is treated as a failure). See $errLog."
-    if (Test-Path $errLog) {
-        $errInfo = Get-Item $errLog
-        Write-Host ("ERR size: {0} bytes" -f $errInfo.Length)
-        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "ERR log missing."
-    }
-    if (Test-Path $outLog) {
-        $outInfo = Get-Item $outLog
-        Write-Host ("OUT size: {0} bytes" -f $outInfo.Length)
-        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "OUT log missing."
-    }
-    exit 1
+    Fail "State layout warning detected during hot-swap (this is treated as a failure)."
 }
 
 function Summarize([string]$label, [int[]]$values, [string]$unit) {
