@@ -107,27 +107,39 @@ if (-not $proc.HasExited) {
 }
 Start-Sleep -Milliseconds 500
 
-$errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
-$layoutWarnings = $errLines | Where-Object { $_ -match "^HOTSWAP warning: state layout changed" }
-$reloads = @()
-$swaps = @()
-foreach ($line in $errLines) {
-    if ($line -match "HOTRELOAD phases\\(ms\\):") {
-        $fields = @{}
-        $parts = $line -replace ".*HOTRELOAD phases\\(ms\\):\\s*", "" -split "\\s+"
-        foreach ($p in $parts) {
-            if ($p -match "^(\\w+)=([0-9]+)$") { $fields[$matches[1]] = [int]$matches[2] }
-        }
-        if ($fields.ContainsKey("total")) { $reloads += $fields }
-    } elseif ($line -match "HOTSWAP ok:") {
-        $fields = @{}
-        $parts = $line -replace ".*HOTSWAP ok:\\s*", "" -split "\\s+"
-        foreach ($p in $parts) {
-            if ($p -match "^(\\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
-        }
-        if ($fields.ContainsKey("load")) { $swaps += $fields }
-    }
+if (Test-Path $errLog) {
+    $errLines = Get-Content $errLog
+} else {
+    $errLines = @()
 }
+$parseAttempts = 0
+do {
+    $parseAttempts++
+    $layoutWarnings = $errLines | Where-Object { $_ -match "^HOTSWAP warning: state layout changed" }
+    $reloads = @()
+    $swaps = @()
+    foreach ($line in $errLines) {
+        if ($line -match "HOTRELOAD phases\\(ms\\):") {
+            $fields = @{}
+            $parts = $line -replace ".*HOTRELOAD phases\\(ms\\):\\s*", "" -split "\\s+"
+            foreach ($p in $parts) {
+                if ($p -match "^(\\w+)=([0-9]+)$") { $fields[$matches[1]] = [int]$matches[2] }
+            }
+            if ($fields.ContainsKey("total")) { $reloads += $fields }
+        } elseif ($line -match "HOTSWAP ok:") {
+            $fields = @{}
+            $parts = $line -replace ".*HOTSWAP ok:\\s*", "" -split "\\s+"
+            foreach ($p in $parts) {
+                if ($p -match "^(\\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+            }
+            if ($fields.ContainsKey("load")) { $swaps += $fields }
+        }
+    }
+    if ($swaps.Count -eq 0 -and $parseAttempts -lt 5) {
+        Start-Sleep -Seconds 2
+        $errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
+    }
+} while ($swaps.Count -eq 0 -and $parseAttempts -lt 5)
 
 if ($swaps.Count -eq 0) {
     Fail "No HOTSWAP timings captured."
