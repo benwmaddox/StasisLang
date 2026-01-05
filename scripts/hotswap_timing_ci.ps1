@@ -102,6 +102,7 @@ if (-not (Wait-ForLine "HOTSWAP ok:" 120 $proc)) {
     Fail "Timed out waiting for HOTSWAP output."
 }
 
+Start-Sleep -Seconds 5
 if (-not $proc.HasExited) {
     Stop-Process -Id $proc.Id -Force
 }
