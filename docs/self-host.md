@@ -70,6 +70,7 @@ Build prerequisites:
 
 3) Run the currently-implemented command:
 - `.\build\stasisc-self.exe expand <entry.stasis> <out.stasis>`
+- `.\build\stasisc-self.exe watch expand <entry.stasis> <out.stasis>` (polling watch; rebuilds on mtime changes)
 
 Notes:
 - Stage0 `stasisc run` does not currently forward argv to programs; build the EXE and run it directly.
@@ -191,3 +192,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
 - 2026-01-05: implemented `stasisc-self expand <entry> <out>` import expansion with the 300 file / 50 KiB limits; fixed Cranelift `print_string` to accept array/string args.
 - 2026-01-05: added `tests/stasisc_self_imports.stasis` coverage for import expansion + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasisc-self under LLVM).
+- 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasisc-self watch expand` based on `sys_file_mtime_ms`.
