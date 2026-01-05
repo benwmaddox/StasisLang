@@ -967,6 +967,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_file_size" => true,
             "sys_file_mtime_ms" => true,
             "sys_exec" => true,
+            "sys_sleep_ms" => true,
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
@@ -1197,6 +1198,19 @@ public sealed class CraneliftFunctionBuilder
         return call;
     }
 
+    private string LowerSysSleepMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_sleep_ms", "sys_sleep_ms expects (ms: i32).");
+        }
+
+        var ms = LowerExpression(arguments[0]);
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_sleep_ms({ms})");
+        return call;
+    }
+
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 
     private string LowerBuiltinCall(string funcName, IReadOnlyList<ExpressionSyntax> arguments)
@@ -1239,6 +1253,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSysFileMtimeMs(arguments);
             case "sys_exec":
                 return LowerSysExec(arguments);
+            case "sys_sleep_ms":
+                return LowerSysSleepMs(arguments);
             case "time":
                 return LowerTime(arguments);
             case "get_time_ms":

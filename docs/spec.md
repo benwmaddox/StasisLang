@@ -164,6 +164,7 @@ These are host-provided helpers intended for tooling and self-hosted programs (c
 - `sys_file_size(path: utf8[N]) -> i32` (returns bytes, `-1` on failure)
 - `sys_file_mtime_ms(path: utf8[N]) -> i32` (returns ms since epoch on supported hosts, `-1` on failure)
 - `sys_exec(command: utf8[N]) -> i32` (process exit code)
+- `sys_sleep_ms(ms: i32) -> i32` (returns 0; used by polling `watch` loops)
 
 ### Imports
 

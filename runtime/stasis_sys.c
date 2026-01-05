@@ -6,6 +6,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #ifndef STASIS_SYS_MAX_ARGS
@@ -298,4 +300,20 @@ int stasis_sys_exec(const char *command)
         return 1;
     }
     return system(command);
+}
+
+int stasis_sys_sleep_ms(int ms)
+{
+    if (ms <= 0)
+    {
+        return 0;
+    }
+
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+    return 0;
+#else
+    usleep((useconds_t)ms * 1000U);
+    return 0;
+#endif
 }

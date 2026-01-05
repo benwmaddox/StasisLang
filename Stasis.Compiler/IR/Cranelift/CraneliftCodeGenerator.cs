@@ -189,6 +189,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             );
         }
 
+        if (builtins.Contains("sys_sleep_ms"))
+        {
+            builder.DeclareExternal("stasis_sys_sleep_ms", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32 // ms
+            );
+        }
+
         if (builtins.Contains("time"))
         {
             // time(tloc: *i64) -> i64

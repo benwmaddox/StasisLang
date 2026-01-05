@@ -1212,6 +1212,7 @@ public sealed class ModuleLowerer
             "sys_file_size",
             "sys_file_mtime_ms",
             "sys_exec",
+            "sys_sleep_ms",
 
             // Legacy math (to be renamed)
             "sin",
@@ -2539,6 +2540,24 @@ public sealed class ModuleLowerer
 
                         var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_exec.cmd");
                         return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_exec.call");
+                    }
+
+                case "sys_sleep_ms":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_sleep_ms expects (ms: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var ms = LowerExpression(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_sleep_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.Int32 }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_sleep_ms", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { ms }, "sys_sleep_ms.call");
                     }
                 case "sin":
                 case "cos":
