@@ -89,6 +89,28 @@ function Wait-ForLine([string]$pattern, [int]$timeoutSeconds, [Diagnostics.Proce
     return $false
 }
 
+function Wait-ForLogStable([string]$path, [int]$timeoutSeconds) {
+    if (-not (Test-Path $path)) {
+        return
+    }
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $lastSize = -1
+    $stableCount = 0
+    while ((Get-Date) -lt $deadline) {
+        $size = (Get-Item $path).Length
+        if ($size -eq $lastSize) {
+            $stableCount++
+            if ($stableCount -ge 2) {
+                return
+            }
+        } else {
+            $stableCount = 0
+            $lastSize = $size
+        }
+        Start-Sleep -Seconds 1
+    }
+}
+
 Start-Sleep -Seconds 30
 if ($proc.HasExited) {
     Fail ("stasis run exited before swap triggers (exit={0})." -f $proc.ExitCode)
@@ -106,7 +128,7 @@ Start-Sleep -Seconds 5
 if (-not $proc.HasExited) {
     Stop-Process -Id $proc.Id -Force
 }
-Start-Sleep -Milliseconds 500
+Wait-ForLogStable $errLog 10
 
 if (Test-Path $errLog) {
     $errLines = Get-Content $errLog
