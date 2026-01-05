@@ -1508,8 +1508,10 @@ public sealed class CraneliftFunctionBuilder
             return err;
         }
 
-        // Get the string value to print (pointer)
-        var value = LowerExpression(arguments[0]);
+        if (!TryGetStringArg(arguments[0], out var value))
+        {
+            return EmitInvalidBuiltin("print_string", "print_string expects (value: string).");
+        }
 
         // Get format string "%s"
         var formatGlobalName = GetOrCreateFormatString("%s");
