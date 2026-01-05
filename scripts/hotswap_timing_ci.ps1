@@ -165,7 +165,24 @@ do {
 } while ($swaps.Count -eq 0 -and $parseAttempts -lt 5)
 
 if ($swaps.Count -eq 0) {
-    Fail "No HOTSWAP timings captured."
+    if (Test-Path $errLog) {
+        $raw = Get-Content $errLog -Raw
+        $rawMatches = [regex]::Matches($raw, "HOTSWAP ok:[^\r\n]*")
+        if ($rawMatches.Count -gt 0) {
+            $swaps = @()
+            foreach ($m in $rawMatches) {
+                $fields = @{}
+                $parts = $m.Value -replace ".*HOTSWAP ok:\\s*", "" -split "\\s+"
+                foreach ($p in $parts) {
+                    if ($p -match "^(\\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+                }
+                if ($fields.ContainsKey("load")) { $swaps += $fields }
+            }
+        }
+    }
+    if ($swaps.Count -eq 0) {
+        Fail "No HOTSWAP timings captured."
+    }
 }
 if ($layoutWarnings.Count -gt 0) {
     Write-Host "State layout warning detected during hot-swap (continuing to report timings)."
