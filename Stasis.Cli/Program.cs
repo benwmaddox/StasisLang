@@ -1076,6 +1076,12 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         }
     }
 
+    var sysLibPath = FindSysLibrary();
+    if (!string.IsNullOrEmpty(sysLibPath))
+    {
+        args.Add($"\"{sysLibPath}\"");
+    }
+
     if (isDll)
     {
         var exportName = entryName ?? (isTest ? "run_tests" : "main");
@@ -1306,8 +1312,8 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
         });
     }
 
-    // lli doesn't support external libraries easily, so use clang when graphics is enabled
-    if (!enableGraphics && TryFindTool("lli", out var llvmInterpreter))
+    // lli doesn't support external libraries easily, so use clang when graphics is enabled (or sys runtime is referenced).
+    if (!enableGraphics && !LlvmIrUsesSysRuntime(llPath) && TryFindTool("lli", out var llvmInterpreter))
     {
         return ExecuteWithLlvmInterpreter(llvmInterpreter, mode, llPath, optLevel, enableLto, enableGraphics, graphicsLibPath);
     }
@@ -1359,6 +1365,28 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 
     Console.Error.WriteLine("error: neither lli nor clang found. Install LLVM or add to PATH.");
     return 1;
+}
+
+static bool LlvmIrUsesSysRuntime(string llPath)
+{
+    try
+    {
+        using var reader = new StreamReader(llPath);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Contains("stasis_sys_", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+    }
+    catch
+    {
+        // Best-effort heuristic: if we can't read the IR, fall back to the existing behavior.
+    }
+
+    return false;
 }
 
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null)
@@ -1443,6 +1471,12 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
         {
             Console.Error.WriteLine("warning: --graphics specified but stasis_graphics library not found. Build runtime/stasis_graphics.c first.");
         }
+    }
+
+    var sysLibPath = FindSysLibrary();
+    if (!string.IsNullOrEmpty(sysLibPath))
+    {
+        args.Add($"\"{sysLibPath}\"");
     }
 
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -1949,6 +1983,38 @@ static string? FindGraphicsLibrary(bool preferShared = false)
     }
 
     return FindFirstCandidate(searchPaths, fallbackCandidates);
+}
+
+static string? FindSysLibrary()
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_SYS_LIB");
+    if (!string.IsNullOrEmpty(env) && File.Exists(env))
+    {
+        return env;
+    }
+
+    var searchPaths = new List<string>();
+
+    // Check relative to the CLI executable
+    var exeDir = AppContext.BaseDirectory;
+    searchPaths.Add(exeDir);
+    searchPaths.Add(Path.Combine(exeDir, "runtime"));
+
+    // Prefer workspace runtime outputs before falling back to cwd root
+    var cwd = Directory.GetCurrentDirectory();
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
+    searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(Path.Combine(cwd, "build"));
+    searchPaths.Add(cwd);
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        return FindFirstCandidate(searchPaths, new[] { "stasis_sys_static.lib" });
+    }
+
+    return FindFirstCandidate(searchPaths, new[] { "libstasis_sys_static.a" });
 }
 
 static string? FindFirstCandidate(IEnumerable<string> searchPaths, IEnumerable<string> candidates)
