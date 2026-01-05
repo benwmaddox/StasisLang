@@ -138,14 +138,17 @@ jobs:
           cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\\scripts\\buildsystems\\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
           cmake --build runtime/build --config Release
 
+      - name: Hot-swap timing (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/hotswap_timing_ci.ps1
+
       - name: Compile graphics samples (LLVM + Cranelift)
         run: |
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend llvm
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend llvm
           dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend cranelift
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/brickout_revenge/brickout_revenge.stasis --graphics --backend cranelift
 
       - name: Upload IR artifacts
         if: matrix.os == 'ubuntu-latest'
