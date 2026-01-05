@@ -1,0 +1,102 @@
+import "lexing.stasis";
+
+const SH_PARSE_STACK_CAP: i32 = 4096;
+
+global sh_parse_stack_kind: i32[4096];
+global sh_parse_stack_start: i32[4096];
+global sh_parse_stack_len: i32;
+
+global sh_parse_path: ascii[260];
+
+// When set to 1, suppresses error prints for expected failures (useful in tests).
+global sh_parse_quiet: i32;
+
+function sh_parse_is_opener(k: i32): bool {
+    return k == SH_TOK_LPAREN || k == SH_TOK_LBRACE || k == SH_TOK_LBRACKET;
+}
+
+function sh_parse_is_closer(k: i32): bool {
+    return k == SH_TOK_RPAREN || k == SH_TOK_RBRACE || k == SH_TOK_RBRACKET;
+}
+
+function sh_parse_open_for_close(k: i32): i32 {
+    if (k == SH_TOK_RPAREN) { return SH_TOK_LPAREN; }
+    if (k == SH_TOK_RBRACE) { return SH_TOK_LBRACE; }
+    if (k == SH_TOK_RBRACKET) { return SH_TOK_LBRACKET; }
+    return -1;
+}
+
+function sh_parse_print_err(file_idx: i32, msg: ascii[], at: i32): void {
+    if (sh_parse_quiet != 0) {
+        return;
+    }
+
+    if (!sh_copy_file_path(sh_parse_path, file_idx)) {
+        ascii_copy(sh_parse_path, "<unknown>");
+    }
+
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    print_string(sh_parse_path);
+    print_char(58); // ':'
+    print_int(at);
+    print_char(10);
+}
+
+// Minimal parsing pass: bracket/paren/brace balance check.
+// Returns the number of parse errors for this file (lex errors are tracked in sh_lex_error_count).
+function sh_parse_balance_file(file_idx: i32): i32 {
+    sh_parse_stack_len = 0;
+
+    if (!sh_lex_begin(file_idx)) {
+        sh_parse_print_err(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+
+    let errors: i32 = 0;
+
+    let tok: i32 = 0;
+    let done: i32 = 0;
+    for (tok = 0; done == 0; tok = tok + 1) {
+        let k: i32 = sh_lex_next_kind();
+        if (k == SH_TOK_EOF) {
+            done = 1;
+        } else {
+
+            if (sh_parse_is_opener(k)) {
+                if (sh_parse_stack_len >= SH_PARSE_STACK_CAP) {
+                    errors = errors + 1;
+                    sh_parse_print_err(file_idx, "parse stack overflow", sh_tok_start);
+                } else {
+                    sh_parse_stack_kind[sh_parse_stack_len] = k;
+                    sh_parse_stack_start[sh_parse_stack_len] = sh_tok_start;
+                    sh_parse_stack_len = sh_parse_stack_len + 1;
+                }
+            } else {
+                if (sh_parse_is_closer(k)) {
+                    if (sh_parse_stack_len <= 0) {
+                        errors = errors + 1;
+                        sh_parse_print_err(file_idx, "unexpected closing token", sh_tok_start);
+                    } else {
+                        let expected_open: i32 = sh_parse_open_for_close(k);
+                        let open_k: i32 = sh_parse_stack_kind[sh_parse_stack_len - 1];
+                        if (open_k != expected_open) {
+                            errors = errors + 1;
+                            sh_parse_print_err(file_idx, "mismatched closing token", sh_tok_start);
+                        } else {
+                            sh_parse_stack_len = sh_parse_stack_len - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (sh_parse_stack_len != 0) {
+        errors = errors + 1;
+        sh_parse_print_err(file_idx, "unclosed token", sh_parse_stack_start[sh_parse_stack_len - 1]);
+    }
+
+    return errors;
+}

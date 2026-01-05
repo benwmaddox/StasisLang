@@ -1,0 +1,79 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stasis/imports.stasis";
+import "../src/stasis/parsing.stasis";
+
+global t_argv0: ascii[260];
+global t_exe_dir: ascii[260];
+
+global t_path_ok: ascii[260];
+global t_path_bad: ascii[260];
+
+global t_tmp: ascii[1024];
+
+function t_init_exe_dir(): bool {
+    let n: i32 = sys_argv(0, t_argv0, 260);
+    if (n <= 0) {
+        return false;
+    }
+    ascii_set_len(t_argv0, n);
+    sh_path_dirname(t_exe_dir, t_argv0);
+    return !ascii_is_empty(t_exe_dir);
+}
+
+function t_append_line(buf: ascii[], text: ascii[]): void {
+    ascii_append(buf, text);
+    ascii_append_byte(buf, 10);
+}
+
+function t_write_ascii(path: ascii[], text: ascii[]): bool {
+    return sys_write_file(path, text, ascii_len(text));
+}
+
+function t_parse_errors(path: ascii[]): i32 {
+    let rc: i32 = sh_load_graph(path);
+    if (rc != 0) {
+        return -1;
+    }
+    let idx: i32 = sh_find_file(path);
+    if (idx < 0) {
+        return -1;
+    }
+    return sh_parse_balance_file(idx);
+}
+
+test `stasis parse balance ok`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path_ok, t_exe_dir, "sh_parse_ok.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(): i32 { return 0; }");
+    if (!t_write_ascii(t_path_ok, t_tmp)) {
+        return false;
+    }
+
+    sh_parse_quiet = 0;
+    let errors: i32 = t_parse_errors(t_path_ok);
+    return errors == 0 && sh_lex_error_count == 0;
+}
+
+test `stasis parse balance missing brace`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path_bad, t_exe_dir, "sh_parse_bad.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(): i32 { return 0;");
+    if (!t_write_ascii(t_path_bad, t_tmp)) {
+        return false;
+    }
+
+    sh_parse_quiet = 1;
+    let errors: i32 = t_parse_errors(t_path_bad);
+    return errors != 0;
+}
+

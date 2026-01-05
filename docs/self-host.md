@@ -44,8 +44,8 @@ Notes:
 ## Current Status (Today)
 
 Implemented:
-- `stasis check <entry.stasis>`: loads the import dependency graph (up to 300 files, 50 KiB per file) and reports file count.
-- `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`.
+- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + a minimal parsing pass (paren/brace/bracket balance); prints `files/lex_errors/parse_errors`.
+- `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
 
 Not yet implemented (but planned in the contract above):
 - `build`, `run`, `test`, `release`.
@@ -228,3 +228,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasis watch check` based on `sys_file_mtime_ms`.
 - 2026-01-05: added `src/stasis/lexing.stasis` streaming lexer + `tests/stasis_lexing.stasis` coverage (comments, numbers, keywords, punctuation).
 - 2026-01-05: fixed LLVM lowering for nested short-circuit `&&`/`||` so verifier passes when RHS emits control flow.
+- 2026-01-05: added `src/stasis/parsing.stasis` minimal parse pass (balance check) + `tests/stasis_parsing.stasis`; wired `stasis check` to run lexer+parse across the loaded source graph.
