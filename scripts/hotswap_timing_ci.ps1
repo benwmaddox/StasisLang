@@ -40,12 +40,15 @@ $cmd = Join-Path $root "stasis.bat"
 $args = @("run", $sample, "--backend", "cranelift", "--watch", "--fps", "30")
 $proc = Start-Process -FilePath $cmd -ArgumentList $args -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 
-function Wait-ForHotreload([int]$timeoutSeconds) {
+function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     while ((Get-Date) -lt $deadline) {
+        if ($proc.HasExited) {
+            return $false
+        }
         if (Test-Path $errLog) {
             $lines = Get-Content $errLog -ErrorAction SilentlyContinue
-            if ($lines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" }) {
+            if ($lines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" -or $_ -match "^warning: initial build failed" }) {
                 return $true
             }
         }
@@ -54,8 +57,16 @@ function Wait-ForHotreload([int]$timeoutSeconds) {
     return $false
 }
 
-if (-not (Wait-ForHotreload 90)) {
+if (-not (Wait-ForHotreload 120 $proc)) {
     Write-Error "Timed out waiting for HOTRELOAD output. See $errLog."
+    if (Test-Path $errLog) {
+        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
+    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+    exit 1
+}
+if ($proc.HasExited) {
+    Write-Error "stasis run exited before producing HOTRELOAD output. See $errLog."
     if (Test-Path $errLog) {
         Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
     }
