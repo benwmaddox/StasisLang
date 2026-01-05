@@ -40,7 +40,28 @@ $cmd = Join-Path $root "stasis.bat"
 $args = @("run", $sample, "--backend", "cranelift", "--watch", "--fps", "30")
 $proc = Start-Process -FilePath $cmd -ArgumentList $args -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 
-Start-Sleep -Seconds 8
+function Wait-ForHotreload([int]$timeoutSeconds) {
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path $errLog) {
+            $lines = Get-Content $errLog -ErrorAction SilentlyContinue
+            if ($lines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" }) {
+                return $true
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+if (-not (Wait-ForHotreload 90)) {
+    Write-Error "Timed out waiting for HOTRELOAD output. See $errLog."
+    if (Test-Path $errLog) {
+        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
+    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+    exit 1
+}
 for ($i = 0; $i -lt 5; $i++) {
     (Get-Item $sample).LastWriteTime = Get-Date
     Start-Sleep -Seconds 3
@@ -75,10 +96,16 @@ foreach ($line in $errLines) {
 
 if ($swaps.Count -eq 0) {
     Write-Error "No HOTSWAP timings captured. See $errLog."
+    if (Test-Path $errLog) {
+        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
     exit 1
 }
 if ($layoutWarnings.Count -gt 0) {
     Write-Error "State layout warning detected during hot-swap (this is treated as a failure). See $errLog."
+    if (Test-Path $errLog) {
+        Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
     exit 1
 }
 
