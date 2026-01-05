@@ -3021,13 +3021,11 @@ public sealed class CraneliftFunctionBuilder
         }
 
         if (expr is MemberAccessExpressionSyntax member &&
-            TryResolveArrayMember(member, out var arrayName))
+            TryResolveArrayMember(member, out var arrayName, out var memberArrayType))
         {
             ptr = NewValue();
             _instructions.AppendLine($"    {ptr} = global_value {arrayName}");
-            if (_symbols.TryGetValue(arrayName, out var symbol) &&
-                symbol.Type is ArrayTypeSymbol arrayType &&
-                IsStringBuffer(arrayType, out var headerSize))
+            if (IsStringBuffer(memberArrayType, out var headerSize))
             {
                 var payload = NewValue();
                 var headerOffset = ConstI64(headerSize);
@@ -3054,9 +3052,10 @@ public sealed class CraneliftFunctionBuilder
         return false;
     }
 
-    private bool TryResolveArrayMember(MemberAccessExpressionSyntax member, out string arrayName)
+    private bool TryResolveArrayMember(MemberAccessExpressionSyntax member, out string arrayName, out ArrayTypeSymbol arrayType)
     {
         arrayName = string.Empty;
+        arrayType = new ArrayTypeSymbol(new NamedTypeSymbol("unknown"), -1);
         if (!TryResolveMemberBase(member.Receiver, out var baseName, out var baseType))
         {
             return false;
@@ -3068,11 +3067,16 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
-        if (field?.Type is not ArrayTypeSyntax)
+        if (field?.Type is not ArrayTypeSyntax arraySyntax)
         {
             return false;
         }
 
+        if (ResolveType(arraySyntax) is not ArrayTypeSymbol arrayTypeSymbol)
+        {
+            return false;
+        }
+        arrayType = arrayTypeSymbol;
         arrayName = $"{baseName}__{member.Member.Text}";
         return true;
     }
@@ -3350,13 +3354,11 @@ public sealed class CraneliftFunctionBuilder
         {
             return LowerArrayElementFieldAccess(arrayAccess, member.Member.Text);
         }
-        else if (TryResolveArrayMember(member, out var arrayName))
+        else if (TryResolveArrayMember(member, out var arrayName, out var memberArrayType))
         {
             var addr = NewValue();
             _instructions.AppendLine($"    {addr} = global_value {arrayName}");
-            if (_symbols.TryGetValue(arrayName, out var symbol) &&
-                symbol.Type is ArrayTypeSymbol arrayType &&
-                IsStringBuffer(arrayType, out var headerSize))
+            if (IsStringBuffer(memberArrayType, out var headerSize))
             {
                 var payload = NewValue();
                 var headerOffset = ConstI64(headerSize);
@@ -3539,6 +3541,19 @@ public sealed class CraneliftFunctionBuilder
 
         var baseAddr = NewValue();
         _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+
+        if (ResolveType(arrayType) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
+        {
+            var payloadBase = NewValue();
+            var headerOffset = ConstI64(headerSize);
+            _instructions.AppendLine($"    {payloadBase} = iadd {baseAddr}, {headerOffset}");
+            var addr = EmitByteAddress(payloadBase, index);
+            var value = NewValue();
+            _instructions.AppendLine($"    {value} = load.i8 {addr}");
+            var byteResult = NewValue();
+            _instructions.AppendLine($"    {byteResult} = uextend.i32 {value}");
+            return byteResult;
+        }
 
         var elemSize = GetTypeSize(clifElemType);
         var elemSizeVal = NewValue();
@@ -3765,6 +3780,21 @@ public sealed class CraneliftFunctionBuilder
         if (field?.Type is not ArrayTypeSyntax arrayType)
         {
             _instructions.AppendLine($"    ; error: not an array field");
+            return;
+        }
+
+        if (ResolveType(field.Type) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
+        {
+            var byteIndex = LowerExpression(indexExpr);
+            var byteBaseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+            var byteBaseAddr = NewValue();
+            _instructions.AppendLine($"    {byteBaseAddr} = global_value {byteBaseName}");
+            var payloadBase = NewValue();
+            var headerOffset = ConstI64(headerSize);
+            _instructions.AppendLine($"    {payloadBase} = iadd {byteBaseAddr}, {headerOffset}");
+            var addr = EmitByteAddress(payloadBase, byteIndex);
+            value = ReduceI32ToSmallInt(value, CraneliftTypeMapper.ClifType.I8);
+            _instructions.AppendLine($"    store {value}, {addr}");
             return;
         }
 

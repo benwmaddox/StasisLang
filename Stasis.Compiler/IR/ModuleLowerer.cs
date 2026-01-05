@@ -5076,6 +5076,18 @@ public sealed class ModuleLowerer
                         var global = _moduleBuilder.Module.GetNamedGlobal(baseName);
                         if (global.Handle != IntPtr.Zero)
                         {
+                            if (elemTypeSymbol is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                            {
+                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                var count = (int)ParseArrayLength(arrayTypeSyntax.SizeToken?.Text ?? string.Empty);
+                                var backingBytes = Math.Max(1, count + headerSize);
+                                var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                                var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, "payload");
+                                ptr = builder.BuildGEP2(LLVMTypeRef.Int8, payloadPtr, new[] { index }, "elemaddr");
+                                elemType = LLVMTypeRef.Int8;
+                                return true;
+                            }
+
                             var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
                             var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
                             ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");
