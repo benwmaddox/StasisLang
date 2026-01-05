@@ -166,6 +166,7 @@ do {
 
 if ($swaps.Count -eq 0) {
     if (Test-Path $errLog) {
+        Start-Sleep -Seconds 5
         $raw = Get-Content $errLog -Raw
         $rawMatches = [regex]::Matches($raw, "HOTSWAP ok:[^\r\n]*")
         if ($rawMatches.Count -gt 0) {
