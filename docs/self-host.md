@@ -14,6 +14,7 @@ This is a living design + progress document for the `self-host` branch.
   - Cranelift CLIF text (compiled via existing `tools/cranelift-aot` + `clang` link), or
   - LLVM IR text (executed via `lli` when possible, else `clang` link).
 - Remains deterministic: static memory only; explicit I/O; no hidden allocation.
+- Uses a single global state struct (`sh`) to own all compiler/static allocations.
 
 ## Names (Stage0 vs Stage1)
 
@@ -240,3 +241,7 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `src/stasis/parsing.stasis` minimal parse pass (balance check) + `tests/stasis_parsing.stasis`; wired `stasis check` to run lexer+parse across the loaded source graph.
 - 2026-01-05: imports now assign a deterministic module name per file (derived from basename) and reject duplicate module names.
 - 2026-01-05: import scanning now records per-file import edges (fixed table) for future semantic module resolution.
+- 2026-01-05: refactored self-host compiler to a single global `sh: ShState` in `src/stasis/state.stasis` (no other globals under `src/stasis/`).
+- 2026-01-05: fixed LLVM + Cranelift lowering for string-buffer headers on flattened struct fields (needed for `sh.scratch_*` and other `ascii[N]` fields inside `sh`).
+- 2026-01-05: fixed `tools/cranelift-aot` to accept `load.r64` (pointer) instructions.
+- 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
