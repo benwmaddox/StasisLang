@@ -78,6 +78,15 @@ public sealed class SemanticAnalyzer
         AddSymbol("read_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
+        // System functions (sys_*): standalone CLI support (argv, file I/O, process execution).
+        AddSymbol("sys_argc", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_argv", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_read_file", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_write_file", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("sys_file_exists", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("sys_file_mtime_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_exec", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
         // Legacy math functions (to be renamed to math_*)
         AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
         AddSymbol("cos", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));

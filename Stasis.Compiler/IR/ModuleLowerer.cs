@@ -1203,6 +1203,15 @@ public sealed class ModuleLowerer
             "read_char",
             "read_int",
 
+            // System: sys_* (argv, file I/O, process execution)
+            "sys_argc",
+            "sys_argv",
+            "sys_read_file",
+            "sys_write_file",
+            "sys_file_exists",
+            "sys_file_mtime_ms",
+            "sys_exec",
+
             // Legacy math (to be renamed)
             "sin",
             "cos",
@@ -2311,6 +2320,181 @@ public sealed class ModuleLowerer
                     return EmitReadChar(builder);
                 case "read_int":
                     return EmitReadInt(builder);
+
+                // ============================================================
+                // System: sys_* (argv, file I/O, process execution)
+                // ============================================================
+
+                case "sys_argc":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_argc expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_argc");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_argc", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_argc.call");
+                    }
+
+                case "sys_argv":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_argv expects (idx: i32, out: string, out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_argv requires an output string buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_argv");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_argv", fnType);
+
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_argv.out");
+                        return builder.BuildCall2(fnType, fn, new[] { idx, outCast, outCap }, "sys_argv.call");
+                    }
+
+                case "sys_read_file":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_read_file expects (path: string, out: u8[], out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_read_file requires an output buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_read_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_read_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.path");
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.out");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, outCast, outCap }, "sys_read_file.call");
+                    }
+
+                case "sys_write_file":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_write_file expects (path: string, data: u8[], len: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var dataPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (dataPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_write_file requires a byte buffer.", span);
+                            return ConstI32(0);
+                        }
+                        var len = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_write_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_write_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_write_file.path");
+                        var dataCast = builder.BuildBitCast(dataPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_write_file.data");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, dataCast, len }, "sys_write_file.call");
+                    }
+
+                case "sys_file_exists":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_exists expects (path: string).", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_exists");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_exists", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_exists.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_exists.call");
+                    }
+
+                case "sys_file_mtime_ms":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_mtime_ms expects (path: string).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_mtime_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_mtime_ms", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_mtime_ms.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_mtime_ms.call");
+                    }
+
+                case "sys_exec":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_exec expects (command: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_exec");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_exec", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_exec.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_exec.call");
+                    }
                 case "sin":
                 case "cos":
                 case "sin_fast":

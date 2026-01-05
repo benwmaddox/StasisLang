@@ -129,6 +129,59 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I64); // pointer to result
         }
 
+        if (builtins.Contains("sys_argc"))
+        {
+            builder.DeclareExternal("stasis_sys_argc", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("sys_argv"))
+        {
+            builder.DeclareExternal("stasis_sys_argv", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32, // idx
+                CraneliftTypeMapper.ClifType.R64, // out
+                CraneliftTypeMapper.ClifType.I32  // out_cap
+            );
+        }
+
+        if (builtins.Contains("sys_read_file"))
+        {
+            builder.DeclareExternal("stasis_sys_read_file", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64, // path
+                CraneliftTypeMapper.ClifType.R64, // out
+                CraneliftTypeMapper.ClifType.I32  // out_cap
+            );
+        }
+
+        if (builtins.Contains("sys_write_file"))
+        {
+            builder.DeclareExternal("stasis_sys_write_file", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64, // path
+                CraneliftTypeMapper.ClifType.R64, // data
+                CraneliftTypeMapper.ClifType.I32  // len
+            );
+        }
+
+        if (builtins.Contains("sys_file_exists"))
+        {
+            builder.DeclareExternal("stasis_sys_file_exists", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // path
+            );
+        }
+
+        if (builtins.Contains("sys_file_mtime_ms"))
+        {
+            builder.DeclareExternal("stasis_sys_file_mtime_ms", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // path
+            );
+        }
+
+        if (builtins.Contains("sys_exec"))
+        {
+            builder.DeclareExternal("stasis_sys_exec", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // command
+            );
+        }
+
         if (builtins.Contains("time"))
         {
             // time(tloc: *i64) -> i64
@@ -1122,6 +1175,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     private static bool IsCraneliftBuiltin(string name) =>
         name is "print_int" or "print_char" or "print_string" or "read_int" or "read_char"
             or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
+            or "sys_argc" or "sys_argv"
+            or "sys_read_file" or "sys_write_file" or "sys_file_exists" or "sys_file_mtime_ms"
+            or "sys_exec"
             or "time" or "get_time_ms" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
             or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"

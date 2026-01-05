@@ -959,6 +959,13 @@ public sealed class CraneliftFunctionBuilder
             "print_cell" => true,
             "read_int" => true,
             "read_char" => true,
+            "sys_argc" => true,
+            "sys_argv" => true,
+            "sys_read_file" => true,
+            "sys_write_file" => true,
+            "sys_file_exists" => true,
+            "sys_file_mtime_ms" => true,
+            "sys_exec" => true,
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
@@ -1058,6 +1065,120 @@ public sealed class CraneliftFunctionBuilder
         };
     }
 
+    private string LowerSysArgv(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_argv", "sys_argv expects (idx: i32, out: string, out_cap: i32).");
+        }
+
+        var idx = LowerExpression(arguments[0]);
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_argv", "sys_argv expects (idx: i32, out: string, out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_argv({idx}, {outPtr}, {cap})");
+        return result;
+    }
+
+    private string LowerSysReadFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_read_file({path}, {outPtr}, {cap})");
+        return result;
+    }
+
+    private string LowerSysWriteFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var dataPtr))
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+        var len = LowerExpression(arguments[2]);
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_write_file({path}, {dataPtr}, {len})");
+        return call;
+    }
+
+    private string LowerSysFileExists(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_exists", "sys_file_exists expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_exists", "sys_file_exists expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_exists({path})");
+        return call;
+    }
+
+    private string LowerSysFileMtimeMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_mtime_ms", "sys_file_mtime_ms expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_mtime_ms", "sys_file_mtime_ms expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_mtime_ms({path})");
+        return call;
+    }
+
+    private string LowerSysExec(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_exec", "sys_exec expects (command: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var command))
+        {
+            return EmitInvalidBuiltin("sys_exec", "sys_exec expects (command: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_exec({command})");
+        return call;
+    }
+
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 
     private string LowerBuiltinCall(string funcName, IReadOnlyList<ExpressionSyntax> arguments)
@@ -1084,6 +1205,20 @@ public sealed class CraneliftFunctionBuilder
                 return LowerReadInt(arguments);
             case "read_char":
                 return LowerReadChar(arguments);
+            case "sys_argc":
+                return LowerExternalCallValue("stasis_sys_argc", "sys_argc expects no arguments.", arguments, 0);
+            case "sys_argv":
+                return LowerSysArgv(arguments);
+            case "sys_read_file":
+                return LowerSysReadFile(arguments);
+            case "sys_write_file":
+                return LowerSysWriteFile(arguments);
+            case "sys_file_exists":
+                return LowerSysFileExists(arguments);
+            case "sys_file_mtime_ms":
+                return LowerSysFileMtimeMs(arguments);
+            case "sys_exec":
+                return LowerSysExec(arguments);
             case "time":
                 return LowerTime(arguments);
             case "get_time_ms":
