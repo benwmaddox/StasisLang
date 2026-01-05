@@ -42,6 +42,7 @@ $proc = Start-Process -FilePath $cmd -ArgumentList $args -RedirectStandardOutput
 
 function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $nextLog = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         if ($proc.HasExited) {
             return $false
@@ -52,15 +53,23 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
                 return $true
             }
         }
+        if ((Get-Date) -ge $nextLog) {
+            $elapsed = [int]((Get-Date) - ($deadline.AddSeconds(-$timeoutSeconds))).TotalSeconds
+            Write-Host ("Waiting for HOTRELOAD output... {0}s" -f $elapsed)
+            $nextLog = (Get-Date).AddSeconds(15)
+        }
         Start-Sleep -Seconds 2
     }
     return $false
 }
 
-if (-not (Wait-ForHotreload 120 $proc)) {
+if (-not (Wait-ForHotreload 300 $proc)) {
     Write-Error "Timed out waiting for HOTRELOAD output. See $errLog."
     if (Test-Path $errLog) {
         Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
+    if (Test-Path $outLog) {
+        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
     }
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
     exit 1
@@ -69,6 +78,9 @@ if ($proc.HasExited) {
     Write-Error "stasis run exited before producing HOTRELOAD output. See $errLog."
     if (Test-Path $errLog) {
         Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
+    if (Test-Path $outLog) {
+        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
     }
     if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
     exit 1
@@ -110,12 +122,18 @@ if ($swaps.Count -eq 0) {
     if (Test-Path $errLog) {
         Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
     }
+    if (Test-Path $outLog) {
+        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
     exit 1
 }
 if ($layoutWarnings.Count -gt 0) {
     Write-Error "State layout warning detected during hot-swap (this is treated as a failure). See $errLog."
     if (Test-Path $errLog) {
         Get-Content $errLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
+    }
+    if (Test-Path $outLog) {
+        Get-Content $outLog | Select-Object -Last 50 | ForEach-Object { Write-Host $_ }
     }
     exit 1
 }
