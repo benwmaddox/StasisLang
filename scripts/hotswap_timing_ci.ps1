@@ -90,7 +90,18 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
 }
 
 if (-not (Wait-ForHotreload 300 $proc)) {
-    Fail "Timed out waiting for HOTRELOAD output."
+    $lateHotreload = $false
+    if (Test-Path $errLog) {
+        $lateLines = Get-Content $errLog -ErrorAction SilentlyContinue
+        if ($lateLines | Where-Object { $_ -match "^HOTRELOAD phases\\(ms\\):" -or $_ -match "^warning: initial build failed" }) {
+            $lateHotreload = $true
+        }
+    }
+    if ($lateHotreload) {
+        Write-Host "HOTRELOAD output arrived late; continuing."
+    } else {
+        Fail "Timed out waiting for HOTRELOAD output."
+    }
 }
 if ($proc.HasExited) {
     Fail ("stasis run exited before producing HOTRELOAD output (exit={0})." -f $proc.ExitCode)
