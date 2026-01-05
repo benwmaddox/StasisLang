@@ -1,5 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
-import "../src/stasisc_self/imports.stasis";
+import "../src/stasis/imports.stasis";
 
 global t_path_common: ascii[260];
 global t_path_a: ascii[260];
@@ -42,7 +42,7 @@ function t_write_ascii(path: ascii[], text: ascii[]): bool {
     return sys_write_file(path, text, ascii_len(text));
 }
 
-test `stasisc-self import graph loads files`() {
+test `stasis import graph loads files`() {
     if (!t_init_cache_dir()) {
         return false;
     }
@@ -92,7 +92,7 @@ test `stasisc-self import graph loads files`() {
         && sh_find_file(t_path_entry) >= 0;
 }
 
-test `stasisc-self import graph enforces 50KiB`() {
+test `stasis import graph enforces 50KiB`() {
     if (!t_init_cache_dir()) {
         return false;
     }

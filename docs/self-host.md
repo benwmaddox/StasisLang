@@ -9,10 +9,17 @@ This is a living design + progress document for the `self-host` branch.
 - Self-hosted compiler is written in Stasis and is directly runnable as a CLI (no C# wrapper required at runtime).
 - Supports up to 300 source files per build (imports), up to 50 KiB per file.
 - Provides CLI modes: `watch`, `run`, `release` (and `build`/`test` as needed for parity).
+- No import expansion/flattening: compilation operates on a multi-file source graph.
 - Emits either:
   - Cranelift CLIF text (compiled via existing `tools/cranelift-aot` + `clang` link), or
   - LLVM IR text (executed via `lli` when possible, else `clang` link).
 - Remains deterministic: static memory only; explicit I/O; no hidden allocation.
+
+## Names (Stage0 vs Stage1)
+
+- Stage0 (today): existing C# toolchain invoked via `stasis.bat` / `stasis.sh` (requires `dotnet`).
+- Stage1 (this branch): `stasis`, built from `src/stasis/main.stasis` as a native executable (no `dotnet` at runtime).
+- Stage0 remains bootstrap-only until Stage1 can build itself end-to-end.
 
 ## CLI Contract (Target)
 
@@ -20,19 +27,28 @@ Initial deliverables should keep the CLI small but stable. The intent is to matc
 
 Commands (final shape; implemented incrementally):
 
-- `stasisc-self check <entry.stasis> [--backend cranelift|llvm]`
+- `stasis check <entry.stasis> [--backend cranelift|llvm]`
   - Parses + semantics only (fast feedback, no codegen), later used by `watch`.
-- `stasisc-self build <entry.stasis> -o <out.exe|out.wasm> [--backend ...] [--release]`
-- `stasisc-self run <entry.stasis> [--backend ...] [--] <args...>`
+- `stasis build <entry.stasis> -o <out.exe|out.wasm> [--backend ...] [--release]`
+- `stasis run <entry.stasis> [--backend ...] [--] <args...>`
   - Build to a temp output then exec it; preserves exit code.
-- `stasisc-self test [path-or-glob] [--backend ...]`
+- `stasis test [path-or-glob] [--backend ...]`
   - Discovers `.stasis` files; runs in-file `test` blocks; prints per-file timings.
-- `stasisc-self watch (check|build|run|test) ...`
+- `stasis watch (check|build|run|test) ...`
   - Polling-based watch loop first (mtime); event-based later.
 
 Notes:
 - Stasis has no dynamic allocation; CLI parsing uses fixed buffers and simple tokenization.
 - We keep path handling ASCII-first (Windows-friendly), but treat data as bytes on disk.
+
+## Current Status (Today)
+
+Implemented:
+- `stasis check <entry.stasis>`: loads the import dependency graph (up to 300 files, 50 KiB per file) and reports file count.
+- `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`.
+
+Not yet implemented (but planned in the contract above):
+- `build`, `run`, `test`, `release`.
 
 ## Backend Strategy (No Reimplementation of LLVM/Cranelift)
 
@@ -48,9 +64,28 @@ The self-hosted compiler does not embed LLVM/Cranelift libraries.
 
 This keeps the scope to "frontend + textual IR emit" while retaining current codegen toolchains.
 
+## Source Graph Model (No Flattening)
+
+The compiler operates on a "source graph":
+
+- Each file is loaded once into a fixed-capacity byte pool.
+- A file table records `(path, offset, len, mtime_ms)` for all files in the build.
+- Imports are scanned from each loaded file; newly discovered files are appended to the table and scanned in turn.
+- Later passes (lexer/parser/sema/codegen) iterate the file table; no pass requires a single concatenated source blob.
+
+This matches the user-facing intent: "just reference other files" rather than expanding imports into one file.
+
+## Iteration First (Avoid Recursion Where Possible)
+
+We prefer iterative algorithms in the self-hosted compiler:
+
+- Import graph loading is iterative (no recursive import traversal).
+- Expression parsing will use a Pratt parser (iterative loop with operator precedence).
+- Other recursion is allowed only when it is shallow and bounded (for example, structured blocks), and should be replaced with explicit stacks where it becomes a risk.
+
 ## Bootstrap / How To Run (Today)
 
-`stasisc-self` is a Stasis program that is currently bootstrapped by the existing C# toolchain (stage0).
+`stasis` is a Stasis program that is currently bootstrapped by the existing C# toolchain (stage0).
 
 Build prerequisites:
 - `dotnet` (for `Stasis.Cli`)
@@ -61,16 +96,17 @@ Build prerequisites:
 - `cmake -S . -B build`
 - `cmake --build build --config Release --target stasis_sys_static`
 
-2) Build `stasisc-self` as a standalone EXE:
-- Cranelift: `.\stasis.bat build src\stasisc_self\main.stasis --backend cranelift --out build\stasisc-self.exe`
-- LLVM: `.\stasis.bat build src\stasisc_self\main.stasis --backend llvm --out build\stasisc-self-llvm.exe`
+2) Build `stasis` as a standalone EXE:
+- Cranelift: `.\stasis.bat build src\stasis\main.stasis --backend cranelift --out build\stasis.exe`
+- LLVM: `.\stasis.bat build src\stasis\main.stasis --backend llvm --out build\stasis-llvm.exe`
 
 3) Run the currently-implemented command:
-- `.\build\stasisc-self.exe check <entry.stasis>`
-- `.\build\stasisc-self.exe watch check <entry.stasis>` (polling watch; rebuilds on mtime changes)
+- `.\build\stasis.exe check <entry.stasis>`
+- `.\build\stasis.exe watch check <entry.stasis>` (polling watch; rebuilds on mtime changes)
 
 Notes:
 - Stage0 `stasisc run` does not currently forward argv to programs; build the EXE and run it directly.
+- The produced `build/stasis*.exe` runs without a `dotnet` runtime (native executable).
 - `sys_*` is linked automatically by the stage0 CLI; set `STASIS_SYS_LIB` to override discovery if needed.
 
 ## Fixed Memory Budgets (Static)
@@ -81,7 +117,7 @@ Hard limits (per compilation):
 - Max bytes per file: 51200 (50 KiB)
 - Max total source bytes: 300 * 51200 = 15360000
 
-Planned static allocations in `stasisc-self` (tunable as we learn real-world pressure):
+Planned static allocations in `stasis` (tunable as we learn real-world pressure):
 
 - Source pool: ~16 MiB (all source file contents, null-sentinels between files)
 - Text output buffer (IR/debug): ~16 MiB
@@ -95,15 +131,15 @@ All "out of memory" failures must name the pool/cap and the source span or file 
 
 ## Bootstrap Strategy
 
-Stage 0 (today): C# toolchain compiles `stasisc_self` (the Stasis compiler) so we can iterate.
+Stage 0 (today): C# toolchain compiles `src/stasis` (the Stasis compiler) so we can iterate.
 
-Stage 1: `stasisc_self` compiles itself.
+Stage 1: `stasis` compiles itself.
 
 Stage 2: triple-build fixed point:
 
-- C# -> stasisc_self_v1
-- stasisc_self_v1 -> stasisc_self_v2
-- stasisc_self_v2 -> stasisc_self_v3
+- C# -> stasis_v1
+- stasis_v1 -> stasis_v2
+- stasis_v2 -> stasis_v3
 
 Success is when v2 and v3 outputs match (or match modulo cosmetic IR formatting if we compare IR).
 
@@ -131,7 +167,7 @@ This milestone includes:
 - Cranelift lowering + external declarations
 - CLI link integration so produced EXEs can resolve these symbols
 
-### M1: `stasisc_self` skeleton CLI
+### M1: `stasis` skeleton CLI
 
 - Parse argv, print usage
 - Read a single `.stasis` file into a fixed buffer
@@ -184,9 +220,9 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: created branch `self-host` from updated `main`; added this document.
 - 2026-01-05: added `runtime/stasis_sys.c` + `stasis_sys_static` build target (argv/file/exec), and wired `sys_*` builtins through LLVM + Cranelift + CLI linking.
 - 2026-01-05: added `tests/syscalls_basic.stasis` smoke tests for `sys_*`.
-- 2026-01-05: added `src/stasisc_self/main.stasis` minimal standalone CLI (argv + read_file smoke).
+- 2026-01-05: added `src/stasis/main.stasis` minimal standalone CLI (argv + read_file smoke).
 - 2026-01-05: fixed Cranelift backend to accept string literals for `sys_*` string args; updated syscalls smoke test to use `argv0` paths (backend-independent).
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
 - 2026-01-05: implemented import graph loading (300 files / 50 KiB limits) and fixed Cranelift `print_string` to accept array/string args.
-- 2026-01-05: added `tests/stasisc_self_imports.stasis` coverage for import graph loading + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasisc-self under LLVM).
-- 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasisc-self watch check` based on `sys_file_mtime_ms`.
+- 2026-01-05: added `tests/stasis_imports.stasis` coverage for import graph loading + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasis under LLVM).
+- 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasis watch check` based on `sys_file_mtime_ms`.

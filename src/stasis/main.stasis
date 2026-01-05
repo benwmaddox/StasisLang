@@ -6,11 +6,11 @@ global sh_subcmd: ascii[64];
 global sh_arg_entry: ascii[260];
 
 function sh_usage(): void {
-    print_string("stasisc-self (WIP self-hosted compiler)\n");
+    print_string("stasis (WIP self-hosted compiler)\n");
     print_string("\n");
     print_string("usage:\n");
-    print_string("  stasisc-self check <entry.stasis>\n");
-    print_string("  stasisc-self watch check <entry.stasis>\n");
+    print_string("  stasis check <entry.stasis>\n");
+    print_string("  stasis watch check <entry.stasis>\n");
     print_string("\n");
     print_string("notes:\n");
     print_string("  - This CLI is under active development on branch self-host.\n");
