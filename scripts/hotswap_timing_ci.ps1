@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$sample = Join-Path $root "samples\hotstate_tick_watch.stasis"
+$sample = Join-Path $root "samples\hotstate_no_runtime.stasis"
 $outLog = Join-Path $root "build\ci_hotswap_timing.out.log"
 $errLog = Join-Path $root "build\ci_hotswap_timing.err.log"
 
@@ -66,7 +66,7 @@ $args = @("run", "--no-build", "--configuration", "Release", "--project", $cliPr
 $proc = Start-Process -FilePath $cmd -ArgumentList $args -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 Write-Host ("Started stasis: pid={0}" -f $proc.Id)
 
-function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
+function Wait-ForLine([string]$pattern, [int]$timeoutSeconds, [Diagnostics.Process]$proc) {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     $nextLog = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
@@ -75,13 +75,13 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
         }
         if (Test-Path $errLog) {
             $lines = Get-Content $errLog -ErrorAction SilentlyContinue
-            if ($lines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
+            if ($lines | Where-Object { $_ -match $pattern }) {
                 return $true
             }
         }
         if ((Get-Date) -ge $nextLog) {
             $elapsed = [int]((Get-Date) - ($deadline.AddSeconds(-$timeoutSeconds))).TotalSeconds
-            Write-Host ("Waiting for HOTRELOAD output... {0}s" -f $elapsed)
+            Write-Host ("Waiting for {0}... {1}s" -f $pattern, $elapsed)
             $nextLog = (Get-Date).AddSeconds(15)
         }
         Start-Sleep -Seconds 2
@@ -89,30 +89,17 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
     return $false
 }
 
-if (-not (Wait-ForHotreload 300 $proc)) {
-    $lateHotreload = $false
-    for ($i = 0; $i -lt 5; $i++) {
-        if (Test-Path $errLog) {
-            $lateLines = Get-Content $errLog -ErrorAction SilentlyContinue
-            if ($lateLines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
-                $lateHotreload = $true
-                break
-            }
-        }
-        Start-Sleep -Seconds 3
-    }
-    if ($lateHotreload) {
-        Write-Host "HOTRELOAD output arrived late; continuing."
-    } else {
-        Fail "Timed out waiting for HOTRELOAD output."
-    }
-}
+Start-Sleep -Seconds 30
 if ($proc.HasExited) {
-    Fail ("stasis run exited before producing HOTRELOAD output (exit={0})." -f $proc.ExitCode)
+    Fail ("stasis run exited before swap triggers (exit={0})." -f $proc.ExitCode)
 }
 for ($i = 0; $i -lt 5; $i++) {
     (Get-Item $sample).LastWriteTime = Get-Date
     Start-Sleep -Seconds 3
+}
+
+if (-not (Wait-ForLine "HOTSWAP ok:" 120 $proc)) {
+    Fail "Timed out waiting for HOTSWAP output."
 }
 
 if (-not $proc.HasExited) {
