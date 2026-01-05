@@ -51,6 +51,30 @@ The self-hosted compiler does not embed LLVM/Cranelift libraries.
 
 This keeps the scope to "frontend + textual IR emit" while retaining current codegen toolchains.
 
+## Bootstrap / How To Run (Today)
+
+`stasisc-self` is a Stasis program that is currently bootstrapped by the existing C# toolchain (stage0).
+
+Build prerequisites:
+- `dotnet` (for `Stasis.Cli`)
+- `clang` (for link steps)
+
+1) Build the sys runtime library (Windows):
+- `cd runtime`
+- `cmake -S . -B build`
+- `cmake --build build --config Release --target stasis_sys_static`
+
+2) Build `stasisc-self` as a standalone EXE:
+- Cranelift: `.\stasis.bat build src\stasisc_self\main.stasis --backend cranelift --out build\stasisc-self.exe`
+- LLVM: `.\stasis.bat build src\stasisc_self\main.stasis --backend llvm --out build\stasisc-self-llvm.exe`
+
+3) Run the currently-implemented command:
+- `.\build\stasisc-self.exe expand <entry.stasis> <out.stasis>`
+
+Notes:
+- Stage0 `stasisc run` does not currently forward argv to programs; build the EXE and run it directly.
+- `sys_*` is linked automatically by the stage0 CLI; set `STASIS_SYS_LIB` to override discovery if needed.
+
 ## Fixed Memory Budgets (Static)
 
 Hard limits (per compilation):
@@ -166,3 +190,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed Cranelift backend to accept string literals for `sys_*` string args; updated syscalls smoke test to use `argv0` paths (backend-independent).
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
 - 2026-01-05: implemented `stasisc-self expand <entry> <out>` import expansion with the 300 file / 50 KiB limits; fixed Cranelift `print_string` to accept array/string args.
+- 2026-01-05: added `tests/stasisc_self_imports.stasis` coverage for import expansion + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasisc-self under LLVM).
