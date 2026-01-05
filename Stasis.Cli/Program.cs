@@ -2256,24 +2256,44 @@ static string GetObjectFileExtension()
 
 static string GetCompilerCacheSalt()
 {
-    var assembly = typeof(Program).Assembly;
-    var version = assembly.GetName().Version?.ToString() ?? "unknown";
-    var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+    var cliAssembly = typeof(Program).Assembly;
+    var compilerAssembly = typeof(SemanticAnalyzer).Assembly;
+    var version = cliAssembly.GetName().Version?.ToString() ?? "unknown";
+    var informationalVersion = cliAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+
+    var cliStamp = GetAssemblyCacheStamp(cliAssembly);
+    var compilerStamp = GetAssemblyCacheStamp(compilerAssembly);
+
+    // dotnet run => ProcessPath is typically 'dotnet.exe' and doesn't change on rebuild; prefer the loaded assemblies.
+    // AOT / single-file => Assembly.Location may be empty; fall back to ProcessPath/BaseDirectory.
     var exePath = Environment.ProcessPath;
     if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
     {
         var lastWriteTicks = File.GetLastWriteTimeUtc(exePath).Ticks;
-        return $"{version}:{informationalVersion}:{lastWriteTicks}";
+        return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}:{lastWriteTicks}";
     }
 
     var baseDir = AppContext.BaseDirectory;
     if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
     {
         var lastWriteTicks = Directory.GetLastWriteTimeUtc(baseDir).Ticks;
-        return $"{version}:{informationalVersion}:{lastWriteTicks}";
+        return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}:{lastWriteTicks}";
     }
 
-    return $"{version}:{informationalVersion}";
+    return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}";
+}
+
+static string GetAssemblyCacheStamp(Assembly assembly)
+{
+    var mvid = assembly.ManifestModule.ModuleVersionId.ToString("N");
+    var location = assembly.Location;
+    if (!string.IsNullOrEmpty(location) && File.Exists(location))
+    {
+        var lastWriteTicks = File.GetLastWriteTimeUtc(location).Ticks;
+        return $"{mvid}:{lastWriteTicks}";
+    }
+
+    return mvid;
 }
 
 static int RunCraneliftAot(string aotTool, string clifPath, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
