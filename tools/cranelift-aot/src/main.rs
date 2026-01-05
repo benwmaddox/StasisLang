@@ -1137,7 +1137,8 @@ fn emit_inst(
     // load.i64 <addr>
     // load.f32 <addr>
     // load.f64 <addr>
-    for ty_str in ["i8", "i16", "i32", "i64", "f32", "f64"]
+    // load.r64 <addr>
+    for ty_str in ["i8", "i16", "i32", "i64", "f32", "f64", "r64"]
     {
         let prefix = format!("load.{} ", ty_str);
         if let Some(rest) = rhs.strip_prefix(&prefix)
