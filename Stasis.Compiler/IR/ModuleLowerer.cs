@@ -1989,17 +1989,19 @@ public sealed class ModuleLowerer
 
                         builder.PositionAtEnd(trueBlock);
                         var trueVal = ConstI32(1);
+                        var trueIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(falseBlock);
                         var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
                         var rhsVal = BuildBoolResult(builder, rhsBool);
+                        var falseIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(mergeBlock);
                         var phi = builder.BuildPhi(LLVMTypeRef.Int32, "or.result");
-                        phi.AddIncoming(new[] { trueVal }, new[] { trueBlock }, 1u);
-                        phi.AddIncoming(new[] { rhsVal }, new[] { falseBlock }, 1u);
+                        phi.AddIncoming(new[] { trueVal }, new[] { trueIncoming }, 1u);
+                        phi.AddIncoming(new[] { rhsVal }, new[] { falseIncoming }, 1u);
                         return phi;
                     }
                 case TokenKind.AmpAmp:
@@ -2014,16 +2016,18 @@ public sealed class ModuleLowerer
                         builder.PositionAtEnd(trueBlock);
                         var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
                         var rhsVal = BuildBoolResult(builder, rhsBool);
+                        var trueIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(falseBlock);
                         var falseVal = ConstI32(0);
+                        var falseIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(mergeBlock);
                         var phi = builder.BuildPhi(LLVMTypeRef.Int32, "and.result");
-                        phi.AddIncoming(new[] { rhsVal }, new[] { trueBlock }, 1u);
-                        phi.AddIncoming(new[] { falseVal }, new[] { falseBlock }, 1u);
+                        phi.AddIncoming(new[] { rhsVal }, new[] { trueIncoming }, 1u);
+                        phi.AddIncoming(new[] { falseVal }, new[] { falseIncoming }, 1u);
                         return phi;
                     }
                 default:
