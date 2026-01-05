@@ -245,3 +245,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed LLVM + Cranelift lowering for string-buffer headers on flattened struct fields (needed for `sh.scratch_*` and other `ascii[N]` fields inside `sh`).
 - 2026-01-05: fixed `tools/cranelift-aot` to accept `load.r64` (pointer) instructions.
 - 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
+- 2026-01-05: tokenizer now uses `enum ShTok { ... }` (explicit numeric values) instead of `const SH_TOK_*`.
