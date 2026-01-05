@@ -12,6 +12,7 @@ struct ShFile {
     path_len: i32;
     offset: i32;
     len: i32;
+    mtime_ms: i32;
     expanded: i32;
 }
 
@@ -32,6 +33,7 @@ global sh_read: u8[51201];
 global sh_scratch_import: ascii[260];
 global sh_scratch_dir: ascii[260];
 global sh_scratch_resolved: ascii[260];
+global sh_scratch_watch_path: ascii[260];
 
 // When set to 1, suppresses stderr-style prints for expected failures (useful in tests).
 global sh_quiet: i32;
@@ -45,6 +47,7 @@ function sh_reset() {
     ascii_clear(sh_scratch_import);
     ascii_clear(sh_scratch_dir);
     ascii_clear(sh_scratch_resolved);
+    ascii_clear(sh_scratch_watch_path);
 }
 
 function sh_is_space(b: u8): bool {
@@ -251,9 +254,46 @@ function sh_load_file(path: ascii[]): i32 {
     sh_files[idx].path_len = path_len;
     sh_files[idx].offset = off;
     sh_files[idx].len = read_n;
+    sh_files[idx].mtime_ms = sys_file_mtime_ms(path);
     sh_files[idx].expanded = 0;
 
     return idx;
+}
+
+function sh_copy_file_path(dst: ascii[], file_idx: i32): bool {
+    ascii_clear(dst);
+
+    if (file_idx < 0 || file_idx >= sh_file_count) {
+        return false;
+    }
+
+    let off: i32 = sh_files[file_idx].path_off;
+    let len: i32 = sh_files[file_idx].path_len;
+    if (len <= 0 || len >= SH_MAX_PATH_BYTES) {
+        return false;
+    }
+
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        dst[i] = sh_path_pool[off + i];
+    }
+    dst[len] = 0;
+    ascii_set_len(dst, len);
+    return true;
+}
+
+function sh_any_file_mtime_changed(): bool {
+    let i: i32 = 0;
+    for (i = 0; i < sh_file_count; i = i + 1) {
+        if (!sh_copy_file_path(sh_scratch_watch_path, i)) {
+            return true;
+        }
+        let now: i32 = sys_file_mtime_ms(sh_scratch_watch_path);
+        if (now != sh_files[i].mtime_ms) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function sh_try_parse_import(file_idx: i32, line_start: i32, line_end: i32): bool {
