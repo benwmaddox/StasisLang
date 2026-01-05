@@ -33,6 +33,9 @@ global sh_scratch_import: ascii[260];
 global sh_scratch_dir: ascii[260];
 global sh_scratch_resolved: ascii[260];
 
+// When set to 1, suppresses stderr-style prints for expected failures (useful in tests).
+global sh_quiet: i32;
+
 function sh_reset() {
     sh_file_count = 0;
     sh_pool_len = 0;
@@ -162,50 +165,66 @@ function sh_load_file(path: ascii[]): i32 {
     }
 
     if (sh_file_count >= SH_MAX_FILES) {
-        print_string("error: exceeded max import files (300)\n");
+        if (sh_quiet == 0) {
+            print_string("error: exceeded max import files (300)\n");
+        }
         return -1;
     }
 
     let size: i32 = sys_file_size(path);
     if (size < 0) {
-        print_string("error: unable to stat file: ");
-        print_string(path);
-        print_char(10);
+        if (sh_quiet == 0) {
+            print_string("error: unable to stat file: ");
+            print_string(path);
+            print_char(10);
+        }
         return -1;
     }
     if (size > SH_MAX_FILE_BYTES) {
-        print_string("error: file exceeds 50KiB limit: ");
-        print_string(path);
-        print_char(10);
+        if (sh_quiet == 0) {
+            print_string("error: file exceeds 50KiB limit: ");
+            print_string(path);
+            print_char(10);
+        }
         return -1;
     }
 
     if (sh_pool_len + size + 1 > SH_POOL_CAP) {
-        print_string("error: exceeded total source pool capacity\n");
+        if (sh_quiet == 0) {
+            print_string("error: exceeded total source pool capacity\n");
+        }
         return -1;
     }
 
     let path_len: i32 = ascii_len(path);
     if (path_len <= 0) {
-        print_string("error: empty path\n");
+        if (sh_quiet == 0) {
+            print_string("error: empty path\n");
+        }
         return -1;
     }
     if (path_len >= SH_MAX_PATH_BYTES) {
-        print_string("error: path too long (max 260 bytes): ");
-        print_string(path);
-        print_char(10);
+        if (sh_quiet == 0) {
+            print_string("error: path too long (max 260 bytes): ");
+            print_string(path);
+            print_char(10);
+        }
         return -1;
     }
     if (sh_path_pool_len + path_len + 1 > SH_PATH_POOL_CAP) {
-        print_string("error: exceeded path pool capacity\n");
+        if (sh_quiet == 0) {
+            print_string("error: exceeded path pool capacity\n");
+        }
         return -1;
     }
 
     let read_n: i32 = sys_read_file(path, sh_read, SH_MAX_FILE_BYTES + 1);
     if (read_n < 0) {
-        print_string("error: unable to read file: ");
-        print_string(path);
-        print_char(10);
+        if (sh_quiet == 0) {
+            print_string("error: unable to read file: ");
+            print_string(path);
+            print_char(10);
+        }
         return -1;
     }
 
@@ -372,11 +391,15 @@ function sh_expand_file(file_idx: i32): bool {
             } else {
                 let count: i32 = line_end - line_start;
                 if (!sh_out_append_from_pool(base + line_start, count)) {
-                    print_string("error: expanded output exceeded capacity\n");
+                    if (sh_quiet == 0) {
+                        print_string("error: expanded output exceeded capacity\n");
+                    }
                     return false;
                 }
                 if (!sh_out_append_byte(10)) {
-                    print_string("error: expanded output exceeded capacity\n");
+                    if (sh_quiet == 0) {
+                        print_string("error: expanded output exceeded capacity\n");
+                    }
                     return false;
                 }
             }
@@ -401,9 +424,11 @@ function sh_expand_entry(entry_path: ascii[], out_path: ascii[]): i32 {
     }
 
     if (!sys_write_file(out_path, sh_out, sh_out_len)) {
-        print_string("error: unable to write output file: ");
-        print_string(out_path);
-        print_char(10);
+        if (sh_quiet == 0) {
+            print_string("error: unable to write output file: ");
+            print_string(out_path);
+            print_char(10);
+        }
         return 1;
     }
 
