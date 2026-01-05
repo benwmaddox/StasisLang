@@ -91,11 +91,15 @@ function Wait-ForHotreload([int]$timeoutSeconds, [Diagnostics.Process]$proc) {
 
 if (-not (Wait-ForHotreload 300 $proc)) {
     $lateHotreload = $false
-    if (Test-Path $errLog) {
-        $lateLines = Get-Content $errLog -ErrorAction SilentlyContinue
-        if ($lateLines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
-            $lateHotreload = $true
+    for ($i = 0; $i -lt 5; $i++) {
+        if (Test-Path $errLog) {
+            $lateLines = Get-Content $errLog -ErrorAction SilentlyContinue
+            if ($lateLines | Where-Object { $_ -match "HOTRELOAD phases\\(ms\\):" -or $_ -match "warning: initial build failed" }) {
+                $lateHotreload = $true
+                break
+            }
         }
+        Start-Sleep -Seconds 3
     }
     if ($lateHotreload) {
         Write-Host "HOTRELOAD output arrived late; continuing."
