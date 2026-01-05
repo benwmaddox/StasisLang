@@ -165,3 +165,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `src/stasisc_self/main.stasis` minimal standalone CLI (argv + read_file smoke).
 - 2026-01-05: fixed Cranelift backend to accept string literals for `sys_*` string args; updated syscalls smoke test to use `argv0` paths (backend-independent).
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
+- 2026-01-05: implemented `stasisc-self expand <entry> <out>` import expansion with the 300 file / 50 KiB limits; fixed Cranelift `print_string` to accept array/string args.
