@@ -964,6 +964,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_read_file" => true,
             "sys_write_file" => true,
             "sys_file_exists" => true,
+            "sys_file_size" => true,
             "sys_file_mtime_ms" => true,
             "sys_exec" => true,
             "time" => true,
@@ -1145,6 +1146,23 @@ public sealed class CraneliftFunctionBuilder
         return call;
     }
 
+    private string LowerSysFileSize(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_size", "sys_file_size expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_size", "sys_file_size expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_size({path})");
+        return call;
+    }
+
     private string LowerSysFileMtimeMs(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 1)
@@ -1215,6 +1233,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSysWriteFile(arguments);
             case "sys_file_exists":
                 return LowerSysFileExists(arguments);
+            case "sys_file_size":
+                return LowerSysFileSize(arguments);
             case "sys_file_mtime_ms":
                 return LowerSysFileMtimeMs(arguments);
             case "sys_exec":

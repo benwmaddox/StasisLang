@@ -1209,6 +1209,7 @@ public sealed class ModuleLowerer
             "sys_read_file",
             "sys_write_file",
             "sys_file_exists",
+            "sys_file_size",
             "sys_file_mtime_ms",
             "sys_exec",
 
@@ -2456,6 +2457,25 @@ public sealed class ModuleLowerer
 
                         var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_exists.path");
                         return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_exists.call");
+                    }
+
+                case "sys_file_size":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_size expects (path: string).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_size");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_size", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_size.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_size.call");
                     }
 
                 case "sys_file_mtime_ms":
