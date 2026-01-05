@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$sample = Join-Path $root "samples\hotstate_no_runtime.stasis"
+$sample = Join-Path $root "samples\hotstate_tick_watch.stasis"
 $outLog = Join-Path $root "build\ci_hotswap_timing.out.log"
 $errLog = Join-Path $root "build\ci_hotswap_timing.err.log"
 
