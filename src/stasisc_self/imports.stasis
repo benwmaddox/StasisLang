@@ -16,6 +16,12 @@ struct ShFile {
     expanded: i32;
 }
 
+struct ShExpandFrame {
+    file_idx: i32;
+    i: i32;
+    line_start: i32;
+}
+
 global sh_files: ShFile[300];
 global sh_file_count: i32;
 
@@ -27,6 +33,9 @@ global sh_path_pool_len: i32;
 
 global sh_out: u8[16000000];
 global sh_out_len: i32;
+
+global sh_stack: ShExpandFrame[300];
+global sh_stack_len: i32;
 
 global sh_read: u8[51201];
 
@@ -43,6 +52,7 @@ function sh_reset() {
     sh_pool_len = 0;
     sh_path_pool_len = 0;
     sh_out_len = 0;
+    sh_stack_len = 0;
     sh_out[0] = 0;
     ascii_clear(sh_scratch_import);
     ascii_clear(sh_scratch_dir);
@@ -394,57 +404,103 @@ function sh_resolve_import(file_idx: i32): bool {
 }
 
 function sh_expand_file(file_idx: i32): bool {
+    if (file_idx < 0 || file_idx >= sh_file_count) {
+        return false;
+    }
+
     if (sh_files[file_idx].expanded != 0) {
         return true;
     }
+
+    // Iterative expansion (explicit stack) to avoid recursion.
+    sh_stack_len = 0;
     sh_files[file_idx].expanded = 1;
 
-    let base: i32 = sh_files[file_idx].offset;
-    let len: i32 = sh_files[file_idx].len;
+    sh_stack[0].file_idx = file_idx;
+    sh_stack[0].i = 0;
+    sh_stack[0].line_start = 0;
+    sh_stack_len = 1;
 
-    let line_start: i32 = 0;
-    let i: i32 = 0;
-    for (i = 0; i <= len; i = i + 1) {
-        let is_end: bool = i == len;
-        let b: u8 = 10;
-        if (!is_end) {
-            b = sh_pool[base + i];
+    let step: i32 = 0;
+    for (step = 0; sh_stack_len > 0; step = step + 1) {
+        let top: i32 = sh_stack_len - 1;
+        let cur: i32 = sh_stack[top].file_idx;
+        let base: i32 = sh_files[cur].offset;
+        let len: i32 = sh_files[cur].len;
+        let i: i32 = sh_stack[top].i;
+        let line_start: i32 = sh_stack[top].line_start;
+
+        let descend: i32 = 0;
+        let imported: i32 = -1;
+        let resume: i32 = 0;
+
+        for (i = i; i <= len; i = i + 1) {
+            let is_end: bool = i == len;
+            let b: u8 = 10;
+            if (!is_end) {
+                b = sh_pool[base + i];
+            }
+
+            if (b == 10 || is_end) {
+                let line_end: i32 = i;
+                if (line_end > line_start && sh_pool[base + line_end - 1] == 13) {
+                    line_end = line_end - 1;
+                }
+
+                let after: i32 = i + 1;
+                if (sh_try_parse_import(cur, line_start, line_end)) {
+                    if (!sh_resolve_import(cur)) {
+                        return false;
+                    }
+                    imported = sh_load_file(sh_scratch_resolved);
+                    if (imported < 0) {
+                        return false;
+                    }
+
+                    if (sh_files[imported].expanded == 0) {
+                        sh_files[imported].expanded = 1;
+                        descend = 1;
+                        resume = after;
+                        // Break out of the scan loop and expand the imported file next.
+                        i = len + 1;
+                    }
+                } else {
+                    let count: i32 = line_end - line_start;
+                    if (!sh_out_append_from_pool(base + line_start, count)) {
+                        if (sh_quiet == 0) {
+                            print_string("error: expanded output exceeded capacity\n");
+                        }
+                        return false;
+                    }
+                    if (!sh_out_append_byte(10)) {
+                        if (sh_quiet == 0) {
+                            print_string("error: expanded output exceeded capacity\n");
+                        }
+                        return false;
+                    }
+                }
+
+                line_start = after;
+            }
         }
 
-        if (b == 10 || is_end) {
-            let line_end: i32 = i;
-            if (line_end > line_start && sh_pool[base + line_end - 1] == 13) {
-                line_end = line_end - 1;
+        if (descend != 0) {
+            sh_stack[top].i = resume;
+            sh_stack[top].line_start = resume;
+
+            if (sh_stack_len >= SH_MAX_FILES) {
+                if (sh_quiet == 0) {
+                    print_string("error: import stack overflow\n");
+                }
+                return false;
             }
 
-            if (sh_try_parse_import(file_idx, line_start, line_end)) {
-                if (!sh_resolve_import(file_idx)) {
-                    return false;
-                }
-                let imported: i32 = sh_load_file(sh_scratch_resolved);
-                if (imported < 0) {
-                    return false;
-                }
-                if (!sh_expand_file(imported)) {
-                    return false;
-                }
-            } else {
-                let count: i32 = line_end - line_start;
-                if (!sh_out_append_from_pool(base + line_start, count)) {
-                    if (sh_quiet == 0) {
-                        print_string("error: expanded output exceeded capacity\n");
-                    }
-                    return false;
-                }
-                if (!sh_out_append_byte(10)) {
-                    if (sh_quiet == 0) {
-                        print_string("error: expanded output exceeded capacity\n");
-                    }
-                    return false;
-                }
-            }
-
-            line_start = i + 1;
+            sh_stack[sh_stack_len].file_idx = imported;
+            sh_stack[sh_stack_len].i = 0;
+            sh_stack[sh_stack_len].line_start = 0;
+            sh_stack_len = sh_stack_len + 1;
+        } else {
+            sh_stack_len = sh_stack_len - 1;
         }
     }
 
