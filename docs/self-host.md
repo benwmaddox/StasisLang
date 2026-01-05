@@ -83,7 +83,7 @@ Each imported file is treated as a module.
 
 - Module name is derived from the imported file basename (strip extension, map `-` and other non-identifier bytes to `_`).
 - Duplicate module names are rejected (fail-fast with a clear diagnostic). Import aliasing is intentionally not supported for now.
-- The frontend will resolve `ModuleName.symbol` as a module-member reference during semantic analysis.
+- Imported module members are in scope by default; if multiple imports define the same name, unqualified use is an error and the frontend will require `ModuleName.symbol`.
 
 ## Iteration First (Avoid Recursion Where Possible)
 
@@ -246,3 +246,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed `tools/cranelift-aot` to accept `load.r64` (pointer) instructions.
 - 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
 - 2026-01-05: tokenizer now uses `enum ShTok { ... }` (explicit numeric values) instead of `const SH_TOK_*`.
+- 2026-01-05: clarified module import semantics: imported module members are in scope by default; use `ModuleName.symbol` only to disambiguate.

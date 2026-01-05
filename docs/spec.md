@@ -479,9 +479,11 @@ Global arrays of struct references become SoA automatically.
 
 - File = Module.
 - `import "relative/path/to/file.stasis";` adds that file's module to the build (no textual expansion required).
-- Imports introduce modules; later references can be qualified as `module_name.symbol`.
+- Imports introduce modules, and module members are in scope by default after import.
+  - `module_name.symbol` is always allowed for disambiguation/clarity.
   - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
-  - Duplicate module names are an error (use an aliasing form once added).
+  - Duplicate module names are an error (import aliasing is not supported currently).
+  - If multiple imports introduce the same member name, unqualified references are ambiguous; use `module_name.symbol`.
 - Compiled via signature-first pass, then tree shaking.
 
 ---

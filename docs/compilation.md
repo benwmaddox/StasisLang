@@ -46,7 +46,10 @@ ImportDecl       -> "import" StringLiteral ";"
 ```
 
 Parsing note:
-- Imports introduce modules (file = module). The parser records import paths so later passes can build a per-file module table and resolve `ModuleName.symbol` references.
+- Imports introduce modules (file = module). The parser records import paths so later passes can build a per-file module table and resolve identifiers against:
+  - local declarations first
+  - then imported module members (in scope by default)
+  - and `ModuleName.symbol` for disambiguation
 
 ## 2.1 Struct Declarations
 
