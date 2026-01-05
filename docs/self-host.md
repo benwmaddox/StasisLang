@@ -41,6 +41,7 @@ We need a minimal host API accessible from Stasis code:
   - `sys_read_file(path: utf8[], out: u8[], out_cap: i32) -> i32`
   - `sys_write_file(path: utf8[], data: u8[], len: i32) -> bool`
   - `sys_file_exists(path: utf8[]) -> bool`
+  - `sys_file_size(path: utf8[]) -> i32`
   - `sys_file_mtime_ms(path: utf8[]) -> i32` (for watch polling)
 - process (for driving AOT/link from Stasis):
   - `sys_exec(command: utf8[]) -> i32`

@@ -161,6 +161,7 @@ These are host-provided helpers intended for tooling and self-hosted programs (c
 - `sys_read_file(path: utf8[N], out: u8[M], out_cap: i32) -> i32` (returns bytes read, `-1` on failure; always writes a `0` sentinel when `out_cap > 0`)
 - `sys_write_file(path: utf8[N], data: u8[M], len: i32) -> bool`
 - `sys_file_exists(path: utf8[N]) -> bool`
+- `sys_file_size(path: utf8[N]) -> i32` (returns bytes, `-1` on failure)
 - `sys_file_mtime_ms(path: utf8[N]) -> i32` (returns ms since epoch on supported hosts, `-1` on failure)
 - `sys_exec(command: utf8[N]) -> i32` (process exit code)
 
