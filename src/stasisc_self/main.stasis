@@ -1,32 +1,53 @@
 import "../stdlib/stdlib.stasis";
 
-global arg1: utf8[1024];
-global file_buf: u8[60000];
+global sh_cmd: ascii[64];
+
+function sh_usage(): void {
+    print_string("stasisc-self (WIP self-hosted compiler)\n");
+    print_string("\n");
+    print_string("usage:\n");
+    print_string("  stasisc-self expand <entry.stasis> <out.stasis>\n");
+    print_string("\n");
+    print_string("notes:\n");
+    print_string("  - This CLI is under active development on branch self-host.\n");
+    print_string("  - Current stage focuses on import expansion + frontend bring-up.\n");
+}
+
+function sh_read_arg(idx: i32, out: ascii[], cap: i32): bool {
+    let n: i32 = sys_argv(idx, out, cap);
+    if (n <= 0) {
+        return false;
+    }
+    ascii_set_len(out, n);
+    return true;
+}
 
 function main(): i32 {
-    if (sys_argc() < 2) {
-        print_string("usage: stasisc-self <file>\n");
+    let argc: i32 = sys_argc();
+    if (argc < 2) {
+        sh_usage();
         return 1;
     }
 
-    let arg_len: i32 = sys_argv(1, arg1, 1024);
-    if (arg_len <= 0) {
+    if (!sh_read_arg(1, sh_cmd, 64)) {
         print_string("error: failed to read argv[1]\n");
         return 1;
     }
-    utf8_set_len_ascii(arg1, arg_len);
 
-    let n: i32 = sys_read_file(arg1, file_buf, 60000);
-    if (n < 0) {
-        print_string("error: failed to read file: ");
-        print_string(arg1);
-        print_char(10);
-        return 1;
+    if (ascii_eq(sh_cmd, "help") || ascii_eq(sh_cmd, "-h") || ascii_eq(sh_cmd, "--help")) {
+        sh_usage();
+        return 0;
     }
 
-    print_string("read bytes=");
-    print_int(n);
+    if (ascii_eq(sh_cmd, "expand")) {
+        print_string("error: expand is not implemented yet\n");
+        return 2;
+    }
+
+    print_string("error: unknown command: ");
+    print_string(sh_cmd);
     print_char(10);
-    return 0;
+    sh_usage();
+    return 1;
 }
 
