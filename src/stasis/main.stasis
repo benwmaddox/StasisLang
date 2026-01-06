@@ -11,7 +11,7 @@ function sh_usage(): void {
     print_string("\n");
     print_string("usage:\n");
     print_string("  stasis check [--quiet] <entry.stasis>\n");
-    print_string("  stasis build [--quiet] [--backend cranelift|llvm] [--module <name>] --emit-ir --out <path> <entry.stasis>\n");
+    print_string("  stasis build [--quiet] [--backend cranelift|llvm] [--module <name>] --out <path> [--emit-ir] <entry.stasis>\n");
     print_string("  stasis run [--quiet] [--backend llvm] [--module <name>] <entry.stasis>\n");
     print_string("  stasis watch check [--quiet] <entry.stasis>\n");
     print_string("\n");
@@ -244,10 +244,6 @@ function main(): i32 {
             sh_usage();
             return 1;
         }
-        if (sh.emit_ir == 0) {
-            print_string("error: build is currently IR-only; pass --emit-ir\n");
-            return 1;
-        }
 
         let rc: i32 = sh_load_graph(sh.arg_entry);
         if (rc != 0) {
@@ -263,19 +259,65 @@ function main(): i32 {
             return rc;
         }
 
-        if (!sys_write_file(sh.arg_out, sh.ir_out, ascii_len(sh.ir_out))) {
-            print_string("error: failed to write output: ");
-            print_string(sh.arg_out);
+        if (sh.emit_ir != 0) {
+            if (!sys_write_file(sh.arg_out, sh.ir_out, ascii_len(sh.ir_out))) {
+                print_string("error: failed to write output: ");
+                print_string(sh.arg_out);
+                print_char(10);
+                return 1;
+            }
+
+            if (sh.quiet == 0) {
+                print_string("built ir: ");
+                print_string(sh.arg_out);
+                print_char(10);
+            }
+            return 0;
+        }
+
+        if (!ascii_eq(sh.arg_backend, "llvm")) {
+            print_string("error: build to exe currently supports --backend llvm only (use --emit-ir for cranelift)\n");
+            return 1;
+        }
+
+        if (!sh_read_arg(0, sh.scratch_import, 260)) {
+            print_string("error: failed to read argv[0]\n");
+            return 1;
+        }
+        sh_path_dirname(sh.scratch_dir, sh.scratch_import);
+        sh_path_join(sh.scratch_resolved, sh.scratch_dir, "stasis_build.ll");
+
+        if (!sys_write_file(sh.scratch_resolved, sh.ir_out, ascii_len(sh.ir_out))) {
+            print_string("error: failed to write temp ir: ");
+            print_string(sh.scratch_resolved);
             print_char(10);
             return 1;
         }
 
+        ascii_clear(sh.exec_cmd);
+        ascii_append(sh.exec_cmd, "clang -Wno-override-module ");
+        ascii_append_byte(sh.exec_cmd, 34); // '"'
+        ascii_append(sh.exec_cmd, sh.scratch_resolved);
+        ascii_append_byte(sh.exec_cmd, 34); // '"'
+        ascii_append(sh.exec_cmd, " -o ");
+        ascii_append_byte(sh.exec_cmd, 34); // '"'
+        ascii_append(sh.exec_cmd, sh.arg_out);
+        ascii_append_byte(sh.exec_cmd, 34); // '"'
+
+        let exit_code: i32 = sys_exec(sh.exec_cmd);
+        if (exit_code != 0) {
+            print_string("error: clang failed (exit=");
+            print_int(exit_code);
+            print_string(")\n");
+            return exit_code;
+        }
+
         if (sh.quiet == 0) {
-            print_string("built ir: ");
+            print_string("built: ");
             print_string(sh.arg_out);
             print_char(10);
         }
-        return 0;
+        return exit_code;
     }
 
     if (ascii_eq(sh.cmd, "run")) {
