@@ -25,12 +25,18 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
 
     let ret_ty: i32 = sh.funcs[func_idx].ret_type_idx;
     let is_void: i32 = 0;
+    let is_f32_ret: i32 = 0;
     if (ret_ty < 0 || sh_build_type_is_void(ret_ty)) {
         is_void = 1;
-    }
-    if (is_void == 0 && !sh_build_type_is_i32ish(ret_ty) && !sh_build_type_is_byte_named(ret_ty)) {
-        sh_build_err_at(file_idx, "unsupported function return type (llvm bring-up)", sh.funcs[func_idx].name_start);
-        return 1;
+    } else {
+        if (sh_build_type_is_f32(ret_ty)) {
+            is_f32_ret = 1;
+        } else {
+            if (!sh_build_type_is_i32ish(ret_ty) && !sh_build_type_is_byte_named(ret_ty)) {
+                sh_build_err_at(file_idx, "unsupported function return type (llvm bring-up)", sh.funcs[func_idx].name_start);
+                return 1;
+            }
+        }
     }
 
     if (!sh_lex_begin(file_idx)) {
@@ -59,6 +65,9 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
 
         // Bring-up: scalar params are i32; array/slice params are ptr.
         let param_kind: ShLlvmValueKind = ShLlvmValueKind.I32;
+        if (sh_build_type_is_f32(p_ty)) {
+            param_kind = ShLlvmValueKind.F32;
+        } else {
         if (!sh_build_type_is_i32ish(p_ty) && !sh_build_type_is_byte_named(p_ty)) {
             let p_tkind: ShTypeKind = sh.types[p_ty].kind;
             if (p_tkind != ShTypeKind.Array) {
@@ -73,10 +82,15 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
                 if (sh_build_type_is_i32ish(elem)) {
                     param_kind = ShLlvmValueKind.PtrI32;
                 } else {
-                    sh_build_err_at(file_idx, "unsupported parameter element type (llvm bring-up)", sh.params[p_decl].name_start);
-                    return 1;
+                    if (sh_build_type_is_f32(elem)) {
+                        param_kind = ShLlvmValueKind.PtrF32;
+                    } else {
+                        sh_build_err_at(file_idx, "unsupported parameter element type (llvm bring-up)", sh.params[p_decl].name_start);
+                        return 1;
+                    }
                 }
             }
+        }
         }
 
         let local_id: i32 = sh_llvm_add_local(file_idx, sh.params[p_decl].name_start, sh.params[p_decl].name_len);
@@ -101,7 +115,11 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
     if (is_void != 0) {
         ascii_append(sh.ir_out, "void @");
     } else {
-        ascii_append(sh.ir_out, "i32 @");
+        if (is_f32_ret != 0) {
+            ascii_append(sh.ir_out, "float @");
+        } else {
+            ascii_append(sh.ir_out, "i32 @");
+        }
     }
     sh_llvm_append_func_ir_name(func_idx);
     ascii_append(sh.ir_out, "(");
@@ -113,12 +131,16 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
         if (p_kind_sig == ShLlvmValueKind.I32) {
             ascii_append(sh.ir_out, "i32 %a");
         } else {
-            if (p_kind_sig == ShLlvmValueKind.PtrI8 || p_kind_sig == ShLlvmValueKind.PtrI32 || p_kind_sig == ShLlvmValueKind.PtrStruct) {
+            if (p_kind_sig == ShLlvmValueKind.F32) {
+                ascii_append(sh.ir_out, "float %a");
+        } else {
+            if (p_kind_sig == ShLlvmValueKind.PtrI8 || p_kind_sig == ShLlvmValueKind.PtrI32 || p_kind_sig == ShLlvmValueKind.PtrF32 || p_kind_sig == ShLlvmValueKind.PtrStruct) {
                 ascii_append(sh.ir_out, "ptr %a");
             } else {
                 sh_build_err_at(file_idx, "unsupported parameter kind (llvm bring-up)", sh.funcs[func_idx].name_start);
                 return 1;
             }
+        }
         }
         sh_ir_append_i32(sh.ir_out, p);
     }
@@ -128,8 +150,18 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
     let exit_label: i32 = sh_llvm_new_label();
 
     // Return slot (allows return to appear anywhere).
-    ascii_append(sh.ir_out, "  %ret_slot = alloca i32, align 4\n");
-    ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+    if (is_void != 0) {
+        ascii_append(sh.ir_out, "  %ret_slot = alloca i32, align 4\n");
+        ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+    } else {
+        if (is_f32_ret != 0) {
+            ascii_append(sh.ir_out, "  %ret_slot = alloca float, align 4\n");
+            ascii_append(sh.ir_out, "  store float 0.0, ptr %ret_slot, align 4\n");
+        } else {
+            ascii_append(sh.ir_out, "  %ret_slot = alloca i32, align 4\n");
+            ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+        }
+    }
 
     // Locals are modeled as wasm-like locals: 0-initialized and available for the whole function.
     let i: i32 = 0;
@@ -143,16 +175,25 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
             sh_llvm_append_local_ptr(i);
             ascii_append(sh.ir_out, ", align 4\n");
         } else {
-            if (lkind == ShLlvmValueKind.PtrI8 || lkind == ShLlvmValueKind.PtrI32 || lkind == ShLlvmValueKind.PtrStruct) {
+            if (lkind == ShLlvmValueKind.F32) {
                 ascii_append(sh.ir_out, "  ");
                 sh_llvm_append_local_ptr(i);
-                ascii_append(sh.ir_out, " = alloca ptr, align 8\n");
-                ascii_append(sh.ir_out, "  store ptr null, ptr ");
+                ascii_append(sh.ir_out, " = alloca float, align 4\n");
+                ascii_append(sh.ir_out, "  store float 0.0, ptr ");
                 sh_llvm_append_local_ptr(i);
-                ascii_append(sh.ir_out, ", align 8\n");
+                ascii_append(sh.ir_out, ", align 4\n");
             } else {
-                sh_build_err_at(file_idx, "unsupported local kind (llvm bring-up)", body_start);
-                return 1;
+                if (lkind == ShLlvmValueKind.PtrI8 || lkind == ShLlvmValueKind.PtrI32 || lkind == ShLlvmValueKind.PtrF32 || lkind == ShLlvmValueKind.PtrStruct) {
+                    ascii_append(sh.ir_out, "  ");
+                    sh_llvm_append_local_ptr(i);
+                    ascii_append(sh.ir_out, " = alloca ptr, align 8\n");
+                    ascii_append(sh.ir_out, "  store ptr null, ptr ");
+                    sh_llvm_append_local_ptr(i);
+                    ascii_append(sh.ir_out, ", align 8\n");
+                } else {
+                    sh_build_err_at(file_idx, "unsupported local kind (llvm bring-up)", body_start);
+                    return 1;
+                }
             }
         }
     }
@@ -167,7 +208,14 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
             sh_llvm_append_local_ptr(p);
             ascii_append(sh.ir_out, ", align 4\n");
         } else {
-            if (p_kind_init == ShLlvmValueKind.PtrI8 || p_kind_init == ShLlvmValueKind.PtrI32 || p_kind_init == ShLlvmValueKind.PtrStruct) {
+            if (p_kind_init == ShLlvmValueKind.F32) {
+                ascii_append(sh.ir_out, "  store float %a");
+                sh_ir_append_i32(sh.ir_out, p);
+                ascii_append(sh.ir_out, ", ptr ");
+                sh_llvm_append_local_ptr(p);
+                ascii_append(sh.ir_out, ", align 4\n");
+            } else {
+            if (p_kind_init == ShLlvmValueKind.PtrI8 || p_kind_init == ShLlvmValueKind.PtrI32 || p_kind_init == ShLlvmValueKind.PtrF32 || p_kind_init == ShLlvmValueKind.PtrStruct) {
                 ascii_append(sh.ir_out, "  store ptr %a");
                 sh_ir_append_i32(sh.ir_out, p);
                 ascii_append(sh.ir_out, ", ptr ");
@@ -176,6 +224,7 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
             } else {
                 sh_build_err_at(file_idx, "unsupported parameter kind (llvm bring-up)", sh.funcs[func_idx].name_start);
                 return 1;
+            }
             }
         }
     }
@@ -340,6 +389,9 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
                             sh_build_err_at(file_idx, "expected type name", sh.tok_start);
                             return 1;
                         }
+                        if (sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "f32")) {
+                            sh.llvm_local_kind[local_id2] = ShLlvmValueKind.F32;
+                        } else {
                         if (!sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "i32") && !sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "bool") && !sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "u8")) {
                             let enum_hit: i32 = sh_llvm_try_resolve_unqualified_enum(file_idx, sh.tok_start, sh.tok_len, sh.tok_start);
                             if (enum_hit < 0) {
@@ -350,6 +402,7 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
                                 return 1;
                             }
                         }
+                        }
                         next_k = sh_lex_next_kind();
                     }
 
@@ -357,17 +410,27 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
                         sh_llvm_ensure_bb_open();
                         let root: i32 = sh_expr_parse_until(file_idx, ShTok.Semicolon);
                         if (root < 0) { return 1; }
-                        let folded: i32 = sh_expr_try_eval_i32_const(root);
-                        if (sh.expr_eval_failed == 0) {
-                            ascii_append(sh.ir_out, "  store i32 ");
-                            sh_ir_append_i32(sh.ir_out, folded);
+                        if (sh.llvm_local_kind[local_id2] == ShLlvmValueKind.F32) {
+                            let rhs_f32_id2: i32 = sh_llvm_emit_expr_f32(file_idx, root);
+                            if (rhs_f32_id2 < 0) { return 1; }
+                            ascii_append(sh.ir_out, "  store float ");
+                            sh_llvm_append_tmp(rhs_f32_id2);
                             ascii_append(sh.ir_out, ", ptr ");
                             sh_llvm_append_local_ptr(local_id2);
                             ascii_append(sh.ir_out, ", align 4\n");
                         } else {
-                            let rhs_id: i32 = sh_llvm_emit_expr_i32(file_idx, root);
-                            if (rhs_id < 0) { return 1; }
-                            sh_llvm_emit_store_local(local_id2, rhs_id);
+                            let folded: i32 = sh_expr_try_eval_i32_const(root);
+                            if (sh.expr_eval_failed == 0) {
+                                ascii_append(sh.ir_out, "  store i32 ");
+                                sh_ir_append_i32(sh.ir_out, folded);
+                                ascii_append(sh.ir_out, ", ptr ");
+                                sh_llvm_append_local_ptr(local_id2);
+                                ascii_append(sh.ir_out, ", align 4\n");
+                            } else {
+                                let rhs_id: i32 = sh_llvm_emit_expr_i32(file_idx, root);
+                                if (rhs_id < 0) { return 1; }
+                                sh_llvm_emit_store_local(local_id2, rhs_id);
+                            }
                         }
                     } else {
                         if (next_k != ShTok.Semicolon) {
@@ -390,22 +453,35 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
                             sh_llvm_emit_br("exit", exit_label);
                         } else {
                             if (next2 == ShTok.Semicolon) {
-                                ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
-                                sh_llvm_emit_br("exit", exit_label);
+                                if (is_f32_ret != 0) {
+                                    ascii_append(sh.ir_out, "  store float 0.0, ptr %ret_slot, align 4\n");
+                                    sh_llvm_emit_br("exit", exit_label);
+                                } else {
+                                    ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+                                    sh_llvm_emit_br("exit", exit_label);
+                                }
                             } else {
                                 let root2: i32 = sh_expr_parse_after_first(file_idx, next2, ShTok.Semicolon);
                                 if (root2 < 0) { return 1; }
-                                let folded2: i32 = sh_expr_try_eval_i32_const(root2);
-                                if (sh.expr_eval_failed == 0) {
-                                    ascii_append(sh.ir_out, "  store i32 ");
-                                    sh_ir_append_i32(sh.ir_out, folded2);
+                                if (is_f32_ret != 0) {
+                                    let ret_f32_id: i32 = sh_llvm_emit_expr_f32(file_idx, root2);
+                                    if (ret_f32_id < 0) { return 1; }
+                                    ascii_append(sh.ir_out, "  store float ");
+                                    sh_llvm_append_tmp(ret_f32_id);
                                     ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
                                 } else {
-                                    let ret_id: i32 = sh_llvm_emit_expr_i32(file_idx, root2);
-                                    if (ret_id < 0) { return 1; }
-                                    ascii_append(sh.ir_out, "  store i32 ");
-                                    sh_llvm_append_tmp(ret_id);
-                                    ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
+                                    let folded2: i32 = sh_expr_try_eval_i32_const(root2);
+                                    if (sh.expr_eval_failed == 0) {
+                                        ascii_append(sh.ir_out, "  store i32 ");
+                                        sh_ir_append_i32(sh.ir_out, folded2);
+                                        ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
+                                    } else {
+                                        let ret_id: i32 = sh_llvm_emit_expr_i32(file_idx, root2);
+                                        if (ret_id < 0) { return 1; }
+                                        ascii_append(sh.ir_out, "  store i32 ");
+                                        sh_llvm_append_tmp(ret_id);
+                                        ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
+                                    }
                                 }
                                 sh_llvm_emit_br("exit", exit_label);
                             }
@@ -555,10 +631,17 @@ function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
         let ret_tmp: i32 = sh_llvm_new_tmp();
         ascii_append(sh.ir_out, "  ");
         sh_llvm_append_tmp(ret_tmp);
-        ascii_append(sh.ir_out, " = load i32, ptr %ret_slot, align 4\n");
-        ascii_append(sh.ir_out, "  ret i32 ");
-        sh_llvm_append_tmp(ret_tmp);
-        ascii_append(sh.ir_out, "\n");
+        if (is_f32_ret != 0) {
+            ascii_append(sh.ir_out, " = load float, ptr %ret_slot, align 4\n");
+            ascii_append(sh.ir_out, "  ret float ");
+            sh_llvm_append_tmp(ret_tmp);
+            ascii_append(sh.ir_out, "\n");
+        } else {
+            ascii_append(sh.ir_out, " = load i32, ptr %ret_slot, align 4\n");
+            ascii_append(sh.ir_out, "  ret i32 ");
+            sh_llvm_append_tmp(ret_tmp);
+            ascii_append(sh.ir_out, "\n");
+        }
     }
 
     ascii_append(sh.ir_out, "}\n\n");

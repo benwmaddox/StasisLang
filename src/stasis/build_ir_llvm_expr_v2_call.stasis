@@ -10,6 +10,7 @@ import "build_ir_llvm_resolve.stasis";
 import "build_ir_llvm_types.stasis";
 import "build_ir_llvm_builder.stasis";
 import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call_user.stasis";
 import "build_ir_llvm_expr_v2_post.stasis";
 import "build_ir_llvm_expr_v2.stasis";
 import "build_ir_llvm_emit_main.stasis";
@@ -107,6 +108,56 @@ function sh_llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32
                 sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
                 sh.llvm_val_struct_idx[val_len] = -1;
                 val_len = val_len + 1;
+            } else {
+                if (sh_span_eq(file_idx, cname_start, cname_len, "i32_to_f32")) {
+                    handled_intr = 1;
+                    if (argc != 1) {
+                        sh_build_err_at(file_idx, "i32_to_f32 expects 1 argument", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.I32) {
+                        sh_build_err_at(file_idx, "i32_to_f32 expects i32 argument", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+
+                    out_id2 = sh_llvm_new_tmp();
+                    ascii_append(sh.ir_out, "  ");
+                    sh_llvm_append_tmp(out_id2);
+                    ascii_append(sh.ir_out, " = sitofp i32 ");
+                    sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                    ascii_append(sh.ir_out, " to float\n");
+
+                    val_len = arg_base;
+                    sh.expr_op_at[val_len] = out_id2;
+                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
+                    sh.llvm_val_struct_idx[val_len] = -1;
+                    val_len = val_len + 1;
+                } else {
+                    if (sh_span_eq(file_idx, cname_start, cname_len, "f32_to_i32")) {
+                        handled_intr = 1;
+                        if (argc != 1) {
+                            sh_build_err_at(file_idx, "f32_to_i32 expects 1 argument", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.F32) {
+                            sh_build_err_at(file_idx, "f32_to_i32 expects f32 argument", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+
+                        out_id2 = sh_llvm_new_tmp();
+                        ascii_append(sh.ir_out, "  ");
+                        sh_llvm_append_tmp(out_id2);
+                        ascii_append(sh.ir_out, " = fptosi float ");
+                        sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                        ascii_append(sh.ir_out, " to i32\n");
+
+                        val_len = arg_base;
+                        sh.expr_op_at[val_len] = out_id2;
+                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                        sh.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    }
+                }
             }
         }
     }
@@ -858,121 +909,7 @@ function sh_llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32
     }
     
     if (handled_intr == 0) {
-        let fn_idx0: i32 = sh_llvm_resolve_callee_func(file_idx, callee_expr, sh.expr_nodes[idx2].at);
-        if (fn_idx0 < 0) {
-            return -1;
-        }
-        if (sh.funcs[fn_idx0].body_start < 0) {
-            sh_build_err_at(file_idx, "function has no body (call)", sh.expr_nodes[idx2].at);
-            return -1;
-        }
-    
-        let ret_ty: i32 = sh.funcs[fn_idx0].ret_type_idx;
-        let ret_is_void: i32 = 0;
-        if (ret_ty < 0 || sh_build_type_is_void(ret_ty)) {
-            ret_is_void = 1;
-        }
-        if (ret_is_void == 0 && !sh_build_type_is_i32ish(ret_ty) && !sh_build_type_is_byte_named(ret_ty)) {
-            sh_build_err_at(file_idx, "unsupported call return type (llvm bring-up)", sh.expr_nodes[idx2].at);
-            return -1;
-        }
-        if (sh.funcs[fn_idx0].params_len != argc) {
-            sh_build_err_at(file_idx, "call arg count mismatch", sh.expr_nodes[idx2].at);
-            return -1;
-        }
-    
-        let pi: i32 = 0;
-        for (pi = 0; pi < argc; pi = pi + 1) {
-            let p_decl: i32 = sh.funcs[fn_idx0].params_off + pi;
-            if (p_decl < 0 || p_decl >= sh.param_count) {
-                sh_build_err_at(file_idx, "invalid function parameters", sh.expr_nodes[idx2].at);
-                return -1;
-            }
-    
-            let p_ty: i32 = sh.params[p_decl].type_idx;
-            if (p_ty < 0 || p_ty >= sh.type_count) {
-                sh_build_err_at(file_idx, "invalid call arg type (llvm bring-up)", sh.expr_nodes[idx2].at);
-                return -1;
-            }
-    
-            if (sh_build_type_is_i32ish(p_ty) || sh_build_type_is_byte_named(p_ty)) {
-                if (sh.llvm_val_kind[arg_base + pi] != ShLlvmValueKind.I32) {
-                    sh_build_err_at(file_idx, "invalid call arg value (expected i32)", sh.expr_nodes[idx2].at);
-                    return -1;
-                }
-            } else {
-                let pk: ShTypeKind = sh.types[p_ty].kind;
-                if (pk != ShTypeKind.Array) {
-                    sh_build_err_at(file_idx, "unsupported call arg type (llvm bring-up)", sh.expr_nodes[idx2].at);
-                    return -1;
-                }
-    
-                let elem: i32 = sh.types[p_ty].elem;
-                let expected_ptr: ShLlvmValueKind = ShLlvmValueKind.PtrI8;
-                if (sh_build_type_is_byte_named(elem)) {
-                    expected_ptr = ShLlvmValueKind.PtrI8;
-                } else {
-                    if (sh_build_type_is_i32ish(elem)) {
-                        expected_ptr = ShLlvmValueKind.PtrI32;
-                    } else {
-                        sh_build_err_at(file_idx, "unsupported call arg element type (llvm bring-up)", sh.expr_nodes[idx2].at);
-                        return -1;
-                    }
-                }
-    
-                if (sh.llvm_val_kind[arg_base + pi] != expected_ptr) {
-                    sh_build_err_at(file_idx, "invalid call arg value (expected pointer)", sh.expr_nodes[idx2].at);
-                    return -1;
-                }
-            }
-        }
-    
-        out_id0 = 0;
-        if (ret_is_void != 0) {
-            ascii_append(sh.ir_out, "  call void @");
-        } else {
-            out_id0 = sh_llvm_new_tmp();
-            ascii_append(sh.ir_out, "  ");
-            sh_llvm_append_tmp(out_id0);
-            ascii_append(sh.ir_out, " = call i32 @");
-        }
-        sh_llvm_append_func_ir_name(fn_idx0);
-        ascii_append(sh.ir_out, "(");
-    
-        for (pi = 0; pi < argc; pi = pi + 1) {
-            if (pi != 0) {
-                ascii_append(sh.ir_out, ", ");
-            }
-    
-            let p_decl2: i32 = sh.funcs[fn_idx0].params_off + pi;
-            if (p_decl2 < 0 || p_decl2 >= sh.param_count) {
-                return -1;
-            }
-            let p_ty2: i32 = sh.params[p_decl2].type_idx;
-            if (p_ty2 < 0 || p_ty2 >= sh.type_count) {
-                return -1;
-            }
-    
-            if (sh_build_type_is_i32ish(p_ty2) || sh_build_type_is_byte_named(p_ty2)) {
-                ascii_append(sh.ir_out, "i32 ");
-            } else {
-                ascii_append(sh.ir_out, "ptr ");
-            }
-            sh_llvm_append_tmp(sh.expr_op_at[arg_base + pi]);
-        }
-    
-        ascii_append(sh.ir_out, ")\n");
-    
-        val_len = arg_base;
-        if (ret_is_void != 0) {
-            sh.expr_op_at[val_len] = 0;
-            sh.llvm_val_kind[val_len] = ShLlvmValueKind.Void;
-        } else {
-            sh.expr_op_at[val_len] = out_id0;
-            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-        }
-        sh.llvm_val_struct_idx[val_len] = -1;
-        val_len = val_len + 1;
+        return sh_llvm_emit_expr_i32_v2_post_call_user(file_idx, idx2, callee_expr, argc, arg_base);
     }
     return val_len;
 }

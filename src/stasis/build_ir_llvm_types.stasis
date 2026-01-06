@@ -94,6 +94,10 @@ function sh_llvm_emit_type(type_idx: i32): i32 {
             ascii_append(sh.ir_out, "i32");
             return 0;
         }
+        if (sh_build_type_is_f32(type_idx)) {
+            ascii_append(sh.ir_out, "float");
+            return 0;
+        }
         if (sh_build_type_is_byte_named(type_idx)) {
             ascii_append(sh.ir_out, "i8");
             return 0;
@@ -146,6 +150,7 @@ function sh_llvm_align_of_type(type_idx: i32): i32 {
     let kind: ShTypeKind = sh.types[type_idx].kind;
     if (kind == ShTypeKind.Named) {
         if (sh_build_type_is_i32ish(type_idx)) { return 4; }
+        if (sh_build_type_is_f32(type_idx)) { return 4; }
         if (sh_build_type_is_byte_named(type_idx)) { return 1; }
         // Struct alignment: conservative.
         return 16;

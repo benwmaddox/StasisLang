@@ -198,7 +198,8 @@ enum ShExprKind {
     Call = 7,
     Member = 8,
     Index = 9,
-    StringLiteral = 10
+    StringLiteral = 10,
+    FloatLiteral = 11
 }
 
 struct ShExprNode {
@@ -228,7 +229,9 @@ enum ShLlvmValueKind {
     PtrI32 = 4,
     PtrStruct = 5,
     Void = 6,
-    EnumType = 7
+    EnumType = 7,
+    F32 = 8,
+    PtrF32 = 9
 }
 
 struct ShState {

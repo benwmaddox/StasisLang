@@ -75,6 +75,24 @@ function sh_expr_make_bool_lit(file_idx: i32, at: i32, value: i32): i32 {
     return idx;
 }
 
+function sh_expr_make_float_lit(file_idx: i32, at: i32, len: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.FloatLiteral;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = at;
+    sh.expr_nodes[idx].name_len = len;
+    return idx;
+}
+
 function sh_expr_make_name(file_idx: i32, at: i32, len: i32): i32 {
     let idx: i32 = sh_expr_node_new();
     if (idx < 0) {
@@ -415,6 +433,9 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                 if (k == ShTok.IntegerLiteral) {
                                     node = sh_expr_make_int_lit(file_idx, sh.tok_start, sh_expr_parse_i32_from_tok(file_idx));
                                 } else {
+                                    if (k == ShTok.FloatLiteral) {
+                                        node = sh_expr_make_float_lit(file_idx, sh.tok_start, sh.tok_len);
+                                    } else {
                                     if (k == ShTok.TrueKeyword) {
                                         node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 1);
                                     } else {
@@ -432,6 +453,7 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                                 }
                                             }
                                         }
+                                    }
                                     }
                                 }
 

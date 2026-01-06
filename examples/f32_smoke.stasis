@@ -1,0 +1,14 @@
+import "../src/stdlib/stdlib.stasis";
+
+const A: f32 = 1.5;
+
+function main(): i32 {
+    let x: f32 = A;
+    let y: f32 = 2.25;
+    let z: f32 = x * y + i32_to_f32(1);
+    let out: i32 = f32_to_i32(z);
+    print_int(out);
+    print_char(10);
+    return out;
+}
+

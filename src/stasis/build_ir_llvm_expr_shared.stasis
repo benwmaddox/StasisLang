@@ -65,6 +65,15 @@ function sh_llvm_emit_member_value_or_place(file_idx: i32, expr_idx: i32, mode: 
             return field_ptr;
         }
 
+        if (sh_build_type_is_f32(field_ty)) {
+            sh.llvm_place_kind = ShLlvmValueKind.F32;
+            sh.llvm_place_struct_idx = -1;
+            if (mode == 0) {
+                return sh_llvm_emit_load_f32_from_ptr(field_ptr);
+            }
+            return field_ptr;
+        }
+
         let si2: i32 = sh_build_find_struct_decl_for_type(field_ty);
         if (si2 < 0) {
             sh_build_err_at(file_idx, "unsupported struct field type (llvm bring-up)", sh.expr_nodes[expr_idx].at);
@@ -134,6 +143,24 @@ function sh_llvm_emit_index_value_or_place(file_idx: i32, expr_idx: i32, mode: i
         return elem_ptr2;
     }
 
+    if (base_kind == ShLlvmValueKind.PtrF32) {
+        let elem_ptr4: i32 = sh_llvm_new_tmp();
+        ascii_append(sh.ir_out, "  ");
+        sh_llvm_append_tmp(elem_ptr4);
+        ascii_append(sh.ir_out, " = getelementptr inbounds float, ptr ");
+        sh_llvm_append_tmp(base_id);
+        ascii_append(sh.ir_out, ", i32 ");
+        sh_llvm_append_tmp(index_id);
+        ascii_append(sh.ir_out, "\n");
+
+        sh.llvm_place_kind = ShLlvmValueKind.F32;
+        sh.llvm_place_struct_idx = -1;
+        if (mode == 0) {
+            return sh_llvm_emit_load_f32_from_ptr(elem_ptr4);
+        }
+        return elem_ptr4;
+    }
+
     if (base_kind == ShLlvmValueKind.PtrStruct && base_si >= 0) {
         let elem_ptr3: i32 = sh_llvm_new_tmp();
         ascii_append(sh.ir_out, "  ");
@@ -162,6 +189,27 @@ function sh_llvm_emit_icmp_to_i32(pred: ascii[], a_id: i32, b_id: i32): i32 {
     ascii_append(sh.ir_out, " = icmp ");
     ascii_append(sh.ir_out, pred);
     ascii_append(sh.ir_out, " i32 ");
+    sh_llvm_append_tmp(a_id);
+    ascii_append(sh.ir_out, ", ");
+    sh_llvm_append_tmp(b_id);
+    ascii_append(sh.ir_out, "\n");
+
+    let id_z: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id_z);
+    ascii_append(sh.ir_out, " = zext i1 ");
+    sh_llvm_append_tmp(id_cmp);
+    ascii_append(sh.ir_out, " to i32\n");
+    return id_z;
+}
+
+function sh_llvm_emit_fcmp_to_i32(pred: ascii[], a_id: i32, b_id: i32): i32 {
+    let id_cmp: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id_cmp);
+    ascii_append(sh.ir_out, " = fcmp ");
+    ascii_append(sh.ir_out, pred);
+    ascii_append(sh.ir_out, " float ");
     sh_llvm_append_tmp(a_id);
     ascii_append(sh.ir_out, ", ");
     sh_llvm_append_tmp(b_id);

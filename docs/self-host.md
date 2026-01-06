@@ -325,3 +325,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: refactored LLVM IR emitter files to keep each `.stasis` source <50KiB; added void returns, char_* builtins, const resolution, and enum member lowering.
 - 2026-01-06: stage1 self-build now works: `stasis build --emit-ir src/stasis/main.stasis` emits `build/stasis_self.ll` with no stage0 help beyond bootstrap.
 - 2026-01-06: `stasis build`/`run`/`release` now link the sys runtime (`runtime/stasis_sys.c`) when invoking `clang`; `run` uses a temp exe instead of `lli`.
+- 2026-01-06: LLVM bring-up: added `f32` support end-to-end (float literals, `f32` types, locals/params/returns, `+ - * /`, comparisons, consts); added `i32_to_f32` / `f32_to_i32` intrinsics; split call lowering to keep files <50KiB; added `examples/f32_smoke.stasis`.

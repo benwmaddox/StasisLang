@@ -115,6 +115,16 @@ function sh_llvm_emit_const_i32(v: i32): i32 {
     return id;
 }
 
+function sh_llvm_emit_const_f32_from_span(file_idx: i32, start: i32, len: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = fadd float 0.0, ");
+    sh_ir_append_span(sh.ir_out, file_idx, start, len);
+    ascii_append(sh.ir_out, "\n");
+    return id;
+}
+
 function sh_llvm_emit_icmp_i1(pred: ascii[], a_id: i32, b_imm: i32): i32 {
     let id_cmp: i32 = sh_llvm_new_tmp();
     ascii_append(sh.ir_out, "  ");
@@ -211,6 +221,16 @@ function sh_llvm_emit_gep0_local_i32(local_id: i32): i32 {
     return id;
 }
 
+function sh_llvm_emit_gep0_local_f32(local_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds float, ptr ");
+    sh_llvm_append_local_ptr(local_id);
+    ascii_append(sh.ir_out, ", i32 0\n");
+    return id;
+}
+
 function sh_llvm_emit_gep0_global(global_idx: i32, type_idx: i32): i32 {
     let id: i32 = sh_llvm_new_tmp();
     ascii_append(sh.ir_out, "  ");
@@ -235,6 +255,16 @@ function sh_llvm_emit_load_i32_from_ptr(ptr_id: i32): i32 {
     return id;
 }
 
+function sh_llvm_emit_load_f32_from_ptr(ptr_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = load float, ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+    return id;
+}
+
 function sh_llvm_emit_load_i8_zext_from_ptr(ptr_id: i32): i32 {
     let id8: i32 = sh_llvm_new_tmp();
     ascii_append(sh.ir_out, "  ");
@@ -254,6 +284,14 @@ function sh_llvm_emit_load_i8_zext_from_ptr(ptr_id: i32): i32 {
 
 function sh_llvm_emit_store_i32_to_ptr(ptr_id: i32, value_id: i32): void {
     ascii_append(sh.ir_out, "  store i32 ");
+    sh_llvm_append_tmp(value_id);
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+}
+
+function sh_llvm_emit_store_f32_to_ptr(ptr_id: i32, value_id: i32): void {
+    ascii_append(sh.ir_out, "  store float ");
     sh_llvm_append_tmp(value_id);
     ascii_append(sh.ir_out, ", ptr ");
     sh_llvm_append_tmp(ptr_id);
@@ -297,6 +335,11 @@ function sh_llvm_ptr_kind_for_elem_type(file_idx: i32, at: i32, elem_type_idx: i
     }
     if (sh_build_type_is_i32ish(elem_type_idx)) {
         sh.llvm_place_kind = ShLlvmValueKind.PtrI32;
+        sh.llvm_place_struct_idx = -1;
+        return 0;
+    }
+    if (sh_build_type_is_f32(elem_type_idx)) {
+        sh.llvm_place_kind = ShLlvmValueKind.PtrF32;
         sh.llvm_place_struct_idx = -1;
         return 0;
     }
@@ -408,6 +451,20 @@ function sh_llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
 
                     sh.llvm_local_declared[local_id] = 0;
                     sh.llvm_local_declared_at[local_id] = sh.tok_start;
+
+                    // Best-effort: infer the local kind from an explicit type annotation so we can emit correct allocas.
+                    // Keep this minimal; full type parsing happens in the real codegen pass.
+                    let next_k: ShTok = sh_lex_next_kind();
+                    if (next_k == ShTok.Colon) {
+                        let ty_k: ShTok = sh_lex_next_kind();
+                        if (ty_k != ShTok.Identifier) {
+                            sh_build_err_at(file_idx, "expected type name", sh.tok_start);
+                            return 1;
+                        }
+                        if (sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "f32")) {
+                            sh.llvm_local_kind[local_id] = ShLlvmValueKind.F32;
+                        }
+                    }
                 }
             }
         }

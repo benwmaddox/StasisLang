@@ -31,6 +31,18 @@ function sh_llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
     return id;
 }
 
+function sh_llvm_emit_expr_f32(file_idx: i32, root: i32): i32 {
+    let id: i32 = sh_llvm_emit_expr_value(file_idx, root);
+    if (id < 0) {
+        return -1;
+    }
+    if (sh.llvm_val_kind[0] != ShLlvmValueKind.F32) {
+        sh_build_err_at(file_idx, "expected f32 expression", sh.expr_nodes[root].at);
+        return -1;
+    }
+    return id;
+}
+
 function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     if (root < 0) {
         return -1;
