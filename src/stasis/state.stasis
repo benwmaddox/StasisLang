@@ -220,6 +220,14 @@ enum ShLlvmBlockKind {
     Function = 5
 }
 
+enum ShLlvmValueKind {
+    I32 = 1,
+    I8 = 2,
+    PtrI8 = 3,
+    PtrI32 = 4,
+    PtrStruct = 5
+}
+
 struct ShState {
     // CLI scratch
     cmd: ascii[64];
@@ -332,10 +340,15 @@ struct ShState {
     llvm_local_name_len: i32[1024];
     llvm_local_declared: i32[1024];
     llvm_local_declared_at: i32[1024];
+    llvm_local_kind: ShLlvmValueKind[1024];
     llvm_local_count: i32;
     llvm_tmp_id: i32;
     llvm_label_id: i32;
     llvm_bb_terminated: i32;
+    llvm_place_stack: i32[4096];
+    llvm_place_len: i32;
+    llvm_place_kind: ShLlvmValueKind;
+    llvm_place_struct_idx: i32;
     llvm_block_kind: ShLlvmBlockKind[256];
     llvm_block_end_label: i32[256];
     llvm_block_else_label: i32[256];
