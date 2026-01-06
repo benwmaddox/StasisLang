@@ -48,7 +48,7 @@ Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
 - `stasis build ...`:
   - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
-  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), and function calls with arguments (i32/bool only). Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). Still no indexing/field access as values yet; member access is currently only used for module-qualified calls; `&&`/`||` are still eager (no short-circuit) in IR.
+  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), function calls with arguments (i32/bool only), struct field access (`a.b`), and indexing (`a[i]`) for fixed arrays/byte buffers. Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). Slices are still not supported in LLVM bring-up; `&&`/`||` are still eager (no short-circuit) in IR.
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
@@ -313,3 +313,6 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: LLVM IR emit now supports a larger `main` subset (locals + assignments + expression statements + non-constant returns) and `stasis run/build/release` can execute/build that subset.
 - 2026-01-06: LLVM IR emit now supports structured control flow (`if`/`else`, `for`) and a return-slot + `exit:` block so `return` no longer has to be the final statement; added IR-level tests for `if` and `for`.
 - 2026-01-06: expression parser now supports empty-arg calls like `foo()`; LLVM IR emitter can now include additional entry-file no-arg `i32` helper functions (minimal return-only body) so `main` can call them; added `foo()` IR test coverage.
+- 2026-01-06: expression parser now supports slice types in decls and statements, and indexing expressions (`a[i]`).
+- 2026-01-06: LLVM IR emitter can now emit struct type definitions and global variable definitions (zeroinitializer + align).
+- 2026-01-06: LLVM expression emission now uses a typed iterative stack; added lowering for struct members + indexing (including global `u8` assignment via trunc/zext); added IR tests.

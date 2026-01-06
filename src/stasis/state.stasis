@@ -349,6 +349,8 @@ struct ShState {
     llvm_place_len: i32;
     llvm_place_kind: ShLlvmValueKind;
     llvm_place_struct_idx: i32;
+    llvm_val_kind: ShLlvmValueKind[4096];
+    llvm_val_struct_idx: i32[4096];
     llvm_block_kind: ShLlvmBlockKind[256];
     llvm_block_end_label: i32[256];
     llvm_block_else_label: i32[256];
