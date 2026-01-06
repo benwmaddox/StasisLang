@@ -68,7 +68,8 @@ enum ShTok {
     ImportKeyword = 54,
 
     // Internal/pseudo tokens (not emitted by the lexer).
-    UnaryMinus = 55
+    UnaryMinus = 55,
+    CallStart = 56
 }
 
 enum ShSymKind {
@@ -193,7 +194,8 @@ enum ShExprKind {
     Unary = 4,
     Binary = 5,
     Assign = 6,
-    Call = 7
+    Call = 7,
+    Member = 8
 }
 
 struct ShExprNode {
@@ -276,6 +278,13 @@ struct ShState {
     // Expression parsing scratch (per-expression; reused across passes).
     expr_nodes: ShExprNode[16384];
     expr_count: i32;
+    expr_call_args: i32[32768];
+    expr_call_args_len: i32;
+    expr_call_callee: i32[4096];
+    expr_call_arg_off: i32[4096];
+    expr_call_arg_len: i32[4096];
+    expr_call_val_base: i32[4096];
+    expr_call_len: i32;
     expr_op_at: i32[4096];
     expr_eval_failed: i32;
 

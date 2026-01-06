@@ -93,7 +93,7 @@ function sh_expr_make_name(file_idx: i32, at: i32, len: i32): i32 {
     return idx;
 }
 
-function sh_expr_make_call(file_idx: i32, at: i32, name_start: i32, name_len: i32): i32 {
+function sh_expr_make_call(file_idx: i32, at: i32, callee: i32, args_off: i32, args_len: i32): i32 {
     let idx: i32 = sh_expr_node_new();
     if (idx < 0) {
         sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
@@ -103,11 +103,29 @@ function sh_expr_make_call(file_idx: i32, at: i32, name_start: i32, name_len: i3
     sh.expr_nodes[idx].file_idx = file_idx;
     sh.expr_nodes[idx].at = at;
     sh.expr_nodes[idx].op = ShTok.Unknown;
-    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].left = callee;
+    sh.expr_nodes[idx].right = args_off;
+    sh.expr_nodes[idx].value = args_len;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_make_member(file_idx: i32, at: i32, base: i32, member_tok: ShTok, member_start: i32, member_len: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Member;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = member_tok;
+    sh.expr_nodes[idx].left = base;
     sh.expr_nodes[idx].right = -1;
     sh.expr_nodes[idx].value = 0;
-    sh.expr_nodes[idx].name_start = name_start;
-    sh.expr_nodes[idx].name_len = name_len;
+    sh.expr_nodes[idx].name_start = member_start;
+    sh.expr_nodes[idx].name_len = member_len;
     return idx;
 }
 
@@ -207,6 +225,23 @@ function sh_expr_is_right_assoc(k: ShTok): bool {
     return sh_expr_is_assign(k) || k == ShTok.UnaryMinus || k == ShTok.Bang;
 }
 
+function sh_expr_is_member_name(k: ShTok): bool {
+    if (k == ShTok.Identifier) { return true; }
+    return k == ShTok.Plus
+        || k == ShTok.Minus
+        || k == ShTok.Star
+        || k == ShTok.Slash
+        || k == ShTok.Percent
+        || k == ShTok.AmpAmp
+        || k == ShTok.PipePipe
+        || k == ShTok.Less
+        || k == ShTok.LessEqual
+        || k == ShTok.Greater
+        || k == ShTok.GreaterEqual
+        || k == ShTok.EqualEqual
+        || k == ShTok.BangEqual;
+}
+
 function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
     if (op_len <= 0) {
         return -1;
@@ -214,7 +249,7 @@ function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
     let op: ShTok = sh.parse_stack_kind[op_len - 1];
     let at: i32 = sh.expr_op_at[op_len - 1];
 
-    if (op == ShTok.LParen) {
+    if (op == ShTok.LParen || op == ShTok.CallStart) {
         sh_expr_err_at(file_idx, "unmatched '('", at);
         return -1;
     }
@@ -253,12 +288,13 @@ function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
 // Consumes the terminator and returns the expression root node index, or -1 on error.
 function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTok): i32 {
     sh.expr_count = 0;
+    sh.expr_call_args_len = 0;
+    sh.expr_call_len = 0;
 
     let op_len: i32 = 0;
     let val_len: i32 = 0;
     let expect_value: i32 = 1;
     let paren_depth: i32 = 0;
-    let seen_assign: i32 = 0;
 
     let k: ShTok = first;
     let done: i32 = 0;
@@ -268,119 +304,126 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
             return -1;
         }
 
-        if (expect_value == 0) {
-            if (k == terminator) {
-                if (terminator != ShTok.RParen && terminator != ShTok.RBracket) {
-                    done = 1;
-                } else {
-                    if (paren_depth == 0) {
-                        done = 1;
-                    }
-                }
-            }
+        if (expect_value == 0 && sh.expr_call_len == 0 && paren_depth == 0 && k == terminator) {
+            done = 1;
         }
 
         if (done == 0) {
             if (expect_value != 0) {
-                if (k == ShTok.LParen) {
-                    if (op_len >= SH_EXPR_STACK_CAP) {
-                        sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                // Allow empty-arg calls: `callee()`.
+                if (k == ShTok.RParen && sh.expr_call_len > 0 && paren_depth == 0) {
+                    let top_call: i32 = sh.expr_call_len - 1;
+                    if (sh.expr_call_arg_len[top_call] != 0 || val_len != sh.expr_call_val_base[top_call]) {
+                        sh_expr_err_at(file_idx, "expected expression after ','", sh.tok_start);
                         return -1;
                     }
-                    sh.parse_stack_kind[op_len] = k;
-                    sh.expr_op_at[op_len] = sh.tok_start;
-                    op_len = op_len + 1;
-                    paren_depth = paren_depth + 1;
+                    if (op_len <= 0 || sh.parse_stack_kind[op_len - 1] != ShTok.CallStart) {
+                        sh_expr_err_at(file_idx, "internal error: call stack desync", sh.tok_start);
+                        return -1;
+                    }
+
+                    let callee0: i32 = sh.expr_call_callee[top_call];
+                    let args_off0: i32 = sh.expr_call_arg_off[top_call];
+
+                    sh.expr_call_len = top_call;
+                    op_len = op_len - 1; // pop CallStart
+
+                    let call_node0: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee0].at, callee0, args_off0, 0);
+                    if (call_node0 < 0) { return -1; }
+                    if (val_len >= SH_EXPR_STACK_CAP) {
+                        sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
+                        return -1;
+                    }
+                    sh.parse_stack_start[val_len] = call_node0;
+                    val_len = val_len + 1;
+                    expect_value = 0;
                     k = sh_lex_next_kind();
                 } else {
-                    if (k == ShTok.Minus) {
+                    if (k == ShTok.LParen) {
                         if (op_len >= SH_EXPR_STACK_CAP) {
                             sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
                             return -1;
                         }
-                        sh.parse_stack_kind[op_len] = ShTok.UnaryMinus;
+                        sh.parse_stack_kind[op_len] = k;
                         sh.expr_op_at[op_len] = sh.tok_start;
                         op_len = op_len + 1;
+                        paren_depth = paren_depth + 1;
                         k = sh_lex_next_kind();
                     } else {
-                        if (k == ShTok.Bang) {
+                        if (k == ShTok.Minus) {
                             if (op_len >= SH_EXPR_STACK_CAP) {
                                 sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
                                 return -1;
                             }
-                            sh.parse_stack_kind[op_len] = ShTok.Bang;
+                            sh.parse_stack_kind[op_len] = ShTok.UnaryMinus;
                             sh.expr_op_at[op_len] = sh.tok_start;
                             op_len = op_len + 1;
                             k = sh_lex_next_kind();
                         } else {
-                            let node: i32 = -1;
-                            if (k == ShTok.IntegerLiteral) {
-                                node = sh_expr_make_int_lit(file_idx, sh.tok_start, sh_expr_parse_i32_from_tok(file_idx));
+                            if (k == ShTok.Bang) {
+                                if (op_len >= SH_EXPR_STACK_CAP) {
+                                    sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                                    return -1;
+                                }
+                                sh.parse_stack_kind[op_len] = ShTok.Bang;
+                                sh.expr_op_at[op_len] = sh.tok_start;
+                                op_len = op_len + 1;
+                                k = sh_lex_next_kind();
                             } else {
-                                if (k == ShTok.TrueKeyword) {
-                                    node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 1);
+                                let node: i32 = -1;
+                                if (k == ShTok.IntegerLiteral) {
+                                    node = sh_expr_make_int_lit(file_idx, sh.tok_start, sh_expr_parse_i32_from_tok(file_idx));
                                 } else {
-                                    if (k == ShTok.FalseKeyword) {
-                                        node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 0);
+                                    if (k == ShTok.TrueKeyword) {
+                                        node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 1);
                                     } else {
-                                        if (k == ShTok.Identifier) {
-                                            node = sh_expr_make_name(file_idx, sh.tok_start, sh.tok_len);
+                                        if (k == ShTok.FalseKeyword) {
+                                            node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 0);
                                         } else {
-                                            sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
-                                            return -1;
+                                            if (k == ShTok.Identifier) {
+                                                node = sh_expr_make_name(file_idx, sh.tok_start, sh.tok_len);
+                                            } else {
+                                                sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
+                                                return -1;
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if (node < 0) { return -1; }
-                            if (val_len >= SH_EXPR_STACK_CAP) {
-                                sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
-                                return -1;
+                                if (node < 0) { return -1; }
+                                if (val_len >= SH_EXPR_STACK_CAP) {
+                                    sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
+                                    return -1;
+                                }
+                                sh.parse_stack_start[val_len] = node;
+                                val_len = val_len + 1;
+                                expect_value = 0;
+                                k = sh_lex_next_kind();
                             }
-                            sh.parse_stack_start[val_len] = node;
-                            val_len = val_len + 1;
-                            expect_value = 0;
-                            k = sh_lex_next_kind();
                         }
                     }
                 }
             } else {
-                if (k == ShTok.RParen) {
-                    if (paren_depth <= 0) {
-                        sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                if (k == ShTok.Dot) {
+                    if (val_len < 1) {
+                        sh_expr_err_at(file_idx, "expected expression before '.'", sh.tok_start);
                         return -1;
                     }
 
-                    let found_lparen: i32 = 0;
-                    for (; found_lparen == 0; ) {
-                        if (op_len <= 0) {
-                            sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
-                            return -1;
-                        }
-
-                        let top: ShTok = sh.parse_stack_kind[op_len - 1];
-                        if (top == ShTok.LParen) {
-                            op_len = op_len - 1;
-                            found_lparen = 1;
-                        } else {
-                            if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
-                                return -1;
-                            }
-                            op_len = op_len - 1;
-                            if (top == ShTok.UnaryMinus || top == ShTok.Bang) {
-                                // val_len unchanged
-                            } else {
-                                val_len = val_len - 1;
-                            }
-                        }
+                    let base_node: i32 = sh.parse_stack_start[val_len - 1];
+                    let member_k: ShTok = sh_lex_next_kind();
+                    if (!sh_expr_is_member_name(member_k)) {
+                        sh_expr_err_at(file_idx, "expected member name after '.'", sh.tok_start);
+                        return -1;
                     }
 
-                    paren_depth = paren_depth - 1;
+                    let member_node: i32 = sh_expr_make_member(file_idx, sh.expr_nodes[base_node].at, base_node, member_k, sh.tok_start, sh.tok_len);
+                    if (member_node < 0) { return -1; }
+                    sh.parse_stack_start[val_len - 1] = member_node;
                     k = sh_lex_next_kind();
                 } else {
                     if (k == ShTok.LParen) {
-                        // Postfix call (bring-up): only supports empty-arg calls: `name()`.
+                        // Postfix call: `callee(args...)`.
                         if (val_len < 1) {
                             sh_expr_err_at(file_idx, "expected call target before '('", sh.tok_start);
                             return -1;
@@ -392,68 +435,205 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                             return -1;
                         }
                         let callee_kind: ShExprKind = sh.expr_nodes[callee].kind;
-                        if (callee_kind != ShExprKind.Name) {
-                            sh_expr_err_at(file_idx, "call target must be an identifier (bring-up)", sh.tok_start);
+                        if (callee_kind != ShExprKind.Name && callee_kind != ShExprKind.Member) {
+                            sh_expr_err_at(file_idx, "unsupported call target", sh.tok_start);
                             return -1;
                         }
 
-                        let arg_k: ShTok = sh_lex_next_kind();
-                        if (arg_k != ShTok.RParen) {
-                            sh_expr_err_at(file_idx, "call arguments not supported yet (bring-up)", sh.tok_start);
+                        if (sh.expr_call_len >= SH_EXPR_STACK_CAP) {
+                            sh_expr_err_at(file_idx, "expression too complex (call stack)", sh.tok_start);
                             return -1;
                         }
-
-                        let call_node: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee].at, sh.expr_nodes[callee].name_start, sh.expr_nodes[callee].name_len);
-                        if (call_node < 0) { return -1; }
-                        sh.parse_stack_start[val_len - 1] = call_node;
-                        k = sh_lex_next_kind();
-                    } else {
-                        if (sh_expr_is_infix(k)) {
-                        if (sh_expr_is_assign(k)) {
-                            if (seen_assign != 0) {
-                                sh_expr_err_at(file_idx, "only one assignment per expression is permitted", sh.tok_start);
-                                return -1;
-                            }
-                            seen_assign = 1;
-                        }
-
-                        let prec: i32 = sh_expr_prec(k);
-                        let reduce: i32 = 1;
-                        for (; reduce != 0; ) {
-                            reduce = 0;
-                            if (op_len > 0) {
-                                let top2: ShTok = sh.parse_stack_kind[op_len - 1];
-                                if (top2 != ShTok.LParen) {
-                                    let top_prec: i32 = sh_expr_prec(top2);
-                                    if (top_prec > prec || (top_prec == prec && !sh_expr_is_right_assoc(k))) {
-                                        if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
-                                            return -1;
-                                        }
-                                        op_len = op_len - 1;
-                                        if (top2 == ShTok.UnaryMinus || top2 == ShTok.Bang) {
-                                            // val_len unchanged
-                                        } else {
-                                            val_len = val_len - 1;
-                                        }
-                                        reduce = 1;
-                                    }
-                                }
-                            }
-                        }
-
                         if (op_len >= SH_EXPR_STACK_CAP) {
                             sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
                             return -1;
                         }
-                        sh.parse_stack_kind[op_len] = k;
+
+                        // Pop callee from the value stack, then parse call args as a sub-context.
+                        val_len = val_len - 1;
+                        let call_idx: i32 = sh.expr_call_len;
+                        sh.expr_call_len = sh.expr_call_len + 1;
+                        sh.expr_call_callee[call_idx] = callee;
+                        sh.expr_call_arg_off[call_idx] = sh.expr_call_args_len;
+                        sh.expr_call_arg_len[call_idx] = 0;
+                        sh.expr_call_val_base[call_idx] = val_len;
+
+                        sh.parse_stack_kind[op_len] = ShTok.CallStart;
                         sh.expr_op_at[op_len] = sh.tok_start;
                         op_len = op_len + 1;
+
                         expect_value = 1;
                         k = sh_lex_next_kind();
                     } else {
-                        sh_expr_err_at(file_idx, "expected operator in expression", sh.tok_start);
-                        return -1;
-                    }
+                        if (k == ShTok.Comma) {
+                            if (sh.expr_call_len <= 0 || paren_depth != 0) {
+                                sh_expr_err_at(file_idx, "unexpected ',' in expression", sh.tok_start);
+                                return -1;
+                            }
+
+                            let top_call2: i32 = sh.expr_call_len - 1;
+                            let base2: i32 = sh.expr_call_val_base[top_call2];
+
+                            // Reduce operators until the call barrier.
+                            for (; op_len > 0 && sh.parse_stack_kind[op_len - 1] != ShTok.CallStart; ) {
+                                let top_op2: ShTok = sh.parse_stack_kind[op_len - 1];
+                                if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                    return -1;
+                                }
+                                op_len = op_len - 1;
+                                if (top_op2 == ShTok.UnaryMinus || top_op2 == ShTok.Bang) {
+                                    // val_len unchanged
+                                } else {
+                                    val_len = val_len - 1;
+                                }
+                            }
+
+                            if (val_len != base2 + 1) {
+                                sh_expr_err_at(file_idx, "expected expression in call argument", sh.tok_start);
+                                return -1;
+                            }
+                            if (sh.expr_call_args_len >= 32768) {
+                                sh_expr_err_at(file_idx, "too many call arguments (cap)", sh.tok_start);
+                                return -1;
+                            }
+                            sh.expr_call_args[sh.expr_call_args_len] = sh.parse_stack_start[val_len - 1];
+                            sh.expr_call_args_len = sh.expr_call_args_len + 1;
+                            sh.expr_call_arg_len[top_call2] = sh.expr_call_arg_len[top_call2] + 1;
+
+                            // Pop the argument value and continue with the next arg.
+                            val_len = base2;
+                            expect_value = 1;
+                            k = sh_lex_next_kind();
+                        } else {
+                            if (k == ShTok.RParen) {
+                                if (paren_depth > 0) {
+                                    let found_lparen: i32 = 0;
+                                    for (; found_lparen == 0; ) {
+                                        if (op_len <= 0) {
+                                            sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                                            return -1;
+                                        }
+
+                                        let top: ShTok = sh.parse_stack_kind[op_len - 1];
+                                        if (top == ShTok.LParen) {
+                                            op_len = op_len - 1;
+                                            found_lparen = 1;
+                                        } else {
+                                            if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                                return -1;
+                                            }
+                                            op_len = op_len - 1;
+                                            if (top == ShTok.UnaryMinus || top == ShTok.Bang) {
+                                                // val_len unchanged
+                                            } else {
+                                                val_len = val_len - 1;
+                                            }
+                                        }
+                                    }
+
+                                    paren_depth = paren_depth - 1;
+                                    k = sh_lex_next_kind();
+                                } else {
+                                    if (sh.expr_call_len <= 0) {
+                                        sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    // Close a call: finalize the last argument, then build the Call node.
+                                    let top_call3: i32 = sh.expr_call_len - 1;
+                                    let base3: i32 = sh.expr_call_val_base[top_call3];
+
+                                    // Reduce operators until the call barrier.
+                                    for (; op_len > 0 && sh.parse_stack_kind[op_len - 1] != ShTok.CallStart; ) {
+                                        let top_op3: ShTok = sh.parse_stack_kind[op_len - 1];
+                                        if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                            return -1;
+                                        }
+                                        op_len = op_len - 1;
+                                        if (top_op3 == ShTok.UnaryMinus || top_op3 == ShTok.Bang) {
+                                            // val_len unchanged
+                                        } else {
+                                            val_len = val_len - 1;
+                                        }
+                                    }
+
+                                    if (val_len != base3 + 1) {
+                                        sh_expr_err_at(file_idx, "expected expression in call argument", sh.tok_start);
+                                        return -1;
+                                    }
+                                    if (op_len <= 0 || sh.parse_stack_kind[op_len - 1] != ShTok.CallStart) {
+                                        sh_expr_err_at(file_idx, "internal error: call stack desync", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    if (sh.expr_call_args_len >= 32768) {
+                                        sh_expr_err_at(file_idx, "too many call arguments (cap)", sh.tok_start);
+                                        return -1;
+                                    }
+                                    sh.expr_call_args[sh.expr_call_args_len] = sh.parse_stack_start[val_len - 1];
+                                    sh.expr_call_args_len = sh.expr_call_args_len + 1;
+                                    sh.expr_call_arg_len[top_call3] = sh.expr_call_arg_len[top_call3] + 1;
+                                    val_len = base3;
+
+                                    let callee3: i32 = sh.expr_call_callee[top_call3];
+                                    let args_off3: i32 = sh.expr_call_arg_off[top_call3];
+                                    let args_len3: i32 = sh.expr_call_arg_len[top_call3];
+
+                                    sh.expr_call_len = top_call3;
+                                    op_len = op_len - 1; // pop CallStart
+
+                                    let call_node3: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee3].at, callee3, args_off3, args_len3);
+                                    if (call_node3 < 0) { return -1; }
+                                    if (val_len >= SH_EXPR_STACK_CAP) {
+                                        sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
+                                        return -1;
+                                    }
+                                    sh.parse_stack_start[val_len] = call_node3;
+                                    val_len = val_len + 1;
+                                    expect_value = 0;
+                                    k = sh_lex_next_kind();
+                                }
+                            } else {
+                                if (sh_expr_is_infix(k)) {
+                                    let prec: i32 = sh_expr_prec(k);
+                                    let reduce: i32 = 1;
+                                    for (; reduce != 0; ) {
+                                        reduce = 0;
+                                        if (op_len > 0) {
+                                            let top2: ShTok = sh.parse_stack_kind[op_len - 1];
+                                            if (top2 != ShTok.LParen && top2 != ShTok.CallStart) {
+                                                let top_prec: i32 = sh_expr_prec(top2);
+                                                if (top_prec > prec || (top_prec == prec && !sh_expr_is_right_assoc(k))) {
+                                                    if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                                        return -1;
+                                                    }
+                                                    op_len = op_len - 1;
+                                                    if (top2 == ShTok.UnaryMinus || top2 == ShTok.Bang) {
+                                                        // val_len unchanged
+                                                    } else {
+                                                        val_len = val_len - 1;
+                                                    }
+                                                    reduce = 1;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (op_len >= SH_EXPR_STACK_CAP) {
+                                        sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                                        return -1;
+                                    }
+                                    sh.parse_stack_kind[op_len] = k;
+                                    sh.expr_op_at[op_len] = sh.tok_start;
+                                    op_len = op_len + 1;
+                                    expect_value = 1;
+                                    k = sh_lex_next_kind();
+                                } else {
+                                    sh_expr_err_at(file_idx, "expected operator in expression", sh.tok_start);
+                                    return -1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -467,7 +647,7 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
 
     for (; op_len > 0; ) {
         let top3: ShTok = sh.parse_stack_kind[op_len - 1];
-        if (top3 == ShTok.LParen) {
+        if (top3 == ShTok.LParen || top3 == ShTok.CallStart) {
             sh_expr_err_at(file_idx, "unmatched '('", sh.expr_op_at[op_len - 1]);
             return -1;
         }
@@ -480,6 +660,11 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
         } else {
             val_len = val_len - 1;
         }
+    }
+
+    if (sh.expr_call_len != 0) {
+        sh_expr_err_at(file_idx, "unclosed call in expression", sh.tok_start);
+        return -1;
     }
 
     if (val_len != 1) {

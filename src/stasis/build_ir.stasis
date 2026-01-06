@@ -84,6 +84,18 @@ function sh_build_type_is_i32(type_idx: i32): bool {
     return sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "i32");
 }
 
+function sh_build_type_is_i32ish(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return false;
+    }
+    if (sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "i32")) { return true; }
+    return sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "bool");
+}
+
 function sh_llvm_find_func_noargs_i32(file_idx: i32, name_start: i32, name_len: i32): i32 {
     let i: i32 = 0;
     for (i = 0; i < sh.func_count; i = i + 1) {
@@ -118,6 +130,182 @@ function sh_span_eq_span(file_idx: i32, a_start: i32, a_len: i32, b_start: i32, 
         }
     }
     return true;
+}
+
+function sh_span_eq_span_cross(a_file_idx: i32, a_start: i32, a_len: i32, b_file_idx: i32, b_start: i32, b_len: i32): bool {
+    if (a_file_idx < 0 || a_file_idx >= sh.file_count) { return false; }
+    if (b_file_idx < 0 || b_file_idx >= sh.file_count) { return false; }
+    if (a_len != b_len) { return false; }
+
+    let a_base: i32 = sh.files[a_file_idx].offset + a_start;
+    let b_base: i32 = sh.files[b_file_idx].offset + b_start;
+    let i: i32 = 0;
+    for (i = 0; i < a_len; i = i + 1) {
+        if (sh.pool[a_base + i] != sh.pool[b_base + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sh_span_eq_module_name(caller_file_idx: i32, mod_start: i32, mod_len: i32, module_file_idx: i32): bool {
+    if (caller_file_idx < 0 || caller_file_idx >= sh.file_count) { return false; }
+    if (module_file_idx < 0 || module_file_idx >= sh.file_count) { return false; }
+
+    let want_len: i32 = sh.files[module_file_idx].mod_len;
+    if (mod_len != want_len) {
+        return false;
+    }
+
+    let a_base: i32 = sh.files[caller_file_idx].offset + mod_start;
+    let b_base: i32 = sh.files[module_file_idx].mod_off;
+    let i: i32 = 0;
+    for (i = 0; i < mod_len; i = i + 1) {
+        if (sh.pool[a_base + i] != sh.mod_pool[b_base + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sh_llvm_find_imported_module(caller_file_idx: i32, mod_start: i32, mod_len: i32): i32 {
+    // Allow `ThisModule.symbol` for clarity.
+    if (sh_span_eq_module_name(caller_file_idx, mod_start, mod_len, caller_file_idx)) {
+        return caller_file_idx;
+    }
+
+    let imp_off: i32 = sh.files[caller_file_idx].imports_off;
+    let imp_len: i32 = sh.files[caller_file_idx].imports_len;
+    let i: i32 = 0;
+    for (i = 0; i < imp_len; i = i + 1) {
+        let mod_file: i32 = sh.imports[imp_off + i];
+        if (sh_span_eq_module_name(caller_file_idx, mod_start, mod_len, mod_file)) {
+            return mod_file;
+        }
+    }
+    return -1;
+}
+
+function sh_llvm_find_func_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.func_count; i = i + 1) {
+        if (sh.funcs[i].is_test == 0) {
+            if (sh.funcs[i].file_idx == target_file_idx) {
+                if (sh_span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, sh.funcs[i].name_start, sh.funcs[i].name_len)) {
+                    return i;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+function sh_llvm_resolve_unqualified_func(caller_file_idx: i32, name_start: i32, name_len: i32, at: i32): i32 {
+    let local: i32 = sh_llvm_find_func_in_file(caller_file_idx, name_start, name_len, caller_file_idx);
+    if (local >= 0) {
+        return local;
+    }
+
+    let imp_off: i32 = sh.files[caller_file_idx].imports_off;
+    let imp_len: i32 = sh.files[caller_file_idx].imports_len;
+    let found: i32 = -1;
+
+    let i: i32 = 0;
+    for (i = 0; i < imp_len; i = i + 1) {
+        let mod_file: i32 = sh.imports[imp_off + i];
+        let hit: i32 = sh_llvm_find_func_in_file(caller_file_idx, name_start, name_len, mod_file);
+        if (hit >= 0) {
+            if (found < 0) {
+                found = hit;
+            } else {
+                sh_build_err_at(caller_file_idx, "ambiguous function name (use Module.symbol)", at);
+                return -1;
+            }
+        }
+    }
+
+    if (found < 0) {
+        sh_build_err_at(caller_file_idx, "unknown function", at);
+        return -1;
+    }
+    return found;
+}
+
+function sh_llvm_resolve_qualified_func(caller_file_idx: i32, mod_start: i32, mod_len: i32, name_start: i32, name_len: i32, at: i32): i32 {
+    let mod_file: i32 = sh_llvm_find_imported_module(caller_file_idx, mod_start, mod_len);
+    if (mod_file < 0) {
+        sh_build_err_at(caller_file_idx, "unknown module", at);
+        return -1;
+    }
+
+    let fn: i32 = sh_llvm_find_func_in_file(caller_file_idx, name_start, name_len, mod_file);
+    if (fn < 0) {
+        sh_build_err_at(caller_file_idx, "unknown function", at);
+        return -1;
+    }
+    return fn;
+}
+
+function sh_llvm_resolve_callee_func(caller_file_idx: i32, callee_expr: i32, at: i32): i32 {
+    if (callee_expr < 0 || callee_expr >= sh.expr_count) {
+        sh_build_err_at(caller_file_idx, "invalid call target", at);
+        return -1;
+    }
+
+    let kind: ShExprKind = sh.expr_nodes[callee_expr].kind;
+    if (kind == ShExprKind.Name) {
+        return sh_llvm_resolve_unqualified_func(caller_file_idx, sh.expr_nodes[callee_expr].name_start, sh.expr_nodes[callee_expr].name_len, at);
+    }
+
+    if (kind == ShExprKind.Member) {
+        let base: i32 = sh.expr_nodes[callee_expr].left;
+        if (base < 0 || base >= sh.expr_count) {
+            sh_build_err_at(caller_file_idx, "invalid member call target", at);
+            return -1;
+        }
+        let base_kind: ShExprKind = sh.expr_nodes[base].kind;
+        if (base_kind != ShExprKind.Name) {
+            sh_build_err_at(caller_file_idx, "unsupported call target (member)", at);
+            return -1;
+        }
+        return sh_llvm_resolve_qualified_func(
+            caller_file_idx,
+            sh.expr_nodes[base].name_start,
+            sh.expr_nodes[base].name_len,
+            sh.expr_nodes[callee_expr].name_start,
+            sh.expr_nodes[callee_expr].name_len,
+            at
+        );
+    }
+
+    sh_build_err_at(caller_file_idx, "unsupported call target", at);
+    return -1;
+}
+
+function sh_llvm_append_func_ir_name(func_idx: i32): void {
+    if (func_idx < 0 || func_idx >= sh.func_count) {
+        return;
+    }
+
+    let file_idx: i32 = sh.funcs[func_idx].file_idx;
+    if (file_idx == 0 && sh_span_eq(file_idx, sh.funcs[func_idx].name_start, sh.funcs[func_idx].name_len, "main")) {
+        ascii_append(sh.ir_out, "main");
+        return;
+    }
+
+    if (file_idx == 0) {
+        ascii_append(sh.ir_out, sh.arg_module);
+    } else {
+        let off: i32 = sh.files[file_idx].mod_off;
+        let len: i32 = sh.files[file_idx].mod_len;
+        let i: i32 = 0;
+        for (i = 0; i < len; i = i + 1) {
+            ascii_append_byte(sh.ir_out, sh.mod_pool[off + i]);
+        }
+    }
+
+    ascii_append(sh.ir_out, "__");
+    sh_ir_append_span(sh.ir_out, file_idx, sh.funcs[func_idx].name_start, sh.funcs[func_idx].name_len);
 }
 
 function sh_llvm_reset(): void {
@@ -336,6 +524,24 @@ function sh_llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
                 sh.parse_stack_start[sp] = sh.expr_nodes[top].left;
                 sp = sp + 1;
             } else {
+                if (kind == ShExprKind.Call) {
+                    let argc0: i32 = sh.expr_nodes[top].value;
+                    let off0: i32 = sh.expr_nodes[top].right;
+                    if (argc0 < 0) {
+                        sh_build_err_at(file_idx, "invalid call argument count", sh.expr_nodes[top].at);
+                        return -1;
+                    }
+                    if (sp + argc0 >= 4096) {
+                        sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[top].at);
+                        return -1;
+                    }
+
+                    let ai: i32 = 0;
+                    for (ai = argc0 - 1; ai >= 0; ai = ai - 1) {
+                        sh.parse_stack_start[sp] = sh.expr_call_args[off0 + ai];
+                        sp = sp + 1;
+                    }
+                } else {
                 if (kind == ShExprKind.Binary) {
                     if (sp + 1 >= 4096) {
                         sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[top].at);
@@ -355,6 +561,7 @@ function sh_llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
                         sp = sp + 1;
                     }
                 }
+                }
             }
         } else {
             let idx: i32 = -top - 1;
@@ -371,22 +578,64 @@ function sh_llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
                 val_len = val_len + 1;
             } else {
                 if (kind2 == ShExprKind.Call) {
-                    let fn_idx0: i32 = sh_llvm_find_func_noargs_i32(file_idx, sh.expr_nodes[idx].name_start, sh.expr_nodes[idx].name_len);
+                    let argc: i32 = sh.expr_nodes[idx].value;
+                    let callee_expr: i32 = sh.expr_nodes[idx].left;
+
+                    if (argc < 0 || val_len < argc) {
+                        sh_build_err_at(file_idx, "invalid call expression", sh.expr_nodes[idx].at);
+                        return -1;
+                    }
+
+                    let fn_idx0: i32 = sh_llvm_resolve_callee_func(file_idx, callee_expr, sh.expr_nodes[idx].at);
                     if (fn_idx0 < 0) {
-                        sh_build_err_at(file_idx, "unknown function (call)", sh.expr_nodes[idx].at);
                         return -1;
                     }
                     if (sh.funcs[fn_idx0].body_start < 0) {
                         sh_build_err_at(file_idx, "function has no body (call)", sh.expr_nodes[idx].at);
                         return -1;
                     }
+                    if (!sh_build_type_is_i32ish(sh.funcs[fn_idx0].ret_type_idx)) {
+                        sh_build_err_at(file_idx, "unsupported call return type (expected i32)", sh.expr_nodes[idx].at);
+                        return -1;
+                    }
+                    if (sh.funcs[fn_idx0].params_len != argc) {
+                        sh_build_err_at(file_idx, "call arg count mismatch", sh.expr_nodes[idx].at);
+                        return -1;
+                    }
 
+                    let pi: i32 = 0;
+                    for (pi = 0; pi < argc; pi = pi + 1) {
+                        let p_decl: i32 = sh.funcs[fn_idx0].params_off + pi;
+                        if (p_decl < 0 || p_decl >= sh.param_count) {
+                            sh_build_err_at(file_idx, "invalid function parameters", sh.expr_nodes[idx].at);
+                            return -1;
+                        }
+                        if (!sh_build_type_is_i32ish(sh.params[p_decl].type_idx)) {
+                            sh_build_err_at(file_idx, "unsupported call arg type (expected i32)", sh.expr_nodes[idx].at);
+                            return -1;
+                        }
+                    }
+
+                    let arg_base: i32 = val_len - argc;
                     let out_id0: i32 = sh_llvm_new_tmp();
                     ascii_append(sh.ir_out, "  ");
                     sh_llvm_append_tmp(out_id0);
                     ascii_append(sh.ir_out, " = call i32 @");
-                    sh_ir_append_span(sh.ir_out, sh.expr_nodes[idx].file_idx, sh.expr_nodes[idx].name_start, sh.expr_nodes[idx].name_len);
-                    ascii_append(sh.ir_out, "()\n");
+                    sh_llvm_append_func_ir_name(fn_idx0);
+                    ascii_append(sh.ir_out, "(");
+
+                    let ai2: i32 = 0;
+                    for (ai2 = 0; ai2 < argc; ai2 = ai2 + 1) {
+                        if (ai2 != 0) {
+                            ascii_append(sh.ir_out, ", ");
+                        }
+                        ascii_append(sh.ir_out, "i32 ");
+                        sh_llvm_append_tmp(sh.expr_op_at[arg_base + ai2]);
+                    }
+
+                    ascii_append(sh.ir_out, ")\n");
+
+                    val_len = arg_base;
                     sh.expr_op_at[val_len] = out_id0;
                     val_len = val_len + 1;
                 } else {
@@ -657,7 +906,9 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
     ascii_append_byte(sh.ir_out, 34); // '\"'
     ascii_append(sh.ir_out, "\n\n");
 
-    ascii_append(sh.ir_out, "define i32 @main() {\n");
+    ascii_append(sh.ir_out, "define i32 @");
+    sh_llvm_append_func_ir_name(func_idx);
+    ascii_append(sh.ir_out, "() {\n");
     ascii_append(sh.ir_out, "entry:\n");
 
     let exit_label: i32 = sh_llvm_new_label();
@@ -1038,19 +1289,30 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
 
     ascii_append(sh.ir_out, "}\n\n");
 
-    // Bring-up: also emit entry-file no-arg i32 functions with a minimal return-only body.
+    // Bring-up: emit other i32/bool-returning functions (from all loaded modules).
     let i2: i32 = 0;
     for (i2 = 0; i2 < sh.func_count; i2 = i2 + 1) {
         if (sh.funcs[i2].is_test == 0) {
-            if (sh.funcs[i2].file_idx == file_idx) {
-                if (i2 != func_idx) {
-                    if (sh.funcs[i2].body_start >= 0) {
-                        if (sh.funcs[i2].params_len == 0) {
-                            if (sh_build_type_is_i32(sh.funcs[i2].ret_type_idx)) {
-                                let rc2: i32 = sh_emit_llvm_func_return_i32_noargs(i2);
-                                if (rc2 != 0) {
-                                    return rc2;
+            if (i2 != func_idx) {
+                if (sh.funcs[i2].body_start >= 0) {
+                    if (sh_build_type_is_i32ish(sh.funcs[i2].ret_type_idx)) {
+                        let ok: i32 = 1;
+                        let pi: i32 = 0;
+                        for (pi = 0; pi < sh.funcs[i2].params_len; pi = pi + 1) {
+                            let p_decl: i32 = sh.funcs[i2].params_off + pi;
+                            if (p_decl < 0 || p_decl >= sh.param_count) {
+                                ok = 0;
+                            } else {
+                                if (!sh_build_type_is_i32ish(sh.params[p_decl].type_idx)) {
+                                    ok = 0;
                                 }
+                            }
+                        }
+
+                        if (ok != 0) {
+                            let rc2: i32 = sh_emit_llvm_func_i32ish(i2);
+                            if (rc2 != 0) {
+                                return rc2;
                             }
                         }
                     }
@@ -1059,6 +1321,461 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
         }
     }
 
+    return 0;
+}
+
+function sh_emit_llvm_func_i32ish(func_idx: i32): i32 {
+    let file_idx: i32 = sh.funcs[func_idx].file_idx;
+    let body_start: i32 = sh.funcs[func_idx].body_start;
+    if (body_start < 0) {
+        sh_build_err_at(file_idx, "missing function body", sh.funcs[func_idx].name_start);
+        return 1;
+    }
+
+    if (!sh_build_type_is_i32ish(sh.funcs[func_idx].ret_type_idx)) {
+        sh_build_err_at(file_idx, "unsupported function return type (llvm bring-up)", sh.funcs[func_idx].name_start);
+        return 1;
+    }
+
+    if (!sh_lex_begin(file_idx)) {
+        sh_build_err_at(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+    sh.lex_pos = body_start;
+
+    sh_llvm_reset();
+
+    // Parameters are modeled as locals for name resolution simplicity.
+    let params_off: i32 = sh.funcs[func_idx].params_off;
+    let params_len: i32 = sh.funcs[func_idx].params_len;
+    let p: i32 = 0;
+    for (p = 0; p < params_len; p = p + 1) {
+        let p_decl: i32 = params_off + p;
+        if (p_decl < 0 || p_decl >= sh.param_count) {
+            sh_build_err_at(file_idx, "invalid function parameters", sh.funcs[func_idx].name_start);
+            return 1;
+        }
+        if (!sh_build_type_is_i32ish(sh.params[p_decl].type_idx)) {
+            sh_build_err_at(file_idx, "unsupported parameter type (llvm bring-up)", sh.params[p_decl].name_start);
+            return 1;
+        }
+
+        let local_id: i32 = sh_llvm_add_local(file_idx, sh.params[p_decl].name_start, sh.params[p_decl].name_len);
+        if (local_id < 0) {
+            return 1;
+        }
+        sh.llvm_local_declared[local_id] = 1;
+        sh.llvm_local_declared_at[local_id] = sh.params[p_decl].name_start;
+    }
+
+    // Pre-scan locals so we can emit all allocas in entry (LLVM friendliness).
+    if (sh_llvm_scan_locals_in_body(file_idx, body_start) != 0) {
+        return 1;
+    }
+
+    // Reset lexer to body start for the real codegen pass.
+    sh.lex_pos = body_start;
+    sh.sig_kind = ShTok.Unknown; // reuse as a 1-token pushback for statement parsing
+
+    ascii_append(sh.ir_out, "define i32 @");
+    sh_llvm_append_func_ir_name(func_idx);
+    ascii_append(sh.ir_out, "(");
+    for (p = 0; p < params_len; p = p + 1) {
+        if (p != 0) {
+            ascii_append(sh.ir_out, ", ");
+        }
+        ascii_append(sh.ir_out, "i32 %a");
+        sh_ir_append_i32(sh.ir_out, p);
+    }
+    ascii_append(sh.ir_out, ") {\n");
+    ascii_append(sh.ir_out, "entry:\n");
+
+    let exit_label: i32 = sh_llvm_new_label();
+
+    // Return slot (allows return to appear anywhere).
+    ascii_append(sh.ir_out, "  %ret_slot = alloca i32, align 4\n");
+    ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+
+    // Locals are modeled as wasm-like locals: 0-initialized and available for the whole function.
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_local_count; i = i + 1) {
+        ascii_append(sh.ir_out, "  ");
+        sh_llvm_append_local_ptr(i);
+        ascii_append(sh.ir_out, " = alloca i32, align 4\n");
+        ascii_append(sh.ir_out, "  store i32 0, ptr ");
+        sh_llvm_append_local_ptr(i);
+        ascii_append(sh.ir_out, ", align 4\n");
+    }
+
+    // Initialize parameter locals from SSA arguments.
+    for (p = 0; p < params_len; p = p + 1) {
+        ascii_append(sh.ir_out, "  store i32 %a");
+        sh_ir_append_i32(sh.ir_out, p);
+        ascii_append(sh.ir_out, ", ptr ");
+        sh_llvm_append_local_ptr(p);
+        ascii_append(sh.ir_out, ", align 4\n");
+    }
+
+    let k: ShTok = sh_lex_next_kind();
+    if (k != ShTok.LBrace) {
+        sh_build_err_at(file_idx, "expected '{' at start of function body", sh.tok_start);
+        return 1;
+    }
+
+    // Push a synthetic function block; it ends at the final '}'.
+    sh.llvm_block_kind[0] = ShLlvmBlockKind.Function;
+    sh.llvm_block_end_label[0] = exit_label;
+    sh.llvm_block_len = 1;
+
+    let did_return: i32 = 0;
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (sh.sig_kind != ShTok.Unknown) {
+            k = sh.sig_kind;
+            sh.sig_kind = ShTok.Unknown;
+        } else {
+            k = sh_lex_next_kind();
+        }
+
+        if (k == ShTok.Eof) {
+            sh_build_err_at(file_idx, "unexpected eof in function body", sh.tok_start);
+            return 1;
+        }
+
+        if (k == ShTok.RBrace) {
+            if (sh.llvm_block_len <= 0) {
+                sh_build_err_at(file_idx, "unmatched '}' in function body", sh.tok_start);
+                return 1;
+            }
+
+            let top: i32 = sh.llvm_block_len - 1;
+            let kind: ShLlvmBlockKind = sh.llvm_block_kind[top];
+            if (kind == ShLlvmBlockKind.Plain) {
+                sh.llvm_block_len = top;
+            } else {
+                if (kind == ShLlvmBlockKind.IfThen) {
+                    let end_id: i32 = sh.llvm_block_end_label[top];
+                    let else_id: i32 = sh.llvm_block_else_label[top];
+                    sh.llvm_block_len = top;
+
+                    if (sh.llvm_bb_terminated == 0) {
+                        sh_llvm_emit_br("if.end", end_id);
+                    }
+
+                    sh_llvm_emit_label_def("if.else", else_id);
+
+                    let next: ShTok = sh_lex_next_kind();
+                    if (next == ShTok.ElseKeyword) {
+                        let brace2: ShTok = sh_lex_next_kind();
+                        if (brace2 != ShTok.LBrace) {
+                            sh_build_err_at(file_idx, "expected '{' after 'else'", sh.tok_start);
+                            return 1;
+                        }
+
+                        if (sh.llvm_block_len >= 256) {
+                            sh_build_err_at(file_idx, "block nesting too deep (llvm)", sh.tok_start);
+                            return 1;
+                        }
+                        sh.llvm_block_kind[sh.llvm_block_len] = ShLlvmBlockKind.IfElse;
+                        sh.llvm_block_end_label[sh.llvm_block_len] = end_id;
+                        sh.llvm_block_len = sh.llvm_block_len + 1;
+                    } else {
+                        // No else: emit an empty else block.
+                        sh_llvm_emit_br("if.end", end_id);
+                        sh_llvm_emit_label_def("if.end", end_id);
+                        sh.sig_kind = next;
+                    }
+                } else {
+                    if (kind == ShLlvmBlockKind.IfElse) {
+                        let end_id2: i32 = sh.llvm_block_end_label[top];
+                        sh.llvm_block_len = top;
+
+                        if (sh.llvm_bb_terminated == 0) {
+                            sh_llvm_emit_br("if.end", end_id2);
+                        }
+                        sh_llvm_emit_label_def("if.end", end_id2);
+                    } else {
+                        if (kind == ShLlvmBlockKind.ForBody) {
+                            let end_id3: i32 = sh.llvm_block_end_label[top];
+                            let cond_id: i32 = sh.llvm_block_cond_label[top];
+                            let step_id: i32 = sh.llvm_block_step_label[top];
+                            let has_step: i32 = sh.llvm_block_has_step[top];
+                            let step_start: i32 = sh.llvm_block_step_start[top];
+                            let step_file_idx: i32 = sh.llvm_block_step_file_idx[top];
+                            sh.llvm_block_len = top;
+
+                            if (sh.llvm_bb_terminated == 0) {
+                                if (has_step != 0) {
+                                    sh_llvm_emit_br("for.step", step_id);
+                                } else {
+                                    sh_llvm_emit_br("for.cond", cond_id);
+                                }
+                            }
+
+                            if (has_step != 0) {
+                                sh_llvm_emit_label_def("for.step", step_id);
+
+                                // Re-parse and emit the step expression from the header span.
+                                let resume_pos: i32 = sh.lex_pos;
+                                sh.lex_pos = step_start;
+                                let root_step: i32 = sh_expr_parse_until(step_file_idx, ShTok.RParen);
+                                if (root_step < 0) { return 1; }
+                                let tmp_step: i32 = sh_llvm_emit_expr_i32(step_file_idx, root_step);
+                                if (tmp_step < 0) { return 1; }
+                                sh.lex_pos = resume_pos;
+
+                                if (sh.llvm_bb_terminated == 0) {
+                                    sh_llvm_emit_br("for.cond", cond_id);
+                                }
+                            }
+
+                            sh_llvm_emit_label_def("for.end", end_id3);
+                        } else {
+                            if (kind == ShLlvmBlockKind.Function) {
+                                sh.llvm_block_len = top;
+
+                                if (sh.llvm_bb_terminated == 0) {
+                                    sh_llvm_emit_br("exit", exit_label);
+                                }
+                                done = 1;
+                            } else {
+                                sh_build_err_at(file_idx, "internal error: unknown block kind", sh.tok_start);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if (k == ShTok.LBrace) {
+                if (sh.llvm_block_len >= 256) {
+                    sh_build_err_at(file_idx, "block nesting too deep (llvm)", sh.tok_start);
+                    return 1;
+                }
+                sh.llvm_block_kind[sh.llvm_block_len] = ShLlvmBlockKind.Plain;
+                sh.llvm_block_len = sh.llvm_block_len + 1;
+            } else {
+                if (k == ShTok.LetKeyword) {
+                    // let name (: type)? (= expr)? ;
+                    let name_k: ShTok = sh_lex_next_kind();
+                    if (name_k != ShTok.Identifier) {
+                        sh_build_err_at(file_idx, "expected variable name", sh.tok_start);
+                        return 1;
+                    }
+                    let local_id2: i32 = sh_llvm_find_local(file_idx, sh.tok_start, sh.tok_len);
+                    if (local_id2 < 0) {
+                        sh_build_err_at(file_idx, "unknown local", sh.tok_start);
+                        return 1;
+                    }
+                    sh.llvm_local_declared[local_id2] = 1;
+
+                    let next_k: ShTok = sh_lex_next_kind();
+                    if (next_k == ShTok.Colon) {
+                        let ty_k: ShTok = sh_lex_next_kind();
+                        if (ty_k != ShTok.Identifier) {
+                            sh_build_err_at(file_idx, "expected type name", sh.tok_start);
+                            return 1;
+                        }
+                        if (!sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "i32") && !sh_span_eq(file_idx, sh.tok_start, sh.tok_len, "bool")) {
+                            sh_build_err_at(file_idx, "unsupported local type (llvm bring-up)", sh.tok_start);
+                            return 1;
+                        }
+                        next_k = sh_lex_next_kind();
+                    }
+
+                    if (next_k == ShTok.Equal) {
+                        sh_llvm_ensure_bb_open();
+                        let root: i32 = sh_expr_parse_until(file_idx, ShTok.Semicolon);
+                        if (root < 0) { return 1; }
+                        let folded: i32 = sh_expr_try_eval_i32_const(root);
+                        if (sh.expr_eval_failed == 0) {
+                            ascii_append(sh.ir_out, "  store i32 ");
+                            sh_ir_append_i32(sh.ir_out, folded);
+                            ascii_append(sh.ir_out, ", ptr ");
+                            sh_llvm_append_local_ptr(local_id2);
+                            ascii_append(sh.ir_out, ", align 4\n");
+                        } else {
+                            let rhs_id: i32 = sh_llvm_emit_expr_i32(file_idx, root);
+                            if (rhs_id < 0) { return 1; }
+                            sh_llvm_emit_store_local(local_id2, rhs_id);
+                        }
+                    } else {
+                        if (next_k != ShTok.Semicolon) {
+                            sh_build_err_at(file_idx, "expected '=' or ';' after let", sh.tok_start);
+                            return 1;
+                        }
+                        // No initializer: locals are already 0-initialized in entry.
+                    }
+                } else {
+                    if (k == ShTok.ReturnKeyword) {
+                        did_return = 1;
+                        sh_llvm_ensure_bb_open();
+
+                        let next: ShTok = sh_lex_next_kind();
+                        if (next == ShTok.Semicolon) {
+                            ascii_append(sh.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+                            sh_llvm_emit_br("exit", exit_label);
+                        } else {
+                            let root2: i32 = sh_expr_parse_after_first(file_idx, next, ShTok.Semicolon);
+                            if (root2 < 0) { return 1; }
+                            let folded2: i32 = sh_expr_try_eval_i32_const(root2);
+                            if (sh.expr_eval_failed == 0) {
+                                ascii_append(sh.ir_out, "  store i32 ");
+                                sh_ir_append_i32(sh.ir_out, folded2);
+                                ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
+                            } else {
+                                let ret_id: i32 = sh_llvm_emit_expr_i32(file_idx, root2);
+                                if (ret_id < 0) { return 1; }
+                                ascii_append(sh.ir_out, "  store i32 ");
+                                sh_llvm_append_tmp(ret_id);
+                                ascii_append(sh.ir_out, ", ptr %ret_slot, align 4\n");
+                            }
+                            sh_llvm_emit_br("exit", exit_label);
+                        }
+                    } else {
+                        if (k == ShTok.IfKeyword) {
+                            sh_llvm_ensure_bb_open();
+
+                            let lp: ShTok = sh_lex_next_kind();
+                            if (lp != ShTok.LParen) {
+                                sh_build_err_at(file_idx, "expected '(' after 'if'", sh.tok_start);
+                                return 1;
+                            }
+
+                            let cond_root: i32 = sh_expr_parse_until(file_idx, ShTok.RParen);
+                            if (cond_root < 0) { return 1; }
+                            let cond_i1: i32 = sh_llvm_emit_expr_i1(file_idx, cond_root);
+                            if (cond_i1 < 0) { return 1; }
+
+                            let then_id: i32 = sh_llvm_new_label();
+                            let else_id: i32 = sh_llvm_new_label();
+                            let end_id: i32 = sh_llvm_new_label();
+
+                            sh_llvm_emit_br_i1(cond_i1, "if.then", then_id, "if.else", else_id);
+                            sh_llvm_emit_label_def("if.then", then_id);
+
+                            let brace: ShTok = sh_lex_next_kind();
+                            if (brace != ShTok.LBrace) {
+                                sh_build_err_at(file_idx, "expected '{' after if condition", sh.tok_start);
+                                return 1;
+                            }
+
+                            if (sh.llvm_block_len >= 256) {
+                                sh_build_err_at(file_idx, "block nesting too deep (llvm)", sh.tok_start);
+                                return 1;
+                            }
+                            sh.llvm_block_kind[sh.llvm_block_len] = ShLlvmBlockKind.IfThen;
+                            sh.llvm_block_end_label[sh.llvm_block_len] = end_id;
+                            sh.llvm_block_else_label[sh.llvm_block_len] = else_id;
+                            sh.llvm_block_len = sh.llvm_block_len + 1;
+                        } else {
+                            if (k == ShTok.ForKeyword) {
+                                sh_llvm_ensure_bb_open();
+
+                                let lp2: ShTok = sh_lex_next_kind();
+                                if (lp2 != ShTok.LParen) {
+                                    sh_build_err_at(file_idx, "expected '(' after 'for'", sh.tok_start);
+                                    return 1;
+                                }
+
+                                // init? ;
+                                let init_k: ShTok = sh_lex_next_kind();
+                                if (init_k != ShTok.Semicolon) {
+                                    let init_root: i32 = sh_expr_parse_after_first(file_idx, init_k, ShTok.Semicolon);
+                                    if (init_root < 0) { return 1; }
+                                    let init_tmp: i32 = sh_llvm_emit_expr_i32(file_idx, init_root);
+                                    if (init_tmp < 0) { return 1; }
+                                }
+
+                                let cond_id: i32 = sh_llvm_new_label();
+                                let body_id: i32 = sh_llvm_new_label();
+                                let step_id: i32 = sh_llvm_new_label();
+                                let end_id2: i32 = sh_llvm_new_label();
+
+                                sh_llvm_emit_br("for.cond", cond_id);
+                                sh_llvm_emit_label_def("for.cond", cond_id);
+
+                                // cond? ;
+                                let cond_k: ShTok = sh_lex_next_kind();
+                                let has_cond: i32 = 1;
+                                let cond_i1: i32 = 0;
+                                if (cond_k == ShTok.Semicolon) {
+                                    has_cond = 0;
+                                } else {
+                                    let cond_root2: i32 = sh_expr_parse_after_first(file_idx, cond_k, ShTok.Semicolon);
+                                    if (cond_root2 < 0) { return 1; }
+                                    cond_i1 = sh_llvm_emit_expr_i1(file_idx, cond_root2);
+                                    if (cond_i1 < 0) { return 1; }
+                                }
+
+                                if (has_cond == 0) {
+                                    sh_llvm_emit_br("for.body", body_id);
+                                } else {
+                                    sh_llvm_emit_br_i1(cond_i1, "for.body", body_id, "for.end", end_id2);
+                                }
+
+                                // step? )
+                                let step_k: ShTok = sh_lex_next_kind();
+                                let has_step: i32 = 0;
+                                let step_start: i32 = 0;
+                                if (step_k != ShTok.RParen) {
+                                    has_step = 1;
+                                    step_start = sh.tok_start;
+                                    let step_root: i32 = sh_expr_parse_after_first(file_idx, step_k, ShTok.RParen);
+                                    if (step_root < 0) { return 1; }
+                                }
+
+                                let brace3: ShTok = sh_lex_next_kind();
+                                if (brace3 != ShTok.LBrace) {
+                                    sh_build_err_at(file_idx, "expected '{' after for header", sh.tok_start);
+                                    return 1;
+                                }
+
+                                sh_llvm_emit_label_def("for.body", body_id);
+
+                                if (sh.llvm_block_len >= 256) {
+                                    sh_build_err_at(file_idx, "block nesting too deep (llvm)", sh.tok_start);
+                                    return 1;
+                                }
+                                sh.llvm_block_kind[sh.llvm_block_len] = ShLlvmBlockKind.ForBody;
+                                sh.llvm_block_end_label[sh.llvm_block_len] = end_id2;
+                                sh.llvm_block_cond_label[sh.llvm_block_len] = cond_id;
+                                sh.llvm_block_step_label[sh.llvm_block_len] = step_id;
+                                sh.llvm_block_has_step[sh.llvm_block_len] = has_step;
+                                sh.llvm_block_step_start[sh.llvm_block_len] = step_start;
+                                sh.llvm_block_step_file_idx[sh.llvm_block_len] = file_idx;
+                                sh.llvm_block_len = sh.llvm_block_len + 1;
+                            } else {
+                                // Expression statement.
+                                sh_llvm_ensure_bb_open();
+                                let root3: i32 = sh_expr_parse_after_first(file_idx, k, ShTok.Semicolon);
+                                if (root3 < 0) { return 1; }
+                                let tmp: i32 = sh_llvm_emit_expr_i32(file_idx, root3);
+                                if (tmp < 0) { return 1; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (did_return == 0) {
+        sh_build_err_at(file_idx, "missing return (llvm bring-up)", body_start);
+        return 1;
+    }
+
+    ascii_append(sh.ir_out, "\n");
+    sh_llvm_emit_label_def("exit", exit_label);
+    let ret_tmp: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(ret_tmp);
+    ascii_append(sh.ir_out, " = load i32, ptr %ret_slot, align 4\n");
+    ascii_append(sh.ir_out, "  ret i32 ");
+    sh_llvm_append_tmp(ret_tmp);
+    ascii_append(sh.ir_out, "\n");
+
+    ascii_append(sh.ir_out, "}\n\n");
     return 0;
 }
 
@@ -1080,7 +1797,7 @@ function sh_emit_llvm_func_return_i32_noargs(func_idx: i32): i32 {
     sh.sig_kind = ShTok.Unknown;
 
     ascii_append(sh.ir_out, "define i32 @");
-    sh_ir_append_span(sh.ir_out, file_idx, sh.funcs[func_idx].name_start, sh.funcs[func_idx].name_len);
+    sh_llvm_append_func_ir_name(func_idx);
     ascii_append(sh.ir_out, "() {\n");
     ascii_append(sh.ir_out, "entry:\n");
 
@@ -1143,6 +1860,9 @@ function sh_emit_llvm_func_return_i32_noargs(func_idx: i32): i32 {
 }
 
 function sh_emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
+    // Store for downstream helpers (LLVM symbol mangling).
+    ascii_copy(sh.arg_module, module_name);
+
     let func_idx: i32 = sh_build_find_entry_main();
     if (func_idx < 0) {
         sh_build_err_at(0, "missing entry function 'main' in entry file", 0);
