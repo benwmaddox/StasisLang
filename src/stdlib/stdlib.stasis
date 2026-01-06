@@ -12,13 +12,15 @@ function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     for (i = 0; i < limit; i = i + 1) {
         let b: u8 = src[i];
         if (b == 0) {
-            str_set(dst, i, 0);
+            dst[i] = 0;
+            utf8_set_len_ascii(dst, i);
             return i;
         }
         dst[i] = b;
     }
 
-    str_set(dst, i, 0);
+    dst[i] = 0;
+    utf8_set_len_ascii(dst, i);
     return i;
 }
 

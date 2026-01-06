@@ -1,0 +1,418 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2_post.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function sh_llvm_reset(): void {
+    sh.llvm_local_count = 0;
+    sh.llvm_tmp_id = 0;
+    sh.llvm_label_id = 0;
+    sh.llvm_bb_terminated = 0;
+    sh.llvm_place_len = 0;
+    sh.llvm_place_kind = ShLlvmValueKind.I32;
+    sh.llvm_place_struct_idx = -1;
+    sh.llvm_block_len = 0;
+}
+
+function sh_llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_local_count; i = i + 1) {
+        if (sh_span_eq_span(file_idx, name_start, name_len, sh.llvm_local_name_start[i], sh.llvm_local_name_len[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function sh_llvm_add_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
+    if (sh.llvm_local_count >= 1024) {
+        sh_build_err_at(file_idx, "too many locals (llvm)", name_start);
+        return -1;
+    }
+    if (sh_llvm_find_local(file_idx, name_start, name_len) >= 0) {
+        sh_build_err_at(file_idx, "duplicate local name", name_start);
+        return -1;
+    }
+
+    let id: i32 = sh.llvm_local_count;
+    sh.llvm_local_name_start[id] = name_start;
+    sh.llvm_local_name_len[id] = name_len;
+    sh.llvm_local_kind[id] = ShLlvmValueKind.I32;
+    sh.llvm_local_count = sh.llvm_local_count + 1;
+    return id;
+}
+
+function sh_llvm_append_local_ptr(local_id: i32): void {
+    ascii_append(sh.ir_out, "%l");
+    sh_ir_append_i32(sh.ir_out, local_id);
+}
+
+function sh_llvm_append_tmp(tmp_id: i32): void {
+    ascii_append(sh.ir_out, "%t");
+    sh_ir_append_i32(sh.ir_out, tmp_id);
+}
+
+function sh_llvm_new_tmp(): i32 {
+    let id: i32 = sh.llvm_tmp_id;
+    sh.llvm_tmp_id = sh.llvm_tmp_id + 1;
+    return id;
+}
+
+function sh_llvm_new_label(): i32 {
+    let id: i32 = sh.llvm_label_id;
+    sh.llvm_label_id = sh.llvm_label_id + 1;
+    return id;
+}
+
+function sh_llvm_append_label(prefix: ascii[], id: i32): void {
+    ascii_append(sh.ir_out, prefix);
+    sh_ir_append_i32(sh.ir_out, id);
+}
+
+function sh_llvm_emit_label_def(prefix: ascii[], id: i32): void {
+    sh_llvm_append_label(prefix, id);
+    ascii_append(sh.ir_out, ":\n");
+    sh.llvm_bb_terminated = 0;
+}
+
+function sh_llvm_emit_br(prefix: ascii[], id: i32): void {
+    ascii_append(sh.ir_out, "  br label %");
+    sh_llvm_append_label(prefix, id);
+    ascii_append(sh.ir_out, "\n");
+    sh.llvm_bb_terminated = 1;
+}
+
+function sh_llvm_emit_br_i1(cond_i1_id: i32, then_prefix: ascii[], then_id: i32, else_prefix: ascii[], else_id: i32): void {
+    ascii_append(sh.ir_out, "  br i1 ");
+    sh_llvm_append_tmp(cond_i1_id);
+    ascii_append(sh.ir_out, ", label %");
+    sh_llvm_append_label(then_prefix, then_id);
+    ascii_append(sh.ir_out, ", label %");
+    sh_llvm_append_label(else_prefix, else_id);
+    ascii_append(sh.ir_out, "\n");
+    sh.llvm_bb_terminated = 1;
+}
+
+function sh_llvm_emit_const_i32(v: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = add i32 0, ");
+    sh_ir_append_i32(sh.ir_out, v);
+    ascii_append(sh.ir_out, "\n");
+    return id;
+}
+
+function sh_llvm_emit_icmp_i1(pred: ascii[], a_id: i32, b_imm: i32): i32 {
+    let id_cmp: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id_cmp);
+    ascii_append(sh.ir_out, " = icmp ");
+    ascii_append(sh.ir_out, pred);
+    ascii_append(sh.ir_out, " i32 ");
+    sh_llvm_append_tmp(a_id);
+    ascii_append(sh.ir_out, ", ");
+    sh_ir_append_i32(sh.ir_out, b_imm);
+    ascii_append(sh.ir_out, "\n");
+    return id_cmp;
+}
+
+function sh_llvm_emit_logic_i1(op: ascii[], a_i1_id: i32, b_i1_id: i32): i32 {
+    let out_i1: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(out_i1);
+    ascii_append(sh.ir_out, " = ");
+    ascii_append(sh.ir_out, op);
+    ascii_append(sh.ir_out, " i1 ");
+    sh_llvm_append_tmp(a_i1_id);
+    ascii_append(sh.ir_out, ", ");
+    sh_llvm_append_tmp(b_i1_id);
+    ascii_append(sh.ir_out, "\n");
+    return out_i1;
+}
+
+function sh_llvm_emit_range_i1(a_id: i32, lo: i32, hi: i32): i32 {
+    let ge: i32 = sh_llvm_emit_icmp_i1("sge", a_id, lo);
+    let le: i32 = sh_llvm_emit_icmp_i1("sle", a_id, hi);
+    return sh_llvm_emit_logic_i1("and", ge, le);
+}
+
+function sh_llvm_emit_zext_i1_to_i32(i1_id: i32): i32 {
+    let out_i32: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(out_i32);
+    ascii_append(sh.ir_out, " = zext i1 ");
+    sh_llvm_append_tmp(i1_id);
+    ascii_append(sh.ir_out, " to i32\n");
+    return out_i32;
+}
+
+function sh_llvm_emit_select_i32(cond_i1: i32, then_i32: i32, else_i32: i32): i32 {
+    let out_i32: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(out_i32);
+    ascii_append(sh.ir_out, " = select i1 ");
+    sh_llvm_append_tmp(cond_i1);
+    ascii_append(sh.ir_out, ", i32 ");
+    sh_llvm_append_tmp(then_i32);
+    ascii_append(sh.ir_out, ", i32 ");
+    sh_llvm_append_tmp(else_i32);
+    ascii_append(sh.ir_out, "\n");
+    return out_i32;
+}
+
+function sh_llvm_emit_load_local(local_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = load i32, ptr ");
+    sh_llvm_append_local_ptr(local_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+    return id;
+}
+
+function sh_llvm_emit_store_local(local_id: i32, value_id: i32): void {
+    ascii_append(sh.ir_out, "  store i32 ");
+    sh_llvm_append_tmp(value_id);
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_local_ptr(local_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+}
+
+function sh_llvm_emit_load_ptr_from_local(local_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = load ptr, ptr ");
+    sh_llvm_append_local_ptr(local_id);
+    ascii_append(sh.ir_out, ", align 8\n");
+    return id;
+}
+
+function sh_llvm_emit_gep0_local_i32(local_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds i32, ptr ");
+    sh_llvm_append_local_ptr(local_id);
+    ascii_append(sh.ir_out, ", i32 0\n");
+    return id;
+}
+
+function sh_llvm_emit_gep0_global(global_idx: i32, type_idx: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds ");
+    if (sh_llvm_emit_type(type_idx) != 0) {
+        return -1;
+    }
+    ascii_append(sh.ir_out, ", ptr @");
+    sh_llvm_append_global_ir_name(global_idx);
+    ascii_append(sh.ir_out, ", i32 0\n");
+    return id;
+}
+
+function sh_llvm_emit_load_i32_from_ptr(ptr_id: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = load i32, ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+    return id;
+}
+
+function sh_llvm_emit_load_i8_zext_from_ptr(ptr_id: i32): i32 {
+    let id8: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id8);
+    ascii_append(sh.ir_out, " = load i8, ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 1\n");
+
+    let id32: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id32);
+    ascii_append(sh.ir_out, " = zext i8 ");
+    sh_llvm_append_tmp(id8);
+    ascii_append(sh.ir_out, " to i32\n");
+    return id32;
+}
+
+function sh_llvm_emit_store_i32_to_ptr(ptr_id: i32, value_id: i32): void {
+    ascii_append(sh.ir_out, "  store i32 ");
+    sh_llvm_append_tmp(value_id);
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 4\n");
+}
+
+function sh_llvm_emit_store_i8_trunc_to_ptr(ptr_id: i32, value_id: i32): void {
+    let id8: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id8);
+    ascii_append(sh.ir_out, " = trunc i32 ");
+    sh_llvm_append_tmp(value_id);
+    ascii_append(sh.ir_out, " to i8\n");
+
+    ascii_append(sh.ir_out, "  store i8 ");
+    sh_llvm_append_tmp(id8);
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, ", align 1\n");
+}
+
+function sh_llvm_emit_gep_struct_field(base_ptr_id: i32, struct_idx: i32, field_rel: i32): i32 {
+    let id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds %");
+    sh_llvm_append_struct_ir_name(struct_idx);
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_tmp(base_ptr_id);
+    ascii_append(sh.ir_out, ", i32 0, i32 ");
+    sh_ir_append_i32(sh.ir_out, field_rel);
+    ascii_append(sh.ir_out, "\n");
+    return id;
+}
+
+function sh_llvm_ptr_kind_for_elem_type(file_idx: i32, at: i32, elem_type_idx: i32): i32 {
+    if (sh_build_type_is_byte_named(elem_type_idx)) {
+        sh.llvm_place_kind = ShLlvmValueKind.PtrI8;
+        sh.llvm_place_struct_idx = -1;
+        return 0;
+    }
+    if (sh_build_type_is_i32ish(elem_type_idx)) {
+        sh.llvm_place_kind = ShLlvmValueKind.PtrI32;
+        sh.llvm_place_struct_idx = -1;
+        return 0;
+    }
+
+    let si: i32 = sh_build_find_struct_decl_for_type(elem_type_idx);
+    if (si >= 0) {
+        sh.llvm_place_kind = ShLlvmValueKind.PtrStruct;
+        sh.llvm_place_struct_idx = si;
+        return 0;
+    }
+
+    sh_build_err_at(file_idx, "unsupported array element type (llvm bring-up)", at);
+    return 1;
+}
+
+function sh_llvm_decay_fixed_array_ptr(file_idx: i32, at: i32, array_ptr_id: i32, array_type_idx: i32): i32 {
+    if (array_type_idx < 0 || array_type_idx >= sh.type_count) {
+        return -1;
+    }
+    let kind: ShTypeKind = sh.types[array_type_idx].kind;
+    if (kind != ShTypeKind.Array) {
+        return -1;
+    }
+    if (sh.types[array_type_idx].size <= 0) {
+        return -1;
+    }
+
+    let elem: i32 = sh.types[array_type_idx].elem;
+    let header_bytes: i32 = sh_build_header_bytes_for_elem(elem);
+
+    if (sh_llvm_ptr_kind_for_elem_type(file_idx, at, elem) != 0) {
+        return -1;
+    }
+
+    // For ascii/utf8 arrays, we model the whole allocation as [N+header x i8] and decay to ptr i8 after the header.
+    if (header_bytes != 0) {
+        sh.llvm_place_kind = ShLlvmValueKind.PtrI8;
+        sh.llvm_place_struct_idx = -1;
+    }
+
+    let elem0_ptr: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(elem0_ptr);
+    ascii_append(sh.ir_out, " = getelementptr inbounds ");
+    if (sh_llvm_emit_type(array_type_idx) != 0) {
+        return -1;
+    }
+    ascii_append(sh.ir_out, ", ptr ");
+    sh_llvm_append_tmp(array_ptr_id);
+    ascii_append(sh.ir_out, ", i32 0, i32 0\n");
+
+    let data_ptr: i32 = elem0_ptr;
+    if (header_bytes != 0) {
+        let data_ptr2: i32 = sh_llvm_new_tmp();
+        ascii_append(sh.ir_out, "  ");
+        sh_llvm_append_tmp(data_ptr2);
+        ascii_append(sh.ir_out, " = getelementptr inbounds i8, ptr ");
+        sh_llvm_append_tmp(elem0_ptr);
+        ascii_append(sh.ir_out, ", i32 ");
+        sh_ir_append_i32(sh.ir_out, header_bytes);
+        ascii_append(sh.ir_out, "\n");
+        data_ptr = data_ptr2;
+    }
+
+    return data_ptr;
+}
+
+function sh_llvm_ensure_bb_open(): void {
+    if (sh.llvm_bb_terminated != 0) {
+        let dead_id: i32 = sh_llvm_new_label();
+        sh_llvm_emit_label_def("dead", dead_id);
+    }
+}
+
+function sh_llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
+    sh.lex_pos = body_start;
+
+    let k: ShTok = sh_lex_next_kind();
+    if (k != ShTok.LBrace) {
+        sh_build_err_at(file_idx, "expected '{' at start of function body", sh.tok_start);
+        return 1;
+    }
+
+    let depth: i32 = 1;
+    for (; depth > 0; ) {
+        k = sh_lex_next_kind();
+        if (k == ShTok.Eof) {
+            sh_build_err_at(file_idx, "unexpected eof in function body", sh.tok_start);
+            return 1;
+        }
+
+        if (k == ShTok.LBrace) {
+            depth = depth + 1;
+        } else {
+            if (k == ShTok.RBrace) {
+                depth = depth - 1;
+            } else {
+                if (k == ShTok.LetKeyword) {
+                    let name_k: ShTok = sh_lex_next_kind();
+                    if (name_k != ShTok.Identifier) {
+                        sh_build_err_at(file_idx, "expected variable name", sh.tok_start);
+                        return 1;
+                    }
+
+                    let local_id: i32 = sh_llvm_add_local(file_idx, sh.tok_start, sh.tok_len);
+                    if (local_id < 0) {
+                        return 1;
+                    }
+
+                    sh.llvm_local_declared[local_id] = 0;
+                    sh.llvm_local_declared_at[local_id] = sh.tok_start;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+

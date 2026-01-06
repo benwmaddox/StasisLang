@@ -226,7 +226,9 @@ enum ShLlvmValueKind {
     I8 = 2,
     PtrI8 = 3,
     PtrI32 = 4,
-    PtrStruct = 5
+    PtrStruct = 5,
+    Void = 6,
+    EnumType = 7
 }
 
 struct ShState {
@@ -262,6 +264,8 @@ struct ShState {
     scratch_import: ascii[260];
     scratch_dir: ascii[260];
     scratch_resolved: ascii[260];
+    scratch_runtime: ascii[260];
+    scratch_exe: ascii[260];
     scratch_watch_path: ascii[260];
     scratch_mod: ascii[96];
 

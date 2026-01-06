@@ -1,0 +1,268 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2_post.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function sh_llvm_append_func_ir_name(func_idx: i32): void {
+    if (func_idx < 0 || func_idx >= sh.func_count) {
+        return;
+    }
+
+    let file_idx: i32 = sh.funcs[func_idx].file_idx;
+    if (file_idx == 0 && sh_span_eq(file_idx, sh.funcs[func_idx].name_start, sh.funcs[func_idx].name_len, "main")) {
+        ascii_append(sh.ir_out, "main");
+        return;
+    }
+
+    if (file_idx == 0) {
+        ascii_append(sh.ir_out, sh.arg_module);
+    } else {
+        let off: i32 = sh.files[file_idx].mod_off;
+        let len: i32 = sh.files[file_idx].mod_len;
+        let i: i32 = 0;
+        for (i = 0; i < len; i = i + 1) {
+            ascii_append_byte(sh.ir_out, sh.mod_pool[off + i]);
+        }
+    }
+
+    ascii_append(sh.ir_out, "__");
+    sh_ir_append_span(sh.ir_out, file_idx, sh.funcs[func_idx].name_start, sh.funcs[func_idx].name_len);
+}
+
+function sh_llvm_append_struct_ir_name(struct_idx: i32): void {
+    if (struct_idx < 0 || struct_idx >= sh.struct_count) {
+        return;
+    }
+
+    let file_idx: i32 = sh.structs[struct_idx].file_idx;
+    if (file_idx == 0) {
+        ascii_append(sh.ir_out, sh.arg_module);
+    } else {
+        let off: i32 = sh.files[file_idx].mod_off;
+        let len: i32 = sh.files[file_idx].mod_len;
+        let i: i32 = 0;
+        for (i = 0; i < len; i = i + 1) {
+            ascii_append_byte(sh.ir_out, sh.mod_pool[off + i]);
+        }
+    }
+
+    ascii_append(sh.ir_out, "__");
+    sh_ir_append_span(sh.ir_out, file_idx, sh.structs[struct_idx].name_start, sh.structs[struct_idx].name_len);
+}
+
+function sh_llvm_append_global_ir_name(global_idx: i32): void {
+    if (global_idx < 0 || global_idx >= sh.global_count) {
+        return;
+    }
+
+    let file_idx: i32 = sh.globals[global_idx].file_idx;
+    if (file_idx == 0) {
+        ascii_append(sh.ir_out, sh.arg_module);
+    } else {
+        let off: i32 = sh.files[file_idx].mod_off;
+        let len: i32 = sh.files[file_idx].mod_len;
+        let i: i32 = 0;
+        for (i = 0; i < len; i = i + 1) {
+            ascii_append_byte(sh.ir_out, sh.mod_pool[off + i]);
+        }
+    }
+
+    ascii_append(sh.ir_out, "__");
+    sh_ir_append_span(sh.ir_out, file_idx, sh.globals[global_idx].name_start, sh.globals[global_idx].name_len);
+}
+
+function sh_llvm_emit_type(type_idx: i32): i32 {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return 1;
+    }
+
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind == ShTypeKind.Named) {
+        if (sh_build_type_is_i32ish(type_idx)) {
+            ascii_append(sh.ir_out, "i32");
+            return 0;
+        }
+        if (sh_build_type_is_byte_named(type_idx)) {
+            ascii_append(sh.ir_out, "i8");
+            return 0;
+        }
+
+        let si: i32 = sh_build_find_struct_decl_for_type(type_idx);
+        if (si >= 0) {
+            ascii_append_byte(sh.ir_out, 37); // '%'
+            sh_llvm_append_struct_ir_name(si);
+            return 0;
+        }
+
+        return 1;
+    }
+
+    if (kind == ShTypeKind.Array) {
+        let size: i32 = sh.types[type_idx].size;
+        if (size == 0) {
+            // Slice type: `T[]` modeled as Array(size=0).
+            ascii_append(sh.ir_out, "ptr");
+            return 0;
+        }
+
+        let elem: i32 = sh.types[type_idx].elem;
+        let header_bytes: i32 = sh_build_header_bytes_for_elem(elem);
+        let total: i32 = size + header_bytes;
+
+        ascii_append_byte(sh.ir_out, 91); // '['
+        sh_ir_append_i32(sh.ir_out, total);
+        ascii_append(sh.ir_out, " x ");
+        if (header_bytes != 0) {
+            ascii_append(sh.ir_out, "i8");
+        } else {
+            if (sh_llvm_emit_type(elem) != 0) {
+                return 1;
+            }
+        }
+        ascii_append_byte(sh.ir_out, 93); // ']'
+        return 0;
+    }
+
+    return 1;
+}
+
+function sh_llvm_align_of_type(type_idx: i32): i32 {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return 4;
+    }
+
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind == ShTypeKind.Named) {
+        if (sh_build_type_is_i32ish(type_idx)) { return 4; }
+        if (sh_build_type_is_byte_named(type_idx)) { return 1; }
+        // Struct alignment: conservative.
+        return 16;
+    }
+
+    if (kind == ShTypeKind.Array) {
+        // Arrays have the same alignment as their element type (conservative).
+        let elem: i32 = sh.types[type_idx].elem;
+        let header_bytes: i32 = sh_build_header_bytes_for_elem(elem);
+        if (header_bytes != 0) { return 1; }
+        return sh_llvm_align_of_type(elem);
+    }
+
+    return 4;
+}
+
+function sh_llvm_emit_struct_type_defs(): i32 {
+    let si: i32 = 0;
+    for (si = 0; si < sh.struct_count; si = si + 1) {
+        ascii_append_byte(sh.ir_out, 37); // '%'
+        sh_llvm_append_struct_ir_name(si);
+        ascii_append(sh.ir_out, " = type { ");
+
+        let off: i32 = sh.structs[si].fields_off;
+        let len: i32 = sh.structs[si].fields_len;
+        let fi: i32 = 0;
+        for (fi = 0; fi < len; fi = fi + 1) {
+            if (fi != 0) {
+                ascii_append(sh.ir_out, ", ");
+            }
+            let field_idx: i32 = off + fi;
+            if (field_idx < 0 || field_idx >= sh.field_count) {
+                return 1;
+            }
+            if (sh_llvm_emit_type(sh.fields[field_idx].type_idx) != 0) {
+                return 1;
+            }
+        }
+
+        ascii_append(sh.ir_out, " }\n");
+    }
+
+    if (sh.struct_count != 0) {
+        ascii_append_byte(sh.ir_out, 10);
+    }
+
+    return 0;
+}
+
+function sh_llvm_emit_global_defs(): i32 {
+    let g: i32 = 0;
+    for (g = 0; g < sh.global_count; g = g + 1) {
+        if (sh.globals[g].has_init != 0) {
+            sh_build_err_at(sh.globals[g].file_idx, "global initializers not yet supported (llvm bring-up)", sh.globals[g].name_start);
+            return 1;
+        }
+
+        ascii_append_byte(sh.ir_out, 64); // '@'
+        sh_llvm_append_global_ir_name(g);
+        ascii_append(sh.ir_out, " = global ");
+        if (sh_llvm_emit_type(sh.globals[g].type_idx) != 0) {
+            sh_build_err_at(sh.globals[g].file_idx, "unsupported global type (llvm bring-up)", sh.globals[g].name_start);
+            return 1;
+        }
+        ascii_append(sh.ir_out, " zeroinitializer, align ");
+        sh_ir_append_i32(sh.ir_out, sh_llvm_align_of_type(sh.globals[g].type_idx));
+        ascii_append_byte(sh.ir_out, 10);
+    }
+
+    if (sh.global_count != 0) {
+        ascii_append_byte(sh.ir_out, 10);
+    }
+
+    return 0;
+}
+
+function sh_llvm_emit_runtime_decls_and_consts(): void {
+    // C runtime
+    ascii_append(sh.ir_out, "declare i32 @printf(ptr, ...)\n");
+
+    // System: sys_* builtins
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_argc()\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_argv(i32, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_read_file(ptr, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_write_file(ptr, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_exists(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_size(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_mtime_ms(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_exec(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_sleep_ms(i32)\n");
+    ascii_append_byte(sh.ir_out, 10);
+
+    // Format strings for print_* builtins.
+    ascii_append(sh.ir_out, "@.stasis_fmt_s = private unnamed_addr constant [3 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 115); // 's'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+
+    ascii_append(sh.ir_out, "@.stasis_fmt_d = private unnamed_addr constant [4 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 32); // ' '
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 100); // 'd'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+
+    ascii_append(sh.ir_out, "@.stasis_fmt_c = private unnamed_addr constant [3 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 99); // 'c'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+    ascii_append_byte(sh.ir_out, 10);
+}
+

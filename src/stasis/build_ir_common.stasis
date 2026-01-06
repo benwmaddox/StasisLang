@@ -1,0 +1,237 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2_post.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function sh_span_eq(file_idx: i32, start: i32, len: i32, lit: ascii[]): bool {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return false;
+    }
+    if (len != ascii_len(lit)) {
+        return false;
+    }
+
+    let base: i32 = sh.files[file_idx].offset + start;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        if (sh.pool[base + i] != lit[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sh_ir_append_span(dst: ascii[], file_idx: i32, start: i32, len: i32): void {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return;
+    }
+    let base: i32 = sh.files[file_idx].offset + start;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        ascii_append_byte(dst, sh.pool[base + i]);
+    }
+}
+
+function sh_build_err_at(file_idx: i32, msg: ascii[], at: i32): void {
+    if (sh.quiet != 0) {
+        return;
+    }
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    sh_print_file_loc(file_idx, at);
+    print_char(10);
+}
+
+function sh_build_parse_i32_from_tok(file_idx: i32): i32 {
+    let v: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < sh.tok_len; i = i + 1) {
+        let b: u8 = sh.pool[sh.lex_base + sh.tok_start + i];
+        if (!ascii_is_digit(b)) {
+            sh_build_err_at(file_idx, "expected integer literal", sh.tok_start);
+            return 0;
+        }
+        v = v * 10 + ascii_to_digit(b);
+    }
+    return v;
+}
+
+function sh_build_find_entry_main(): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.func_count; i = i + 1) {
+        if (sh.funcs[i].is_test == 0) {
+            if (sh.funcs[i].file_idx == 0) {
+                if (sh_span_eq(sh.funcs[i].file_idx, sh.funcs[i].name_start, sh.funcs[i].name_len, "main")) {
+                    return i;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+function sh_build_type_is_i32(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return false;
+    }
+    return sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "i32");
+}
+
+function sh_build_type_is_i32ish(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return false;
+    }
+    if (sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "i32")) { return true; }
+    if (sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "bool")) { return true; }
+    return sh_build_find_enum_decl_for_type(type_idx) >= 0;
+}
+
+function sh_build_type_is_byte_named(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return false;
+    }
+    if (sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "u8")) { return true; }
+    if (sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "ascii")) { return true; }
+    return sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "utf8");
+}
+
+function sh_build_type_is_void(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return false;
+    }
+    return sh_span_eq(sh.types[type_idx].file_idx, sh.types[type_idx].start, sh.types[type_idx].len, "void");
+}
+
+function sh_build_header_bytes_for_elem(elem_type_idx: i32): i32 {
+    if (elem_type_idx < 0 || elem_type_idx >= sh.type_count) {
+        return 0;
+    }
+    let kind: ShTypeKind = sh.types[elem_type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return 0;
+    }
+    if (sh_span_eq(sh.types[elem_type_idx].file_idx, sh.types[elem_type_idx].start, sh.types[elem_type_idx].len, "ascii")) { return 4; }
+    if (sh_span_eq(sh.types[elem_type_idx].file_idx, sh.types[elem_type_idx].start, sh.types[elem_type_idx].len, "utf8")) { return 8; }
+    return 0;
+}
+
+function sh_build_type_is_slice_of_bytes(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Array) {
+        return false;
+    }
+    if (sh.types[type_idx].size != 0) {
+        return false;
+    }
+    return sh_build_type_is_byte_named(sh.types[type_idx].elem);
+}
+
+function sh_build_type_is_slice_of_i32ish(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return false;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Array) {
+        return false;
+    }
+    if (sh.types[type_idx].size != 0) {
+        return false;
+    }
+    return sh_build_type_is_i32ish(sh.types[type_idx].elem);
+}
+
+function sh_build_find_struct_decl_for_type(type_idx: i32): i32 {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return -1;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return -1;
+    }
+
+    let want_file: i32 = sh.types[type_idx].file_idx;
+    let want_start: i32 = sh.types[type_idx].start;
+    let want_len: i32 = sh.types[type_idx].len;
+
+    let si: i32 = 0;
+    for (si = 0; si < sh.struct_count; si = si + 1) {
+        if (sh_span_eq_span_cross(want_file, want_start, want_len, sh.structs[si].file_idx, sh.structs[si].name_start, sh.structs[si].name_len)) {
+            return si;
+        }
+    }
+    return -1;
+}
+
+function sh_build_find_enum_decl_for_type(type_idx: i32): i32 {
+    if (type_idx < 0 || type_idx >= sh.type_count) {
+        return -1;
+    }
+    let kind: ShTypeKind = sh.types[type_idx].kind;
+    if (kind != ShTypeKind.Named) {
+        return -1;
+    }
+
+    let want_file: i32 = sh.types[type_idx].file_idx;
+    let want_start: i32 = sh.types[type_idx].start;
+    let want_len: i32 = sh.types[type_idx].len;
+
+    let ei: i32 = 0;
+    for (ei = 0; ei < sh.enum_count; ei = ei + 1) {
+        if (sh_span_eq_span_cross(want_file, want_start, want_len, sh.enums[ei].file_idx, sh.enums[ei].name_start, sh.enums[ei].name_len)) {
+            return ei;
+        }
+    }
+    return -1;
+}
+
+function sh_build_find_struct_field(struct_idx: i32, name_file_idx: i32, name_start: i32, name_len: i32): i32 {
+    if (struct_idx < 0 || struct_idx >= sh.struct_count) {
+        return -1;
+    }
+
+    let off: i32 = sh.structs[struct_idx].fields_off;
+    let len: i32 = sh.structs[struct_idx].fields_len;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        let field_idx: i32 = off + i;
+        if (field_idx >= 0 && field_idx < sh.field_count) {
+            if (sh_span_eq_span_cross(name_file_idx, name_start, name_len, sh.fields[field_idx].file_idx, sh.fields[field_idx].name_start, sh.fields[field_idx].name_len)) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+

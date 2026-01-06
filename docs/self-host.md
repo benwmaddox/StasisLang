@@ -321,3 +321,7 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: LLVM bring-up: accept `u8[]`/`i32[]` as `ptr` params (length passed separately) and recognize `u8_to_i32` / `i32_to_u8_trunc` as intrinsics; added IR tests.
 - 2026-01-06: grew `sh.ir_out` to 32MiB; added LLVM module-level string literal emission (utf8 header + null sentinel) and added IR tests.
 - 2026-01-06: LLVM bring-up: lowered `print_string`/`print_int`/`print_char` and `sys_*` builtins via `printf` and `stasis_sys_*`; added IR tests.
+- 2026-01-06: fixed expression parsing of `)` so calls can close inside grouping parentheses (needed for self-host compiler code).
+- 2026-01-06: refactored LLVM IR emitter files to keep each `.stasis` source <50KiB; added void returns, char_* builtins, const resolution, and enum member lowering.
+- 2026-01-06: stage1 self-build now works: `stasis build --emit-ir src/stasis/main.stasis` emits `build/stasis_self.ll` with no stage0 help beyond bootstrap.
+- 2026-01-06: `stasis build`/`run`/`release` now link the sys runtime (`runtime/stasis_sys.c`) when invoking `clang`; `run` uses a temp exe instead of `lli`.

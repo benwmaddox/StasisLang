@@ -105,6 +105,76 @@ function sh_stmt_skip_expr_until(file_idx: i32, terminator: ShTok, allow_empty: 
     return sh_stmt_skip_expr_after_first(file_idx, first, terminator);
 }
 
+// Skips an expression that must end at the matching ')' of an already-consumed '('.
+// This differs from sh_stmt_skip_expr_after_first(..., terminator=RParen) because the
+// expression itself may contain nested parentheses (e.g. function calls).
+function sh_stmt_skip_expr_after_first_in_parens(file_idx: i32, first: ShTok): i32 {
+    let paren_depth: i32 = 1;   // account for the already-consumed '('
+    let bracket_depth: i32 = 0;
+
+    if (first == ShTok.LParen) { paren_depth = paren_depth + 1; }
+    if (first == ShTok.LBracket) { bracket_depth = bracket_depth + 1; }
+    if (first == ShTok.RBracket) {
+        sh_stmt_err_at(file_idx, "unmatched ']'", sh.tok_start);
+        return 1;
+    }
+
+    let k: ShTok = sh_lex_next_kind();
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (k == ShTok.Eof) {
+            sh_stmt_err_at(file_idx, "unexpected eof in expression", sh.tok_start);
+            return 1;
+        }
+
+        if (k == ShTok.LParen) { paren_depth = paren_depth + 1; }
+        else { if (k == ShTok.RParen) {
+            if (paren_depth > 0) {
+                paren_depth = paren_depth - 1;
+            } else {
+                sh_stmt_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                return 1;
+            }
+        } }
+
+        if (done == 0) {
+            if (k == ShTok.LBracket) { bracket_depth = bracket_depth + 1; }
+            else { if (k == ShTok.RBracket) {
+                if (bracket_depth > 0) {
+                    bracket_depth = bracket_depth - 1;
+                } else {
+                    sh_stmt_err_at(file_idx, "unmatched ']'", sh.tok_start);
+                    return 1;
+                }
+            } }
+        }
+
+        if (done == 0) {
+            if (k == ShTok.RParen && paren_depth == 0 && bracket_depth == 0) {
+                done = 1;
+            }
+        }
+
+        if (done == 0) {
+            k = sh_lex_next_kind();
+        }
+    }
+
+    return 0;
+}
+
+function sh_stmt_skip_expr_in_parens(file_idx: i32, allow_empty: i32): i32 {
+    let first: ShTok = sh_lex_next_kind();
+    if (first == ShTok.RParen) {
+        if (allow_empty != 0) {
+            return 0;
+        }
+        sh_stmt_err_at(file_idx, "expected expression", sh.tok_start);
+        return 1;
+    }
+    return sh_stmt_skip_expr_after_first_in_parens(file_idx, first);
+}
+
 function sh_stmt_skip_type(file_idx: i32): i32 {
     let errors: i32 = 0;
 
@@ -151,13 +221,17 @@ function sh_stmt_skip_type(file_idx: i32): i32 {
 }
 
 function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
+    let errors: i32 = 0;
+    let k: ShTok = ShTok.Unknown;
+    let next: ShTok = ShTok.Unknown;
+
     if (first == ShTok.LBrace) {
         return sh_stmt_parse_block_after_lbrace(file_idx);
     }
 
     if (first == ShTok.LetKeyword) {
-        let errors: i32 = 0;
-        let k: ShTok = sh_lex_next_kind();
+        errors = 0;
+        k = sh_lex_next_kind();
         if (k != ShTok.Identifier) {
             sh_stmt_err_at(file_idx, "expected variable name", sh.tok_start);
             return 1;
@@ -185,7 +259,7 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
 
     if (first == ShTok.ReturnKeyword) {
         // return <expr>? ;
-        let k: ShTok = sh_lex_next_kind();
+        k = sh_lex_next_kind();
         if (k == ShTok.Semicolon) {
             return 0;
         }
@@ -193,14 +267,14 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
     }
 
     if (first == ShTok.IfKeyword) {
-        let errors: i32 = 0;
-        let k: ShTok = sh_lex_next_kind();
+        errors = 0;
+        k = sh_lex_next_kind();
         if (k != ShTok.LParen) {
             errors = errors + 1;
             sh_stmt_err_at(file_idx, "expected '(' after 'if'", sh.tok_start);
             return errors;
         }
-        errors = errors + sh_stmt_skip_expr_until(file_idx, ShTok.RParen, 0);
+        errors = errors + sh_stmt_skip_expr_in_parens(file_idx, 0);
 
         k = sh_lex_next_kind();
         if (k != ShTok.LBrace) {
@@ -211,7 +285,7 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
         errors = errors + sh_stmt_parse_block_after_lbrace(file_idx);
 
         // Optional else block.
-        let next: ShTok = sh_lex_next_kind();
+        next = sh_lex_next_kind();
         if (next == ShTok.ElseKeyword) {
             next = sh_lex_next_kind();
             if (next != ShTok.LBrace) {
@@ -230,8 +304,8 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
     }
 
     if (first == ShTok.ForKeyword) {
-        let errors: i32 = 0;
-        let k: ShTok = sh_lex_next_kind();
+        errors = 0;
+        k = sh_lex_next_kind();
         if (k != ShTok.LParen) {
             errors = errors + 1;
             sh_stmt_err_at(file_idx, "expected '(' after 'for'", sh.tok_start);
@@ -253,7 +327,7 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
         // step? )
         k = sh_lex_next_kind();
         if (k != ShTok.RParen) {
-            errors = errors + sh_stmt_skip_expr_after_first(file_idx, k, ShTok.RParen);
+            errors = errors + sh_stmt_skip_expr_after_first_in_parens(file_idx, k);
         }
 
         k = sh_lex_next_kind();
@@ -267,8 +341,8 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
     }
 
     if (first == ShTok.ForeachKeyword) {
-        let errors: i32 = 0;
-        let k: ShTok = sh_lex_next_kind();
+        errors = 0;
+        k = sh_lex_next_kind();
         if (k != ShTok.LParen) {
             errors = errors + 1;
             sh_stmt_err_at(file_idx, "expected '(' after 'foreach'", sh.tok_start);
@@ -305,7 +379,7 @@ function sh_stmt_parse_statement(file_idx: i32, first: ShTok): i32 {
             return errors;
         }
 
-        errors = errors + sh_stmt_skip_expr_until(file_idx, ShTok.RParen, 0);
+        errors = errors + sh_stmt_skip_expr_in_parens(file_idx, 0);
 
         k = sh_lex_next_kind();
         if (k != ShTok.LBrace) {

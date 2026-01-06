@@ -1,0 +1,228 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2_post.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function sh_llvm_append_hex_digit(dst: ascii[], v: i32): void {
+    let x: i32 = v;
+    if (x < 0) { x = 0; }
+    if (x > 15) { x = 15; }
+    if (x < 10) {
+        ascii_append_byte(dst, 48 + x); // '0'..'9'
+    } else {
+        ascii_append_byte(dst, 65 + (x - 10)); // 'A'..'F'
+    }
+}
+
+function sh_llvm_append_hex_byte(dst: ascii[], b: i32): void {
+    let x: i32 = b;
+    if (x < 0) { x = 0; }
+    if (x > 255) { x = 255; }
+    ascii_append_byte(dst, 92); // '\'
+    sh_llvm_append_hex_digit(dst, x / 16);
+    sh_llvm_append_hex_digit(dst, x % 16);
+}
+
+function sh_llvm_append_cstring_byte(dst: ascii[], b: i32): void {
+    if (b >= 32 && b <= 126 && b != 34 && b != 92) { // printable, not '"' or '\'
+        ascii_append_byte(dst, b);
+    } else {
+        sh_llvm_append_hex_byte(dst, b);
+    }
+}
+
+function sh_llvm_string_lit_unescaped_len_ascii(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return -1;
+    }
+    if (tok_len < 2) {
+        sh_build_err_at(file_idx, "invalid string literal", tok_start);
+        return -1;
+    }
+
+    let base: i32 = sh.files[file_idx].offset;
+    let i: i32 = tok_start + 1;
+    let end: i32 = tok_start + tok_len - 1; // exclude closing quote
+    let out_len: i32 = 0;
+    for (; i < end; ) {
+        let b: u8 = sh.pool[base + i];
+        if (b == 92) { // '\\'
+            if (i + 1 >= end) {
+                sh_build_err_at(file_idx, "unterminated escape in string literal", tok_start);
+                return -1;
+            }
+            let e: u8 = sh.pool[base + i + 1];
+            let out_b: i32 = -1;
+            if (e == 110) { out_b = 10; } // 'n'
+            if (e == 114) { out_b = 13; } // 'r'
+            if (e == 116) { out_b = 9; }  // 't'
+            if (e == 48) { out_b = 0; }   // '0'
+            if (e == 34) { out_b = 34; }  // '\"'
+            if (e == 92) { out_b = 92; }  // '\\'
+            if (out_b < 0) {
+                sh_build_err_at(file_idx, "unsupported escape in string literal (bring-up)", tok_start);
+                return -1;
+            }
+            out_len = out_len + 1;
+            i = i + 2;
+        } else {
+            out_len = out_len + 1;
+            i = i + 1;
+        }
+    }
+    return out_len;
+}
+
+function sh_llvm_string_lit_append_unescaped_bytes_ascii(dst: ascii[], file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return 1;
+    }
+    if (tok_len < 2) {
+        return 1;
+    }
+
+    let base: i32 = sh.files[file_idx].offset;
+    let i: i32 = tok_start + 1;
+    let end: i32 = tok_start + tok_len - 1; // exclude closing quote
+    for (; i < end; ) {
+        let b: u8 = sh.pool[base + i];
+        if (b == 92) { // '\\'
+            if (i + 1 >= end) {
+                return 1;
+            }
+            let e: u8 = sh.pool[base + i + 1];
+            let out_b: i32 = -1;
+            if (e == 110) { out_b = 10; } // 'n'
+            if (e == 114) { out_b = 13; } // 'r'
+            if (e == 116) { out_b = 9; }  // 't'
+            if (e == 48) { out_b = 0; }   // '0'
+            if (e == 34) { out_b = 34; }  // '\"'
+            if (e == 92) { out_b = 92; }  // '\\'
+            if (out_b < 0) {
+                return 1;
+            }
+            sh_llvm_append_cstring_byte(dst, out_b);
+            i = i + 2;
+        } else {
+            sh_llvm_append_cstring_byte(dst, u8_to_i32(b));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+function sh_llvm_get_utf8_string_lit_id(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_str_count; i = i + 1) {
+        if (sh.llvm_str_file_idx[i] == file_idx && sh.llvm_str_tok_start[i] == tok_start && sh.llvm_str_tok_len[i] == tok_len) {
+            return i;
+        }
+    }
+
+    if (sh.llvm_str_count >= 4096) {
+        sh_build_err_at(file_idx, "too many string literals (cap)", tok_start);
+        return -1;
+    }
+
+    let byte_len: i32 = sh_llvm_string_lit_unescaped_len_ascii(file_idx, tok_start, tok_len);
+    if (byte_len < 0) {
+        return -1;
+    }
+
+    // Bring-up: char_len == byte_len (no UTF-8 decode yet).
+    let char_len: i32 = byte_len;
+    let total_bytes: i32 = 8 + byte_len + 1;
+
+    let id: i32 = sh.llvm_str_count;
+    sh.llvm_str_file_idx[id] = file_idx;
+    sh.llvm_str_tok_start[id] = tok_start;
+    sh.llvm_str_tok_len[id] = tok_len;
+    sh.llvm_str_total_bytes[id] = total_bytes;
+    sh.llvm_str_byte_len[id] = byte_len;
+    sh.llvm_str_char_len[id] = char_len;
+    sh.llvm_str_count = sh.llvm_str_count + 1;
+    return id;
+}
+
+function sh_llvm_emit_utf8_string_lit_ptr(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    let id: i32 = sh_llvm_get_utf8_string_lit_id(file_idx, tok_start, tok_len);
+    if (id < 0) {
+        return -1;
+    }
+
+    let total_bytes: i32 = sh.llvm_str_total_bytes[id];
+    let ptr_id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds [");
+    sh_ir_append_i32(sh.ir_out, total_bytes);
+    ascii_append(sh.ir_out, " x i8], ptr @.sh_str");
+    sh_ir_append_i32(sh.ir_out, id);
+    ascii_append(sh.ir_out, ", i32 0, i32 8\n");
+    return ptr_id;
+}
+
+function sh_llvm_emit_string_literal_globals(): i32 {
+    if (sh.llvm_str_count <= 0) {
+        return 0;
+    }
+
+    ascii_append_byte(sh.ir_out, 10);
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_str_count; i = i + 1) {
+        let file_idx: i32 = sh.llvm_str_file_idx[i];
+        let tok_start: i32 = sh.llvm_str_tok_start[i];
+        let tok_len: i32 = sh.llvm_str_tok_len[i];
+
+        let total_bytes: i32 = sh.llvm_str_total_bytes[i];
+        let byte_len: i32 = sh.llvm_str_byte_len[i];
+        let char_len: i32 = sh.llvm_str_char_len[i];
+
+        ascii_append_byte(sh.ir_out, 64); // '@'
+        ascii_append(sh.ir_out, ".sh_str");
+        sh_ir_append_i32(sh.ir_out, i);
+        ascii_append(sh.ir_out, " = private unnamed_addr constant [");
+        sh_ir_append_i32(sh.ir_out, total_bytes);
+        ascii_append(sh.ir_out, " x i8] c");
+        ascii_append_byte(sh.ir_out, 34); // '\"'
+
+        // Header: [byte_len: i32][char_len: i32] (little endian).
+        let bl: i32 = byte_len;
+        sh_llvm_append_cstring_byte(sh.ir_out, bl % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 256) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 65536) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 16777216) % 256);
+
+        let cl: i32 = char_len;
+        sh_llvm_append_cstring_byte(sh.ir_out, cl % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 256) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 65536) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 16777216) % 256);
+
+        if (sh_llvm_string_lit_append_unescaped_bytes_ascii(sh.ir_out, file_idx, tok_start, tok_len) != 0) {
+            sh_build_err_at(file_idx, "failed to emit string literal (llvm)", tok_start);
+            return 1;
+        }
+
+        // Null sentinel.
+        sh_llvm_append_cstring_byte(sh.ir_out, 0);
+
+        ascii_append_byte(sh.ir_out, 34); // '\"'
+        ascii_append(sh.ir_out, ", align 1\n");
+    }
+    ascii_append_byte(sh.ir_out, 10);
+    return 0;
+}
+

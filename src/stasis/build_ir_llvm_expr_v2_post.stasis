@@ -1,0 +1,491 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function sh_llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_len: i32): i32 {
+    if (val_len >= 4096) {
+        sh_build_err_at(file_idx, "expression too complex (value stack)", sh.expr_nodes[idx2].at);
+        return -1;
+    }
+    
+    let kind2: ShExprKind = sh.expr_nodes[idx2].kind;
+    if (kind2 == ShExprKind.IntLiteral || kind2 == ShExprKind.BoolLiteral) {
+        if (mode2 != 0) {
+            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+            return -1;
+        }
+        sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(sh.expr_nodes[idx2].value);
+        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+        sh.llvm_val_struct_idx[val_len] = -1;
+        val_len = val_len + 1;
+    } else {
+        if (kind2 == ShExprKind.StringLiteral) {
+            if (mode2 != 0) {
+                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                return -1;
+            }
+            let ptr_id: i32 = sh_llvm_emit_utf8_string_lit_ptr(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len);
+            if (ptr_id < 0) {
+                return -1;
+            }
+            sh.expr_op_at[val_len] = ptr_id;
+            sh.llvm_val_kind[val_len] = ShLlvmValueKind.PtrI8;
+            sh.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        } else {
+        if (kind2 == ShExprKind.Call) {
+            return sh_llvm_emit_expr_i32_v2_post_call(file_idx, idx2, mode2, val_len);
+        } else {
+            if (kind2 == ShExprKind.Name) {
+                let name_start: i32 = sh.expr_nodes[idx2].name_start;
+                let name_len: i32 = sh.expr_nodes[idx2].name_len;
+    
+                let local_id: i32 = sh_llvm_find_local(file_idx, name_start, name_len);
+                if (local_id >= 0) {
+                    if (sh.llvm_local_declared[local_id] == 0) {
+                        sh_build_err_at(file_idx, "local used before declaration", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    let lkind: ShLlvmValueKind = sh.llvm_local_kind[local_id];
+                    if (lkind == ShLlvmValueKind.I32) {
+                        if (mode2 == 0) {
+                            sh.expr_op_at[val_len] = sh_llvm_emit_load_local(local_id);
+                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                            sh.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
+                            sh.expr_op_at[val_len] = sh_llvm_emit_gep0_local_i32(local_id);
+                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                            sh.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        }
+                    } else {
+                        if (lkind == ShLlvmValueKind.PtrI8 || lkind == ShLlvmValueKind.PtrI32 || lkind == ShLlvmValueKind.PtrStruct) {
+                            if (mode2 != 0) {
+                                sh_build_err_at(file_idx, "unsupported assignment target", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            sh.expr_op_at[val_len] = sh_llvm_emit_load_ptr_from_local(local_id);
+                            sh.llvm_val_kind[val_len] = lkind;
+                            sh.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
+                            sh_build_err_at(file_idx, "unsupported local kind (llvm bring-up)", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+                } else {
+                    let c: i32 = sh_llvm_try_resolve_unqualified_const(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                    if (c >= 0) {
+                        if (mode2 != 0) {
+                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        let v: i32 = sh_llvm_eval_const_i32(file_idx, c, sh.expr_nodes[idx2].at);
+                        if (sh.expr_eval_failed != 0) {
+                            return -1;
+                        }
+                        sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(v);
+                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                        sh.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    } else {
+                        if (c == -2) {
+                            return -1;
+                        }
+
+                        let e: i32 = sh_llvm_try_resolve_unqualified_enum(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                        if (e >= 0) {
+                            if (mode2 != 0) {
+                                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            sh.expr_op_at[val_len] = 0;
+                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.EnumType;
+                            sh.llvm_val_struct_idx[val_len] = e;
+                            val_len = val_len + 1;
+                        } else {
+                            if (e == -2) {
+                                return -1;
+                            }
+                            let g: i32 = sh_llvm_resolve_unqualified_global(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                            if (g < 0) {
+                                return -1;
+                            }
+      
+                    let ty: i32 = sh.globals[g].type_idx;
+                    if (ty < 0 || ty >= sh.type_count) {
+                        sh_build_err_at(file_idx, "invalid global type", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+    
+                        let tkind: ShTypeKind = sh.types[ty].kind;
+                        if (tkind == ShTypeKind.Named) {
+                            if (sh_build_type_is_i32ish(ty)) {
+                            let ptr_id_global: i32 = sh_llvm_emit_gep0_global(g, ty);
+                            if (ptr_id_global < 0) {
+                                sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+
+                            if (mode2 == 0) {
+                                sh.expr_op_at[val_len] = sh_llvm_emit_load_i32_from_ptr(ptr_id_global);
+                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                sh.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                                sh.expr_op_at[val_len] = ptr_id_global;
+                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                sh.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            }
+                        } else {
+                            if (sh_build_type_is_byte_named(ty)) {
+                                let ptr_id2: i32 = sh_llvm_emit_gep0_global(g, ty);
+                                if (ptr_id2 < 0) {
+                                    sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+    
+                                if (mode2 == 0) {
+                                    sh.expr_op_at[val_len] = sh_llvm_emit_load_i8_zext_from_ptr(ptr_id2);
+                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    sh.expr_op_at[val_len] = ptr_id2;
+                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I8;
+                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                }
+                            } else {
+                                let si: i32 = sh_build_find_struct_decl_for_type(ty);
+                                if (si < 0) {
+                                    sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+    
+                                let ptr_id3: i32 = sh_llvm_emit_gep0_global(g, ty);
+                                if (ptr_id3 < 0) {
+                                    sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+    
+                                sh.expr_op_at[val_len] = ptr_id3;
+                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.PtrStruct;
+                                sh.llvm_val_struct_idx[val_len] = si;
+                                val_len = val_len + 1;
+                            }
+                        }
+                    } else {
+                        if (tkind == ShTypeKind.Array) {
+                            if (sh.types[ty].size == 0) {
+                                sh_build_err_at(file_idx, "slice globals not yet supported (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let array_ptr: i32 = sh_llvm_emit_gep0_global(g, ty);
+                            if (array_ptr < 0) {
+                                sh_build_err_at(file_idx, "unsupported global array type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let data_ptr: i32 = sh_llvm_decay_fixed_array_ptr(file_idx, sh.expr_nodes[idx2].at, array_ptr, ty);
+                            if (data_ptr < 0) {
+                                return -1;
+                            }
+    
+                            sh.expr_op_at[val_len] = data_ptr;
+                            sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
+                            sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                            val_len = val_len + 1;
+                        } else {
+                            sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+                        }
+                }
+            }
+        } else {
+            if (kind2 == ShExprKind.Member) {
+                    if (val_len < 1) {
+                        sh_build_err_at(file_idx, "invalid member expression", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+    
+                    let base_id: i32 = sh.expr_op_at[val_len - 1];
+                    let base_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
+                    let base_si: i32 = sh.llvm_val_struct_idx[val_len - 1];
+                    val_len = val_len - 1;
+     
+                    if (base_kind == ShLlvmValueKind.EnumType) {
+                        if (mode2 != 0) {
+                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        let enum_member_abs_idx: i32 = sh_llvm_find_enum_member(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len, base_si);
+                        if (enum_member_abs_idx < 0) {
+                            sh_build_err_at(file_idx, "unknown enum member", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(sh.enum_members[enum_member_abs_idx].value);
+                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                        sh.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    } else {
+                        let out_idm: i32 = sh_llvm_emit_member_value_or_place(file_idx, idx2, mode2, base_id, base_kind, base_si);
+                        if (out_idm < 0) {
+                            return -1;
+                        }
+     
+                        sh.expr_op_at[val_len] = out_idm;
+                        sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
+                        sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                        val_len = val_len + 1;
+                    }
+                } else {
+                    if (kind2 == ShExprKind.Index) {
+                        if (val_len < 2) {
+                            sh_build_err_at(file_idx, "invalid index expression", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+    
+                        let index_id: i32 = sh.expr_op_at[val_len - 1];
+                        let index_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
+                        let base_id2: i32 = sh.expr_op_at[val_len - 2];
+                        let base_kind2: ShLlvmValueKind = sh.llvm_val_kind[val_len - 2];
+                        let base_si2: i32 = sh.llvm_val_struct_idx[val_len - 2];
+                        val_len = val_len - 2;
+    
+                        let out_idi: i32 = sh_llvm_emit_index_value_or_place(file_idx, idx2, mode2, base_id2, base_kind2, base_si2, index_id, index_kind);
+                        if (out_idi < 0) {
+                            return -1;
+                        }
+    
+                        sh.expr_op_at[val_len] = out_idi;
+                        sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
+                        sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                        val_len = val_len + 1;
+                    } else {
+                if (kind2 == ShExprKind.Unary) {
+                    if (mode2 != 0) {
+                        sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    if (val_len < 1) {
+                        sh_build_err_at(file_idx, "invalid expression", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    if (sh.llvm_val_kind[val_len - 1] != ShLlvmValueKind.I32) {
+                        sh_build_err_at(file_idx, "invalid unary operand (expected i32)", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+    
+                    let v_id: i32 = sh.expr_op_at[val_len - 1];
+                    val_len = val_len - 1;
+    
+                    let op: ShTok = sh.expr_nodes[idx2].op;
+                    let out_id: i32 = -1;
+                    if (op == ShTok.UnaryMinus) {
+                        let zero_id: i32 = sh_llvm_emit_const_i32(0);
+                        out_id = sh_llvm_new_tmp();
+                        ascii_append(sh.ir_out, "  ");
+                        sh_llvm_append_tmp(out_id);
+                        ascii_append(sh.ir_out, " = sub i32 ");
+                        sh_llvm_append_tmp(zero_id);
+                        ascii_append(sh.ir_out, ", ");
+                        sh_llvm_append_tmp(v_id);
+                        ascii_append(sh.ir_out, "\n");
+                    } else {
+                        if (op == ShTok.Bang) {
+                            let zero_id2: i32 = sh_llvm_emit_const_i32(0);
+                            out_id = sh_llvm_emit_icmp_to_i32("eq", v_id, zero_id2);
+                        } else {
+                            sh_build_err_at(file_idx, "unsupported unary operator", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+    
+                    sh.expr_op_at[val_len] = out_id;
+                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                    sh.llvm_val_struct_idx[val_len] = -1;
+                    val_len = val_len + 1;
+                } else {
+                    if (kind2 == ShExprKind.Binary) {
+                        if (mode2 != 0) {
+                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        if (val_len < 2) {
+                            sh_build_err_at(file_idx, "invalid expression", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        if (sh.llvm_val_kind[val_len - 1] != ShLlvmValueKind.I32 || sh.llvm_val_kind[val_len - 2] != ShLlvmValueKind.I32) {
+                            sh_build_err_at(file_idx, "invalid binary operand (expected i32)", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+    
+                        let b_id: i32 = sh.expr_op_at[val_len - 1];
+                        let a_id: i32 = sh.expr_op_at[val_len - 2];
+                        val_len = val_len - 2;
+    
+                        let op2: ShTok = sh.expr_nodes[idx2].op;
+                        let out2: i32 = -1;
+    
+                        if (op2 == ShTok.Plus || op2 == ShTok.Minus || op2 == ShTok.Star || op2 == ShTok.Slash || op2 == ShTok.Percent) {
+                            out2 = sh_llvm_new_tmp();
+                            ascii_append(sh.ir_out, "  ");
+                            sh_llvm_append_tmp(out2);
+                            ascii_append(sh.ir_out, " = ");
+                            if (op2 == ShTok.Plus) { ascii_append(sh.ir_out, "add"); }
+                            if (op2 == ShTok.Minus) { ascii_append(sh.ir_out, "sub"); }
+                            if (op2 == ShTok.Star) { ascii_append(sh.ir_out, "mul"); }
+                            if (op2 == ShTok.Slash) { ascii_append(sh.ir_out, "sdiv"); }
+                            if (op2 == ShTok.Percent) { ascii_append(sh.ir_out, "srem"); }
+                            ascii_append(sh.ir_out, " i32 ");
+                            sh_llvm_append_tmp(a_id);
+                            ascii_append(sh.ir_out, ", ");
+                            sh_llvm_append_tmp(b_id);
+                            ascii_append(sh.ir_out, "\n");
+                        } else {
+                            // Comparisons + logical.
+                            let handled_cmp: i32 = 0;
+                            if (op2 == ShTok.EqualEqual) { out2 = sh_llvm_emit_icmp_to_i32("eq", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.BangEqual) { out2 = sh_llvm_emit_icmp_to_i32("ne", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.Less) { out2 = sh_llvm_emit_icmp_to_i32("slt", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.LessEqual) { out2 = sh_llvm_emit_icmp_to_i32("sle", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.Greater) { out2 = sh_llvm_emit_icmp_to_i32("sgt", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.GreaterEqual) { out2 = sh_llvm_emit_icmp_to_i32("sge", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.AmpAmp) { out2 = sh_llvm_emit_logic_to_i32("and", a_id, b_id); handled_cmp = 1; }
+                            if (op2 == ShTok.PipePipe) { out2 = sh_llvm_emit_logic_to_i32("or", a_id, b_id); handled_cmp = 1; }
+    
+                            if (handled_cmp == 0) {
+                                sh_build_err_at(file_idx, "unsupported operator", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                        }
+    
+                        sh.expr_op_at[val_len] = out2;
+                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                        sh.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    } else {
+                        if (kind2 == ShExprKind.Assign) {
+                            if (mode2 != 0) {
+                                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            if (val_len < 2) {
+                                sh_build_err_at(file_idx, "invalid assignment expression", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let rhs_id: i32 = sh.expr_op_at[val_len - 1];
+                            let rhs_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
+                            let lhs_ptr: i32 = sh.expr_op_at[val_len - 2];
+                            let lhs_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 2];
+                            val_len = val_len - 2;
+    
+                            if (rhs_kind != ShLlvmValueKind.I32) {
+                                sh_build_err_at(file_idx, "invalid assignment rhs (expected i32)", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let aop: ShTok = sh.expr_nodes[idx2].op;
+                            if (lhs_kind == ShLlvmValueKind.I32) {
+                                if (aop == ShTok.Equal) {
+                                    sh_llvm_emit_store_i32_to_ptr(lhs_ptr, rhs_id);
+                                    sh.expr_op_at[val_len] = rhs_id;
+                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    let old_id: i32 = sh_llvm_emit_load_i32_from_ptr(lhs_ptr);
+                                    let new_id: i32 = sh_llvm_new_tmp();
+    
+                                    ascii_append(sh.ir_out, "  ");
+                                    sh_llvm_append_tmp(new_id);
+                                    ascii_append(sh.ir_out, " = ");
+                                    if (aop == ShTok.PlusEqual) { ascii_append(sh.ir_out, "add"); }
+                                    if (aop == ShTok.MinusEqual) { ascii_append(sh.ir_out, "sub"); }
+                                    if (aop == ShTok.StarEqual) { ascii_append(sh.ir_out, "mul"); }
+                                    if (aop == ShTok.SlashEqual) { ascii_append(sh.ir_out, "sdiv"); }
+                                    if (aop == ShTok.PercentEqual) { ascii_append(sh.ir_out, "srem"); }
+                                    ascii_append(sh.ir_out, " i32 ");
+                                    sh_llvm_append_tmp(old_id);
+                                    ascii_append(sh.ir_out, ", ");
+                                    sh_llvm_append_tmp(rhs_id);
+                                    ascii_append(sh.ir_out, "\n");
+    
+                                    sh_llvm_emit_store_i32_to_ptr(lhs_ptr, new_id);
+                                    sh.expr_op_at[val_len] = new_id;
+                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                }
+                            } else {
+                                if (lhs_kind == ShLlvmValueKind.I8) {
+                                    if (aop == ShTok.Equal) {
+                                        sh_llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, rhs_id);
+                                        sh.expr_op_at[val_len] = rhs_id;
+                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    } else {
+                                        let old_id2: i32 = sh_llvm_emit_load_i8_zext_from_ptr(lhs_ptr);
+                                        let new_id2: i32 = sh_llvm_new_tmp();
+    
+                                        ascii_append(sh.ir_out, "  ");
+                                        sh_llvm_append_tmp(new_id2);
+                                        ascii_append(sh.ir_out, " = ");
+                                        if (aop == ShTok.PlusEqual) { ascii_append(sh.ir_out, "add"); }
+                                        if (aop == ShTok.MinusEqual) { ascii_append(sh.ir_out, "sub"); }
+                                        if (aop == ShTok.StarEqual) { ascii_append(sh.ir_out, "mul"); }
+                                        if (aop == ShTok.SlashEqual) { ascii_append(sh.ir_out, "sdiv"); }
+                                        if (aop == ShTok.PercentEqual) { ascii_append(sh.ir_out, "srem"); }
+                                        ascii_append(sh.ir_out, " i32 ");
+                                        sh_llvm_append_tmp(old_id2);
+                                        ascii_append(sh.ir_out, ", ");
+                                        sh_llvm_append_tmp(rhs_id);
+                                        ascii_append(sh.ir_out, "\n");
+    
+                                        sh_llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, new_id2);
+                                        sh.expr_op_at[val_len] = new_id2;
+                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    }
+                                } else {
+                                    sh_build_err_at(file_idx, "unsupported assignment target", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                            }
+                        } else {
+                            sh_build_err_at(file_idx, "unsupported expression", sh.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+                }
+                    }
+                }
+            }
+        }
+        }
+    }
+    return val_len;
+}
+
