@@ -306,3 +306,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: added minimal `stasis release` (LLVM+clang `-O3`).
 - 2026-01-06: extended `stasis watch` to support `build` and `run` (polling).
 - 2026-01-06: expanded roadmap details for parser/sema/codegen and added a "definition of done" checklist for self-hosting.
+- 2026-01-06: added iterative expression parser + const evaluator (`src/stasis/expr_parse.stasis`) and reused it for minimal `build` return expressions (more operators, better errors).

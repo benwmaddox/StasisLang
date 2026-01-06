@@ -65,7 +65,10 @@ enum ShTok {
     Comma = 52,
     Semicolon = 53,
 
-    ImportKeyword = 54
+    ImportKeyword = 54,
+
+    // Internal/pseudo tokens (not emitted by the lexer).
+    UnaryMinus = 55
 }
 
 enum ShSymKind {
@@ -183,6 +186,27 @@ struct ShFile {
     mtime_ms: i32;
 }
 
+enum ShExprKind {
+    IntLiteral = 1,
+    BoolLiteral = 2,
+    Name = 3,
+    Unary = 4,
+    Binary = 5,
+    Assign = 6
+}
+
+struct ShExprNode {
+    kind: ShExprKind;
+    file_idx: i32;
+    at: i32;
+    op: ShTok;
+    left: i32;
+    right: i32;
+    value: i32;
+    name_start: i32;
+    name_len: i32;
+}
+
 struct ShState {
     // CLI scratch
     cmd: ascii[64];
@@ -239,6 +263,12 @@ struct ShState {
     parse_stack_len: i32;
     parse_path: ascii[260];
     parse_quiet: i32;
+
+    // Expression parsing scratch (per-expression; reused across passes).
+    expr_nodes: ShExprNode[16384];
+    expr_count: i32;
+    expr_op_at: i32[4096];
+    expr_eval_failed: i32;
 
     // Signature scan (top-level declarations)
     sym_pool: u8[200000];

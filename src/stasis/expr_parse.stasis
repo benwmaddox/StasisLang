@@ -1,0 +1,596 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+
+const SH_EXPR_STACK_CAP: i32 = 4096;
+
+function sh_expr_err_at(file_idx: i32, msg: ascii[], at: i32): void {
+    if (sh.quiet != 0) {
+        return;
+    }
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    sh_print_file_loc(file_idx, at);
+    print_char(10);
+}
+
+function sh_expr_parse_i32_from_tok(file_idx: i32): i32 {
+    let v: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < sh.tok_len; i = i + 1) {
+        let b: u8 = sh.pool[sh.lex_base + sh.tok_start + i];
+        if (!ascii_is_digit(b)) {
+            sh_expr_err_at(file_idx, "expected integer literal", sh.tok_start);
+            return 0;
+        }
+        v = v * 10 + ascii_to_digit(b);
+    }
+    return v;
+}
+
+function sh_expr_node_new(): i32 {
+    if (sh.expr_count >= 16384) {
+        return -1;
+    }
+    let idx: i32 = sh.expr_count;
+    sh.expr_count = sh.expr_count + 1;
+    return idx;
+}
+
+function sh_expr_make_int_lit(file_idx: i32, at: i32, value: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.IntLiteral;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = value;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_make_bool_lit(file_idx: i32, at: i32, value: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.BoolLiteral;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = value;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_make_name(file_idx: i32, at: i32, len: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Name;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = at;
+    sh.expr_nodes[idx].name_len = len;
+    return idx;
+}
+
+function sh_expr_make_unary(file_idx: i32, at: i32, op: ShTok, operand: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Unary;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = op;
+    sh.expr_nodes[idx].left = operand;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_make_binary(file_idx: i32, at: i32, op: ShTok, left: i32, right: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Binary;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = op;
+    sh.expr_nodes[idx].left = left;
+    sh.expr_nodes[idx].right = right;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_make_assign(file_idx: i32, at: i32, op: ShTok, left: i32, right: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Assign;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = op;
+    sh.expr_nodes[idx].left = left;
+    sh.expr_nodes[idx].right = right;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
+function sh_expr_is_assign(k: ShTok): bool {
+    return k == ShTok.Equal
+        || k == ShTok.PlusEqual
+        || k == ShTok.MinusEqual
+        || k == ShTok.StarEqual
+        || k == ShTok.SlashEqual
+        || k == ShTok.PercentEqual;
+}
+
+function sh_expr_is_infix(k: ShTok): bool {
+    if (sh_expr_is_assign(k)) { return true; }
+    return k == ShTok.PipePipe
+        || k == ShTok.AmpAmp
+        || k == ShTok.EqualEqual
+        || k == ShTok.BangEqual
+        || k == ShTok.Less
+        || k == ShTok.LessEqual
+        || k == ShTok.Greater
+        || k == ShTok.GreaterEqual
+        || k == ShTok.Plus
+        || k == ShTok.Minus
+        || k == ShTok.Star
+        || k == ShTok.Slash
+        || k == ShTok.Percent;
+}
+
+function sh_expr_prec(k: ShTok): i32 {
+    if (sh_expr_is_assign(k)) { return 1; }
+    if (k == ShTok.PipePipe) { return 2; }
+    if (k == ShTok.AmpAmp) { return 3; }
+    if (k == ShTok.EqualEqual || k == ShTok.BangEqual) { return 4; }
+    if (k == ShTok.Less || k == ShTok.LessEqual || k == ShTok.Greater || k == ShTok.GreaterEqual) { return 5; }
+    if (k == ShTok.Plus || k == ShTok.Minus) { return 6; }
+    if (k == ShTok.Star || k == ShTok.Slash || k == ShTok.Percent) { return 7; }
+    if (k == ShTok.UnaryMinus || k == ShTok.Bang) { return 8; }
+    return 0;
+}
+
+function sh_expr_is_right_assoc(k: ShTok): bool {
+    return sh_expr_is_assign(k) || k == ShTok.UnaryMinus || k == ShTok.Bang;
+}
+
+function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
+    if (op_len <= 0) {
+        return -1;
+    }
+    let op: ShTok = sh.parse_stack_kind[op_len - 1];
+    let at: i32 = sh.expr_op_at[op_len - 1];
+
+    if (op == ShTok.LParen) {
+        sh_expr_err_at(file_idx, "unmatched '('", at);
+        return -1;
+    }
+
+    if (op == ShTok.UnaryMinus || op == ShTok.Bang) {
+        if (val_len < 1) {
+            sh_expr_err_at(file_idx, "invalid expression", at);
+            return -1;
+        }
+        let operand: i32 = sh.parse_stack_start[val_len - 1];
+        let idx: i32 = sh_expr_make_unary(file_idx, at, op, operand);
+        if (idx < 0) { return -1; }
+        sh.parse_stack_start[val_len - 1] = idx;
+        return 0;
+    }
+
+    if (val_len < 2) {
+        sh_expr_err_at(file_idx, "invalid expression", at);
+        return -1;
+    }
+
+    let right: i32 = sh.parse_stack_start[val_len - 1];
+    let left: i32 = sh.parse_stack_start[val_len - 2];
+    let idx2: i32 = -1;
+    if (sh_expr_is_assign(op)) {
+        idx2 = sh_expr_make_assign(file_idx, at, op, left, right);
+    } else {
+        idx2 = sh_expr_make_binary(file_idx, at, op, left, right);
+    }
+    if (idx2 < 0) { return -1; }
+    sh.parse_stack_start[val_len - 2] = idx2;
+    return 0;
+}
+
+// Parses an expression starting at the current lexer position and consumes the terminator.
+// Returns the expression root node index, or -1 on error.
+function sh_expr_parse_until(file_idx: i32, terminator: ShTok): i32 {
+    sh.expr_count = 0;
+
+    let op_len: i32 = 0;
+    let val_len: i32 = 0;
+    let expect_value: i32 = 1;
+    let paren_depth: i32 = 0;
+    let seen_assign: i32 = 0;
+
+    let k: ShTok = sh_lex_next_kind();
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (k == ShTok.Eof) {
+            sh_expr_err_at(file_idx, "unexpected eof in expression", sh.tok_start);
+            return -1;
+        }
+
+        if (expect_value == 0) {
+            if (k == terminator) {
+                if (terminator != ShTok.RParen && terminator != ShTok.RBracket) {
+                    done = 1;
+                } else {
+                    if (paren_depth == 0) {
+                        done = 1;
+                    }
+                }
+            }
+        }
+
+        if (done == 0) {
+            if (expect_value != 0) {
+                if (k == ShTok.LParen) {
+                    if (op_len >= SH_EXPR_STACK_CAP) {
+                        sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                        return -1;
+                    }
+                    sh.parse_stack_kind[op_len] = k;
+                    sh.expr_op_at[op_len] = sh.tok_start;
+                    op_len = op_len + 1;
+                    paren_depth = paren_depth + 1;
+                    k = sh_lex_next_kind();
+                } else {
+                    if (k == ShTok.Minus) {
+                        if (op_len >= SH_EXPR_STACK_CAP) {
+                            sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                            return -1;
+                        }
+                        sh.parse_stack_kind[op_len] = ShTok.UnaryMinus;
+                        sh.expr_op_at[op_len] = sh.tok_start;
+                        op_len = op_len + 1;
+                        k = sh_lex_next_kind();
+                    } else {
+                        if (k == ShTok.Bang) {
+                            if (op_len >= SH_EXPR_STACK_CAP) {
+                                sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                                return -1;
+                            }
+                            sh.parse_stack_kind[op_len] = ShTok.Bang;
+                            sh.expr_op_at[op_len] = sh.tok_start;
+                            op_len = op_len + 1;
+                            k = sh_lex_next_kind();
+                        } else {
+                            let node: i32 = -1;
+                            if (k == ShTok.IntegerLiteral) {
+                                node = sh_expr_make_int_lit(file_idx, sh.tok_start, sh_expr_parse_i32_from_tok(file_idx));
+                            } else {
+                                if (k == ShTok.TrueKeyword) {
+                                    node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 1);
+                                } else {
+                                    if (k == ShTok.FalseKeyword) {
+                                        node = sh_expr_make_bool_lit(file_idx, sh.tok_start, 0);
+                                    } else {
+                                        if (k == ShTok.Identifier) {
+                                            node = sh_expr_make_name(file_idx, sh.tok_start, sh.tok_len);
+                                        } else {
+                                            sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
+                                            return -1;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (node < 0) { return -1; }
+                            if (val_len >= SH_EXPR_STACK_CAP) {
+                                sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
+                                return -1;
+                            }
+                            sh.parse_stack_start[val_len] = node;
+                            val_len = val_len + 1;
+                            expect_value = 0;
+                            k = sh_lex_next_kind();
+                        }
+                    }
+                }
+            } else {
+                if (k == ShTok.RParen) {
+                    if (paren_depth <= 0) {
+                        sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                        return -1;
+                    }
+
+                    let found_lparen: i32 = 0;
+                    for (; found_lparen == 0; ) {
+                        if (op_len <= 0) {
+                            sh_expr_err_at(file_idx, "unmatched ')'", sh.tok_start);
+                            return -1;
+                        }
+
+                        let top: ShTok = sh.parse_stack_kind[op_len - 1];
+                        if (top == ShTok.LParen) {
+                            op_len = op_len - 1;
+                            found_lparen = 1;
+                        } else {
+                            if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                return -1;
+                            }
+                            op_len = op_len - 1;
+                            if (top == ShTok.UnaryMinus || top == ShTok.Bang) {
+                                // val_len unchanged
+                            } else {
+                                val_len = val_len - 1;
+                            }
+                        }
+                    }
+
+                    paren_depth = paren_depth - 1;
+                    k = sh_lex_next_kind();
+                } else {
+                    if (sh_expr_is_infix(k)) {
+                        if (sh_expr_is_assign(k)) {
+                            if (seen_assign != 0) {
+                                sh_expr_err_at(file_idx, "only one assignment per expression is permitted", sh.tok_start);
+                                return -1;
+                            }
+                            seen_assign = 1;
+                        }
+
+                        let prec: i32 = sh_expr_prec(k);
+                        let reduce: i32 = 1;
+                        for (; reduce != 0; ) {
+                            reduce = 0;
+                            if (op_len > 0) {
+                                let top2: ShTok = sh.parse_stack_kind[op_len - 1];
+                                if (top2 != ShTok.LParen) {
+                                    let top_prec: i32 = sh_expr_prec(top2);
+                                    if (top_prec > prec || (top_prec == prec && !sh_expr_is_right_assoc(k))) {
+                                        if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                            return -1;
+                                        }
+                                        op_len = op_len - 1;
+                                        if (top2 == ShTok.UnaryMinus || top2 == ShTok.Bang) {
+                                            // val_len unchanged
+                                        } else {
+                                            val_len = val_len - 1;
+                                        }
+                                        reduce = 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (op_len >= SH_EXPR_STACK_CAP) {
+                            sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                            return -1;
+                        }
+                        sh.parse_stack_kind[op_len] = k;
+                        sh.expr_op_at[op_len] = sh.tok_start;
+                        op_len = op_len + 1;
+                        expect_value = 1;
+                        k = sh_lex_next_kind();
+                    } else {
+                        sh_expr_err_at(file_idx, "expected operator in expression", sh.tok_start);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (expect_value != 0) {
+        sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
+        return -1;
+    }
+
+    for (; op_len > 0; ) {
+        let top3: ShTok = sh.parse_stack_kind[op_len - 1];
+        if (top3 == ShTok.LParen) {
+            sh_expr_err_at(file_idx, "unmatched '('", sh.expr_op_at[op_len - 1]);
+            return -1;
+        }
+        if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+            return -1;
+        }
+        op_len = op_len - 1;
+        if (top3 == ShTok.UnaryMinus || top3 == ShTok.Bang) {
+            // val_len unchanged
+        } else {
+            val_len = val_len - 1;
+        }
+    }
+
+    if (val_len != 1) {
+        sh_expr_err_at(file_idx, "invalid expression", sh.tok_start);
+        return -1;
+    }
+
+    return sh.parse_stack_start[0];
+}
+
+// Iterative (stack-based) evaluator for i32/bool constant expressions.
+// Sets sh.expr_eval_failed for non-constant nodes.
+function sh_expr_eval_i32_const(root: i32): i32 {
+    sh.expr_eval_failed = 0;
+    if (root < 0) {
+        sh.expr_eval_failed = 1;
+        return 0;
+    }
+
+    let sp: i32 = 0;
+    let val_len: i32 = 0;
+
+    // Node stack uses sh.parse_stack_start; visited flag is encoded by negating the index.
+    sh.parse_stack_start[sp] = root;
+    sp = sp + 1;
+
+    for (; sp > 0; ) {
+        let top: i32 = sh.parse_stack_start[sp - 1];
+        if (top >= 0) {
+            sh.parse_stack_start[sp - 1] = -top - 1;
+
+            let kind: ShExprKind = sh.expr_nodes[top].kind;
+            if (kind == ShExprKind.Unary) {
+                if (sp >= SH_EXPR_STACK_CAP) { sh.expr_eval_failed = 1; return 0; }
+                sh.parse_stack_start[sp] = sh.expr_nodes[top].left;
+                sp = sp + 1;
+            } else {
+                if (kind == ShExprKind.Binary || kind == ShExprKind.Assign) {
+                    if (sp + 1 >= SH_EXPR_STACK_CAP) { sh.expr_eval_failed = 1; return 0; }
+                    sh.parse_stack_start[sp] = sh.expr_nodes[top].right;
+                    sp = sp + 1;
+                    sh.parse_stack_start[sp] = sh.expr_nodes[top].left;
+                    sp = sp + 1;
+                }
+            }
+        } else {
+            let idx: i32 = -top - 1;
+            sp = sp - 1;
+
+            if (val_len >= SH_EXPR_STACK_CAP) { sh.expr_eval_failed = 1; return 0; }
+
+            let kind2: ShExprKind = sh.expr_nodes[idx].kind;
+            if (kind2 == ShExprKind.IntLiteral || kind2 == ShExprKind.BoolLiteral) {
+                sh.expr_op_at[val_len] = sh.expr_nodes[idx].value;
+                val_len = val_len + 1;
+            } else {
+                if (kind2 == ShExprKind.Unary) {
+                    if (val_len < 1) { sh.expr_eval_failed = 1; return 0; }
+                    let v: i32 = sh.expr_op_at[val_len - 1];
+                    val_len = val_len - 1;
+
+                    let r: i32 = 0;
+                    let op: ShTok = sh.expr_nodes[idx].op;
+                    if (op == ShTok.UnaryMinus) {
+                        r = -v;
+                    } else {
+                        if (op == ShTok.Bang) {
+                            r = 0;
+                            if (v == 0) { r = 1; }
+                        } else {
+                            if (sh.expr_eval_failed == 0) {
+                                sh_expr_err_at(sh.expr_nodes[idx].file_idx, "unsupported unary operator in const expression", sh.expr_nodes[idx].at);
+                            }
+                            sh.expr_eval_failed = 1;
+                        }
+                    }
+
+                    sh.expr_op_at[val_len] = r;
+                    val_len = val_len + 1;
+                } else {
+                    if (kind2 == ShExprKind.Binary) {
+                        if (val_len < 2) { sh.expr_eval_failed = 1; return 0; }
+                        let b: i32 = sh.expr_op_at[val_len - 1];
+                        let a: i32 = sh.expr_op_at[val_len - 2];
+                        val_len = val_len - 2;
+
+                        let r2: i32 = 0;
+                        let handled: i32 = 0;
+                        let op2: ShTok = sh.expr_nodes[idx].op;
+                        let at: i32 = sh.expr_nodes[idx].at;
+                        let src_file: i32 = sh.expr_nodes[idx].file_idx;
+
+                        if (op2 == ShTok.Plus) { r2 = a + b; handled = 1; }
+                        if (op2 == ShTok.Minus) { r2 = a - b; handled = 1; }
+                        if (op2 == ShTok.Star) { r2 = a * b; handled = 1; }
+                        if (op2 == ShTok.Slash) {
+                            handled = 1;
+                            if (b == 0) {
+                                sh_expr_err_at(src_file, "division by zero", at);
+                                sh.expr_eval_failed = 1;
+                                r2 = 0;
+                            } else {
+                                r2 = a / b;
+                            }
+                        }
+                        if (op2 == ShTok.Percent) {
+                            handled = 1;
+                            if (b == 0) {
+                                sh_expr_err_at(src_file, "modulo by zero", at);
+                                sh.expr_eval_failed = 1;
+                                r2 = 0;
+                            } else {
+                                r2 = a % b;
+                            }
+                        }
+
+                        if (op2 == ShTok.EqualEqual) { r2 = 0; if (a == b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.BangEqual) { r2 = 0; if (a != b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.Less) { r2 = 0; if (a < b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.LessEqual) { r2 = 0; if (a <= b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.Greater) { r2 = 0; if (a > b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.GreaterEqual) { r2 = 0; if (a >= b) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.AmpAmp) { r2 = 0; if (a != 0 && b != 0) { r2 = 1; } handled = 1; }
+                        if (op2 == ShTok.PipePipe) { r2 = 0; if (a != 0 || b != 0) { r2 = 1; } handled = 1; }
+
+                        if (handled == 0) {
+                            if (sh.expr_eval_failed == 0) {
+                                sh_expr_err_at(src_file, "unsupported operator in const expression", at);
+                            }
+                            sh.expr_eval_failed = 1;
+                            r2 = 0;
+                        }
+
+                        sh.expr_op_at[val_len] = r2;
+                        val_len = val_len + 1;
+                    } else {
+                        if (sh.expr_eval_failed == 0) {
+                            if (kind2 == ShExprKind.Name) {
+                                sh_expr_err_at(sh.expr_nodes[idx].file_idx, "non-constant identifier in expression (minimal build only)", sh.expr_nodes[idx].at);
+                            } else {
+                                if (kind2 == ShExprKind.Assign) {
+                                    sh_expr_err_at(sh.expr_nodes[idx].file_idx, "assignment in constant expression (minimal build only)", sh.expr_nodes[idx].at);
+                                } else {
+                                    sh_expr_err_at(sh.expr_nodes[idx].file_idx, "non-constant expression (minimal build only)", sh.expr_nodes[idx].at);
+                                }
+                            }
+                        }
+                        sh.expr_eval_failed = 1;
+                        sh.expr_op_at[val_len] = 0;
+                        val_len = val_len + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (val_len != 1) {
+        sh.expr_eval_failed = 1;
+        return 0;
+    }
+    return sh.expr_op_at[0];
+}
