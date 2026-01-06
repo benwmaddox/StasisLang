@@ -202,24 +202,62 @@ Implementation notes:
 
 ### M3: Parser (Stasis)
 
-- Decls via recursive descent, expressions via Pratt parser (per `docs/compilation.md`)
-- Diagnostic spans with actionable hints
+- Decls via iterative scan first (already in place), then a real parser for all constructs in `docs/compilation.md`.
+- Expressions:
+  - Prefer iterative parsing (shunting-yard / explicit stacks) to avoid deep recursion.
+  - Full operator precedence (TypeScript-like) + operator-method calls (`x.+(y)` etc).
+  - Postfix forms: call `f(x)`, member `a.b`, index `a[i]`.
+  - Assignments: `=`, `+=`, `-=`, etc.
+- Statements:
+  - Block `{ ... }`, `let` (with/without initializer), `return`, `if`/`else`, loops (`for`, `foreach`), expression statements.
+  - Keep parsing iterative where reasonable (for example, explicit stacks for nested blocks).
+- Diagnostics:
+  - Always emit `path:line:col` with a short "what" + "hint" where practical.
 
 ### M4: Semantic + Layout (Stasis)
 
-- Symbols, types, const-eval needed for layout
-- AoS -> SoA lowering aligned to `docs/spec.md`
+- Name resolution:
+  - Per-module symbol tables (decls) + import/module scope rules.
+  - Imported module members visible by default; collisions require `Module.symbol`.
+  - No import aliasing (for now).
+- Types:
+  - Primitive types + arrays + structs/enums.
+  - Operator-method validation (reject invalid operator-method usage early).
+  - Const-eval support as needed for layout (array sizes, global initializers).
+- Memory/layout (match `docs/spec.md` and Stage0):
+  - Static globals only; deterministic layout.
+  - AoS syntax lowered to SoA storage (flattening struct globals/fields into separate globals).
+  - String buffer headers + negative indexing rules (keep consistent with Stage0 lowering).
 
 ### M5: Codegen (Stasis)
 
-- Cranelift CLIF emitter first (matches current backend semantics)
-- LLVM IR emitter second
+- General goal: emit textual IR and reuse existing native toolchains (`tools/cranelift-aot`, `lli`, `clang`) rather than embedding backends.
+- Function codegen:
+  - SSA-ish temps + stack locals (as needed) for LLVM IR.
+  - Control flow blocks for `if`/loops; structured lowering (no recursion required).
+  - Calls, returns, arithmetic/comparison, and eventually memory ops (globals/struct fields/arrays).
+- Global lowering:
+  - Single global struct holding program state (the Stasis model), with deterministic field offsets.
+  - Emit the backing storage and accessor ops in IR.
+- Backend parity:
+  - Keep CLIF and LLVM semantics aligned (tests should run on both).
 
 ### M6: CLI parity
 
 - `run`: compile + execute (Cranelift runner DLL mode optional later)
 - `release`: optimized build (LTO hooks preserved)
 - `watch`: polling-based loop first; event-based later
+
+## Definition Of Done (Self-Hosted)
+
+Stage1 is considered "self-hosted" when it can:
+
+- Compile any valid Stasis program (per `docs/spec.md`) from a source graph (no import expansion), producing either LLVM IR or CLIF, and then an executable via the existing toolchain.
+- Run without `dotnet` at runtime (native executable; `.NET` is bootstrap-only).
+- Compile itself end-to-end (`src/stasis/main.stasis` entry), producing a `stasis` executable that can rebuild the same sources.
+- Provide CLI parity for `check`, `build`, `run`, `release`, `watch`, and `test` (test discovery + timings per repo guidelines).
+
+We will reach this in stages: first "compile more programs", then "compile most programs", then "compile everything", then "compile itself".
 
 ## Import + Source Limits (Enforced)
 
@@ -267,3 +305,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: minimal build now supports constant `return` expressions (literals + `+ - * /` + parentheses) via an iterative shunting-yard evaluator.
 - 2026-01-06: added minimal `stasis release` (LLVM+clang `-O3`).
 - 2026-01-06: extended `stasis watch` to support `build` and `run` (polling).
+- 2026-01-06: expanded roadmap details for parser/sema/codegen and added a "definition of done" checklist for self-hosting.
