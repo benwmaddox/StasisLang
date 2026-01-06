@@ -45,7 +45,7 @@ Notes:
 ## Current Status (Today)
 
 Implemented:
-- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + a minimal parsing pass (paren/brace/bracket balance); prints `files/lex_errors/parse_errors`.
+- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level signature scan; prints `files/lex_errors/parse_errors/sig_errors`.
 - `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
 
 Not yet implemented (but planned in the contract above):
@@ -84,6 +84,7 @@ Each imported file is treated as a module.
 - Module name is derived from the imported file basename (strip extension, map `-` and other non-identifier bytes to `_`).
 - Duplicate module names are rejected (fail-fast with a clear diagnostic). Import aliasing is intentionally not supported for now.
 - Imported module members are in scope by default; if multiple imports define the same name, unqualified use is an error and the frontend will require `ModuleName.symbol`.
+- Imports are file-scoped (not transitive): a module must explicitly import what it uses.
 
 ## Iteration First (Avoid Recursion Where Possible)
 
@@ -250,3 +251,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: `stasis check` now prints lexer error diagnostics (file + byte offset) for unknown bytes and unterminated string literals.
 - 2026-01-05: added `--quiet` to `stasis check` and `stasis watch check` to suppress diagnostics (useful for scripting/watch output).
 - 2026-01-05: made `src/stasis/*.stasis` imports explicit (avoid relying on transitive imports under the module model).
+- 2026-01-05: added a top-level signature scan pass (`src/stasis/signatures.stasis`) + `tests/stasis_signatures.stasis`; `stasis check` now reports `sig_errors`.

@@ -4,7 +4,7 @@
 // needed by the program. This keeps memory layout deterministic and makes it
 // easy to reason about limits.
 
-// Token kinds (mirrors Stage0 TokenKind ordering).
+// Token kinds (mirrors Stage0 TokenKind ordering, plus a few Stage1-only tokens).
 enum ShTok {
     Eof = 0,
     Unknown = 1,
@@ -63,7 +63,27 @@ enum ShTok {
     LBracket = 50,
     RBracket = 51,
     Comma = 52,
-    Semicolon = 53
+    Semicolon = 53,
+
+    ImportKeyword = 54
+}
+
+enum ShSymKind {
+    Struct = 1,
+    Enum = 2,
+    Global = 3,
+    Const = 4,
+    Function = 5,
+    Test = 6
+}
+
+struct ShSym {
+    kind: ShSymKind;
+    file_idx: i32;
+    name_off: i32;
+    name_len: i32;
+    name_at: i32;
+    is_exported: i32;
 }
 
 struct ShFile {
@@ -73,6 +93,8 @@ struct ShFile {
     mod_len: i32;
     imports_off: i32;
     imports_len: i32;
+    syms_off: i32;
+    syms_len: i32;
     offset: i32;
     len: i32;
     mtime_ms: i32;
@@ -128,6 +150,13 @@ struct ShState {
     parse_stack_len: i32;
     parse_path: ascii[260];
     parse_quiet: i32;
+
+    // Signature scan (top-level declarations)
+    sym_pool: u8[200000];
+    sym_pool_len: i32;
+    syms: ShSym[20000];
+    sym_count: i32;
+    sig_path: ascii[260];
 }
 
 global sh: ShState;

@@ -184,6 +184,7 @@ function sh_lex_bytes_eq_lit(start: i32, len: i32, lit: ascii[]): bool {
 }
 
 function sh_lex_keyword_kind(start: i32, len: i32): ShTok {
+    if (sh_lex_bytes_eq_lit(start, len, "import")) { return ShTok.ImportKeyword; }
     if (sh_lex_bytes_eq_lit(start, len, "struct")) { return ShTok.StructKeyword; }
     if (sh_lex_bytes_eq_lit(start, len, "enum")) { return ShTok.EnumKeyword; }
     if (sh_lex_bytes_eq_lit(start, len, "global")) { return ShTok.GlobalKeyword; }

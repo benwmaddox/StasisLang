@@ -16,11 +16,14 @@ function sh_reset() {
     sh.path_pool_len = 0;
     sh.mod_pool_len = 0;
     sh.imports_len = 0;
+    sh.sym_pool_len = 0;
+    sh.sym_count = 0;
     ascii_clear(sh.scratch_import);
     ascii_clear(sh.scratch_dir);
     ascii_clear(sh.scratch_resolved);
     ascii_clear(sh.scratch_watch_path);
     ascii_clear(sh.scratch_mod);
+    ascii_clear(sh.sig_path);
 }
 
 function sh_is_space(b: u8): bool {
@@ -374,6 +377,8 @@ function sh_load_file(path: ascii[]): i32 {
     sh.files[idx].mod_len = mod_len;
     sh.files[idx].imports_off = 0;
     sh.files[idx].imports_len = 0;
+    sh.files[idx].syms_off = 0;
+    sh.files[idx].syms_len = 0;
     sh.files[idx].offset = off;
     sh.files[idx].len = read_n;
     sh.files[idx].mtime_ms = sys_file_mtime_ms(path);

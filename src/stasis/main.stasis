@@ -2,6 +2,7 @@ import "../stdlib/stdlib.stasis";
 import "state.stasis";
 import "imports.stasis";
 import "parsing.stasis";
+import "signatures.stasis";
 
 function sh_usage(): void {
     print_string("stasis (WIP self-hosted compiler)\n");
@@ -12,7 +13,7 @@ function sh_usage(): void {
     print_string("\n");
     print_string("notes:\n");
     print_string("  - This CLI is under active development on branch self-host.\n");
-    print_string("  - Current stage: import graph + lexer + minimal parsing (balance check).\n");
+    print_string("  - Current stage: import graph + lexer + minimal parsing (balance check) + signature scan.\n");
 }
 
 function sh_read_arg(idx: i32, out: ascii[], cap: i32): bool {
@@ -53,6 +54,7 @@ function sh_check_loaded_files(): i32 {
     sh.parse_quiet = sh.quiet;
     let lex_errors: i32 = 0;
     let parse_errors: i32 = 0;
+    let sig_errors: i32 = 0;
 
     let i: i32 = 0;
     for (i = 0; i < sh.file_count; i = i + 1) {
@@ -60,16 +62,21 @@ function sh_check_loaded_files(): i32 {
         lex_errors = lex_errors + sh.lex_error_count;
     }
 
+    sig_errors = sh_sig_scan_loaded_files();
+
     print_string("check: files=");
     print_int(sh.file_count);
     print_string(" lex_errors=");
     print_int(lex_errors);
     print_string(" parse_errors=");
     print_int(parse_errors);
+    print_string(" sig_errors=");
+    print_int(sig_errors);
     print_char(10);
 
     if (lex_errors != 0) { return 1; }
     if (parse_errors != 0) { return 1; }
+    if (sig_errors != 0) { return 1; }
     return 0;
 }
 

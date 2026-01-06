@@ -50,6 +50,7 @@ Parsing note:
   - local declarations first
   - then imported module members (in scope by default)
   - and `ModuleName.symbol` for disambiguation
+  - imports are file-scoped (not transitive)
 
 ## 2.1 Struct Declarations
 

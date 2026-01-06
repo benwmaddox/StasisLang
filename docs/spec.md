@@ -484,6 +484,7 @@ Global arrays of struct references become SoA automatically.
   - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
   - Duplicate module names are an error (import aliasing is not supported currently).
   - If multiple imports introduce the same member name, unqualified references are ambiguous; use `module_name.symbol`.
+- Imports are file-scoped (not transitive): importing a module does not implicitly import that module's imports.
 - Compiled via signature-first pass, then tree shaking.
 
 ---
