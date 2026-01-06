@@ -93,6 +93,24 @@ function sh_expr_make_name(file_idx: i32, at: i32, len: i32): i32 {
     return idx;
 }
 
+function sh_expr_make_call(file_idx: i32, at: i32, name_start: i32, name_len: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Call;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = name_start;
+    sh.expr_nodes[idx].name_len = name_len;
+    return idx;
+}
+
 function sh_expr_make_unary(file_idx: i32, at: i32, op: ShTok, operand: i32): i32 {
     let idx: i32 = sh_expr_node_new();
     if (idx < 0) {
@@ -361,7 +379,36 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                     paren_depth = paren_depth - 1;
                     k = sh_lex_next_kind();
                 } else {
-                    if (sh_expr_is_infix(k)) {
+                    if (k == ShTok.LParen) {
+                        // Postfix call (bring-up): only supports empty-arg calls: `name()`.
+                        if (val_len < 1) {
+                            sh_expr_err_at(file_idx, "expected call target before '('", sh.tok_start);
+                            return -1;
+                        }
+
+                        let callee: i32 = sh.parse_stack_start[val_len - 1];
+                        if (callee < 0 || callee >= sh.expr_count) {
+                            sh_expr_err_at(file_idx, "invalid call target", sh.tok_start);
+                            return -1;
+                        }
+                        let callee_kind: ShExprKind = sh.expr_nodes[callee].kind;
+                        if (callee_kind != ShExprKind.Name) {
+                            sh_expr_err_at(file_idx, "call target must be an identifier (bring-up)", sh.tok_start);
+                            return -1;
+                        }
+
+                        let arg_k: ShTok = sh_lex_next_kind();
+                        if (arg_k != ShTok.RParen) {
+                            sh_expr_err_at(file_idx, "call arguments not supported yet (bring-up)", sh.tok_start);
+                            return -1;
+                        }
+
+                        let call_node: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee].at, sh.expr_nodes[callee].name_start, sh.expr_nodes[callee].name_len);
+                        if (call_node < 0) { return -1; }
+                        sh.parse_stack_start[val_len - 1] = call_node;
+                        k = sh_lex_next_kind();
+                    } else {
+                        if (sh_expr_is_infix(k)) {
                         if (sh_expr_is_assign(k)) {
                             if (seen_assign != 0) {
                                 sh_expr_err_at(file_idx, "only one assignment per expression is permitted", sh.tok_start);
@@ -406,6 +453,7 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                     } else {
                         sh_expr_err_at(file_idx, "expected operator in expression", sh.tok_start);
                         return -1;
+                    }
                     }
                 }
             }

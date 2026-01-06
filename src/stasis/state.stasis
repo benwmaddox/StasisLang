@@ -192,7 +192,8 @@ enum ShExprKind {
     Name = 3,
     Unary = 4,
     Binary = 5,
-    Assign = 6
+    Assign = 6,
+    Call = 7
 }
 
 struct ShExprNode {
