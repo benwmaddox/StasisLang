@@ -11,28 +11,28 @@ const MOD_POOL_CAP: i32 = 20000;
 const IMPORTS_CAP: i32 = 90000;
 
 function reset() {
-    st.file_count = 0;
-    st.pool_len = 0;
-    st.path_pool_len = 0;
-    st.mod_pool_len = 0;
-    st.imports_len = 0;
-    st.sym_pool_len = 0;
-    st.sym_count = 0;
-    st.type_count = 0;
-    st.struct_count = 0;
-    st.field_count = 0;
-    st.enum_count = 0;
-    st.enum_member_count = 0;
-    st.global_count = 0;
-    st.const_count = 0;
-    st.func_count = 0;
-    st.param_count = 0;
-    ascii_clear(st.scratch_import);
-    ascii_clear(st.scratch_dir);
-    ascii_clear(st.scratch_resolved);
-    ascii_clear(st.scratch_watch_path);
-    ascii_clear(st.scratch_mod);
-    ascii_clear(st.sig_path);
+    stasis.file_count = 0;
+    stasis.pool_len = 0;
+    stasis.path_pool_len = 0;
+    stasis.mod_pool_len = 0;
+    stasis.imports_len = 0;
+    stasis.sym_pool_len = 0;
+    stasis.sym_count = 0;
+    stasis.type_count = 0;
+    stasis.struct_count = 0;
+    stasis.field_count = 0;
+    stasis.enum_count = 0;
+    stasis.enum_member_count = 0;
+    stasis.global_count = 0;
+    stasis.const_count = 0;
+    stasis.func_count = 0;
+    stasis.param_count = 0;
+    ascii_clear(stasis.scratch_import);
+    ascii_clear(stasis.scratch_dir);
+    ascii_clear(stasis.scratch_resolved);
+    ascii_clear(stasis.scratch_watch_path);
+    ascii_clear(stasis.scratch_mod);
+    ascii_clear(stasis.sig_path);
 }
 
 function is_space(b: u8): bool {
@@ -101,18 +101,18 @@ function path_pool_eq(path_off: i32, path_len: i32, path: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < path_len; i = i + 1) {
-        if (st.path_pool[path_off + i] != path[i]) {
+        if (stasis.path_pool[path_off + i] != path[i]) {
             return false;
         }
     }
 
-    return st.path_pool[path_off + path_len] == 0 && path[path_len] == 0;
+    return stasis.path_pool[path_off + path_len] == 0 && path[path_len] == 0;
 }
 
 function find_file(path: ascii[]): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.file_count; i = i + 1) {
-        if (path_pool_eq(st.files[i].path_off, st.files[i].path_len, path)) {
+    for (i = 0; i < stasis.file_count; i = i + 1) {
+        if (path_pool_eq(stasis.files[i].path_off, stasis.files[i].path_len, path)) {
             return i;
         }
     }
@@ -126,18 +126,18 @@ function mod_pool_eq(mod_off: i32, mod_len: i32, mod: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < mod_len; i = i + 1) {
-        if (st.mod_pool[mod_off + i] != mod[i]) {
+        if (stasis.mod_pool[mod_off + i] != mod[i]) {
             return false;
         }
     }
 
-    return st.mod_pool[mod_off + mod_len] == 0 && mod[mod_len] == 0;
+    return stasis.mod_pool[mod_off + mod_len] == 0 && mod[mod_len] == 0;
 }
 
 function find_module(mod: ascii[]): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.file_count; i = i + 1) {
-        if (mod_pool_eq(st.files[i].mod_off, st.files[i].mod_len, mod)) {
+    for (i = 0; i < stasis.file_count; i = i + 1) {
+        if (mod_pool_eq(stasis.files[i].mod_off, stasis.files[i].mod_len, mod)) {
             return i;
         }
     }
@@ -147,19 +147,19 @@ function find_module(mod: ascii[]): i32 {
 function copy_file_module(dst: ascii[], file_idx: i32): bool {
     ascii_clear(dst);
 
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
 
-    let off: i32 = st.files[file_idx].mod_off;
-    let len: i32 = st.files[file_idx].mod_len;
+    let off: i32 = stasis.files[file_idx].mod_off;
+    let len: i32 = stasis.files[file_idx].mod_len;
     if (len <= 0 || len >= MAX_MOD_BYTES) {
         return false;
     }
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        dst[i] = st.mod_pool[off + i];
+        dst[i] = stasis.mod_pool[off + i];
     }
     dst[len] = 0;
     ascii_set_len(dst, len);
@@ -230,15 +230,15 @@ function module_name_from_path(dst: ascii[], path: ascii[]): bool {
 }
 
 function file_imports_contains(file_idx: i32, imported: i32): bool {
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
 
-    let off: i32 = st.files[file_idx].imports_off;
-    let count: i32 = st.files[file_idx].imports_len;
+    let off: i32 = stasis.files[file_idx].imports_off;
+    let count: i32 = stasis.files[file_idx].imports_len;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        if (st.imports[off + i] == imported) {
+        if (stasis.imports[off + i] == imported) {
             return true;
         }
     }
@@ -251,8 +251,8 @@ function load_file(path: ascii[]): i32 {
         return existing;
     }
 
-    if (st.file_count >= MAX_FILES) {
-        if (st.quiet == 0) {
+    if (stasis.file_count >= MAX_FILES) {
+        if (stasis.quiet == 0) {
             print_string("error: exceeded max import files (300)\n");
         }
         return -1;
@@ -260,7 +260,7 @@ function load_file(path: ascii[]): i32 {
 
     let size: i32 = sys_file_size(path);
     if (size < 0) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: unable to stat file: ");
             print_string(path);
             print_char(10);
@@ -268,7 +268,7 @@ function load_file(path: ascii[]): i32 {
         return -1;
     }
     if (size > MAX_FILE_BYTES) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: file exceeds 50KiB limit: ");
             print_string(path);
             print_char(10);
@@ -276,8 +276,8 @@ function load_file(path: ascii[]): i32 {
         return -1;
     }
 
-    if (st.pool_len + size + 1 > POOL_CAP) {
-        if (st.quiet == 0) {
+    if (stasis.pool_len + size + 1 > POOL_CAP) {
+        if (stasis.quiet == 0) {
             print_string("error: exceeded total source pool capacity\n");
         }
         return -1;
@@ -285,28 +285,28 @@ function load_file(path: ascii[]): i32 {
 
     let path_len: i32 = ascii_len(path);
     if (path_len <= 0) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: empty path\n");
         }
         return -1;
     }
     if (path_len >= MAX_PATH_BYTES) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: path too long (max 260 bytes): ");
             print_string(path);
             print_char(10);
         }
         return -1;
     }
-    if (st.path_pool_len + path_len + 1 > PATH_POOL_CAP) {
-        if (st.quiet == 0) {
+    if (stasis.path_pool_len + path_len + 1 > PATH_POOL_CAP) {
+        if (stasis.quiet == 0) {
             print_string("error: exceeded path pool capacity\n");
         }
         return -1;
     }
 
-    if (!module_name_from_path(st.scratch_mod, path)) {
-        if (st.quiet == 0) {
+    if (!module_name_from_path(stasis.scratch_mod, path)) {
+        if (stasis.quiet == 0) {
             print_string("error: unable to derive module name: ");
             print_string(path);
             print_char(10);
@@ -314,39 +314,39 @@ function load_file(path: ascii[]): i32 {
         return -1;
     }
 
-    let mod_len: i32 = ascii_len(st.scratch_mod);
+    let mod_len: i32 = ascii_len(stasis.scratch_mod);
     if (mod_len <= 0 || mod_len >= MAX_MOD_BYTES) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: module name too long (max 96 bytes)\n");
         }
         return -1;
     }
 
-    let mod_dup: i32 = find_module(st.scratch_mod);
+    let mod_dup: i32 = find_module(stasis.scratch_mod);
     if (mod_dup >= 0) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: duplicate module name: ");
-            print_string(st.scratch_mod);
+            print_string(stasis.scratch_mod);
             print_char(10);
-            if (copy_file_path(st.scratch_dir, mod_dup)) {
+            if (copy_file_path(stasis.scratch_dir, mod_dup)) {
                 print_string("note: module already used by: ");
-                print_string(st.scratch_dir);
+                print_string(stasis.scratch_dir);
                 print_char(10);
             }
         }
         return -1;
     }
 
-    if (st.mod_pool_len + mod_len + 1 > MOD_POOL_CAP) {
-        if (st.quiet == 0) {
+    if (stasis.mod_pool_len + mod_len + 1 > MOD_POOL_CAP) {
+        if (stasis.quiet == 0) {
             print_string("error: exceeded module name pool capacity\n");
         }
         return -1;
     }
 
-    let read_n: i32 = sys_read_file(path, st.read, MAX_FILE_BYTES + 1);
+    let read_n: i32 = sys_read_file(path, stasis.read, MAX_FILE_BYTES + 1);
     if (read_n < 0) {
-        if (st.quiet == 0) {
+        if (stasis.quiet == 0) {
             print_string("error: unable to read file: ");
             print_string(path);
             print_char(10);
@@ -355,42 +355,42 @@ function load_file(path: ascii[]): i32 {
     }
 
     // Copy into the global pool (stable across full graph load).
-    let off: i32 = st.pool_len;
+    let off: i32 = stasis.pool_len;
     let i: i32 = 0;
     for (i = 0; i < read_n; i = i + 1) {
-        st.pool[off + i] = st.read[i];
+        stasis.pool[off + i] = stasis.read[i];
     }
-    st.pool[off + read_n] = 0;
-    st.pool_len = st.pool_len + read_n + 1;
+    stasis.pool[off + read_n] = 0;
+    stasis.pool_len = stasis.pool_len + read_n + 1;
 
-    let idx: i32 = st.file_count;
-    st.file_count = st.file_count + 1;
+    let idx: i32 = stasis.file_count;
+    stasis.file_count = stasis.file_count + 1;
 
-    let path_off: i32 = st.path_pool_len;
+    let path_off: i32 = stasis.path_pool_len;
     for (i = 0; i < path_len; i = i + 1) {
-        st.path_pool[path_off + i] = path[i];
+        stasis.path_pool[path_off + i] = path[i];
     }
-    st.path_pool[path_off + path_len] = 0;
-    st.path_pool_len = st.path_pool_len + path_len + 1;
+    stasis.path_pool[path_off + path_len] = 0;
+    stasis.path_pool_len = stasis.path_pool_len + path_len + 1;
 
-    let mod_off: i32 = st.mod_pool_len;
+    let mod_off: i32 = stasis.mod_pool_len;
     for (i = 0; i < mod_len; i = i + 1) {
-        st.mod_pool[mod_off + i] = st.scratch_mod[i];
+        stasis.mod_pool[mod_off + i] = stasis.scratch_mod[i];
     }
-    st.mod_pool[mod_off + mod_len] = 0;
-    st.mod_pool_len = st.mod_pool_len + mod_len + 1;
+    stasis.mod_pool[mod_off + mod_len] = 0;
+    stasis.mod_pool_len = stasis.mod_pool_len + mod_len + 1;
 
-    st.files[idx].path_off = path_off;
-    st.files[idx].path_len = path_len;
-    st.files[idx].mod_off = mod_off;
-    st.files[idx].mod_len = mod_len;
-    st.files[idx].imports_off = 0;
-    st.files[idx].imports_len = 0;
-    st.files[idx].syms_off = 0;
-    st.files[idx].syms_len = 0;
-    st.files[idx].offset = off;
-    st.files[idx].len = read_n;
-    st.files[idx].mtime_ms = sys_file_mtime_ms(path);
+    stasis.files[idx].path_off = path_off;
+    stasis.files[idx].path_len = path_len;
+    stasis.files[idx].mod_off = mod_off;
+    stasis.files[idx].mod_len = mod_len;
+    stasis.files[idx].imports_off = 0;
+    stasis.files[idx].imports_len = 0;
+    stasis.files[idx].syms_off = 0;
+    stasis.files[idx].syms_len = 0;
+    stasis.files[idx].offset = off;
+    stasis.files[idx].len = read_n;
+    stasis.files[idx].mtime_ms = sys_file_mtime_ms(path);
 
     return idx;
 }
@@ -398,19 +398,19 @@ function load_file(path: ascii[]): i32 {
 function copy_file_path(dst: ascii[], file_idx: i32): bool {
     ascii_clear(dst);
 
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
 
-    let off: i32 = st.files[file_idx].path_off;
-    let len: i32 = st.files[file_idx].path_len;
+    let off: i32 = stasis.files[file_idx].path_off;
+    let len: i32 = stasis.files[file_idx].path_len;
     if (len <= 0 || len >= MAX_PATH_BYTES) {
         return false;
     }
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        dst[i] = st.path_pool[off + i];
+        dst[i] = stasis.path_pool[off + i];
     }
     dst[len] = 0;
     ascii_set_len(dst, len);
@@ -419,12 +419,12 @@ function copy_file_path(dst: ascii[], file_idx: i32): bool {
 
 function any_file_mtime_changed(): bool {
     let i: i32 = 0;
-    for (i = 0; i < st.file_count; i = i + 1) {
-        if (!copy_file_path(st.scratch_watch_path, i)) {
+    for (i = 0; i < stasis.file_count; i = i + 1) {
+        if (!copy_file_path(stasis.scratch_watch_path, i)) {
             return true;
         }
-        let now: i32 = sys_file_mtime_ms(st.scratch_watch_path);
-        if (now != st.files[i].mtime_ms) {
+        let now: i32 = sys_file_mtime_ms(stasis.scratch_watch_path);
+        if (now != stasis.files[i].mtime_ms) {
             return true;
         }
     }
@@ -432,56 +432,56 @@ function any_file_mtime_changed(): bool {
 }
 
 function try_parse_import(file_idx: i32, line_start: i32, line_end: i32): bool {
-    ascii_clear(st.scratch_import);
+    ascii_clear(stasis.scratch_import);
 
-    let base: i32 = st.files[file_idx].offset;
+    let base: i32 = stasis.files[file_idx].offset;
     let i: i32 = line_start;
-    for (i = i; i < line_end && is_space(st.pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && is_space(stasis.pool[base + i]); i = i + 1) {
     }
 
     if (i + 6 > line_end) {
         return false;
     }
 
-    if (st.pool[base + i + 0] != 105) { return false; } // i
-    if (st.pool[base + i + 1] != 109) { return false; } // m
-    if (st.pool[base + i + 2] != 112) { return false; } // p
-    if (st.pool[base + i + 3] != 111) { return false; } // o
-    if (st.pool[base + i + 4] != 114) { return false; } // r
-    if (st.pool[base + i + 5] != 116) { return false; } // t
+    if (stasis.pool[base + i + 0] != 105) { return false; } // i
+    if (stasis.pool[base + i + 1] != 109) { return false; } // m
+    if (stasis.pool[base + i + 2] != 112) { return false; } // p
+    if (stasis.pool[base + i + 3] != 111) { return false; } // o
+    if (stasis.pool[base + i + 4] != 114) { return false; } // r
+    if (stasis.pool[base + i + 5] != 116) { return false; } // t
 
     i = i + 6;
-    for (i = i; i < line_end && is_space(st.pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && is_space(stasis.pool[base + i]); i = i + 1) {
     }
 
-    if (i >= line_end || st.pool[base + i] != 34) {
+    if (i >= line_end || stasis.pool[base + i] != 34) {
         return false;
     }
     i = i + 1;
 
     let out_i: i32 = 0;
-    for (i = i; i < line_end && st.pool[base + i] != 34; i = i + 1) {
+    for (i = i; i < line_end && stasis.pool[base + i] != 34; i = i + 1) {
         if (out_i + 1 >= MAX_PATH_BYTES) {
             return false;
         }
-        st.scratch_import[out_i] = st.pool[base + i];
+        stasis.scratch_import[out_i] = stasis.pool[base + i];
         out_i = out_i + 1;
     }
 
-    if (i >= line_end || st.pool[base + i] != 34) {
+    if (i >= line_end || stasis.pool[base + i] != 34) {
         return false;
     }
 
-    st.scratch_import[out_i] = 0;
-    ascii_set_len(st.scratch_import, out_i);
+    stasis.scratch_import[out_i] = 0;
+    ascii_set_len(stasis.scratch_import, out_i);
 
     i = i + 1;
-    for (i = i; i < line_end && is_space(st.pool[base + i]); i = i + 1) {
+    for (i = i; i < line_end && is_space(stasis.pool[base + i]); i = i + 1) {
     }
 
-    if (i < line_end && st.pool[base + i] == 59) {
+    if (i < line_end && stasis.pool[base + i] == 59) {
         i = i + 1;
-        for (i = i; i < line_end && is_space(st.pool[base + i]); i = i + 1) {
+        for (i = i; i < line_end && is_space(stasis.pool[base + i]); i = i + 1) {
         }
     }
 
@@ -494,7 +494,7 @@ function path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): i32
     let cut: i32 = -1;
     let i: i32 = 0;
     for (i = 0; i < path_len; i = i + 1) {
-        let b: u8 = st.path_pool[path_off + i];
+        let b: u8 = stasis.path_pool[path_off + i];
         if (b == 47 || b == 92) {
             cut = i;
         }
@@ -509,7 +509,7 @@ function path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): i32
         limit = MAX_PATH_BYTES - 1;
     }
     for (i = 0; i < limit; i = i + 1) {
-        dst[i] = st.path_pool[path_off + i];
+        dst[i] = stasis.path_pool[path_off + i];
     }
     dst[i] = 0;
     ascii_set_len(dst, i);
@@ -517,27 +517,27 @@ function path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): i32
 }
 
 function resolve_import(file_idx: i32): bool {
-    ascii_clear(st.scratch_resolved);
-    if (path_is_abs(st.scratch_import)) {
-        ascii_copy(st.scratch_resolved, st.scratch_import);
+    ascii_clear(stasis.scratch_resolved);
+    if (path_is_abs(stasis.scratch_import)) {
+        ascii_copy(stasis.scratch_resolved, stasis.scratch_import);
         return true;
     }
 
-    path_dirname_from_pool(st.scratch_dir, st.files[file_idx].path_off, st.files[file_idx].path_len);
-    path_join(st.scratch_resolved, st.scratch_dir, st.scratch_import);
+    path_dirname_from_pool(stasis.scratch_dir, stasis.files[file_idx].path_off, stasis.files[file_idx].path_len);
+    path_join(stasis.scratch_resolved, stasis.scratch_dir, stasis.scratch_import);
     return true;
 }
 
 function scan_file_imports(file_idx: i32): bool {
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
 
-    st.files[file_idx].imports_off = st.imports_len;
-    st.files[file_idx].imports_len = 0;
+    stasis.files[file_idx].imports_off = stasis.imports_len;
+    stasis.files[file_idx].imports_len = 0;
 
-    let base: i32 = st.files[file_idx].offset;
-    let len: i32 = st.files[file_idx].len;
+    let base: i32 = stasis.files[file_idx].offset;
+    let len: i32 = stasis.files[file_idx].len;
 
     let line_start: i32 = 0;
     let i: i32 = 0;
@@ -545,12 +545,12 @@ function scan_file_imports(file_idx: i32): bool {
         let is_end: bool = i == len;
         let b: u8 = 10;
         if (!is_end) {
-            b = st.pool[base + i];
+            b = stasis.pool[base + i];
         }
 
         if (b == 10 || is_end) {
             let line_end: i32 = i;
-            if (line_end > line_start && st.pool[base + line_end - 1] == 13) {
+            if (line_end > line_start && stasis.pool[base + line_end - 1] == 13) {
                 line_end = line_end - 1;
             }
 
@@ -558,21 +558,21 @@ function scan_file_imports(file_idx: i32): bool {
                 if (!resolve_import(file_idx)) {
                     return false;
                 }
-                let imported: i32 = load_file(st.scratch_resolved);
+                let imported: i32 = load_file(stasis.scratch_resolved);
                 if (imported < 0) {
                     return false;
                 }
 
                 if (!file_imports_contains(file_idx, imported)) {
-                    if (st.imports_len >= IMPORTS_CAP) {
-                        if (st.quiet == 0) {
+                    if (stasis.imports_len >= IMPORTS_CAP) {
+                        if (stasis.quiet == 0) {
                             print_string("error: exceeded import edge capacity\n");
                         }
                         return false;
                     }
-                    st.imports[st.imports_len] = imported;
-                    st.imports_len = st.imports_len + 1;
-                    st.files[file_idx].imports_len = st.files[file_idx].imports_len + 1;
+                    stasis.imports[stasis.imports_len] = imported;
+                    stasis.imports_len = stasis.imports_len + 1;
+                    stasis.files[file_idx].imports_len = stasis.files[file_idx].imports_len + 1;
                 }
             }
 
@@ -592,7 +592,7 @@ function load_graph(entry_path: ascii[]): i32 {
     }
 
     let i: i32 = 0;
-    for (i = 0; i < st.file_count; i = i + 1) {
+    for (i = 0; i < stasis.file_count; i = i + 1) {
         if (!scan_file_imports(i)) {
             return 1;
         }

@@ -381,4 +381,4 @@ struct State {
     llvm_str_count: i32;
 }
 
-global st: State;
+global stasis: State;

@@ -42,7 +42,7 @@ test `stasis build emits clif for main return i32`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -57,8 +57,8 @@ test `stasis build emits clif for main return i32`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "function %module__main()")) { return false; }
-    if (!ascii_contains(st.ir_out, "iconst.i32 42")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "function %module__main()")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "iconst.i32 42")) { return false; }
     return true;
 }
 
@@ -75,7 +75,7 @@ test `stasis build emits llvm ir for main return i32`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -90,10 +90,10 @@ test `stasis build emits llvm ir for main return i32`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @main()")) { return false; }
-    if (!ascii_contains(st.ir_out, "%ret_slot = alloca i32")) { return false; }
-    if (!ascii_contains(st.ir_out, "store i32 42, ptr %ret_slot")) { return false; }
-    if (!ascii_contains(st.ir_out, "ret i32 %t")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @main()")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "%ret_slot = alloca i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 42, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "ret i32 %t")) { return false; }
     return true;
 }
 
@@ -110,7 +110,7 @@ test `stasis build evaluates constant expressions`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -124,13 +124,13 @@ test `stasis build evaluates constant expressions`() {
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(st.ir_out, "iconst.i32 13")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "iconst.i32 13")) { return false; }
 
     rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(st.ir_out, "store i32 13, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 13, ptr %ret_slot")) { return false; }
 
     return true;
 }
@@ -148,7 +148,7 @@ test `stasis build evaluates more operators`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -162,13 +162,13 @@ test `stasis build evaluates more operators`() {
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(st.ir_out, "iconst.i32 1")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "iconst.i32 1")) { return false; }
 
     rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(st.ir_out, "store i32 1, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 1, ptr %ret_slot")) { return false; }
 
     return true;
 }
@@ -186,7 +186,7 @@ test `stasis build rejects non-constant return expressions`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -217,7 +217,7 @@ test `stasis build emits llvm for locals and assignments`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -232,10 +232,10 @@ test `stasis build emits llvm for locals and assignments`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "alloca i32")) { return false; }
-    if (!ascii_contains(st.ir_out, "store i32 40")) { return false; }
-    if (!ascii_contains(st.ir_out, "add i32")) { return false; }
-    return ascii_contains(st.ir_out, "ret i32 %t");
+    if (!ascii_contains(stasis.ir_out, "alloca i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 40")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "add i32")) { return false; }
+    return ascii_contains(stasis.ir_out, "ret i32 %t");
 }
 
 test `stasis build emits llvm control flow for if`() {
@@ -255,7 +255,7 @@ test `stasis build emits llvm control flow for if`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -270,10 +270,10 @@ test `stasis build emits llvm control flow for if`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "br i1")) { return false; }
-    if (!ascii_contains(st.ir_out, "if.then")) { return false; }
-    if (!ascii_contains(st.ir_out, "if.else")) { return false; }
-    if (!ascii_contains(st.ir_out, "if.end")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "br i1")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "if.then")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "if.else")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "if.end")) { return false; }
     return true;
 }
 
@@ -294,7 +294,7 @@ test `stasis build emits llvm control flow for for`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -309,10 +309,10 @@ test `stasis build emits llvm control flow for for`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "for.cond")) { return false; }
-    if (!ascii_contains(st.ir_out, "for.body")) { return false; }
-    if (!ascii_contains(st.ir_out, "for.step")) { return false; }
-    if (!ascii_contains(st.ir_out, "for.end")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "for.cond")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "for.body")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "for.step")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "for.end")) { return false; }
     return true;
 }
 
@@ -330,7 +330,7 @@ test `stasis build emits llvm for empty-arg function calls`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -345,8 +345,8 @@ test `stasis build emits llvm for empty-arg function calls`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @module__foo()")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @module__foo()")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @module__foo()")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @module__foo()")) { return false; }
     return true;
 }
 
@@ -364,7 +364,7 @@ test `stasis build emits llvm for call arguments`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -379,10 +379,10 @@ test `stasis build emits llvm for call arguments`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @module__add(i32 %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(st.ir_out, "store i32 %a0, ptr %l0")) { return false; }
-    if (!ascii_contains(st.ir_out, "store i32 %a1, ptr %l1")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @module__add(i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @module__add(i32 %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 %a0, ptr %l0")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i32 %a1, ptr %l1")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @module__add(i32")) { return false; }
     return true;
 }
 
@@ -401,7 +401,7 @@ test `stasis build emits llvm for nested calls`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -416,10 +416,10 @@ test `stasis build emits llvm for nested calls`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @module__inner(i32 %a0)")) { return false; }
-    if (!ascii_contains(st.ir_out, "define i32 @module__outer(i32 %a0)")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @module__inner(i32")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @module__outer(i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @module__inner(i32 %a0)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @module__outer(i32 %a0)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @module__inner(i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @module__outer(i32")) { return false; }
     return true;
 }
 
@@ -448,7 +448,7 @@ test `stasis build emits llvm for module-qualified calls`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path2);
     if (rc != 0) {
         return false;
@@ -463,8 +463,8 @@ test `stasis build emits llvm for module-qualified calls`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @math__add(i32 %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @math__add(i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "define i32 @math__add(i32 %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @math__add(i32")) { return false; }
     return true;
 }
 
@@ -487,7 +487,7 @@ test `stasis build emits llvm for struct member access`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -502,9 +502,9 @@ test `stasis build emits llvm for struct member access`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "%module__Pair = type { i32, i32 }")) { return false; }
-    if (!ascii_contains(st.ir_out, "@module__g = global %module__Pair zeroinitializer")) { return false; }
-    if (!ascii_contains(st.ir_out, "getelementptr inbounds %module__Pair")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "%module__Pair = type { i32, i32 }")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "@module__g = global %module__Pair zeroinitializer")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "getelementptr inbounds %module__Pair")) { return false; }
     return true;
 }
 
@@ -526,7 +526,7 @@ test `stasis build emits llvm for member indexing`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -541,8 +541,8 @@ test `stasis build emits llvm for member indexing`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "[4 x i32]")) { return false; }
-    if (!ascii_contains(st.ir_out, "getelementptr inbounds i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "[4 x i32]")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "getelementptr inbounds i32")) { return false; }
     return true;
 }
 
@@ -564,7 +564,7 @@ test `stasis build emits llvm for global u8 assignment`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -579,10 +579,10 @@ test `stasis build emits llvm for global u8 assignment`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "@module__g = global i8 zeroinitializer")) { return false; }
-    if (!ascii_contains(st.ir_out, "zext i8")) { return false; }
-    if (!ascii_contains(st.ir_out, "trunc i32")) { return false; }
-    if (!ascii_contains(st.ir_out, "store i8")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "@module__g = global i8 zeroinitializer")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "zext i8")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "trunc i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "store i8")) { return false; }
     return true;
 }
 
@@ -613,7 +613,7 @@ test `stasis build emits llvm for slice params and u8 conversions`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -628,14 +628,14 @@ test `stasis build emits llvm for slice params and u8 conversions`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "define i32 @module__sum(ptr %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 @module__sum(ptr")) { return false; }
-    if (!ascii_contains(st.ir_out, "alloca ptr")) { return false; }
-    if (!ascii_contains(st.ir_out, "load ptr, ptr %l0")) { return false; }
-    if (!ascii_contains(st.ir_out, "getelementptr inbounds i8")) { return false; }
-    if (!ascii_contains(st.ir_out, "zext i8")) { return false; }
-    if (!ascii_contains(st.ir_out, " = and i32")) { return false; }
-    return ascii_contains(st.ir_out, ", 255");
+    if (!ascii_contains(stasis.ir_out, "define i32 @module__sum(ptr %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 @module__sum(ptr")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "alloca ptr")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "load ptr, ptr %l0")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "getelementptr inbounds i8")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "zext i8")) { return false; }
+    if (!ascii_contains(stasis.ir_out, " = and i32")) { return false; }
+    return ascii_contains(stasis.ir_out, ", 255");
 }
 
 test `stasis build emits llvm for string literals`() {
@@ -659,7 +659,7 @@ test `stasis build emits llvm for string literals`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -674,10 +674,10 @@ test `stasis build emits llvm for string literals`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "declare i32 @printf(ptr, ...)")) { return false; }
-    if (!ascii_contains(st.ir_out, "call i32 (ptr, ...) @printf")) { return false; }
-    if (!ascii_contains(st.ir_out, "@.str0 = private unnamed_addr constant [11 x i8]")) { return false; }
-    return ascii_contains(st.ir_out, "getelementptr inbounds [11 x i8], ptr @.str0, i32 0, i32 8");
+    if (!ascii_contains(stasis.ir_out, "declare i32 @printf(ptr, ...)")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "call i32 (ptr, ...) @printf")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "@.str0 = private unnamed_addr constant [11 x i8]")) { return false; }
+    return ascii_contains(stasis.ir_out, "getelementptr inbounds [11 x i8], ptr @.str0, i32 0, i32 8");
 }
 
 test `stasis build emits llvm for sys_argc`() {
@@ -693,7 +693,7 @@ test `stasis build emits llvm for sys_argc`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -708,6 +708,6 @@ test `stasis build emits llvm for sys_argc`() {
         return false;
     }
 
-    if (!ascii_contains(st.ir_out, "declare i32 @stasis_sys_argc()")) { return false; }
-    return ascii_contains(st.ir_out, "call i32 @stasis_sys_argc()");
+    if (!ascii_contains(stasis.ir_out, "declare i32 @stasis_sys_argc()")) { return false; }
+    return ascii_contains(stasis.ir_out, "call i32 @stasis_sys_argc()");
 }

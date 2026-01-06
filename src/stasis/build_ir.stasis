@@ -9,7 +9,7 @@ import "build_ir_llvm_emit_main.stasis";
 
 function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
     // Store for downstream helpers (LLVM symbol mangling).
-    ascii_copy(st.arg_module, module_name);
+    ascii_copy(stasis.arg_module, module_name);
 
     let func_idx: i32 = build_find_entry_main();
     if (func_idx < 0) {
@@ -17,10 +17,10 @@ function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
         return 1;
     }
 
-    let file_idx: i32 = st.funcs[func_idx].file_idx;
-    let body_start: i32 = st.funcs[func_idx].body_start;
+    let file_idx: i32 = stasis.funcs[func_idx].file_idx;
+    let body_start: i32 = stasis.funcs[func_idx].body_start;
     if (body_start < 0) {
-        build_err_at(file_idx, "missing function body for 'main'", st.funcs[func_idx].name_start);
+        build_err_at(file_idx, "missing function body for 'main'", stasis.funcs[func_idx].name_start);
         return 1;
     }
 
@@ -28,7 +28,7 @@ function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
         build_err_at(file_idx, "failed to start lexer", 0);
         return 1;
     }
-    st.lex_pos = body_start;
+    stasis.lex_pos = body_start;
 
     if (ascii_eq(backend, "llvm")) {
         return emit_llvm_main_i32(module_name);
@@ -36,13 +36,13 @@ function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
 
     let k: Tok = lex_next_kind();
     if (k != Tok.LBrace) {
-        build_err_at(file_idx, "expected '{' at start of function body", st.tok_start);
+        build_err_at(file_idx, "expected '{' at start of function body", stasis.tok_start);
         return 1;
     }
 
     k = lex_next_kind();
     if (k != Tok.ReturnKeyword) {
-        build_err_at(file_idx, "expected 'return' in function body (minimal build only)", st.tok_start);
+        build_err_at(file_idx, "expected 'return' in function body (minimal build only)", stasis.tok_start);
         return 1;
     }
 
@@ -52,14 +52,14 @@ function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
         return 1;
     }
     let value: i32 = expr_eval_i32_const(root);
-    if (st.expr_eval_failed != 0) {
+    if (stasis.expr_eval_failed != 0) {
         return 1;
     }
 
     // Expect '}'
     k = lex_next_kind();
     if (k != Tok.RBrace) {
-        build_err_at(file_idx, "expected '}' after return statement", st.tok_start);
+        build_err_at(file_idx, "expected '}' after return statement", stasis.tok_start);
         return 1;
     }
 

@@ -8,27 +8,27 @@ import "diagnostics.stasis";
 const LEX_ERR_PRINT_CAP: i32 = 8;
 
 function lex_begin(file_idx: i32): bool {
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
 
-    st.lex_file_idx = file_idx;
-    st.lex_base = st.files[file_idx].offset;
-    st.lex_len = st.files[file_idx].len;
-    st.lex_pos = 0;
-    st.lex_error_count = 0;
-    st.lex_error_printed = 0;
-    st.lex_quiet = st.quiet;
-    st.tok_start = 0;
-    st.tok_len = 0;
+    stasis.lex_file_idx = file_idx;
+    stasis.lex_base = stasis.files[file_idx].offset;
+    stasis.lex_len = stasis.files[file_idx].len;
+    stasis.lex_pos = 0;
+    stasis.lex_error_count = 0;
+    stasis.lex_error_printed = 0;
+    stasis.lex_quiet = stasis.quiet;
+    stasis.tok_start = 0;
+    stasis.tok_len = 0;
     return true;
 }
 
 function lex_print_err(file_idx: i32, msg: ascii[], at: i32): void {
-    if (st.lex_quiet != 0) {
+    if (stasis.lex_quiet != 0) {
         return;
     }
-    if (st.lex_error_printed >= LEX_ERR_PRINT_CAP) {
+    if (stasis.lex_error_printed >= LEX_ERR_PRINT_CAP) {
         return;
     }
 
@@ -37,14 +37,14 @@ function lex_print_err(file_idx: i32, msg: ascii[], at: i32): void {
     print_string(": ");
     print_file_loc(file_idx, at);
     print_char(10);
-    st.lex_error_printed = st.lex_error_printed + 1;
+    stasis.lex_error_printed = stasis.lex_error_printed + 1;
 }
 
 function lex_print_err_byte(file_idx: i32, msg: ascii[], at: i32, b: u8): void {
-    if (st.lex_quiet != 0) {
+    if (stasis.lex_quiet != 0) {
         return;
     }
-    if (st.lex_error_printed >= LEX_ERR_PRINT_CAP) {
+    if (stasis.lex_error_printed >= LEX_ERR_PRINT_CAP) {
         return;
     }
 
@@ -55,7 +55,7 @@ function lex_print_err_byte(file_idx: i32, msg: ascii[], at: i32, b: u8): void {
     print_string("): ");
     print_file_loc(file_idx, at);
     print_char(10);
-    st.lex_error_printed = st.lex_error_printed + 1;
+    stasis.lex_error_printed = stasis.lex_error_printed + 1;
 }
 
 function is_alpha(b: u8): bool {
@@ -94,26 +94,26 @@ function is_ident_continue(b: u8): bool {
 }
 
 function lex_is_at_end(): bool {
-    return st.lex_pos >= st.lex_len;
+    return stasis.lex_pos >= stasis.lex_len;
 }
 
 function lex_current(): u8 {
-    if (st.lex_pos >= st.lex_len) {
+    if (stasis.lex_pos >= stasis.lex_len) {
         return i32_to_u8_trunc(0);
     }
-    return st.pool[st.lex_base + st.lex_pos];
+    return stasis.pool[stasis.lex_base + stasis.lex_pos];
 }
 
 function lex_peek(): u8 {
-    let next: i32 = st.lex_pos + 1;
-    if (next >= st.lex_len) {
+    let next: i32 = stasis.lex_pos + 1;
+    if (next >= stasis.lex_len) {
         return i32_to_u8_trunc(0);
     }
-    return st.pool[st.lex_base + next];
+    return stasis.pool[stasis.lex_base + next];
 }
 
 function lex_advance(): void {
-    st.lex_pos = st.lex_pos + 1;
+    stasis.lex_pos = stasis.lex_pos + 1;
 }
 
 function lex_skip_ws_and_comments(): void {
@@ -165,7 +165,7 @@ function lex_bytes_eq_lit(start: i32, len: i32, lit: ascii[]): bool {
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        if (st.pool[st.lex_base + start + i] != lit[i]) {
+        if (stasis.pool[stasis.lex_base + start + i] != lit[i]) {
             return false;
         }
     }
@@ -194,17 +194,17 @@ function lex_keyword_kind(start: i32, len: i32): Tok {
 }
 
 function lex_identifier_or_keyword(): Tok {
-    let start: i32 = st.lex_pos;
+    let start: i32 = stasis.lex_pos;
     for (; !lex_is_at_end() && is_ident_continue(lex_current()); ) {
         lex_advance();
     }
-    st.tok_start = start;
-    st.tok_len = st.lex_pos - start;
-    return lex_keyword_kind(start, st.tok_len);
+    stasis.tok_start = start;
+    stasis.tok_len = stasis.lex_pos - start;
+    return lex_keyword_kind(start, stasis.tok_len);
 }
 
 function lex_number(): Tok {
-    let start: i32 = st.lex_pos;
+    let start: i32 = stasis.lex_pos;
     let has_dot: i32 = 0;
 
     let done: i32 = 0;
@@ -223,8 +223,8 @@ function lex_number(): Tok {
         }
     }
 
-    st.tok_start = start;
-    st.tok_len = st.lex_pos - start;
+    stasis.tok_start = start;
+    stasis.tok_len = stasis.lex_pos - start;
     if (has_dot != 0) {
         return Tok.FloatLiteral;
     }
@@ -232,7 +232,7 @@ function lex_number(): Tok {
 }
 
 function lex_string_like(quote: u8, kind: Tok): Tok {
-    let start: i32 = st.lex_pos;
+    let start: i32 = stasis.lex_pos;
     lex_advance(); // opening quote/backtick
 
     for (; !lex_is_at_end() && lex_current() != quote; ) {
@@ -240,20 +240,20 @@ function lex_string_like(quote: u8, kind: Tok): Tok {
     }
 
     if (lex_is_at_end()) {
-        st.lex_error_count = st.lex_error_count + 1;
+        stasis.lex_error_count = stasis.lex_error_count + 1;
         if (kind == Tok.StringLiteral) {
-            lex_print_err(st.lex_file_idx, "unterminated string literal", start);
+            lex_print_err(stasis.lex_file_idx, "unterminated string literal", start);
         } else {
-            lex_print_err(st.lex_file_idx, "unterminated backtick literal", start);
+            lex_print_err(stasis.lex_file_idx, "unterminated backtick literal", start);
         }
-        st.tok_start = start;
-        st.tok_len = st.lex_pos - start;
+        stasis.tok_start = start;
+        stasis.tok_len = stasis.lex_pos - start;
         return kind;
     }
 
     lex_advance(); // closing quote/backtick
-    st.tok_start = start;
-    st.tok_len = st.lex_pos - start;
+    stasis.tok_start = start;
+    stasis.tok_len = stasis.lex_pos - start;
     return kind;
 }
 
@@ -261,12 +261,12 @@ function lex_next_kind(): Tok {
     lex_skip_ws_and_comments();
 
     if (lex_is_at_end()) {
-        st.tok_start = st.lex_pos;
-        st.tok_len = 0;
+        stasis.tok_start = stasis.lex_pos;
+        stasis.tok_len = 0;
         return Tok.Eof;
     }
 
-    let start: i32 = st.lex_pos;
+    let start: i32 = stasis.lex_pos;
     let b: u8 = lex_current();
 
     if (is_alpha(b)) {
@@ -286,8 +286,8 @@ function lex_next_kind(): Tok {
 
     // One and two byte tokens.
     lex_advance();
-    st.tok_start = start;
-    st.tok_len = 1;
+    stasis.tok_start = start;
+    stasis.tok_len = 1;
 
     if (b == 46) { return Tok.Dot; } // '.'
     if (b == 64) { return Tok.At; } // '@'
@@ -295,29 +295,29 @@ function lex_next_kind(): Tok {
     if (b == 38) { // '&'
         if (lex_current() == 38) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.AmpAmp;
         }
-        st.lex_error_count = st.lex_error_count + 1;
-        lex_print_err_byte(st.lex_file_idx, "unexpected '&' (use &&)", start, b);
+        stasis.lex_error_count = stasis.lex_error_count + 1;
+        lex_print_err_byte(stasis.lex_file_idx, "unexpected '&' (use &&)", start, b);
         return Tok.Unknown;
     }
 
     if (b == 124) { // '|'
         if (lex_current() == 124) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.PipePipe;
         }
-        st.lex_error_count = st.lex_error_count + 1;
-        lex_print_err_byte(st.lex_file_idx, "unexpected '|' (use ||)", start, b);
+        stasis.lex_error_count = stasis.lex_error_count + 1;
+        lex_print_err_byte(stasis.lex_file_idx, "unexpected '|' (use ||)", start, b);
         return Tok.Unknown;
     }
 
     if (b == 33) { // '!'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.BangEqual;
         }
         return Tok.Bang;
@@ -326,7 +326,7 @@ function lex_next_kind(): Tok {
     if (b == 43) { // '+'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.PlusEqual;
         }
         return Tok.Plus;
@@ -335,7 +335,7 @@ function lex_next_kind(): Tok {
     if (b == 45) { // '-'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.MinusEqual;
         }
         return Tok.Minus;
@@ -344,7 +344,7 @@ function lex_next_kind(): Tok {
     if (b == 42) { // '*'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.StarEqual;
         }
         return Tok.Star;
@@ -353,7 +353,7 @@ function lex_next_kind(): Tok {
     if (b == 47) { // '/'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.SlashEqual;
         }
         return Tok.Slash;
@@ -362,7 +362,7 @@ function lex_next_kind(): Tok {
     if (b == 37) { // '%'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.PercentEqual;
         }
         return Tok.Percent;
@@ -371,7 +371,7 @@ function lex_next_kind(): Tok {
     if (b == 60) { // '<'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.LessEqual;
         }
         return Tok.Less;
@@ -380,7 +380,7 @@ function lex_next_kind(): Tok {
     if (b == 62) { // '>'
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.GreaterEqual;
         }
         return Tok.Greater;
@@ -391,7 +391,7 @@ function lex_next_kind(): Tok {
     if (b == 61) { // '='
         if (lex_current() == 61) {
             lex_advance();
-            st.tok_len = 2;
+            stasis.tok_len = 2;
             return Tok.EqualEqual;
         }
         return Tok.Equal;
@@ -406,7 +406,7 @@ function lex_next_kind(): Tok {
     if (b == 44) { return Tok.Comma; } // ','
     if (b == 59) { return Tok.Semicolon; } // ';'
 
-    st.lex_error_count = st.lex_error_count + 1;
-    lex_print_err_byte(st.lex_file_idx, "unexpected byte", start, b);
+    stasis.lex_error_count = stasis.lex_error_count + 1;
+    lex_print_err_byte(stasis.lex_file_idx, "unexpected byte", start, b);
     return Tok.Unknown;
 }

@@ -78,7 +78,7 @@ test `stasis import collision scan detects conflicts`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_entry);
     if (rc != 0) {
         return false;
@@ -106,7 +106,7 @@ test `stasis import collision scan ignores shadowed names`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_entry_shadow);
     if (rc != 0) {
         return false;

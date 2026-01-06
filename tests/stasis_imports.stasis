@@ -83,7 +83,7 @@ test `stasis import graph loads files`() {
         return false;
     }
 
-    if (st.file_count != 3) {
+    if (stasis.file_count != 3) {
         return false;
     }
 
@@ -94,16 +94,16 @@ test `stasis import graph loads files`() {
         return false;
     }
 
-    if (st.files[idx_common].imports_len != 0) { return false; }
-    if (st.files[idx_a].imports_len != 1) { return false; }
-    if (st.files[idx_entry].imports_len != 2) { return false; }
+    if (stasis.files[idx_common].imports_len != 0) { return false; }
+    if (stasis.files[idx_a].imports_len != 1) { return false; }
+    if (stasis.files[idx_entry].imports_len != 2) { return false; }
 
-    let off_a: i32 = st.files[idx_a].imports_off;
-    if (st.imports[off_a] != idx_common) { return false; }
+    let off_a: i32 = stasis.files[idx_a].imports_off;
+    if (stasis.imports[off_a] != idx_common) { return false; }
 
-    let off_entry: i32 = st.files[idx_entry].imports_off;
-    if (st.imports[off_entry] != idx_a) { return false; }
-    if (st.imports[off_entry + 1] != idx_common) { return false; }
+    let off_entry: i32 = stasis.files[idx_entry].imports_off;
+    if (stasis.imports[off_entry] != idx_a) { return false; }
+    if (stasis.imports[off_entry + 1] != idx_common) { return false; }
 
     return find_file(t_path_common) >= 0
         && find_file(t_path_a) >= 0
@@ -118,7 +118,7 @@ test `stasis import graph enforces 50KiB`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
 
     path_join(t_path_big, t_exe_dir, "sh_big.stasis");
     path_join(t_path_big_entry, t_exe_dir, "sh_big_entry.stasis");

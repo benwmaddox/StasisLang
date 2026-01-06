@@ -60,13 +60,13 @@ test `stasis signature scan records declarations`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_sample);
     if (rc != 0) {
         return false;
     }
     let errors: i32 = sig_scan_loaded_files();
-    return errors == 0 && st.sym_count == 6;
+    return errors == 0 && stasis.sym_count == 6;
 }
 
 test `stasis signature scan detects duplicates`() {
@@ -83,7 +83,7 @@ test `stasis signature scan detects duplicates`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_dup);
     if (rc != 0) {
         return false;
@@ -120,13 +120,13 @@ test `stasis signature scan allows duplicates across modules`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_entry);
     if (rc != 0) {
         return false;
     }
     let errors: i32 = sig_scan_loaded_files();
-    return errors == 0 && st.sym_count == 2;
+    return errors == 0 && stasis.sym_count == 2;
 }
 
 test `stasis signature scan accepts slice types`() {
@@ -142,7 +142,7 @@ test `stasis signature scan accepts slice types`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path_slice);
     if (rc != 0) {
         return false;

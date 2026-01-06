@@ -1,23 +1,3 @@
-Got you, Ben. Here is a **complete, consolidated, detailed Stasis Language Specification** with **all decisions incorporated**, including:
-
-- Assignment via infix `=`
-- Operator-methods for arithmetic/comparison; assignment uses infix `=`
-- Infix arithmetic/comparison with TypeScript-style precedence; compound assignment supported
-- Only one assignment operator may appear in an expression (no chaining).
-- AoS → SoA translation model
-- LLVM and Cranelift backends
-- Static memory rules
-- Modules, functions, tests, globals
-- Compiler phases
-- Built-in opcode-direct functions
-- All built-in operators, including their lowering
-- Updated examples
-- Aligned with the current Pratt-based expression grammar
-
-I am not omitting anything — this is the full working spec as of now.
-
----
-
 # **Stasis Language Specification (v0.2)**
 
 _A statically-allocated, AoS-syntax / SoA-storage, operator-method-based language for deterministic WASM/LLVM compilation._
@@ -26,13 +6,17 @@ _A statically-allocated, AoS-syntax / SoA-storage, operator-method-based languag
 
 # **1. Overview**
 
-Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly, LLVM IR, and Cranelift CLIF**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required. The reference compiler is being built in **C#** with **LLVMSharp** and a Cranelift AOT path for IR construction and emission.
+Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly, LLVM IR, and Cranelift CLIF**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required.
+
+Toolchain direction:
+- Stage 0 (bootstrap): a C# frontend (LLVMSharp) used for development and bootstrapping.
+- Stage 1 (self-host): a standalone `stasis` CLI written in Stasis that emits textual LLVM IR or Cranelift CLIF and runs without .NET at runtime.
 
 The core design pillars are:
 
-- **Static memory only** — all data exists in a fixed global memory region
-- **No dynamic allocation** — no heap, no runtime resizing
-- **Explicit semantics** — no hidden copies, no implicit boxing
+- **Static memory only** - all data exists in a fixed global memory region
+- **No dynamic allocation** - no heap, no runtime resizing
+- **Explicit semantics** - no hidden copies, no implicit boxing
 - **Operator-methods** for arithmetic/comparison; assignment uses infix `=`
 - **Assignment uses infix syntax**:
 
@@ -40,10 +24,10 @@ The core design pillars are:
   target = value
   ```
 
-- **AoS source structure → SoA target memory**
+- **AoS source structure -> SoA target memory**
 - **LLVM, Cranelift, and WASM compatibility**
 - **Analyzable effects** (reads vs writes can be statically determined)
-- **Deterministic layout** — struct offsets, array bounds known at compile time
+- **Deterministic layout** - struct offsets, array bounds known at compile time
 - **Direct opcode functions** for arithmetic and memory operations
 
 ---
@@ -77,14 +61,14 @@ struct enum global function export test return let if else for foreach in
 - Infix arithmetic/comparison: `+ - * / % < <= > >= == !=` with TypeScript-style precedence.
 - Compound assignment: `= += -= *= /= %=` 
 - Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .<=() .>() .>=() .==() .!=()`
-- Assignment expressions may appear only once per expression to keep the Pratt parser unambiguous; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
+- Assignment expressions may appear only once per expression to keep parsing deterministic; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
 
 ---
 
 # **3. Diagnostics**
 
 - Diagnostics highlight the exact `SourceSpan` that triggered an error, include a concise human-friendly description, and often include a hint on how to fix it (similar to Elm's clarity).
-- The parser/semantic layers emit messages such as “Use infix '=' instead of '.='” or “Only one assignment per expression is permitted” so the code author immediately sees which operator or expression needs rewriting.
+- The parser/semantic layers emit messages such as "Use infix '=' for assignment" or "Only one assignment per expression is permitted" so the code author immediately sees which operator or expression needs rewriting.
 - CLI tools and editors can read the `SourceSpan` attached to every diagnostic to underline the tokens, show line/column info, and include references to the spec section being violated.
 
 # **4. Types**
@@ -197,10 +181,10 @@ enum State { Idle, Jump, Run, Fall }
 Enums are **type-safe** named types that lower to integers (`i32`) at runtime. Enum members are automatically assigned sequential integer values starting from 0:
 
 ```
-State.Idle → 0
-State.Jump → 1
-State.Run → 2
-State.Fall → 3
+State.Idle -> 0
+State.Jump -> 1
+State.Run -> 2
+State.Fall -> 3
 ```
 
 Enum members may optionally specify an explicit integer value. When a member has an explicit value, subsequent members without an explicit value continue counting upward from that value:
@@ -228,15 +212,15 @@ Example:
 enum State { Idle, Jump, Run }
 
 function update(): void {
-    let state: State = State.Idle;  // ✓ Correct
-    state = State.Jump;              // ✓ Correct
+    let state: State = State.Idle;  // valid
+    state = State.Jump;              // valid
 
-    if (state == State.Idle) {       // ✓ Correct
+    if (state == State.Idle) {       // valid
         state = State.Run;
     }
 
-    // let x: State = 0;              // ✗ Error: cannot assign i32 to State
-    // if (state == 0) {              // ✗ Error: cannot compare State with i32
+    // let x: State = 0;              // invalid: cannot assign i32 to State
+    // if (state == 0) {              // invalid: cannot compare State with i32
 }
 ```
 
@@ -249,9 +233,9 @@ function update(): void {
 - All structs and arrays live in a single global memory region.
 - Functions may not allocate dynamic memory.
 - Local variables are primitive scalars stored in WASM/LLVM locals; struct-typed locals hold references (indices) into global structs.
-- Arrays are never local — struct storage stays global-only even when referenced from the stack.
+- Arrays are never local - struct storage stays global-only even when referenced from the stack.
 
-### 4.2 AoS Syntax → SoA Storage
+### 4.2 AoS Syntax -> SoA Storage
 
 Example struct:
 
@@ -274,8 +258,8 @@ Player_hp[N]
 Access:
 
 ```
-p.posX  →  Player_posX[p.index]
-p.hp    →  Player_hp[p.index]
+p.posX  ->  Player_posX[p.index]
+p.hp    ->  Player_hp[p.index]
 ```
 
 ### 4.3 Assignment
@@ -306,7 +290,7 @@ Bounds checking rules may be:
 
 # **6. Expressions**
 
-Stasis expressions allow infix arithmetic/comparison with TypeScript-style precedence (`||`, `&&`, equality, relational, additive, multiplicative) plus infix `=`/`+=`/`-=`/`*=` `/=` `%=`, and `&&`/`||` for logical flow. Operator-methods for arithmetic/comparison remain valid. A Pratt parser enforces precedence (assignments are right-associative).
+Stasis expressions allow infix arithmetic/comparison with TypeScript-style precedence (`||`, `&&`, equality, relational, additive, multiplicative) plus infix `=`/`+=`/`-=`/`*=` `/=` `%=`, and `&&`/`||` for logical flow. Operator-methods for arithmetic/comparison remain valid. Assignment operators are right-associative.
 
 ---
 
@@ -315,11 +299,11 @@ Stasis expressions allow infix arithmetic/comparison with TypeScript-style prece
 ## 6.1 Arithmetic Operators
 
 ```
-.+(rhs)    → add
-.-(rhs)    → subtract
-.*(rhs)    → multiply
-./(rhs)    → divide
-.%(rhs)    → modulo
+.+(rhs)    -> add
+.-(rhs)    -> subtract
+.*(rhs)    -> multiply
+./(rhs)    -> divide
+.%(rhs)    -> modulo
 ```
 
 ### Lowering (WASM example)
@@ -523,7 +507,7 @@ Useful for JS interop, debugging, and memory inspection tools.
 
 # **14. Compiler Architecture**
 
-## Phase 1 — Signature Discovery
+## Phase 1 - Signature Discovery
 
 Scan all files, collect:
 
@@ -534,7 +518,7 @@ Scan all files, collect:
 
 Skip bodies.
 
-## Phase 2 — Dependency and Tree-Shaking
+## Phase 2 - Dependency and Tree-Shaking
 
 Process exported + test functions as roots.
 
@@ -542,7 +526,7 @@ Parse bodies on-demand.
 
 Mark reachable declarations.
 
-## Phase 3 — WASM/LLVM Code Generation
+## Phase 3 - WASM/LLVM Code Generation
 
 Lower each reachable function.
 
@@ -559,7 +543,7 @@ Generate:
 
 ### Struct Lowering
 
-AoS syntax → flat arrays:
+AoS syntax -> flat arrays:
 
 Example:
 
@@ -593,7 +577,7 @@ Compiles to:
 
 # **16. LL(1) Grammar (Final)**
 
-(You requested a clean formal version; already delivered, not duplicating here unless you want them merged together.)
+See `docs/compilation.md` for the LL(1) grammar used by the compiler.
 
 ---
 
@@ -635,16 +619,16 @@ function damage(e: Enemy, amt: u8): void {
 
 | Feature                        | Status       |
 | ------------------------------ | ------------ |
-| Static memory                  | ✔ required   |
-| AoS syntax → SoA memory        | ✔ automatic  |
-| No dynamic allocation          | ✔            |
-| Infix arith/compare + method calls | ✔ available |
-| Assignment via `=`, `+=`, `-=`, `*=`, `/=`, `%=` | ✔ |
-| Infix ops beyond these             | ✖ none in v1 |
-| Function signatures first pass | ✔            |
-| Tree shaking                   | ✔            |
-| LLVM backend                   | ✔            |
-| Cranelift backend (debug)      | ✔ (experimental) |
-| WASM backend                   | ✔            |
-| Deterministic behavior         | ✔            |
-| Suitable for parallel analysis | ✔            |
+| Static memory                      | required |
+| AoS syntax -> SoA memory            | automatic |
+| No dynamic allocation              | required |
+| Infix arith/compare + method calls | available |
+| Assignment via `=`, `+=`, `-=`, `*=`, `/=`, `%=` | available |
+| Infix ops beyond these             | none in v1 |
+| Function signatures first pass     | yes |
+| Tree shaking                       | yes |
+| LLVM backend                       | yes |
+| Cranelift backend (debug)          | experimental |
+| WASM backend                       | yes |
+| Deterministic behavior             | required |
+| Suitable for parallel analysis     | yes |

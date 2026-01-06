@@ -16,20 +16,20 @@ import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_func.stasis";
 
 function llvm_reset(): void {
-    st.llvm_local_count = 0;
-    st.llvm_tmp_id = 0;
-    st.llvm_label_id = 0;
-    st.llvm_bb_terminated = 0;
-    st.llvm_place_len = 0;
-    st.llvm_place_kind = LlvmValueKind.I32;
-    st.llvm_place_struct_idx = -1;
-    st.llvm_block_len = 0;
+    stasis.llvm_local_count = 0;
+    stasis.llvm_tmp_id = 0;
+    stasis.llvm_label_id = 0;
+    stasis.llvm_bb_terminated = 0;
+    stasis.llvm_place_len = 0;
+    stasis.llvm_place_kind = LlvmValueKind.I32;
+    stasis.llvm_place_struct_idx = -1;
+    stasis.llvm_block_len = 0;
 }
 
 function llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.llvm_local_count; i = i + 1) {
-        if (span_eq_span(file_idx, name_start, name_len, st.llvm_local_name_start[i], st.llvm_local_name_len[i])) {
+    for (i = 0; i < stasis.llvm_local_count; i = i + 1) {
+        if (span_eq_span(file_idx, name_start, name_len, stasis.llvm_local_name_start[i], stasis.llvm_local_name_len[i])) {
             return i;
         }
     }
@@ -37,7 +37,7 @@ function llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
 }
 
 function llvm_add_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
-    if (st.llvm_local_count >= 1024) {
+    if (stasis.llvm_local_count >= 1024) {
         build_err_at(file_idx, "too many locals (llvm)", name_start);
         return -1;
     }
@@ -46,110 +46,110 @@ function llvm_add_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
         return -1;
     }
 
-    let id: i32 = st.llvm_local_count;
-    st.llvm_local_name_start[id] = name_start;
-    st.llvm_local_name_len[id] = name_len;
-    st.llvm_local_kind[id] = LlvmValueKind.I32;
-    st.llvm_local_count = st.llvm_local_count + 1;
+    let id: i32 = stasis.llvm_local_count;
+    stasis.llvm_local_name_start[id] = name_start;
+    stasis.llvm_local_name_len[id] = name_len;
+    stasis.llvm_local_kind[id] = LlvmValueKind.I32;
+    stasis.llvm_local_count = stasis.llvm_local_count + 1;
     return id;
 }
 
 function llvm_append_local_ptr(local_id: i32): void {
-    ascii_append(st.ir_out, "%l");
-    ir_append_i32(st.ir_out, local_id);
+    ascii_append(stasis.ir_out, "%l");
+    ir_append_i32(stasis.ir_out, local_id);
 }
 
 function llvm_append_tmp(tmp_id: i32): void {
-    ascii_append(st.ir_out, "%t");
-    ir_append_i32(st.ir_out, tmp_id);
+    ascii_append(stasis.ir_out, "%t");
+    ir_append_i32(stasis.ir_out, tmp_id);
 }
 
 function llvm_new_tmp(): i32 {
-    let id: i32 = st.llvm_tmp_id;
-    st.llvm_tmp_id = st.llvm_tmp_id + 1;
+    let id: i32 = stasis.llvm_tmp_id;
+    stasis.llvm_tmp_id = stasis.llvm_tmp_id + 1;
     return id;
 }
 
 function llvm_new_label(): i32 {
-    let id: i32 = st.llvm_label_id;
-    st.llvm_label_id = st.llvm_label_id + 1;
+    let id: i32 = stasis.llvm_label_id;
+    stasis.llvm_label_id = stasis.llvm_label_id + 1;
     return id;
 }
 
 function llvm_append_label(prefix: ascii[], id: i32): void {
-    ascii_append(st.ir_out, prefix);
-    ir_append_i32(st.ir_out, id);
+    ascii_append(stasis.ir_out, prefix);
+    ir_append_i32(stasis.ir_out, id);
 }
 
 function llvm_emit_label_def(prefix: ascii[], id: i32): void {
     llvm_append_label(prefix, id);
-    ascii_append(st.ir_out, ":\n");
-    st.llvm_bb_terminated = 0;
+    ascii_append(stasis.ir_out, ":\n");
+    stasis.llvm_bb_terminated = 0;
 }
 
 function llvm_emit_br(prefix: ascii[], id: i32): void {
-    ascii_append(st.ir_out, "  br label %");
+    ascii_append(stasis.ir_out, "  br label %");
     llvm_append_label(prefix, id);
-    ascii_append(st.ir_out, "\n");
-    st.llvm_bb_terminated = 1;
+    ascii_append(stasis.ir_out, "\n");
+    stasis.llvm_bb_terminated = 1;
 }
 
 function llvm_emit_br_i1(cond_i1_id: i32, then_prefix: ascii[], then_id: i32, else_prefix: ascii[], else_id: i32): void {
-    ascii_append(st.ir_out, "  br i1 ");
+    ascii_append(stasis.ir_out, "  br i1 ");
     llvm_append_tmp(cond_i1_id);
-    ascii_append(st.ir_out, ", label %");
+    ascii_append(stasis.ir_out, ", label %");
     llvm_append_label(then_prefix, then_id);
-    ascii_append(st.ir_out, ", label %");
+    ascii_append(stasis.ir_out, ", label %");
     llvm_append_label(else_prefix, else_id);
-    ascii_append(st.ir_out, "\n");
-    st.llvm_bb_terminated = 1;
+    ascii_append(stasis.ir_out, "\n");
+    stasis.llvm_bb_terminated = 1;
 }
 
 function llvm_emit_const_i32(v: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = add i32 0, ");
-    ir_append_i32(st.ir_out, v);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, " = add i32 0, ");
+    ir_append_i32(stasis.ir_out, v);
+    ascii_append(stasis.ir_out, "\n");
     return id;
 }
 
 function llvm_emit_const_f32_from_span(file_idx: i32, start: i32, len: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = fadd float 0.0, ");
-    ir_append_span(st.ir_out, file_idx, start, len);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, " = fadd float 0.0, ");
+    ir_append_span(stasis.ir_out, file_idx, start, len);
+    ascii_append(stasis.ir_out, "\n");
     return id;
 }
 
 function llvm_emit_icmp_i1(pred: ascii[], a_id: i32, b_imm: i32): i32 {
     let id_cmp: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id_cmp);
-    ascii_append(st.ir_out, " = icmp ");
-    ascii_append(st.ir_out, pred);
-    ascii_append(st.ir_out, " i32 ");
+    ascii_append(stasis.ir_out, " = icmp ");
+    ascii_append(stasis.ir_out, pred);
+    ascii_append(stasis.ir_out, " i32 ");
     llvm_append_tmp(a_id);
-    ascii_append(st.ir_out, ", ");
-    ir_append_i32(st.ir_out, b_imm);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, ", ");
+    ir_append_i32(stasis.ir_out, b_imm);
+    ascii_append(stasis.ir_out, "\n");
     return id_cmp;
 }
 
 function llvm_emit_logic_i1(op: ascii[], a_i1_id: i32, b_i1_id: i32): i32 {
     let out_i1: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(out_i1);
-    ascii_append(st.ir_out, " = ");
-    ascii_append(st.ir_out, op);
-    ascii_append(st.ir_out, " i1 ");
+    ascii_append(stasis.ir_out, " = ");
+    ascii_append(stasis.ir_out, op);
+    ascii_append(stasis.ir_out, " i1 ");
     llvm_append_tmp(a_i1_id);
-    ascii_append(st.ir_out, ", ");
+    ascii_append(stasis.ir_out, ", ");
     llvm_append_tmp(b_i1_id);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, "\n");
     return out_i1;
 }
 
@@ -161,193 +161,193 @@ function llvm_emit_range_i1(a_id: i32, lo: i32, hi: i32): i32 {
 
 function llvm_emit_zext_i1_to_i32(i1_id: i32): i32 {
     let out_i32: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(out_i32);
-    ascii_append(st.ir_out, " = zext i1 ");
+    ascii_append(stasis.ir_out, " = zext i1 ");
     llvm_append_tmp(i1_id);
-    ascii_append(st.ir_out, " to i32\n");
+    ascii_append(stasis.ir_out, " to i32\n");
     return out_i32;
 }
 
 function llvm_emit_select_i32(cond_i1: i32, then_i32: i32, else_i32: i32): i32 {
     let out_i32: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(out_i32);
-    ascii_append(st.ir_out, " = select i1 ");
+    ascii_append(stasis.ir_out, " = select i1 ");
     llvm_append_tmp(cond_i1);
-    ascii_append(st.ir_out, ", i32 ");
+    ascii_append(stasis.ir_out, ", i32 ");
     llvm_append_tmp(then_i32);
-    ascii_append(st.ir_out, ", i32 ");
+    ascii_append(stasis.ir_out, ", i32 ");
     llvm_append_tmp(else_i32);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, "\n");
     return out_i32;
 }
 
 function llvm_emit_load_local(local_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = load i32, ptr ");
+    ascii_append(stasis.ir_out, " = load i32, ptr ");
     llvm_append_local_ptr(local_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
     return id;
 }
 
 function llvm_emit_store_local(local_id: i32, value_id: i32): void {
-    ascii_append(st.ir_out, "  store i32 ");
+    ascii_append(stasis.ir_out, "  store i32 ");
     llvm_append_tmp(value_id);
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_local_ptr(local_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
 }
 
 function llvm_emit_load_ptr_from_local(local_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = load ptr, ptr ");
+    ascii_append(stasis.ir_out, " = load ptr, ptr ");
     llvm_append_local_ptr(local_id);
-    ascii_append(st.ir_out, ", align 8\n");
+    ascii_append(stasis.ir_out, ", align 8\n");
     return id;
 }
 
 function llvm_emit_gep0_local_i32(local_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = getelementptr inbounds i32, ptr ");
+    ascii_append(stasis.ir_out, " = getelementptr inbounds i32, ptr ");
     llvm_append_local_ptr(local_id);
-    ascii_append(st.ir_out, ", i32 0\n");
+    ascii_append(stasis.ir_out, ", i32 0\n");
     return id;
 }
 
 function llvm_emit_gep0_local_f32(local_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = getelementptr inbounds float, ptr ");
+    ascii_append(stasis.ir_out, " = getelementptr inbounds float, ptr ");
     llvm_append_local_ptr(local_id);
-    ascii_append(st.ir_out, ", i32 0\n");
+    ascii_append(stasis.ir_out, ", i32 0\n");
     return id;
 }
 
 function llvm_emit_gep0_global(global_idx: i32, type_idx: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = getelementptr inbounds ");
+    ascii_append(stasis.ir_out, " = getelementptr inbounds ");
     if (llvm_emit_type(type_idx) != 0) {
         return -1;
     }
-    ascii_append(st.ir_out, ", ptr @");
+    ascii_append(stasis.ir_out, ", ptr @");
     llvm_append_global_ir_name(global_idx);
-    ascii_append(st.ir_out, ", i32 0\n");
+    ascii_append(stasis.ir_out, ", i32 0\n");
     return id;
 }
 
 function llvm_emit_load_i32_from_ptr(ptr_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = load i32, ptr ");
+    ascii_append(stasis.ir_out, " = load i32, ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
     return id;
 }
 
 function llvm_emit_load_f32_from_ptr(ptr_id: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = load float, ptr ");
+    ascii_append(stasis.ir_out, " = load float, ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
     return id;
 }
 
 function llvm_emit_load_i8_zext_from_ptr(ptr_id: i32): i32 {
     let id8: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id8);
-    ascii_append(st.ir_out, " = load i8, ptr ");
+    ascii_append(stasis.ir_out, " = load i8, ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 1\n");
+    ascii_append(stasis.ir_out, ", align 1\n");
 
     let id32: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id32);
-    ascii_append(st.ir_out, " = zext i8 ");
+    ascii_append(stasis.ir_out, " = zext i8 ");
     llvm_append_tmp(id8);
-    ascii_append(st.ir_out, " to i32\n");
+    ascii_append(stasis.ir_out, " to i32\n");
     return id32;
 }
 
 function llvm_emit_store_i32_to_ptr(ptr_id: i32, value_id: i32): void {
-    ascii_append(st.ir_out, "  store i32 ");
+    ascii_append(stasis.ir_out, "  store i32 ");
     llvm_append_tmp(value_id);
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
 }
 
 function llvm_emit_store_f32_to_ptr(ptr_id: i32, value_id: i32): void {
-    ascii_append(st.ir_out, "  store float ");
+    ascii_append(stasis.ir_out, "  store float ");
     llvm_append_tmp(value_id);
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 4\n");
+    ascii_append(stasis.ir_out, ", align 4\n");
 }
 
 function llvm_emit_store_i8_trunc_to_ptr(ptr_id: i32, value_id: i32): void {
     let id8: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id8);
-    ascii_append(st.ir_out, " = trunc i32 ");
+    ascii_append(stasis.ir_out, " = trunc i32 ");
     llvm_append_tmp(value_id);
-    ascii_append(st.ir_out, " to i8\n");
+    ascii_append(stasis.ir_out, " to i8\n");
 
-    ascii_append(st.ir_out, "  store i8 ");
+    ascii_append(stasis.ir_out, "  store i8 ");
     llvm_append_tmp(id8);
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_tmp(ptr_id);
-    ascii_append(st.ir_out, ", align 1\n");
+    ascii_append(stasis.ir_out, ", align 1\n");
 }
 
 function llvm_emit_gep_struct_field(base_ptr_id: i32, struct_idx: i32, field_rel: i32): i32 {
     let id: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(st.ir_out, " = getelementptr inbounds %");
+    ascii_append(stasis.ir_out, " = getelementptr inbounds %");
     llvm_append_struct_ir_name(struct_idx);
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_tmp(base_ptr_id);
-    ascii_append(st.ir_out, ", i32 0, i32 ");
-    ir_append_i32(st.ir_out, field_rel);
-    ascii_append(st.ir_out, "\n");
+    ascii_append(stasis.ir_out, ", i32 0, i32 ");
+    ir_append_i32(stasis.ir_out, field_rel);
+    ascii_append(stasis.ir_out, "\n");
     return id;
 }
 
 function llvm_ptr_kind_for_elem_type(file_idx: i32, at: i32, elem_type_idx: i32): i32 {
     if (build_type_is_byte_named(elem_type_idx)) {
-        st.llvm_place_kind = LlvmValueKind.PtrI8;
-        st.llvm_place_struct_idx = -1;
+        stasis.llvm_place_kind = LlvmValueKind.PtrI8;
+        stasis.llvm_place_struct_idx = -1;
         return 0;
     }
     if (build_type_is_i32ish(elem_type_idx)) {
-        st.llvm_place_kind = LlvmValueKind.PtrI32;
-        st.llvm_place_struct_idx = -1;
+        stasis.llvm_place_kind = LlvmValueKind.PtrI32;
+        stasis.llvm_place_struct_idx = -1;
         return 0;
     }
     if (build_type_is_f32(elem_type_idx)) {
-        st.llvm_place_kind = LlvmValueKind.PtrF32;
-        st.llvm_place_struct_idx = -1;
+        stasis.llvm_place_kind = LlvmValueKind.PtrF32;
+        stasis.llvm_place_struct_idx = -1;
         return 0;
     }
 
     let si: i32 = build_find_struct_decl_for_type(elem_type_idx);
     if (si >= 0) {
-        st.llvm_place_kind = LlvmValueKind.PtrStruct;
-        st.llvm_place_struct_idx = si;
+        stasis.llvm_place_kind = LlvmValueKind.PtrStruct;
+        stasis.llvm_place_struct_idx = si;
         return 0;
     }
 
@@ -356,18 +356,18 @@ function llvm_ptr_kind_for_elem_type(file_idx: i32, at: i32, elem_type_idx: i32)
 }
 
 function llvm_decay_fixed_array_ptr(file_idx: i32, at: i32, array_ptr_id: i32, array_type_idx: i32): i32 {
-    if (array_type_idx < 0 || array_type_idx >= st.type_count) {
+    if (array_type_idx < 0 || array_type_idx >= stasis.type_count) {
         return -1;
     }
-    let kind: TypeKind = st.types[array_type_idx].kind;
+    let kind: TypeKind = stasis.types[array_type_idx].kind;
     if (kind != TypeKind.Array) {
         return -1;
     }
-    if (st.types[array_type_idx].size <= 0) {
+    if (stasis.types[array_type_idx].size <= 0) {
         return -1;
     }
 
-    let elem: i32 = st.types[array_type_idx].elem;
+    let elem: i32 = stasis.types[array_type_idx].elem;
     let header_bytes: i32 = build_header_bytes_for_elem(elem);
 
     if (llvm_ptr_kind_for_elem_type(file_idx, at, elem) != 0) {
@@ -376,31 +376,31 @@ function llvm_decay_fixed_array_ptr(file_idx: i32, at: i32, array_ptr_id: i32, a
 
     // For ascii/utf8 arrays, we model the whole allocation as [N+header x i8] and decay to ptr i8 after the header.
     if (header_bytes != 0) {
-        st.llvm_place_kind = LlvmValueKind.PtrI8;
-        st.llvm_place_struct_idx = -1;
+        stasis.llvm_place_kind = LlvmValueKind.PtrI8;
+        stasis.llvm_place_struct_idx = -1;
     }
 
     let elem0_ptr: i32 = llvm_new_tmp();
-    ascii_append(st.ir_out, "  ");
+    ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(elem0_ptr);
-    ascii_append(st.ir_out, " = getelementptr inbounds ");
+    ascii_append(stasis.ir_out, " = getelementptr inbounds ");
     if (llvm_emit_type(array_type_idx) != 0) {
         return -1;
     }
-    ascii_append(st.ir_out, ", ptr ");
+    ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_tmp(array_ptr_id);
-    ascii_append(st.ir_out, ", i32 0, i32 0\n");
+    ascii_append(stasis.ir_out, ", i32 0, i32 0\n");
 
     let data_ptr: i32 = elem0_ptr;
     if (header_bytes != 0) {
         let data_ptr2: i32 = llvm_new_tmp();
-        ascii_append(st.ir_out, "  ");
+        ascii_append(stasis.ir_out, "  ");
         llvm_append_tmp(data_ptr2);
-        ascii_append(st.ir_out, " = getelementptr inbounds i8, ptr ");
+        ascii_append(stasis.ir_out, " = getelementptr inbounds i8, ptr ");
         llvm_append_tmp(elem0_ptr);
-        ascii_append(st.ir_out, ", i32 ");
-        ir_append_i32(st.ir_out, header_bytes);
-        ascii_append(st.ir_out, "\n");
+        ascii_append(stasis.ir_out, ", i32 ");
+        ir_append_i32(stasis.ir_out, header_bytes);
+        ascii_append(stasis.ir_out, "\n");
         data_ptr = data_ptr2;
     }
 
@@ -408,18 +408,18 @@ function llvm_decay_fixed_array_ptr(file_idx: i32, at: i32, array_ptr_id: i32, a
 }
 
 function llvm_ensure_bb_open(): void {
-    if (st.llvm_bb_terminated != 0) {
+    if (stasis.llvm_bb_terminated != 0) {
         let dead_id: i32 = llvm_new_label();
         llvm_emit_label_def("dead", dead_id);
     }
 }
 
 function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
-    st.lex_pos = body_start;
+    stasis.lex_pos = body_start;
 
     let k: Tok = lex_next_kind();
     if (k != Tok.LBrace) {
-        build_err_at(file_idx, "expected '{' at start of function body", st.tok_start);
+        build_err_at(file_idx, "expected '{' at start of function body", stasis.tok_start);
         return 1;
     }
 
@@ -427,7 +427,7 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
     for (; depth > 0; ) {
         k = lex_next_kind();
         if (k == Tok.Eof) {
-            build_err_at(file_idx, "unexpected eof in function body", st.tok_start);
+            build_err_at(file_idx, "unexpected eof in function body", stasis.tok_start);
             return 1;
         }
 
@@ -440,17 +440,17 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                 if (k == Tok.LetKeyword) {
                     let name_k: Tok = lex_next_kind();
                     if (name_k != Tok.Identifier) {
-                        build_err_at(file_idx, "expected variable name", st.tok_start);
+                        build_err_at(file_idx, "expected variable name", stasis.tok_start);
                         return 1;
                     }
 
-                    let local_id: i32 = llvm_add_local(file_idx, st.tok_start, st.tok_len);
+                    let local_id: i32 = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
                     if (local_id < 0) {
                         return 1;
                     }
 
-                    st.llvm_local_declared[local_id] = 0;
-                    st.llvm_local_declared_at[local_id] = st.tok_start;
+                    stasis.llvm_local_declared[local_id] = 0;
+                    stasis.llvm_local_declared_at[local_id] = stasis.tok_start;
 
                     // Best-effort: infer the local kind from an explicit type annotation so we can emit correct allocas.
                     // Keep this minimal; full type parsing happens in the real codegen pass.
@@ -458,11 +458,11 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                     if (next_k == Tok.Colon) {
                         let ty_k: Tok = lex_next_kind();
                         if (ty_k != Tok.Identifier) {
-                            build_err_at(file_idx, "expected type name", st.tok_start);
+                            build_err_at(file_idx, "expected type name", stasis.tok_start);
                             return 1;
                         }
-                        if (span_eq(file_idx, st.tok_start, st.tok_len, "f32")) {
-                            st.llvm_local_kind[local_id] = LlvmValueKind.F32;
+                        if (span_eq(file_idx, stasis.tok_start, stasis.tok_len, "f32")) {
+                            stasis.llvm_local_kind[local_id] = LlvmValueKind.F32;
                         }
                     }
                 }

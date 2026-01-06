@@ -3,15 +3,15 @@ import "state.stasis";
 import "imports.stasis";
 
 function print_file_loc(file_idx: i32, at: i32): void {
-    if (!copy_file_path(st.sig_path, file_idx)) {
-        ascii_copy(st.sig_path, "<unknown>");
+    if (!copy_file_path(stasis.sig_path, file_idx)) {
+        ascii_copy(stasis.sig_path, "<unknown>");
     }
 
     let base: i32 = 0;
     let len: i32 = 0;
-    if (file_idx >= 0 && file_idx < st.file_count) {
-        base = st.files[file_idx].offset;
-        len = st.files[file_idx].len;
+    if (file_idx >= 0 && file_idx < stasis.file_count) {
+        base = stasis.files[file_idx].offset;
+        len = stasis.files[file_idx].len;
     }
 
     let limit: i32 = at;
@@ -27,7 +27,7 @@ function print_file_loc(file_idx: i32, at: i32): void {
 
     let i: i32 = 0;
     for (i = 0; i < limit; i = i + 1) {
-        let b: u8 = st.pool[base + i];
+        let b: u8 = stasis.pool[base + i];
         if (b == 10) {
             line = line + 1;
             col = 1;
@@ -38,7 +38,7 @@ function print_file_loc(file_idx: i32, at: i32): void {
         }
     }
 
-    print_string(st.sig_path);
+    print_string(stasis.sig_path);
     print_char(58); // ':'
     print_int(line);
     print_char(58); // ':'

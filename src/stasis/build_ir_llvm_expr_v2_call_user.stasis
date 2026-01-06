@@ -9,16 +9,16 @@ import "build_ir_llvm_types.stasis";
 import "build_ir_llvm_builder.stasis";
 
 function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_expr: i32, argc: i32, arg_base: i32): i32 {
-    let fn_idx0: i32 = llvm_resolve_callee_func(file_idx, callee_expr, st.expr_nodes[idx2].at);
+    let fn_idx0: i32 = llvm_resolve_callee_func(file_idx, callee_expr, stasis.expr_nodes[idx2].at);
     if (fn_idx0 < 0) {
         return -1;
     }
-    if (st.funcs[fn_idx0].body_start < 0) {
-        build_err_at(file_idx, "function has no body (call)", st.expr_nodes[idx2].at);
+    if (stasis.funcs[fn_idx0].body_start < 0) {
+        build_err_at(file_idx, "function has no body (call)", stasis.expr_nodes[idx2].at);
         return -1;
     }
 
-    let ret_ty: i32 = st.funcs[fn_idx0].ret_type_idx;
+    let ret_ty: i32 = stasis.funcs[fn_idx0].ret_type_idx;
     let ret_is_void: i32 = 0;
     let ret_is_f32: i32 = 0;
     if (ret_ty < 0 || build_type_is_void(ret_ty)) {
@@ -28,49 +28,49 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
             ret_is_f32 = 1;
         } else {
             if (!build_type_is_i32ish(ret_ty) && !build_type_is_byte_named(ret_ty)) {
-                build_err_at(file_idx, "unsupported call return type (llvm bring-up)", st.expr_nodes[idx2].at);
+                build_err_at(file_idx, "unsupported call return type (llvm bring-up)", stasis.expr_nodes[idx2].at);
                 return -1;
             }
         }
     }
-    if (st.funcs[fn_idx0].params_len != argc) {
-        build_err_at(file_idx, "call arg count mismatch", st.expr_nodes[idx2].at);
+    if (stasis.funcs[fn_idx0].params_len != argc) {
+        build_err_at(file_idx, "call arg count mismatch", stasis.expr_nodes[idx2].at);
         return -1;
     }
 
     let pi: i32 = 0;
     for (pi = 0; pi < argc; pi = pi + 1) {
-        let p_decl: i32 = st.funcs[fn_idx0].params_off + pi;
-        if (p_decl < 0 || p_decl >= st.param_count) {
-            build_err_at(file_idx, "invalid function parameters", st.expr_nodes[idx2].at);
+        let p_decl: i32 = stasis.funcs[fn_idx0].params_off + pi;
+        if (p_decl < 0 || p_decl >= stasis.param_count) {
+            build_err_at(file_idx, "invalid function parameters", stasis.expr_nodes[idx2].at);
             return -1;
         }
 
-        let p_ty: i32 = st.params[p_decl].type_idx;
-        if (p_ty < 0 || p_ty >= st.type_count) {
-            build_err_at(file_idx, "invalid call arg type (llvm bring-up)", st.expr_nodes[idx2].at);
+        let p_ty: i32 = stasis.params[p_decl].type_idx;
+        if (p_ty < 0 || p_ty >= stasis.type_count) {
+            build_err_at(file_idx, "invalid call arg type (llvm bring-up)", stasis.expr_nodes[idx2].at);
             return -1;
         }
 
         if (build_type_is_f32(p_ty)) {
-            if (st.llvm_val_kind[arg_base + pi] != LlvmValueKind.F32) {
-                build_err_at(file_idx, "invalid call arg value (expected f32)", st.expr_nodes[idx2].at);
+            if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.F32) {
+                build_err_at(file_idx, "invalid call arg value (expected f32)", stasis.expr_nodes[idx2].at);
                 return -1;
             }
         } else {
             if (build_type_is_i32ish(p_ty) || build_type_is_byte_named(p_ty)) {
-                if (st.llvm_val_kind[arg_base + pi] != LlvmValueKind.I32) {
-                    build_err_at(file_idx, "invalid call arg value (expected i32)", st.expr_nodes[idx2].at);
+                if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.I32) {
+                    build_err_at(file_idx, "invalid call arg value (expected i32)", stasis.expr_nodes[idx2].at);
                     return -1;
                 }
             } else {
-                let pk: TypeKind = st.types[p_ty].kind;
+                let pk: TypeKind = stasis.types[p_ty].kind;
                 if (pk != TypeKind.Array) {
-                    build_err_at(file_idx, "unsupported call arg type (llvm bring-up)", st.expr_nodes[idx2].at);
+                    build_err_at(file_idx, "unsupported call arg type (llvm bring-up)", stasis.expr_nodes[idx2].at);
                     return -1;
                 }
 
-                let elem: i32 = st.types[p_ty].elem;
+                let elem: i32 = stasis.types[p_ty].elem;
                 let expected_ptr: LlvmValueKind = LlvmValueKind.PtrI8;
                 if (build_type_is_byte_named(elem)) {
                     expected_ptr = LlvmValueKind.PtrI8;
@@ -81,14 +81,14 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
                         if (build_type_is_f32(elem)) {
                             expected_ptr = LlvmValueKind.PtrF32;
                         } else {
-                            build_err_at(file_idx, "unsupported call arg element type (llvm bring-up)", st.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unsupported call arg element type (llvm bring-up)", stasis.expr_nodes[idx2].at);
                             return -1;
                         }
                     }
                 }
 
-                if (st.llvm_val_kind[arg_base + pi] != expected_ptr) {
-                    build_err_at(file_idx, "invalid call arg value (expected pointer)", st.expr_nodes[idx2].at);
+                if (stasis.llvm_val_kind[arg_base + pi] != expected_ptr) {
+                    build_err_at(file_idx, "invalid call arg value (expected pointer)", stasis.expr_nodes[idx2].at);
                     return -1;
                 }
             }
@@ -97,61 +97,61 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
 
     let out_id0: i32 = 0;
     if (ret_is_void != 0) {
-        ascii_append(st.ir_out, "  call void @");
+        ascii_append(stasis.ir_out, "  call void @");
     } else {
         out_id0 = llvm_new_tmp();
-        ascii_append(st.ir_out, "  ");
+        ascii_append(stasis.ir_out, "  ");
         llvm_append_tmp(out_id0);
-        ascii_append(st.ir_out, " = call ");
+        ascii_append(stasis.ir_out, " = call ");
         if (ret_is_f32 != 0) {
-            ascii_append(st.ir_out, "float @");
+            ascii_append(stasis.ir_out, "float @");
         } else {
-            ascii_append(st.ir_out, "i32 @");
+            ascii_append(stasis.ir_out, "i32 @");
         }
     }
     llvm_append_func_ir_name(fn_idx0);
-    ascii_append(st.ir_out, "(");
+    ascii_append(stasis.ir_out, "(");
 
     for (pi = 0; pi < argc; pi = pi + 1) {
         if (pi != 0) {
-            ascii_append(st.ir_out, ", ");
+            ascii_append(stasis.ir_out, ", ");
         }
 
-        let p_decl2: i32 = st.funcs[fn_idx0].params_off + pi;
-        if (p_decl2 < 0 || p_decl2 >= st.param_count) {
+        let p_decl2: i32 = stasis.funcs[fn_idx0].params_off + pi;
+        if (p_decl2 < 0 || p_decl2 >= stasis.param_count) {
             return -1;
         }
-        let p_ty2: i32 = st.params[p_decl2].type_idx;
-        if (p_ty2 < 0 || p_ty2 >= st.type_count) {
+        let p_ty2: i32 = stasis.params[p_decl2].type_idx;
+        if (p_ty2 < 0 || p_ty2 >= stasis.type_count) {
             return -1;
         }
 
         if (build_type_is_f32(p_ty2)) {
-            ascii_append(st.ir_out, "float ");
+            ascii_append(stasis.ir_out, "float ");
         } else {
             if (build_type_is_i32ish(p_ty2) || build_type_is_byte_named(p_ty2)) {
-                ascii_append(st.ir_out, "i32 ");
+                ascii_append(stasis.ir_out, "i32 ");
             } else {
-                ascii_append(st.ir_out, "ptr ");
+                ascii_append(stasis.ir_out, "ptr ");
             }
         }
-        llvm_append_tmp(st.expr_op_at[arg_base + pi]);
+        llvm_append_tmp(stasis.expr_op_at[arg_base + pi]);
     }
 
-    ascii_append(st.ir_out, ")\n");
+    ascii_append(stasis.ir_out, ")\n");
 
     let val_len2: i32 = arg_base;
     if (ret_is_void != 0) {
-        st.expr_op_at[val_len2] = 0;
-        st.llvm_val_kind[val_len2] = LlvmValueKind.Void;
+        stasis.expr_op_at[val_len2] = 0;
+        stasis.llvm_val_kind[val_len2] = LlvmValueKind.Void;
     } else {
-        st.expr_op_at[val_len2] = out_id0;
+        stasis.expr_op_at[val_len2] = out_id0;
         if (ret_is_f32 != 0) {
-            st.llvm_val_kind[val_len2] = LlvmValueKind.F32;
+            stasis.llvm_val_kind[val_len2] = LlvmValueKind.F32;
         } else {
-            st.llvm_val_kind[val_len2] = LlvmValueKind.I32;
+            stasis.llvm_val_kind[val_len2] = LlvmValueKind.I32;
         }
     }
-    st.llvm_val_struct_idx[val_len2] = -1;
+    stasis.llvm_val_struct_idx[val_len2] = -1;
     return val_len2 + 1;
 }

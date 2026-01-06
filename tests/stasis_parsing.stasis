@@ -54,9 +54,9 @@ test `stasis parse balance ok`() {
         return false;
     }
 
-    st.parse_quiet = 0;
+    stasis.parse_quiet = 0;
     let errors: i32 = t_parse_errors(t_path_ok);
-    return errors == 0 && st.lex_error_count == 0;
+    return errors == 0 && stasis.lex_error_count == 0;
 }
 
 test `stasis parse balance missing brace`() {
@@ -72,7 +72,7 @@ test `stasis parse balance missing brace`() {
         return false;
     }
 
-    st.parse_quiet = 1;
+    stasis.parse_quiet = 1;
     let errors: i32 = t_parse_errors(t_path_bad);
     return errors != 0;
 }

@@ -17,12 +17,12 @@ import "build_ir_llvm_emit_func.stasis";
 
 function llvm_find_func_noargs_i32(file_idx: i32, name_start: i32, name_len: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.func_count; i = i + 1) {
-        if (st.funcs[i].is_test == 0) {
-            if (st.funcs[i].file_idx == file_idx) {
-                if (st.funcs[i].params_len == 0) {
-                    if (build_type_is_i32(st.funcs[i].ret_type_idx)) {
-                        if (span_eq_span(file_idx, name_start, name_len, st.funcs[i].name_start, st.funcs[i].name_len)) {
+    for (i = 0; i < stasis.func_count; i = i + 1) {
+        if (stasis.funcs[i].is_test == 0) {
+            if (stasis.funcs[i].file_idx == file_idx) {
+                if (stasis.funcs[i].params_len == 0) {
+                    if (build_type_is_i32(stasis.funcs[i].ret_type_idx)) {
+                        if (span_eq_span(file_idx, name_start, name_len, stasis.funcs[i].name_start, stasis.funcs[i].name_len)) {
                             return i;
                         }
                     }
@@ -34,17 +34,17 @@ function llvm_find_func_noargs_i32(file_idx: i32, name_start: i32, name_len: i32
 }
 
 function span_eq_span(file_idx: i32, a_start: i32, a_len: i32, b_start: i32, b_len: i32): bool {
-    if (file_idx < 0 || file_idx >= st.file_count) {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
         return false;
     }
     if (a_len != b_len) {
         return false;
     }
 
-    let base: i32 = st.files[file_idx].offset;
+    let base: i32 = stasis.files[file_idx].offset;
     let i: i32 = 0;
     for (i = 0; i < a_len; i = i + 1) {
-        if (st.pool[base + a_start + i] != st.pool[base + b_start + i]) {
+        if (stasis.pool[base + a_start + i] != stasis.pool[base + b_start + i]) {
             return false;
         }
     }
@@ -52,15 +52,15 @@ function span_eq_span(file_idx: i32, a_start: i32, a_len: i32, b_start: i32, b_l
 }
 
 function span_eq_span_cross(a_file_idx: i32, a_start: i32, a_len: i32, b_file_idx: i32, b_start: i32, b_len: i32): bool {
-    if (a_file_idx < 0 || a_file_idx >= st.file_count) { return false; }
-    if (b_file_idx < 0 || b_file_idx >= st.file_count) { return false; }
+    if (a_file_idx < 0 || a_file_idx >= stasis.file_count) { return false; }
+    if (b_file_idx < 0 || b_file_idx >= stasis.file_count) { return false; }
     if (a_len != b_len) { return false; }
 
-    let a_base: i32 = st.files[a_file_idx].offset + a_start;
-    let b_base: i32 = st.files[b_file_idx].offset + b_start;
+    let a_base: i32 = stasis.files[a_file_idx].offset + a_start;
+    let b_base: i32 = stasis.files[b_file_idx].offset + b_start;
     let i: i32 = 0;
     for (i = 0; i < a_len; i = i + 1) {
-        if (st.pool[a_base + i] != st.pool[b_base + i]) {
+        if (stasis.pool[a_base + i] != stasis.pool[b_base + i]) {
             return false;
         }
     }
@@ -68,19 +68,19 @@ function span_eq_span_cross(a_file_idx: i32, a_start: i32, a_len: i32, b_file_id
 }
 
 function span_eq_module_name(caller_file_idx: i32, mod_start: i32, mod_len: i32, module_file_idx: i32): bool {
-    if (caller_file_idx < 0 || caller_file_idx >= st.file_count) { return false; }
-    if (module_file_idx < 0 || module_file_idx >= st.file_count) { return false; }
+    if (caller_file_idx < 0 || caller_file_idx >= stasis.file_count) { return false; }
+    if (module_file_idx < 0 || module_file_idx >= stasis.file_count) { return false; }
 
-    let want_len: i32 = st.files[module_file_idx].mod_len;
+    let want_len: i32 = stasis.files[module_file_idx].mod_len;
     if (mod_len != want_len) {
         return false;
     }
 
-    let a_base: i32 = st.files[caller_file_idx].offset + mod_start;
-    let b_base: i32 = st.files[module_file_idx].mod_off;
+    let a_base: i32 = stasis.files[caller_file_idx].offset + mod_start;
+    let b_base: i32 = stasis.files[module_file_idx].mod_off;
     let i: i32 = 0;
     for (i = 0; i < mod_len; i = i + 1) {
-        if (st.pool[a_base + i] != st.mod_pool[b_base + i]) {
+        if (stasis.pool[a_base + i] != stasis.mod_pool[b_base + i]) {
             return false;
         }
     }
@@ -93,11 +93,11 @@ function llvm_find_imported_module(caller_file_idx: i32, mod_start: i32, mod_len
         return caller_file_idx;
     }
 
-    let imp_off: i32 = st.files[caller_file_idx].imports_off;
-    let imp_len: i32 = st.files[caller_file_idx].imports_len;
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let i: i32 = 0;
     for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = st.imports[imp_off + i];
+        let mod_file: i32 = stasis.imports[imp_off + i];
         if (span_eq_module_name(caller_file_idx, mod_start, mod_len, mod_file)) {
             return mod_file;
         }
@@ -107,10 +107,10 @@ function llvm_find_imported_module(caller_file_idx: i32, mod_start: i32, mod_len
 
 function llvm_find_func_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.func_count; i = i + 1) {
-        if (st.funcs[i].is_test == 0) {
-            if (st.funcs[i].file_idx == target_file_idx) {
-                if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, st.funcs[i].name_start, st.funcs[i].name_len)) {
+    for (i = 0; i < stasis.func_count; i = i + 1) {
+        if (stasis.funcs[i].is_test == 0) {
+            if (stasis.funcs[i].file_idx == target_file_idx) {
+                if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, stasis.funcs[i].name_start, stasis.funcs[i].name_len)) {
                     return i;
                 }
             }
@@ -121,9 +121,9 @@ function llvm_find_func_in_file(named_file_idx: i32, name_start: i32, name_len: 
 
 function llvm_find_global_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.global_count; i = i + 1) {
-        if (st.globals[i].file_idx == target_file_idx) {
-            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, st.globals[i].name_start, st.globals[i].name_len)) {
+    for (i = 0; i < stasis.global_count; i = i + 1) {
+        if (stasis.globals[i].file_idx == target_file_idx) {
+            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, stasis.globals[i].name_start, stasis.globals[i].name_len)) {
                 return i;
             }
         }
@@ -133,9 +133,9 @@ function llvm_find_global_in_file(named_file_idx: i32, name_start: i32, name_len
 
 function llvm_find_const_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.const_count; i = i + 1) {
-        if (st.consts[i].file_idx == target_file_idx) {
-            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, st.consts[i].name_start, st.consts[i].name_len)) {
+    for (i = 0; i < stasis.const_count; i = i + 1) {
+        if (stasis.consts[i].file_idx == target_file_idx) {
+            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, stasis.consts[i].name_start, stasis.consts[i].name_len)) {
                 return i;
             }
         }
@@ -149,13 +149,13 @@ function llvm_try_resolve_unqualified_const(caller_file_idx: i32, name_start: i3
         return local;
     }
 
-    let imp_off: i32 = st.files[caller_file_idx].imports_off;
-    let imp_len: i32 = st.files[caller_file_idx].imports_len;
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
     let i: i32 = 0;
     for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = st.imports[imp_off + i];
+        let mod_file: i32 = stasis.imports[imp_off + i];
         let hit: i32 = llvm_find_const_in_file(caller_file_idx, name_start, name_len, mod_file);
         if (hit >= 0) {
             if (found < 0) {
@@ -170,24 +170,24 @@ function llvm_try_resolve_unqualified_const(caller_file_idx: i32, name_start: i3
 }
 
 function llvm_eval_const_i32(caller_file_idx: i32, const_idx: i32, at: i32): i32 {
-    st.expr_eval_failed = 0;
-    if (const_idx < 0 || const_idx >= st.const_count) {
+    stasis.expr_eval_failed = 0;
+    if (const_idx < 0 || const_idx >= stasis.const_count) {
         build_err_at(caller_file_idx, "invalid const reference", at);
-        st.expr_eval_failed = 1;
+        stasis.expr_eval_failed = 1;
         return 0;
     }
 
-    let file_idx: i32 = st.consts[const_idx].file_idx;
-    let start: i32 = st.consts[const_idx].init_start;
-    if (file_idx < 0 || file_idx >= st.file_count || start < 0) {
+    let file_idx: i32 = stasis.consts[const_idx].file_idx;
+    let start: i32 = stasis.consts[const_idx].init_start;
+    if (file_idx < 0 || file_idx >= stasis.file_count || start < 0) {
         build_err_at(caller_file_idx, "const has no initializer", at);
-        st.expr_eval_failed = 1;
+        stasis.expr_eval_failed = 1;
         return 0;
     }
 
-    let base: i32 = st.files[file_idx].offset + start;
+    let base: i32 = stasis.files[file_idx].offset + start;
     let sign: i32 = 1;
-    if (st.pool[base] == 45) {
+    if (stasis.pool[base] == 45) {
         sign = -1;
         base = base + 1;
     }
@@ -196,7 +196,7 @@ function llvm_eval_const_i32(caller_file_idx: i32, const_idx: i32, at: i32): i32
     let i: i32 = 0;
     let done: i32 = 0;
     for (; done == 0; ) {
-        let b: u8 = st.pool[base + i];
+        let b: u8 = stasis.pool[base + i];
         if (!ascii_is_digit(b)) {
             done = 1;
         } else {
@@ -206,37 +206,37 @@ function llvm_eval_const_i32(caller_file_idx: i32, const_idx: i32, at: i32): i32
     }
     if (i == 0) {
         build_err_at(caller_file_idx, "unsupported const initializer (expected integer literal)", at);
-        st.expr_eval_failed = 1;
+        stasis.expr_eval_failed = 1;
         return 0;
     }
     return v * sign;
 }
 
 function llvm_emit_const_f32_from_const(caller_file_idx: i32, const_idx: i32, at: i32): i32 {
-    if (const_idx < 0 || const_idx >= st.const_count) {
+    if (const_idx < 0 || const_idx >= stasis.const_count) {
         build_err_at(caller_file_idx, "invalid const reference", at);
         return -1;
     }
 
-    let file_idx: i32 = st.consts[const_idx].file_idx;
-    let start: i32 = st.consts[const_idx].init_start;
-    if (file_idx < 0 || file_idx >= st.file_count || start < 0) {
+    let file_idx: i32 = stasis.consts[const_idx].file_idx;
+    let start: i32 = stasis.consts[const_idx].init_start;
+    if (file_idx < 0 || file_idx >= stasis.file_count || start < 0) {
         build_err_at(caller_file_idx, "const has no initializer", at);
         return -1;
     }
 
-    let base: i32 = st.files[file_idx].offset + start;
+    let base: i32 = stasis.files[file_idx].offset + start;
     let i: i32 = 0;
     let saw_digit: i32 = 0;
     let saw_dot: i32 = 0;
 
-    if (st.pool[base] == 45) {
+    if (stasis.pool[base] == 45) {
         i = 1;
     }
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        let b: u8 = st.pool[base + i];
+        let b: u8 = stasis.pool[base + i];
         if (ascii_is_digit(b)) {
             saw_digit = 1;
             i = i + 1;
@@ -260,9 +260,9 @@ function llvm_emit_const_f32_from_const(caller_file_idx: i32, const_idx: i32, at
 
 function llvm_find_enum_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
     let i: i32 = 0;
-    for (i = 0; i < st.enum_count; i = i + 1) {
-        if (st.enums[i].file_idx == target_file_idx) {
-            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, st.enums[i].name_start, st.enums[i].name_len)) {
+    for (i = 0; i < stasis.enum_count; i = i + 1) {
+        if (stasis.enums[i].file_idx == target_file_idx) {
+            if (span_eq_span_cross(named_file_idx, name_start, name_len, target_file_idx, stasis.enums[i].name_start, stasis.enums[i].name_len)) {
                 return i;
             }
         }
@@ -276,13 +276,13 @@ function llvm_try_resolve_unqualified_enum(caller_file_idx: i32, name_start: i32
         return local;
     }
 
-    let imp_off: i32 = st.files[caller_file_idx].imports_off;
-    let imp_len: i32 = st.files[caller_file_idx].imports_len;
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
     let i: i32 = 0;
     for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = st.imports[imp_off + i];
+        let mod_file: i32 = stasis.imports[imp_off + i];
         let hit: i32 = llvm_find_enum_in_file(caller_file_idx, name_start, name_len, mod_file);
         if (hit >= 0) {
             if (found < 0) {
@@ -297,17 +297,17 @@ function llvm_try_resolve_unqualified_enum(caller_file_idx: i32, name_start: i32
 }
 
 function llvm_find_enum_member(named_file_idx: i32, name_start: i32, name_len: i32, enum_idx: i32): i32 {
-    if (enum_idx < 0 || enum_idx >= st.enum_count) {
+    if (enum_idx < 0 || enum_idx >= stasis.enum_count) {
         return -1;
     }
-    let off: i32 = st.enums[enum_idx].members_off;
-    let len: i32 = st.enums[enum_idx].members_len;
+    let off: i32 = stasis.enums[enum_idx].members_off;
+    let len: i32 = stasis.enums[enum_idx].members_len;
 
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
         let mi: i32 = off + i;
-        if (mi >= 0 && mi < st.enum_member_count) {
-            if (span_eq_span_cross(named_file_idx, name_start, name_len, st.enum_members[mi].file_idx, st.enum_members[mi].name_start, st.enum_members[mi].name_len)) {
+        if (mi >= 0 && mi < stasis.enum_member_count) {
+            if (span_eq_span_cross(named_file_idx, name_start, name_len, stasis.enum_members[mi].file_idx, stasis.enum_members[mi].name_start, stasis.enum_members[mi].name_len)) {
                 return mi;
             }
         }
@@ -321,13 +321,13 @@ function llvm_resolve_unqualified_global(caller_file_idx: i32, name_start: i32, 
         return local;
     }
 
-    let imp_off: i32 = st.files[caller_file_idx].imports_off;
-    let imp_len: i32 = st.files[caller_file_idx].imports_len;
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
     let i: i32 = 0;
     for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = st.imports[imp_off + i];
+        let mod_file: i32 = stasis.imports[imp_off + i];
         let hit: i32 = llvm_find_global_in_file(caller_file_idx, name_start, name_len, mod_file);
         if (hit >= 0) {
             if (found < 0) {
@@ -352,13 +352,13 @@ function llvm_resolve_unqualified_func(caller_file_idx: i32, name_start: i32, na
         return local;
     }
 
-    let imp_off: i32 = st.files[caller_file_idx].imports_off;
-    let imp_len: i32 = st.files[caller_file_idx].imports_len;
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
     let i: i32 = 0;
     for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = st.imports[imp_off + i];
+        let mod_file: i32 = stasis.imports[imp_off + i];
         let hit: i32 = llvm_find_func_in_file(caller_file_idx, name_start, name_len, mod_file);
         if (hit >= 0) {
             if (found < 0) {
@@ -393,33 +393,33 @@ function llvm_resolve_qualified_func(caller_file_idx: i32, mod_start: i32, mod_l
 }
 
 function llvm_resolve_callee_func(caller_file_idx: i32, callee_expr: i32, at: i32): i32 {
-    if (callee_expr < 0 || callee_expr >= st.expr_count) {
+    if (callee_expr < 0 || callee_expr >= stasis.expr_count) {
         build_err_at(caller_file_idx, "invalid call target", at);
         return -1;
     }
 
-    let kind: ExprKind = st.expr_nodes[callee_expr].kind;
+    let kind: ExprKind = stasis.expr_nodes[callee_expr].kind;
     if (kind == ExprKind.Name) {
-        return llvm_resolve_unqualified_func(caller_file_idx, st.expr_nodes[callee_expr].name_start, st.expr_nodes[callee_expr].name_len, at);
+        return llvm_resolve_unqualified_func(caller_file_idx, stasis.expr_nodes[callee_expr].name_start, stasis.expr_nodes[callee_expr].name_len, at);
     }
 
     if (kind == ExprKind.Member) {
-        let base: i32 = st.expr_nodes[callee_expr].left;
-        if (base < 0 || base >= st.expr_count) {
+        let base: i32 = stasis.expr_nodes[callee_expr].left;
+        if (base < 0 || base >= stasis.expr_count) {
             build_err_at(caller_file_idx, "invalid member call target", at);
             return -1;
         }
-        let base_kind: ExprKind = st.expr_nodes[base].kind;
+        let base_kind: ExprKind = stasis.expr_nodes[base].kind;
         if (base_kind != ExprKind.Name) {
             build_err_at(caller_file_idx, "unsupported call target (member)", at);
             return -1;
         }
         return llvm_resolve_qualified_func(
             caller_file_idx,
-            st.expr_nodes[base].name_start,
-            st.expr_nodes[base].name_len,
-            st.expr_nodes[callee_expr].name_start,
-            st.expr_nodes[callee_expr].name_len,
+            stasis.expr_nodes[base].name_start,
+            stasis.expr_nodes[base].name_len,
+            stasis.expr_nodes[callee_expr].name_start,
+            stasis.expr_nodes[callee_expr].name_len,
             at
         );
     }

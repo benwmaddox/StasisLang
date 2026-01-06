@@ -24,8 +24,8 @@ function llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
     if (id < 0) {
         return -1;
     }
-    if (st.llvm_val_kind[0] != LlvmValueKind.I32) {
-        build_err_at(file_idx, "expected i32 expression", st.expr_nodes[root].at);
+    if (stasis.llvm_val_kind[0] != LlvmValueKind.I32) {
+        build_err_at(file_idx, "expected i32 expression", stasis.expr_nodes[root].at);
         return -1;
     }
     return id;
@@ -36,8 +36,8 @@ function llvm_emit_expr_f32(file_idx: i32, root: i32): i32 {
     if (id < 0) {
         return -1;
     }
-    if (st.llvm_val_kind[0] != LlvmValueKind.F32) {
-        build_err_at(file_idx, "expected f32 expression", st.expr_nodes[root].at);
+    if (stasis.llvm_val_kind[0] != LlvmValueKind.F32) {
+        build_err_at(file_idx, "expected f32 expression", stasis.expr_nodes[root].at);
         return -1;
     }
     return id;
@@ -52,86 +52,86 @@ function llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     // Negative entries are "visited" (postorder).
     let sp: i32 = 0;
     let val_len: i32 = 0;
-    st.parse_stack_start[sp] = root * 2;
+    stasis.parse_stack_start[sp] = root * 2;
     sp = sp + 1;
 
     for (; sp > 0; ) {
-        let enc: i32 = st.parse_stack_start[sp - 1];
+        let enc: i32 = stasis.parse_stack_start[sp - 1];
         if (enc >= 0) {
-            st.parse_stack_start[sp - 1] = -enc - 1;
+            stasis.parse_stack_start[sp - 1] = -enc - 1;
 
             let idx: i32 = enc / 2;
             let mode: i32 = enc % 2;
-            let kind: ExprKind = st.expr_nodes[idx].kind;
+            let kind: ExprKind = stasis.expr_nodes[idx].kind;
 
             if (kind == ExprKind.Unary) {
                 if (sp >= 4096) {
-                    build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                    build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                     return -1;
                 }
-                st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
+                stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].left * 2;
                 sp = sp + 1;
             } else {
                 if (kind == ExprKind.Call) {
-                    let argc0: i32 = st.expr_nodes[idx].value;
-                    let off0: i32 = st.expr_nodes[idx].right;
+                    let argc0: i32 = stasis.expr_nodes[idx].value;
+                    let off0: i32 = stasis.expr_nodes[idx].right;
                     if (argc0 < 0) {
-                        build_err_at(file_idx, "invalid call argument count", st.expr_nodes[idx].at);
+                        build_err_at(file_idx, "invalid call argument count", stasis.expr_nodes[idx].at);
                         return -1;
                     }
                     if (sp + argc0 >= 4096) {
-                        build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                        build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                         return -1;
                     }
 
                     let ai: i32 = 0;
                     for (ai = argc0 - 1; ai >= 0; ai = ai - 1) {
-                        st.parse_stack_start[sp] = st.expr_call_args[off0 + ai] * 2;
+                        stasis.parse_stack_start[sp] = stasis.expr_call_args[off0 + ai] * 2;
                         sp = sp + 1;
                     }
                 } else {
                     if (kind == ExprKind.Binary) {
                         if (sp + 1 >= 4096) {
-                            build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                            build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                             return -1;
                         }
-                        st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
+                        stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].right * 2;
                         sp = sp + 1;
-                        st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
+                        stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].left * 2;
                         sp = sp + 1;
                     } else {
                         if (kind == ExprKind.Assign) {
                             if (sp + 1 >= 4096) {
-                                build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                                build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                                 return -1;
                             }
                             // Evaluate lhs place first, then rhs value (deterministic).
-                            st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
+                            stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].right * 2;
                             sp = sp + 1;
-                            st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2 + 1;
+                            stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].left * 2 + 1;
                             sp = sp + 1;
                         } else {
                             if (kind == ExprKind.Member) {
                                 if (sp >= 4096) {
-                                    build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                                    build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                                     return -1;
                                 }
-                                st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
+                                stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].left * 2;
                                 sp = sp + 1;
                             } else {
                                 if (kind == ExprKind.Index) {
                                     if (sp + 1 >= 4096) {
-                                        build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
+                                        build_err_at(file_idx, "expression too complex (node stack)", stasis.expr_nodes[idx].at);
                                         return -1;
                                     }
                                     // Evaluate base first, then index.
-                                    st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
+                                    stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].right * 2;
                                     sp = sp + 1;
-                                    st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
+                                    stasis.parse_stack_start[sp] = stasis.expr_nodes[idx].left * 2;
                                     sp = sp + 1;
                                 } else {
                                     if (mode != 0 && kind != ExprKind.Name && kind != ExprKind.Member && kind != ExprKind.Index) {
-                                        build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx].at);
+                                        build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx].at);
                                         return -1;
                                     }
                                 }
@@ -154,9 +154,9 @@ function llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     }
 
     if (val_len != 1) {
-        build_err_at(file_idx, "invalid expression", st.expr_nodes[root].at);
+        build_err_at(file_idx, "invalid expression", stasis.expr_nodes[root].at);
         return -1;
     }
-    return st.expr_op_at[0];
+    return stasis.expr_op_at[0];
 }
 

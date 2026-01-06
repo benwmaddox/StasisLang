@@ -46,7 +46,7 @@ test `stasis statement parser accepts basic constructs`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -76,7 +76,7 @@ test `stasis statement parser rejects missing semicolons`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
@@ -107,7 +107,7 @@ test `stasis statement parser accepts slice types`() {
         return false;
     }
 
-    st.quiet = 1;
+    stasis.quiet = 1;
     let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
