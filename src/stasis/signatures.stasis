@@ -13,6 +13,10 @@ const SH_STRUCT_CAP: i32 = 2000;
 const SH_FIELD_CAP: i32 = 50000;
 const SH_ENUM_CAP: i32 = 2000;
 const SH_ENUM_MEMBER_CAP: i32 = 50000;
+const SH_GLOBAL_CAP: i32 = 20000;
+const SH_CONST_CAP: i32 = 20000;
+const SH_FUNC_CAP: i32 = 20000;
+const SH_PARAM_CAP: i32 = 50000;
 
 function sh_sig_print_tok_text(): void {
     let i: i32 = 0;
@@ -153,6 +157,76 @@ function sh_sig_add_type_array(file_idx: i32, elem: i32, size: i32): i32 {
     sh.types[idx].len = 0;
     sh.types[idx].elem = elem;
     sh.types[idx].size = size;
+    return idx;
+}
+
+function sh_sig_add_param(file_idx: i32, name_start: i32, name_len: i32, type_idx: i32): i32 {
+    if (sh.param_count >= SH_PARAM_CAP) {
+        sh_sig_err_here(file_idx, "exceeded parameter capacity");
+        return -1;
+    }
+    let idx: i32 = sh.param_count;
+    sh.param_count = sh.param_count + 1;
+
+    sh.params[idx].file_idx = file_idx;
+    sh.params[idx].name_start = name_start;
+    sh.params[idx].name_len = name_len;
+    sh.params[idx].type_idx = type_idx;
+    return idx;
+}
+
+function sh_sig_add_func_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, is_test: i32): i32 {
+    if (sh.func_count >= SH_FUNC_CAP) {
+        sh_sig_err_here(file_idx, "exceeded function capacity");
+        return -1;
+    }
+    let idx: i32 = sh.func_count;
+    sh.func_count = sh.func_count + 1;
+
+    sh.funcs[idx].file_idx = file_idx;
+    sh.funcs[idx].name_start = name_start;
+    sh.funcs[idx].name_len = name_len;
+    sh.funcs[idx].sym_idx = sym_idx;
+    sh.funcs[idx].params_off = 0;
+    sh.funcs[idx].params_len = 0;
+    sh.funcs[idx].ret_type_idx = -1;
+    sh.funcs[idx].body_start = -1;
+    sh.funcs[idx].is_test = is_test;
+    return idx;
+}
+
+function sh_sig_add_global_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, has_init: i32, init_start: i32): i32 {
+    if (sh.global_count >= SH_GLOBAL_CAP) {
+        sh_sig_err_here(file_idx, "exceeded global capacity");
+        return -1;
+    }
+    let idx: i32 = sh.global_count;
+    sh.global_count = sh.global_count + 1;
+
+    sh.globals[idx].file_idx = file_idx;
+    sh.globals[idx].name_start = name_start;
+    sh.globals[idx].name_len = name_len;
+    sh.globals[idx].sym_idx = sym_idx;
+    sh.globals[idx].type_idx = type_idx;
+    sh.globals[idx].has_init = has_init;
+    sh.globals[idx].init_start = init_start;
+    return idx;
+}
+
+function sh_sig_add_const_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, init_start: i32): i32 {
+    if (sh.const_count >= SH_CONST_CAP) {
+        sh_sig_err_here(file_idx, "exceeded const capacity");
+        return -1;
+    }
+    let idx: i32 = sh.const_count;
+    sh.const_count = sh.const_count + 1;
+
+    sh.consts[idx].file_idx = file_idx;
+    sh.consts[idx].name_start = name_start;
+    sh.consts[idx].name_len = name_len;
+    sh.consts[idx].sym_idx = sym_idx;
+    sh.consts[idx].type_idx = type_idx;
+    sh.consts[idx].init_start = init_start;
     return idx;
 }
 
@@ -444,10 +518,12 @@ function sh_sig_parse_enum_decl(file_idx: i32): void {
     }
 }
 
-function sh_sig_parse_param_list(file_idx: i32): void {
+function sh_sig_parse_param_list(file_idx: i32): i32 {
+    let params_before: i32 = sh.param_count;
+
     if (sh.sig_kind != ShTok.LParen) {
         sh_sig_err_here(file_idx, "expected '('");
-        return;
+        return 0;
     }
     sh_sig_advance();
 
@@ -465,13 +541,19 @@ function sh_sig_parse_param_list(file_idx: i32): void {
                     sh_sig_err_here(file_idx, "expected parameter name");
                     sh_sig_advance();
                 } else {
+                    let name_start: i32 = sh.tok_start;
+                    let name_len: i32 = sh.tok_len;
                     sh_sig_advance();
+
+                    let type_idx: i32 = -1;
                     if (sh.sig_kind != ShTok.Colon) {
                         sh_sig_err_here(file_idx, "expected ':' after parameter name");
                     } else {
                         sh_sig_advance();
-                        sh_sig_parse_type(file_idx);
+                        type_idx = sh_sig_parse_type(file_idx);
                     }
+
+                    sh_sig_add_param(file_idx, name_start, name_len, type_idx);
 
                     if (sh.sig_kind == ShTok.Comma) {
                         sh_sig_advance();
@@ -492,6 +574,8 @@ function sh_sig_parse_param_list(file_idx: i32): void {
             }
         }
     }
+
+    return sh.param_count - params_before;
 }
 
 function sh_sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
@@ -519,18 +603,40 @@ function sh_sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
         return;
     }
 
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Function, is_exported)) {
+    let name_start: i32 = sh.tok_start;
+    let name_len: i32 = sh.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sh_sig_add_sym(file_idx, ShSymKind.Function, is_exported)) {
+        sym_idx = sh.sym_count - 1;
+    } else {
         sh.sig_errors = sh.sig_errors + 1;
     }
+
+    let func_idx: i32 = sh_sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 0);
     sh_sig_advance();
 
-    sh_sig_parse_param_list(file_idx);
-
-    if (sh.sig_kind == ShTok.Colon) {
-        sh_sig_advance();
-        sh_sig_parse_type(file_idx);
+    let params_off: i32 = sh.param_count;
+    let params_len: i32 = sh_sig_parse_param_list(file_idx);
+    if (func_idx >= 0) {
+        sh.funcs[func_idx].params_off = params_off;
+        sh.funcs[func_idx].params_len = params_len;
     }
 
+    let ret_type_idx: i32 = -1;
+    if (sh.sig_kind == ShTok.Colon) {
+        sh_sig_advance();
+        ret_type_idx = sh_sig_parse_type(file_idx);
+    }
+    if (func_idx >= 0) {
+        sh.funcs[func_idx].ret_type_idx = ret_type_idx;
+    }
+
+    if (sh.sig_kind == ShTok.LBrace) {
+        if (func_idx >= 0) {
+            sh.funcs[func_idx].body_start = sh.tok_start;
+        }
+    }
     sh_sig_skip_block(file_idx);
 }
 
@@ -543,18 +649,40 @@ function sh_sig_parse_test_decl(file_idx: i32): void {
         return;
     }
 
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Test, 0)) {
+    let name_start: i32 = sh.tok_start;
+    let name_len: i32 = sh.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sh_sig_add_sym(file_idx, ShSymKind.Test, 0)) {
+        sym_idx = sh.sym_count - 1;
+    } else {
         sh.sig_errors = sh.sig_errors + 1;
     }
+
+    let func_idx: i32 = sh_sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 1);
     sh_sig_advance();
 
-    sh_sig_parse_param_list(file_idx);
-
-    if (sh.sig_kind == ShTok.Colon) {
-        sh_sig_advance();
-        sh_sig_parse_type(file_idx);
+    let params_off: i32 = sh.param_count;
+    let params_len: i32 = sh_sig_parse_param_list(file_idx);
+    if (func_idx >= 0) {
+        sh.funcs[func_idx].params_off = params_off;
+        sh.funcs[func_idx].params_len = params_len;
     }
 
+    let ret_type_idx: i32 = -1;
+    if (sh.sig_kind == ShTok.Colon) {
+        sh_sig_advance();
+        ret_type_idx = sh_sig_parse_type(file_idx);
+    }
+    if (func_idx >= 0) {
+        sh.funcs[func_idx].ret_type_idx = ret_type_idx;
+    }
+
+    if (sh.sig_kind == ShTok.LBrace) {
+        if (func_idx >= 0) {
+            sh.funcs[func_idx].body_start = sh.tok_start;
+        }
+    }
     sh_sig_skip_block(file_idx);
 }
 
@@ -567,7 +695,13 @@ function sh_sig_parse_global_decl(file_idx: i32): void {
         return;
     }
 
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Global, 0)) {
+    let name_start: i32 = sh.tok_start;
+    let name_len: i32 = sh.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sh_sig_add_sym(file_idx, ShSymKind.Global, 0)) {
+        sym_idx = sh.sym_count - 1;
+    } else {
         sh.sig_errors = sh.sig_errors + 1;
     }
     sh_sig_advance();
@@ -577,10 +711,15 @@ function sh_sig_parse_global_decl(file_idx: i32): void {
         return;
     }
     sh_sig_advance();
-    sh_sig_parse_type(file_idx);
+    let type_idx: i32 = sh_sig_parse_type(file_idx);
+
+    let has_init: i32 = 0;
+    let init_start: i32 = -1;
 
     if (sh.sig_kind == ShTok.Equal) {
+        has_init = 1;
         sh_sig_advance();
+        init_start = sh.tok_start;
         sh_sig_skip_until_semicolon(file_idx);
     } else {
         if (sh.sig_kind != ShTok.Semicolon) {
@@ -590,6 +729,8 @@ function sh_sig_parse_global_decl(file_idx: i32): void {
             sh_sig_advance();
         }
     }
+
+    sh_sig_add_global_decl(file_idx, name_start, name_len, sym_idx, type_idx, has_init, init_start);
 }
 
 function sh_sig_parse_const_decl(file_idx: i32): void {
@@ -601,7 +742,13 @@ function sh_sig_parse_const_decl(file_idx: i32): void {
         return;
     }
 
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Const, 0)) {
+    let name_start: i32 = sh.tok_start;
+    let name_len: i32 = sh.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sh_sig_add_sym(file_idx, ShSymKind.Const, 0)) {
+        sym_idx = sh.sym_count - 1;
+    } else {
         sh.sig_errors = sh.sig_errors + 1;
     }
     sh_sig_advance();
@@ -611,16 +758,19 @@ function sh_sig_parse_const_decl(file_idx: i32): void {
         return;
     }
     sh_sig_advance();
-    sh_sig_parse_type(file_idx);
+    let type_idx: i32 = sh_sig_parse_type(file_idx);
 
     if (sh.sig_kind != ShTok.Equal) {
         sh_sig_err_here(file_idx, "expected '=' after const type");
         sh_sig_skip_until_semicolon(file_idx);
+        sh_sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, -1);
         return;
     }
 
     sh_sig_advance();
+    let init_start: i32 = sh.tok_start;
     sh_sig_skip_until_semicolon(file_idx);
+    sh_sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, init_start);
 }
 
 function sh_sig_scan_file(file_idx: i32): i32 {
@@ -717,6 +867,10 @@ function sh_sig_scan_loaded_files(): i32 {
     sh.field_count = 0;
     sh.enum_count = 0;
     sh.enum_member_count = 0;
+    sh.global_count = 0;
+    sh.const_count = 0;
+    sh.func_count = 0;
+    sh.param_count = 0;
 
     let i: i32 = 0;
     for (i = 0; i < sh.file_count; i = i + 1) {

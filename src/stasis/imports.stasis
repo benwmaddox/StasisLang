@@ -23,6 +23,10 @@ function sh_reset() {
     sh.field_count = 0;
     sh.enum_count = 0;
     sh.enum_member_count = 0;
+    sh.global_count = 0;
+    sh.const_count = 0;
+    sh.func_count = 0;
+    sh.param_count = 0;
     ascii_clear(sh.scratch_import);
     ascii_clear(sh.scratch_dir);
     ascii_clear(sh.scratch_resolved);

@@ -145,3 +145,111 @@ test `stasis decl parsing records enum members`() {
 
     return true;
 }
+
+test `stasis decl parsing records function decls and params`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path, t_exe_dir, "sh_decls_func.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(a: i32, b: i32[4]): i32 { return a; }");
+    t_append_line(t_tmp, "test `t`(): bool { return true; }");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    if (sh.func_count != 2) { return false; }
+    if (sh.param_count != 2) { return false; }
+
+    // function f(a: i32, b: i32[4]): i32 { ... }
+    if (!t_span_eq(sh.funcs[0].file_idx, sh.funcs[0].name_start, sh.funcs[0].name_len, "f")) { return false; }
+    if (sh.funcs[0].is_test != 0) { return false; }
+    if (sh.funcs[0].params_len != 2) { return false; }
+    if (sh.funcs[0].body_start < 0) { return false; }
+    if (sh.pool[sh.files[0].offset + sh.funcs[0].body_start] != 123) { return false; } // '{'
+
+    let ret_kind: ShTypeKind = sh.types[sh.funcs[0].ret_type_idx].kind;
+    if (ret_kind != ShTypeKind.Named) { return false; }
+    if (!t_span_eq(sh.types[sh.funcs[0].ret_type_idx].file_idx, sh.types[sh.funcs[0].ret_type_idx].start, sh.types[sh.funcs[0].ret_type_idx].len, "i32")) { return false; }
+
+    let p0: i32 = sh.funcs[0].params_off + 0;
+    let p1: i32 = sh.funcs[0].params_off + 1;
+    if (!t_span_eq(sh.params[p0].file_idx, sh.params[p0].name_start, sh.params[p0].name_len, "a")) { return false; }
+    if (!t_span_eq(sh.params[p1].file_idx, sh.params[p1].name_start, sh.params[p1].name_len, "b")) { return false; }
+
+    let p0_kind: ShTypeKind = sh.types[sh.params[p0].type_idx].kind;
+    if (p0_kind != ShTypeKind.Named) { return false; }
+    if (!t_span_eq(sh.types[sh.params[p0].type_idx].file_idx, sh.types[sh.params[p0].type_idx].start, sh.types[sh.params[p0].type_idx].len, "i32")) { return false; }
+
+    let p1_kind: ShTypeKind = sh.types[sh.params[p1].type_idx].kind;
+    if (p1_kind != ShTypeKind.Array) { return false; }
+    if (sh.types[sh.params[p1].type_idx].size != 4) { return false; }
+
+    // test `t`(): bool { ... }
+    if (sh.funcs[1].is_test == 0) { return false; }
+    if (sh.funcs[1].params_len != 0) { return false; }
+    if (sh.funcs[1].body_start < 0) { return false; }
+    if (sh.pool[sh.files[0].offset + sh.funcs[1].body_start] != 123) { return false; } // '{'
+
+    let test_ret_kind: ShTypeKind = sh.types[sh.funcs[1].ret_type_idx].kind;
+    if (test_ret_kind != ShTypeKind.Named) { return false; }
+    if (!t_span_eq(sh.types[sh.funcs[1].ret_type_idx].file_idx, sh.types[sh.funcs[1].ret_type_idx].start, sh.types[sh.funcs[1].ret_type_idx].len, "bool")) { return false; }
+
+    return true;
+}
+
+test `stasis decl parsing records global and const decls`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path, t_exe_dir, "sh_decls_values.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "global g: i32 = 1;");
+    t_append_line(t_tmp, "const c: i32 = 2;");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    if (sh.global_count != 1) { return false; }
+    if (sh.const_count != 1) { return false; }
+
+    if (!t_span_eq(sh.globals[0].file_idx, sh.globals[0].name_start, sh.globals[0].name_len, "g")) { return false; }
+    if (sh.globals[0].has_init == 0) { return false; }
+    if (sh.pool[sh.files[0].offset + sh.globals[0].init_start] != 49) { return false; } // '1'
+    let g_kind: ShTypeKind = sh.types[sh.globals[0].type_idx].kind;
+    if (g_kind != ShTypeKind.Named) { return false; }
+    if (!t_span_eq(sh.types[sh.globals[0].type_idx].file_idx, sh.types[sh.globals[0].type_idx].start, sh.types[sh.globals[0].type_idx].len, "i32")) { return false; }
+
+    if (!t_span_eq(sh.consts[0].file_idx, sh.consts[0].name_start, sh.consts[0].name_len, "c")) { return false; }
+    if (sh.consts[0].init_start < 0) { return false; }
+    if (sh.pool[sh.files[0].offset + sh.consts[0].init_start] != 50) { return false; } // '2'
+    let c_kind: ShTypeKind = sh.types[sh.consts[0].type_idx].kind;
+    if (c_kind != ShTypeKind.Named) { return false; }
+    if (!t_span_eq(sh.types[sh.consts[0].type_idx].file_idx, sh.types[sh.consts[0].type_idx].start, sh.types[sh.consts[0].type_idx].len, "i32")) { return false; }
+
+    return true;
+}
