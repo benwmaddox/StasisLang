@@ -86,6 +86,51 @@ struct ShSym {
     is_exported: i32;
 }
 
+enum ShTypeKind {
+    Named = 1,
+    Array = 2
+}
+
+struct ShType {
+    kind: ShTypeKind;
+    file_idx: i32;
+    start: i32;
+    len: i32;
+    elem: i32;
+    size: i32;
+}
+
+struct ShStructDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    fields_off: i32;
+    fields_len: i32;
+}
+
+struct ShStructField {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    type_idx: i32;
+}
+
+struct ShEnumDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    members_off: i32;
+    members_len: i32;
+}
+
+struct ShEnumMember {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    has_value: i32;
+    value: i32;
+}
+
 struct ShFile {
     path_off: i32;
     path_len: i32;
@@ -156,6 +201,22 @@ struct ShState {
     sym_pool_len: i32;
     syms: ShSym[20000];
     sym_count: i32;
+    sig_kind: ShTok;
+    sig_errors: i32;
+
+    // Types + decls (parsed from source)
+    types: ShType[50000];
+    type_count: i32;
+
+    structs: ShStructDecl[2000];
+    struct_count: i32;
+    fields: ShStructField[50000];
+    field_count: i32;
+
+    enums: ShEnumDecl[2000];
+    enum_count: i32;
+    enum_members: ShEnumMember[50000];
+    enum_member_count: i32;
     sig_path: ascii[260];
 }
 

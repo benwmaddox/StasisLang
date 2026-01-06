@@ -45,7 +45,7 @@ Notes:
 ## Current Status (Today)
 
 Implemented:
-- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level signature scan; prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
+- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan (signatures + struct/enum fields + basic type shapes); prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
 - `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
 
 Not yet implemented (but planned in the contract above):
@@ -254,3 +254,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added a top-level signature scan pass (`src/stasis/signatures.stasis`) + `tests/stasis_signatures.stasis`; `stasis check` now reports `sig_errors`.
 - 2026-01-05: added import-member collision detection (`src/stasis/modules.stasis`) + `tests/stasis_modules.stasis`; `stasis check` now reports `import_collisions` (non-fatal note).
 - 2026-01-05: standardized diagnostics formatting to `path:line:col` via `src/stasis/diagnostics.stasis` (lexer/parser/signatures).
+- 2026-01-06: grew the signature scan into an iterative top-level decl parser that records `struct`/`enum` declarations + fields/members + basic type shapes into fixed-capacity tables under `sh`; added `tests/stasis_decls.stasis`.

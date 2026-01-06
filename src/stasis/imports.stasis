@@ -18,6 +18,11 @@ function sh_reset() {
     sh.imports_len = 0;
     sh.sym_pool_len = 0;
     sh.sym_count = 0;
+    sh.type_count = 0;
+    sh.struct_count = 0;
+    sh.field_count = 0;
+    sh.enum_count = 0;
+    sh.enum_member_count = 0;
     ascii_clear(sh.scratch_import);
     ascii_clear(sh.scratch_dir);
     ascii_clear(sh.scratch_resolved);
