@@ -642,8 +642,18 @@ function sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
         if (func_idx >= 0) {
             stasis.funcs[func_idx].body_start = stasis.tok_start;
         }
+        sig_skip_block(file_idx);
+        return;
     }
-    sig_skip_block(file_idx);
+
+    // Extern function declaration: `function name(params): type;`
+    if (stasis.sig_kind == Tok.Semicolon) {
+        sig_advance();
+        return;
+    }
+
+    sig_err_here(file_idx, "expected '{' or ';' after function signature");
+    sig_skip_until_semicolon(file_idx);
 }
 
 function sig_parse_test_decl(file_idx: i32): void {

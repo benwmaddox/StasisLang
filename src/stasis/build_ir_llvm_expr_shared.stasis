@@ -371,10 +371,6 @@ function llvm_emit_expr_i32_v1(file_idx: i32, root: i32): i32 {
                     if (fn_idx0 < 0) {
                         return -1;
                     }
-                    if (stasis.funcs[fn_idx0].body_start < 0) {
-                        build_err_at(file_idx, "function has no body (call)", stasis.expr_nodes[idx].at);
-                        return -1;
-                    }
                     if (!build_type_is_i32ish(stasis.funcs[fn_idx0].ret_type_idx)) {
                         build_err_at(file_idx, "unsupported call return type (expected i32)", stasis.expr_nodes[idx].at);
                         return -1;
@@ -590,4 +586,3 @@ function llvm_emit_expr_i32_v1(file_idx: i32, root: i32): i32 {
     }
     return stasis.expr_op_at[0];
 }
-

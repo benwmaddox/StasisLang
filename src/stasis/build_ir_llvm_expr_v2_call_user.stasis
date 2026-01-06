@@ -13,10 +13,6 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
     if (fn_idx0 < 0) {
         return -1;
     }
-    if (stasis.funcs[fn_idx0].body_start < 0) {
-        build_err_at(file_idx, "function has no body (call)", stasis.expr_nodes[idx2].at);
-        return -1;
-    }
 
     let ret_ty: i32 = stasis.funcs[fn_idx0].ret_type_idx;
     let ret_is_void: i32 = 0;

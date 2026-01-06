@@ -19,8 +19,8 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
     let file_idx: i32 = stasis.funcs[func_idx].file_idx;
     let body_start: i32 = stasis.funcs[func_idx].body_start;
     if (body_start < 0) {
-        build_err_at(file_idx, "missing function body", stasis.funcs[func_idx].name_start);
-        return 1;
+        // Extern (no-body) functions are only declared, not defined.
+        return 0;
     }
 
     let ret_ty: i32 = stasis.funcs[func_idx].ret_type_idx;
@@ -727,4 +727,3 @@ function emit_llvm_func_return_i32_noargs(func_idx: i32): i32 {
     ascii_append(stasis.ir_out, "}\n\n");
     return 0;
 }
-

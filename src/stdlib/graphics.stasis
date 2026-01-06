@@ -1,2 +1,23 @@
-// Graphics/runtime bindings (marker module).
+// Graphics/runtime bindings.
 // Import explicitly: import "src/stdlib/graphics.stasis";
+
+// All declarations in this module are extern (no body).
+// Lowering links them from the runtime as `stasis_<name>`.
+
+function init_window(width: i32, height: i32, title: ascii[]): bool;
+function begin_frame(): void;
+function end_frame(): void;
+function should_quit(): bool;
+
+function get_time_ms(): i32;
+function sleep_ms(ms: i32): void;
+function is_key_down(scancode: i32): bool;
+
+function clear(r: f32, g: f32, b: f32, a: f32): void;
+function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void;
+function draw_lines_f32(lines: f32[], line_count: i32): void;
+
+function gfx_load_sprite(path: ascii[], max_w: i32, max_h: i32): i32;
+function gfx_poll_reload(handle: i32): bool;
+function gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_degrees: i32, a: i32): void;
+function gfx_draw_sprites_i32(cmds: i32[], sprite_count: i32): void;
