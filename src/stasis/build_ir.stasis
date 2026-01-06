@@ -34,6 +34,114 @@ function sh_ir_append_span(dst: ascii[], file_idx: i32, start: i32, len: i32): v
     }
 }
 
+function sh_llvm_append_hex_digit(dst: ascii[], v: i32): void {
+    let x: i32 = v;
+    if (x < 0) { x = 0; }
+    if (x > 15) { x = 15; }
+    if (x < 10) {
+        ascii_append_byte(dst, 48 + x); // '0'..'9'
+    } else {
+        ascii_append_byte(dst, 65 + (x - 10)); // 'A'..'F'
+    }
+}
+
+function sh_llvm_append_hex_byte(dst: ascii[], b: i32): void {
+    let x: i32 = b;
+    if (x < 0) { x = 0; }
+    if (x > 255) { x = 255; }
+    ascii_append_byte(dst, 92); // '\'
+    sh_llvm_append_hex_digit(dst, x / 16);
+    sh_llvm_append_hex_digit(dst, x % 16);
+}
+
+function sh_llvm_append_cstring_byte(dst: ascii[], b: i32): void {
+    if (b >= 32 && b <= 126 && b != 34 && b != 92) { // printable, not '"' or '\'
+        ascii_append_byte(dst, b);
+    } else {
+        sh_llvm_append_hex_byte(dst, b);
+    }
+}
+
+function sh_llvm_string_lit_unescaped_len_ascii(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return -1;
+    }
+    if (tok_len < 2) {
+        sh_build_err_at(file_idx, "invalid string literal", tok_start);
+        return -1;
+    }
+
+    let base: i32 = sh.files[file_idx].offset;
+    let i: i32 = tok_start + 1;
+    let end: i32 = tok_start + tok_len - 1; // exclude closing quote
+    let out_len: i32 = 0;
+    for (; i < end; ) {
+        let b: u8 = sh.pool[base + i];
+        if (b == 92) { // '\\'
+            if (i + 1 >= end) {
+                sh_build_err_at(file_idx, "unterminated escape in string literal", tok_start);
+                return -1;
+            }
+            let e: u8 = sh.pool[base + i + 1];
+            let out_b: i32 = -1;
+            if (e == 110) { out_b = 10; } // 'n'
+            if (e == 114) { out_b = 13; } // 'r'
+            if (e == 116) { out_b = 9; }  // 't'
+            if (e == 48) { out_b = 0; }   // '0'
+            if (e == 34) { out_b = 34; }  // '\"'
+            if (e == 92) { out_b = 92; }  // '\\'
+            if (out_b < 0) {
+                sh_build_err_at(file_idx, "unsupported escape in string literal (bring-up)", tok_start);
+                return -1;
+            }
+            out_len = out_len + 1;
+            i = i + 2;
+        } else {
+            out_len = out_len + 1;
+            i = i + 1;
+        }
+    }
+    return out_len;
+}
+
+function sh_llvm_string_lit_append_unescaped_bytes_ascii(dst: ascii[], file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return 1;
+    }
+    if (tok_len < 2) {
+        return 1;
+    }
+
+    let base: i32 = sh.files[file_idx].offset;
+    let i: i32 = tok_start + 1;
+    let end: i32 = tok_start + tok_len - 1; // exclude closing quote
+    for (; i < end; ) {
+        let b: u8 = sh.pool[base + i];
+        if (b == 92) { // '\\'
+            if (i + 1 >= end) {
+                return 1;
+            }
+            let e: u8 = sh.pool[base + i + 1];
+            let out_b: i32 = -1;
+            if (e == 110) { out_b = 10; } // 'n'
+            if (e == 114) { out_b = 13; } // 'r'
+            if (e == 116) { out_b = 9; }  // 't'
+            if (e == 48) { out_b = 0; }   // '0'
+            if (e == 34) { out_b = 34; }  // '\"'
+            if (e == 92) { out_b = 92; }  // '\\'
+            if (out_b < 0) {
+                return 1;
+            }
+            sh_llvm_append_cstring_byte(dst, out_b);
+            i = i + 2;
+        } else {
+            sh_llvm_append_cstring_byte(dst, u8_to_i32(b));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 function sh_build_err_at(file_idx: i32, msg: ascii[], at: i32): void {
     if (sh.quiet != 0) {
         return;
@@ -647,6 +755,153 @@ function sh_llvm_emit_global_defs(): i32 {
         ascii_append_byte(sh.ir_out, 10);
     }
 
+    return 0;
+}
+
+function sh_llvm_emit_runtime_decls_and_consts(): void {
+    // C runtime
+    ascii_append(sh.ir_out, "declare i32 @printf(ptr, ...)\n");
+
+    // System: sys_* builtins
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_argc()\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_argv(i32, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_read_file(ptr, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_write_file(ptr, ptr, i32)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_exists(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_size(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_file_mtime_ms(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_exec(ptr)\n");
+    ascii_append(sh.ir_out, "declare i32 @stasis_sys_sleep_ms(i32)\n");
+    ascii_append_byte(sh.ir_out, 10);
+
+    // Format strings for print_* builtins.
+    ascii_append(sh.ir_out, "@.stasis_fmt_s = private unnamed_addr constant [3 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 115); // 's'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+
+    ascii_append(sh.ir_out, "@.stasis_fmt_d = private unnamed_addr constant [4 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 32); // ' '
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 100); // 'd'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+
+    ascii_append(sh.ir_out, "@.stasis_fmt_c = private unnamed_addr constant [3 x i8] c");
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    sh_llvm_append_cstring_byte(sh.ir_out, 37); // '%'
+    sh_llvm_append_cstring_byte(sh.ir_out, 99); // 'c'
+    sh_llvm_append_cstring_byte(sh.ir_out, 0);
+    ascii_append_byte(sh.ir_out, 34); // '\"'
+    ascii_append(sh.ir_out, ", align 1\n");
+    ascii_append_byte(sh.ir_out, 10);
+}
+
+function sh_llvm_get_utf8_string_lit_id(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_str_count; i = i + 1) {
+        if (sh.llvm_str_file_idx[i] == file_idx && sh.llvm_str_tok_start[i] == tok_start && sh.llvm_str_tok_len[i] == tok_len) {
+            return i;
+        }
+    }
+
+    if (sh.llvm_str_count >= 4096) {
+        sh_build_err_at(file_idx, "too many string literals (cap)", tok_start);
+        return -1;
+    }
+
+    let byte_len: i32 = sh_llvm_string_lit_unescaped_len_ascii(file_idx, tok_start, tok_len);
+    if (byte_len < 0) {
+        return -1;
+    }
+
+    // Bring-up: char_len == byte_len (no UTF-8 decode yet).
+    let char_len: i32 = byte_len;
+    let total_bytes: i32 = 8 + byte_len + 1;
+
+    let id: i32 = sh.llvm_str_count;
+    sh.llvm_str_file_idx[id] = file_idx;
+    sh.llvm_str_tok_start[id] = tok_start;
+    sh.llvm_str_tok_len[id] = tok_len;
+    sh.llvm_str_total_bytes[id] = total_bytes;
+    sh.llvm_str_byte_len[id] = byte_len;
+    sh.llvm_str_char_len[id] = char_len;
+    sh.llvm_str_count = sh.llvm_str_count + 1;
+    return id;
+}
+
+function sh_llvm_emit_utf8_string_lit_ptr(file_idx: i32, tok_start: i32, tok_len: i32): i32 {
+    let id: i32 = sh_llvm_get_utf8_string_lit_id(file_idx, tok_start, tok_len);
+    if (id < 0) {
+        return -1;
+    }
+
+    let total_bytes: i32 = sh.llvm_str_total_bytes[id];
+    let ptr_id: i32 = sh_llvm_new_tmp();
+    ascii_append(sh.ir_out, "  ");
+    sh_llvm_append_tmp(ptr_id);
+    ascii_append(sh.ir_out, " = getelementptr inbounds [");
+    sh_ir_append_i32(sh.ir_out, total_bytes);
+    ascii_append(sh.ir_out, " x i8], ptr @.sh_str");
+    sh_ir_append_i32(sh.ir_out, id);
+    ascii_append(sh.ir_out, ", i32 0, i32 8\n");
+    return ptr_id;
+}
+
+function sh_llvm_emit_string_literal_globals(): i32 {
+    if (sh.llvm_str_count <= 0) {
+        return 0;
+    }
+
+    ascii_append_byte(sh.ir_out, 10);
+    let i: i32 = 0;
+    for (i = 0; i < sh.llvm_str_count; i = i + 1) {
+        let file_idx: i32 = sh.llvm_str_file_idx[i];
+        let tok_start: i32 = sh.llvm_str_tok_start[i];
+        let tok_len: i32 = sh.llvm_str_tok_len[i];
+
+        let total_bytes: i32 = sh.llvm_str_total_bytes[i];
+        let byte_len: i32 = sh.llvm_str_byte_len[i];
+        let char_len: i32 = sh.llvm_str_char_len[i];
+
+        ascii_append_byte(sh.ir_out, 64); // '@'
+        ascii_append(sh.ir_out, ".sh_str");
+        sh_ir_append_i32(sh.ir_out, i);
+        ascii_append(sh.ir_out, " = private unnamed_addr constant [");
+        sh_ir_append_i32(sh.ir_out, total_bytes);
+        ascii_append(sh.ir_out, " x i8] c");
+        ascii_append_byte(sh.ir_out, 34); // '\"'
+
+        // Header: [byte_len: i32][char_len: i32] (little endian).
+        let bl: i32 = byte_len;
+        sh_llvm_append_cstring_byte(sh.ir_out, bl % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 256) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 65536) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (bl / 16777216) % 256);
+
+        let cl: i32 = char_len;
+        sh_llvm_append_cstring_byte(sh.ir_out, cl % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 256) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 65536) % 256);
+        sh_llvm_append_cstring_byte(sh.ir_out, (cl / 16777216) % 256);
+
+        if (sh_llvm_string_lit_append_unescaped_bytes_ascii(sh.ir_out, file_idx, tok_start, tok_len) != 0) {
+            sh_build_err_at(file_idx, "failed to emit string literal (llvm)", tok_start);
+            return 1;
+        }
+
+        // Null sentinel.
+        sh_llvm_append_cstring_byte(sh.ir_out, 0);
+
+        ascii_append_byte(sh.ir_out, 34); // '\"'
+        ascii_append(sh.ir_out, ", align 1\n");
+    }
+    ascii_append_byte(sh.ir_out, 10);
     return 0;
 }
 
@@ -1592,6 +1847,20 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
                 sh.llvm_val_struct_idx[val_len] = -1;
                 val_len = val_len + 1;
             } else {
+                if (kind2 == ShExprKind.StringLiteral) {
+                    if (mode2 != 0) {
+                        sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    let ptr_id: i32 = sh_llvm_emit_utf8_string_lit_ptr(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len);
+                    if (ptr_id < 0) {
+                        return -1;
+                    }
+                    sh.expr_op_at[val_len] = ptr_id;
+                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.PtrI8;
+                    sh.llvm_val_struct_idx[val_len] = -1;
+                    val_len = val_len + 1;
+                } else {
                 if (kind2 == ShExprKind.Call) {
                     if (mode2 != 0) {
                         sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
@@ -1655,6 +1924,351 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
                                 sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
                                 sh.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
+                            }
+                        }
+                    }
+
+                    // Builtins (llvm bring-up).
+                    if (handled_intr == 0 && callee_kind2 == ShExprKind.Name) {
+                        let cname_start2: i32 = sh.expr_nodes[callee_expr].name_start;
+                        let cname_len2: i32 = sh.expr_nodes[callee_expr].name_len;
+
+                        if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_argc")) {
+                            handled_intr = 1;
+                            if (argc != 0) {
+                                sh_build_err_at(file_idx, "sys_argc expects 0 arguments", sh.expr_nodes[idx2].at);
+                                return -1;
+                            }
+
+                            let out_id0: i32 = sh_llvm_new_tmp();
+                            ascii_append(sh.ir_out, "  ");
+                            sh_llvm_append_tmp(out_id0);
+                            ascii_append(sh.ir_out, " = call i32 @stasis_sys_argc()\n");
+
+                            val_len = arg_base;
+                            sh.expr_op_at[val_len] = out_id0;
+                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                            sh.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
+                            if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_argv")) {
+                                handled_intr = 1;
+                                if (argc != 3) {
+                                    sh_build_err_at(file_idx, "sys_argv expects 3 arguments", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                                if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.I32 || sh.llvm_val_kind[arg_base + 2] != ShLlvmValueKind.I32) {
+                                    sh_build_err_at(file_idx, "sys_argv expects i32 arguments (idx, out_cap)", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                                if (sh.llvm_val_kind[arg_base + 1] != ShLlvmValueKind.PtrI8) {
+                                    sh_build_err_at(file_idx, "sys_argv expects pointer argument (out)", sh.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+
+                                let out_id1: i32 = sh_llvm_new_tmp();
+                                ascii_append(sh.ir_out, "  ");
+                                sh_llvm_append_tmp(out_id1);
+                                ascii_append(sh.ir_out, " = call i32 @stasis_sys_argv(i32 ");
+                                sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                ascii_append(sh.ir_out, ", ptr ");
+                                sh_llvm_append_tmp(sh.expr_op_at[arg_base + 1]);
+                                ascii_append(sh.ir_out, ", i32 ");
+                                sh_llvm_append_tmp(sh.expr_op_at[arg_base + 2]);
+                                ascii_append(sh.ir_out, ")\n");
+
+                                val_len = arg_base;
+                                sh.expr_op_at[val_len] = out_id1;
+                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                sh.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                                if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_read_file")) {
+                                    handled_intr = 1;
+                                    if (argc != 3) {
+                                        sh_build_err_at(file_idx, "sys_read_file expects 3 arguments", sh.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+                                    if (sh.llvm_val_kind[arg_base + 2] != ShLlvmValueKind.I32) {
+                                        sh_build_err_at(file_idx, "sys_read_file expects i32 argument (out_cap)", sh.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+                                    if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8 || sh.llvm_val_kind[arg_base + 1] != ShLlvmValueKind.PtrI8) {
+                                        sh_build_err_at(file_idx, "sys_read_file expects pointer arguments (path, out)", sh.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+
+                                    let out_id2: i32 = sh_llvm_new_tmp();
+                                    ascii_append(sh.ir_out, "  ");
+                                    sh_llvm_append_tmp(out_id2);
+                                    ascii_append(sh.ir_out, " = call i32 @stasis_sys_read_file(ptr ");
+                                    sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                    ascii_append(sh.ir_out, ", ptr ");
+                                    sh_llvm_append_tmp(sh.expr_op_at[arg_base + 1]);
+                                    ascii_append(sh.ir_out, ", i32 ");
+                                    sh_llvm_append_tmp(sh.expr_op_at[arg_base + 2]);
+                                    ascii_append(sh.ir_out, ")\n");
+
+                                    val_len = arg_base;
+                                    sh.expr_op_at[val_len] = out_id2;
+                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_write_file")) {
+                                        handled_intr = 1;
+                                        if (argc != 3) {
+                                            sh_build_err_at(file_idx, "sys_write_file expects 3 arguments", sh.expr_nodes[idx2].at);
+                                            return -1;
+                                        }
+                                        if (sh.llvm_val_kind[arg_base + 2] != ShLlvmValueKind.I32) {
+                                            sh_build_err_at(file_idx, "sys_write_file expects i32 argument (len)", sh.expr_nodes[idx2].at);
+                                            return -1;
+                                        }
+                                        if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8 || sh.llvm_val_kind[arg_base + 1] != ShLlvmValueKind.PtrI8) {
+                                            sh_build_err_at(file_idx, "sys_write_file expects pointer arguments (path, data)", sh.expr_nodes[idx2].at);
+                                            return -1;
+                                        }
+
+                                        let out_id3: i32 = sh_llvm_new_tmp();
+                                        ascii_append(sh.ir_out, "  ");
+                                        sh_llvm_append_tmp(out_id3);
+                                        ascii_append(sh.ir_out, " = call i32 @stasis_sys_write_file(ptr ");
+                                        sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                        ascii_append(sh.ir_out, ", ptr ");
+                                        sh_llvm_append_tmp(sh.expr_op_at[arg_base + 1]);
+                                        ascii_append(sh.ir_out, ", i32 ");
+                                        sh_llvm_append_tmp(sh.expr_op_at[arg_base + 2]);
+                                        ascii_append(sh.ir_out, ")\n");
+
+                                        val_len = arg_base;
+                                        sh.expr_op_at[val_len] = out_id3;
+                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    } else {
+                                        if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_file_exists")) {
+                                            handled_intr = 1;
+                                            if (argc != 1) {
+                                                sh_build_err_at(file_idx, "sys_file_exists expects 1 argument", sh.expr_nodes[idx2].at);
+                                                return -1;
+                                            }
+                                            if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8) {
+                                                sh_build_err_at(file_idx, "sys_file_exists expects pointer argument (path)", sh.expr_nodes[idx2].at);
+                                                return -1;
+                                            }
+
+                                            let out_id4: i32 = sh_llvm_new_tmp();
+                                            ascii_append(sh.ir_out, "  ");
+                                            sh_llvm_append_tmp(out_id4);
+                                            ascii_append(sh.ir_out, " = call i32 @stasis_sys_file_exists(ptr ");
+                                            sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                            ascii_append(sh.ir_out, ")\n");
+
+                                            val_len = arg_base;
+                                            sh.expr_op_at[val_len] = out_id4;
+                                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                            sh.llvm_val_struct_idx[val_len] = -1;
+                                            val_len = val_len + 1;
+                                        } else {
+                                            if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_file_size")) {
+                                                handled_intr = 1;
+                                                if (argc != 1) {
+                                                    sh_build_err_at(file_idx, "sys_file_size expects 1 argument", sh.expr_nodes[idx2].at);
+                                                    return -1;
+                                                }
+                                                if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8) {
+                                                    sh_build_err_at(file_idx, "sys_file_size expects pointer argument (path)", sh.expr_nodes[idx2].at);
+                                                    return -1;
+                                                }
+
+                                                let out_id5: i32 = sh_llvm_new_tmp();
+                                                ascii_append(sh.ir_out, "  ");
+                                                sh_llvm_append_tmp(out_id5);
+                                                ascii_append(sh.ir_out, " = call i32 @stasis_sys_file_size(ptr ");
+                                                sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                ascii_append(sh.ir_out, ")\n");
+
+                                                val_len = arg_base;
+                                                sh.expr_op_at[val_len] = out_id5;
+                                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                sh.llvm_val_struct_idx[val_len] = -1;
+                                                val_len = val_len + 1;
+                                            } else {
+                                                if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_file_mtime_ms")) {
+                                                    handled_intr = 1;
+                                                    if (argc != 1) {
+                                                        sh_build_err_at(file_idx, "sys_file_mtime_ms expects 1 argument", sh.expr_nodes[idx2].at);
+                                                        return -1;
+                                                    }
+                                                    if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8) {
+                                                        sh_build_err_at(file_idx, "sys_file_mtime_ms expects pointer argument (path)", sh.expr_nodes[idx2].at);
+                                                        return -1;
+                                                    }
+
+                                                    let out_id6: i32 = sh_llvm_new_tmp();
+                                                    ascii_append(sh.ir_out, "  ");
+                                                    sh_llvm_append_tmp(out_id6);
+                                                    ascii_append(sh.ir_out, " = call i32 @stasis_sys_file_mtime_ms(ptr ");
+                                                    sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                    ascii_append(sh.ir_out, ")\n");
+
+                                                    val_len = arg_base;
+                                                    sh.expr_op_at[val_len] = out_id6;
+                                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                                    val_len = val_len + 1;
+                                                } else {
+                                                    if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_exec")) {
+                                                        handled_intr = 1;
+                                                        if (argc != 1) {
+                                                            sh_build_err_at(file_idx, "sys_exec expects 1 argument", sh.expr_nodes[idx2].at);
+                                                            return -1;
+                                                        }
+                                                        if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8) {
+                                                            sh_build_err_at(file_idx, "sys_exec expects pointer argument (command)", sh.expr_nodes[idx2].at);
+                                                            return -1;
+                                                        }
+
+                                                        let out_id7: i32 = sh_llvm_new_tmp();
+                                                        ascii_append(sh.ir_out, "  ");
+                                                        sh_llvm_append_tmp(out_id7);
+                                                        ascii_append(sh.ir_out, " = call i32 @stasis_sys_exec(ptr ");
+                                                        sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                        ascii_append(sh.ir_out, ")\n");
+
+                                                        val_len = arg_base;
+                                                        sh.expr_op_at[val_len] = out_id7;
+                                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                                        val_len = val_len + 1;
+                                                    } else {
+                                                        if (sh_span_eq(file_idx, cname_start2, cname_len2, "sys_sleep_ms")) {
+                                                            handled_intr = 1;
+                                                            if (argc != 1) {
+                                                                sh_build_err_at(file_idx, "sys_sleep_ms expects 1 argument", sh.expr_nodes[idx2].at);
+                                                                return -1;
+                                                            }
+                                                            if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.I32) {
+                                                                sh_build_err_at(file_idx, "sys_sleep_ms expects i32 argument (ms)", sh.expr_nodes[idx2].at);
+                                                                return -1;
+                                                            }
+
+                                                            let out_id8: i32 = sh_llvm_new_tmp();
+                                                            ascii_append(sh.ir_out, "  ");
+                                                            sh_llvm_append_tmp(out_id8);
+                                                            ascii_append(sh.ir_out, " = call i32 @stasis_sys_sleep_ms(i32 ");
+                                                            sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                            ascii_append(sh.ir_out, ")\n");
+
+                                                            val_len = arg_base;
+                                                            sh.expr_op_at[val_len] = out_id8;
+                                                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                            sh.llvm_val_struct_idx[val_len] = -1;
+                                                            val_len = val_len + 1;
+                                                        } else {
+                                                            if (sh_span_eq(file_idx, cname_start2, cname_len2, "print_string") || sh_span_eq(file_idx, cname_start2, cname_len2, "print")) {
+                                                                handled_intr = 1;
+                                                                if (argc != 1) {
+                                                                    sh_build_err_at(file_idx, "print_string expects 1 argument", sh.expr_nodes[idx2].at);
+                                                                    return -1;
+                                                                }
+                                                                if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.PtrI8) {
+                                                                    sh_build_err_at(file_idx, "print_string expects pointer argument (utf8/ascii)", sh.expr_nodes[idx2].at);
+                                                                    return -1;
+                                                                }
+
+                                                                let fmt_ptr: i32 = sh_llvm_new_tmp();
+                                                                ascii_append(sh.ir_out, "  ");
+                                                                sh_llvm_append_tmp(fmt_ptr);
+                                                                ascii_append(sh.ir_out, " = getelementptr inbounds [3 x i8], ptr @.stasis_fmt_s, i32 0, i32 0\n");
+
+                                                                let out_id9: i32 = sh_llvm_new_tmp();
+                                                                ascii_append(sh.ir_out, "  ");
+                                                                sh_llvm_append_tmp(out_id9);
+                                                                ascii_append(sh.ir_out, " = call i32 (ptr, ...) @printf(ptr ");
+                                                                sh_llvm_append_tmp(fmt_ptr);
+                                                                ascii_append(sh.ir_out, ", ptr ");
+                                                                sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                                ascii_append(sh.ir_out, ")\n");
+
+                                                                val_len = arg_base;
+                                                                sh.expr_op_at[val_len] = out_id9;
+                                                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                                sh.llvm_val_struct_idx[val_len] = -1;
+                                                                val_len = val_len + 1;
+                                                            } else {
+                                                                if (sh_span_eq(file_idx, cname_start2, cname_len2, "print_int")) {
+                                                                    handled_intr = 1;
+                                                                    if (argc != 1) {
+                                                                        sh_build_err_at(file_idx, "print_int expects 1 argument", sh.expr_nodes[idx2].at);
+                                                                        return -1;
+                                                                    }
+                                                                    if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.I32) {
+                                                                        sh_build_err_at(file_idx, "print_int expects i32 argument", sh.expr_nodes[idx2].at);
+                                                                        return -1;
+                                                                    }
+
+                                                                    let fmt_ptr2: i32 = sh_llvm_new_tmp();
+                                                                    ascii_append(sh.ir_out, "  ");
+                                                                    sh_llvm_append_tmp(fmt_ptr2);
+                                                                    ascii_append(sh.ir_out, " = getelementptr inbounds [4 x i8], ptr @.stasis_fmt_d, i32 0, i32 0\n");
+
+                                                                    let out_id10: i32 = sh_llvm_new_tmp();
+                                                                    ascii_append(sh.ir_out, "  ");
+                                                                    sh_llvm_append_tmp(out_id10);
+                                                                    ascii_append(sh.ir_out, " = call i32 (ptr, ...) @printf(ptr ");
+                                                                    sh_llvm_append_tmp(fmt_ptr2);
+                                                                    ascii_append(sh.ir_out, ", i32 ");
+                                                                    sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                                    ascii_append(sh.ir_out, ")\n");
+
+                                                                    val_len = arg_base;
+                                                                    sh.expr_op_at[val_len] = out_id10;
+                                                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                                                    val_len = val_len + 1;
+                                                                } else {
+                                                                    if (sh_span_eq(file_idx, cname_start2, cname_len2, "print_char")) {
+                                                                        handled_intr = 1;
+                                                                        if (argc != 1) {
+                                                                            sh_build_err_at(file_idx, "print_char expects 1 argument", sh.expr_nodes[idx2].at);
+                                                                            return -1;
+                                                                        }
+                                                                        if (sh.llvm_val_kind[arg_base] != ShLlvmValueKind.I32) {
+                                                                            sh_build_err_at(file_idx, "print_char expects i32 argument", sh.expr_nodes[idx2].at);
+                                                                            return -1;
+                                                                        }
+
+                                                                        let fmt_ptr3: i32 = sh_llvm_new_tmp();
+                                                                        ascii_append(sh.ir_out, "  ");
+                                                                        sh_llvm_append_tmp(fmt_ptr3);
+                                                                        ascii_append(sh.ir_out, " = getelementptr inbounds [3 x i8], ptr @.stasis_fmt_c, i32 0, i32 0\n");
+
+                                                                        let out_id11: i32 = sh_llvm_new_tmp();
+                                                                        ascii_append(sh.ir_out, "  ");
+                                                                        sh_llvm_append_tmp(out_id11);
+                                                                        ascii_append(sh.ir_out, " = call i32 (ptr, ...) @printf(ptr ");
+                                                                        sh_llvm_append_tmp(fmt_ptr3);
+                                                                        ascii_append(sh.ir_out, ", i32 ");
+                                                                        sh_llvm_append_tmp(sh.expr_op_at[arg_base]);
+                                                                        ascii_append(sh.ir_out, ")\n");
+
+                                                                        val_len = arg_base;
+                                                                        sh.expr_op_at[val_len] = out_id11;
+                                                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
+                                                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                                                        val_len = val_len + 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1897,10 +2511,10 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
                                     sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
                                     return -1;
                                 }
-                            }
                         }
-                    } else {
-                        if (kind2 == ShExprKind.Member) {
+                    }
+                } else {
+                    if (kind2 == ShExprKind.Member) {
                             if (val_len < 1) {
                                 sh_build_err_at(file_idx, "invalid member expression", sh.expr_nodes[idx2].at);
                                 return -1;
@@ -2147,6 +2761,7 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
                         }
                     }
                 }
+                }
             }
         }
     }
@@ -2233,6 +2848,7 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
         return 1;
     }
     sh_llvm_reset();
+    sh.llvm_str_count = 0;
 
     // Pre-scan locals so we can emit all allocas in entry (LLVM friendliness).
     if (sh_llvm_scan_locals_in_body(file_idx, body_start) != 0) {
@@ -2257,6 +2873,8 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
     ascii_append(sh.ir_out, "x86_64-pc-windows-msvc");
     ascii_append_byte(sh.ir_out, 34); // '\"'
     ascii_append(sh.ir_out, "\n\n");
+
+    sh_llvm_emit_runtime_decls_and_consts();
 
     if (sh_llvm_emit_struct_type_defs() != 0) {
         sh_build_err_at(file_idx, "failed to emit struct type definitions (llvm bring-up)", sh.tok_start);
@@ -2714,6 +3332,9 @@ function sh_emit_llvm_main_i32(module_name: ascii[]): i32 {
         }
     }
 
+    if (sh_llvm_emit_string_literal_globals() != 0) {
+        return 1;
+    }
     return 0;
 }
 

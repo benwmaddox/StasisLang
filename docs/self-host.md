@@ -49,7 +49,7 @@ Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
 - `stasis build ...`:
   - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
-  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), function calls with scalar args (i32ish/u8) and ptr args (u8[]/i32ish[]), struct field access (`a.b`), and indexing (`a[i]`) for fixed arrays/byte buffers. Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). `u8_to_i32()` and `i32_to_u8_trunc()` are recognized as bring-up intrinsics. `&&`/`||` are still eager (no short-circuit) in IR.
+  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), function calls with scalar args (i32ish/u8) and ptr args (u8[]/i32ish[]), struct field access (`a.b`), and indexing (`a[i]`) for fixed arrays/byte buffers. Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). `u8_to_i32()` and `i32_to_u8_trunc()` are recognized as bring-up intrinsics. String literals lower to static utf8 buffers (header + null sentinel); `print_*` and `sys_*` are lowered via `printf` and `stasis_sys_*`. `&&`/`||` are still eager (no short-circuit) in IR.
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
@@ -139,7 +139,7 @@ Hard limits (per compilation):
 Planned static allocations in `stasis` (tunable as we learn real-world pressure):
 
 - Source pool: ~16 MiB (all source file contents, null-sentinels between files)
-- Text output buffer (IR/debug): ~16 MiB
+- Text output buffer (IR/debug): ~32 MiB
 - Token buffer: fixed array sized for worst-case token density
   - Conservative estimate: 1 token per 2 bytes -> ~8 million tokens is too large; use a smaller cap and fail with a diagnostic if exceeded.
   - First implementation will target common code sizes and adjust once we have lexer metrics.
@@ -319,3 +319,5 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: LLVM expression emission now uses a typed iterative stack; added lowering for struct members + indexing (including global `u8` assignment via trunc/zext); added IR tests.
 - 2026-01-06: fixed expression parsing for nested calls by staging per-call arg lists in a stack buffer before copying into the call-node arg arena; added LLVM IR tests for nested calls.
 - 2026-01-06: LLVM bring-up: accept `u8[]`/`i32[]` as `ptr` params (length passed separately) and recognize `u8_to_i32` / `i32_to_u8_trunc` as intrinsics; added IR tests.
+- 2026-01-06: grew `sh.ir_out` to 32MiB; added LLVM module-level string literal emission (utf8 header + null sentinel) and added IR tests.
+- 2026-01-06: LLVM bring-up: lowered `print_string`/`print_int`/`print_char` and `sys_*` builtins via `printf` and `stasis_sys_*`; added IR tests.

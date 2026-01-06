@@ -197,7 +197,8 @@ enum ShExprKind {
     Assign = 6,
     Call = 7,
     Member = 8,
-    Index = 9
+    Index = 9,
+    StringLiteral = 10
 }
 
 struct ShExprNode {
@@ -237,7 +238,7 @@ struct ShState {
     arg_backend: ascii[16];
     arg_module: ascii[96];
     emit_ir: i32;
-    ir_out: ascii[262144];
+    ir_out: ascii[33554432];
     exec_cmd: ascii[4096];
 
     // Import/source graph
@@ -362,6 +363,15 @@ struct ShState {
     llvm_block_step_start: i32[256];
     llvm_block_step_file_idx: i32[256];
     llvm_block_len: i32;
+
+    // LLVM module-level scratch (string literals).
+    llvm_str_file_idx: i32[4096];
+    llvm_str_tok_start: i32[4096];
+    llvm_str_tok_len: i32[4096];
+    llvm_str_total_bytes: i32[4096];
+    llvm_str_byte_len: i32[4096];
+    llvm_str_char_len: i32[4096];
+    llvm_str_count: i32;
 }
 
 global sh: ShState;

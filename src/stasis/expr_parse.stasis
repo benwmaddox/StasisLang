@@ -93,6 +93,24 @@ function sh_expr_make_name(file_idx: i32, at: i32, len: i32): i32 {
     return idx;
 }
 
+function sh_expr_make_string_lit(file_idx: i32, at: i32, len: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.StringLiteral;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.Unknown;
+    sh.expr_nodes[idx].left = -1;
+    sh.expr_nodes[idx].right = -1;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = at;
+    sh.expr_nodes[idx].name_len = len;
+    return idx;
+}
+
 function sh_expr_make_call(file_idx: i32, at: i32, callee: i32, args_off: i32, args_len: i32): i32 {
     let idx: i32 = sh_expr_node_new();
     if (idx < 0) {
@@ -408,8 +426,12 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                             if (k == ShTok.Identifier) {
                                                 node = sh_expr_make_name(file_idx, sh.tok_start, sh.tok_len);
                                             } else {
-                                                sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
-                                                return -1;
+                                                if (k == ShTok.StringLiteral) {
+                                                    node = sh_expr_make_string_lit(file_idx, sh.tok_start, sh.tok_len);
+                                                } else {
+                                                    sh_expr_err_at(file_idx, "expected value in expression", sh.tok_start);
+                                                    return -1;
+                                                }
                                             }
                                         }
                                     }
