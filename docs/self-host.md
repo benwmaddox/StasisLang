@@ -47,6 +47,7 @@ Notes:
 Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan (signatures + struct/enum fields + function params/returns + global/const types); prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
 - `stasis build ... --emit-ir`: emits Cranelift CLIF or LLVM IR for a minimal subset (currently: `function main(): i32 { return <int>; }`).
+- `stasis run ...`: LLVM+`lli` runner for the same minimal subset (executes the produced IR and returns the program exit code).
 - `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
 
 Not yet implemented (but planned in the contract above):
@@ -258,3 +259,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: grew the signature scan into an iterative top-level decl parser that records `struct`/`enum` declarations + fields/members + basic type shapes into fixed-capacity tables under `sh`; added `tests/stasis_decls.stasis`.
 - 2026-01-06: signature scan now also records `function`/`test` decls (params, return type, body start) and `global`/`const` decls (type + init start) into fixed-capacity tables.
 - 2026-01-06: added minimal `stasis build --emit-ir` + IR emit helpers (`src/stasis/emit_ir.stasis`, `src/stasis/build_ir.stasis`) and coverage in `tests/stasis_build_ir.stasis`.
+- 2026-01-06: added minimal `stasis run` for LLVM via `lli` (no linking yet; used for smoke-testing the IR path).

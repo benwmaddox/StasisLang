@@ -193,6 +193,7 @@ struct ShState {
     arg_module: ascii[96];
     emit_ir: i32;
     ir_out: ascii[262144];
+    exec_cmd: ascii[4096];
 
     // Import/source graph
     files: ShFile[300];

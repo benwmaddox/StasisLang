@@ -33,6 +33,7 @@ codevcpkg/
 build/hotstate/
 build/aot/
 build/*.clif
+build/*.ll
 build/*_expanded.stasis
 
 # Android local build outputs
