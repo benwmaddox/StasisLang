@@ -196,3 +196,41 @@ test `stasis build rejects non-constant return expressions`() {
     rc = sh_emit_main_return_i32_ir("module", "cranelift");
     return rc != 0;
 }
+
+test `stasis build emits llvm for locals and assignments`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path, t_exe_dir, "sh_build_ir_locals_llvm.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  let x: i32 = 40;");
+    t_append_line(t_tmp, "  x = x + 2;");
+    t_append_line(t_tmp, "  return x;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(sh.ir_out, "alloca i32")) { return false; }
+    if (!ascii_contains(sh.ir_out, "store i32 40")) { return false; }
+    if (!ascii_contains(sh.ir_out, "add i32")) { return false; }
+    return ascii_contains(sh.ir_out, "ret i32 %t");
+}

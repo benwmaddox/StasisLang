@@ -45,16 +45,18 @@ Notes:
 ## Current Status (Today)
 
 Implemented:
-- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan (signatures + struct/enum fields + function params/returns + global/const types); prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
-- `stasis build ...`: minimal compiler path for `function main(): i32 { return <const-expr>; }` where `<const-expr>` is i32 literals with `+ - * /` and parentheses:
+- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
+- `stasis build ...`:
+  - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
+  - LLVM: can now emit IR for a larger subset of `main` including `let` locals + assignments + expression statements + return (still no control-flow/calls/member/index yet; return must currently be the last statement).
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
-- `stasis run ...`: LLVM+`lli` runner for the same minimal subset (executes the produced IR and returns the program exit code).
-- `stasis release ...`: LLVM+`clang -O3` for the same minimal subset.
+- `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
+- `stasis release ...`: LLVM+`clang -O3` for the current LLVM subset.
 - `stasis watch (check|build|run) ...`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the selected subcommand on changes.
 
 Not yet implemented (but planned in the contract above):
-- `build`, `run`, `test`, `release`.
+- `test`.
 
 ## Backend Strategy (No Reimplementation of LLVM/Cranelift)
 
@@ -308,3 +310,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: expanded roadmap details for parser/sema/codegen and added a "definition of done" checklist for self-hosting.
 - 2026-01-06: added iterative expression parser + const evaluator (`src/stasis/expr_parse.stasis`) and reused it for minimal `build` return expressions (more operators, better errors).
 - 2026-01-06: added a first-pass function-body statement parser (`src/stasis/stmt_parse.stasis`) and wired it into `stasis check` (syntax-only; expressions are skipped structurally for now).
+- 2026-01-06: LLVM IR emit now supports a larger `main` subset (locals + assignments + expression statements + non-constant returns) and `stasis run/build/release` can execute/build that subset.

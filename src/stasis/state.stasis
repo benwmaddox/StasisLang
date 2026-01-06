@@ -302,6 +302,12 @@ struct ShState {
     params: ShParamDecl[50000];
     param_count: i32;
     sig_path: ascii[260];
+
+    // LLVM codegen scratch (minimal bring-up; grows over time).
+    llvm_local_name_start: i32[1024];
+    llvm_local_name_len: i32[1024];
+    llvm_local_count: i32;
+    llvm_tmp_id: i32;
 }
 
 global sh: ShState;
