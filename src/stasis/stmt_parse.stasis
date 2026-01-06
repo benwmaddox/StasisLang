@@ -119,18 +119,24 @@ function sh_stmt_skip_type(file_idx: i32): i32 {
     for (; done == 0; ) {
         if (k == ShTok.LBracket) {
             k = sh_lex_next_kind();
-            if (k != ShTok.IntegerLiteral) {
-                errors = errors + 1;
-                sh_stmt_err_at(file_idx, "expected array size", sh.tok_start);
-            } else {
-                k = sh_lex_next_kind();
-            }
 
-            if (k != ShTok.RBracket) {
-                errors = errors + 1;
-                sh_stmt_err_at(file_idx, "expected ']'", sh.tok_start);
-            } else {
+            // Slice: `Type[]` (no explicit size).
+            if (k == ShTok.RBracket) {
                 k = sh_lex_next_kind();
+            } else {
+                if (k != ShTok.IntegerLiteral) {
+                    errors = errors + 1;
+                    sh_stmt_err_at(file_idx, "expected array size or ']'", sh.tok_start);
+                } else {
+                    k = sh_lex_next_kind();
+                }
+
+                if (k != ShTok.RBracket) {
+                    errors = errors + 1;
+                    sh_stmt_err_at(file_idx, "expected ']'", sh.tok_start);
+                } else {
+                    k = sh_lex_next_kind();
+                }
             }
         } else {
             done = 1;

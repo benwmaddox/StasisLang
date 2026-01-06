@@ -10,6 +10,7 @@ global t_path_dup: ascii[260];
 global t_path_entry: ascii[260];
 global t_path_mod1: ascii[260];
 global t_path_mod2: ascii[260];
+global t_path_slice: ascii[260];
 
 global t_tmp: ascii[4096];
 
@@ -126,4 +127,26 @@ test `stasis signature scan allows duplicates across modules`() {
     }
     let errors: i32 = sh_sig_scan_loaded_files();
     return errors == 0 && sh.sym_count == 2;
+}
+
+test `stasis signature scan accepts slice types`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path_slice, t_exe_dir, "sh_sig_slice.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(a: ascii[], b: u8[]): i32 { return 0; }");
+    if (!t_write_ascii(t_path_slice, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path_slice);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    return errors == 0;
 }

@@ -257,18 +257,24 @@ function sh_sig_parse_type(file_idx: i32): i32 {
     for (; done == 0; ) {
         if (sh.sig_kind == ShTok.LBracket) {
             sh_sig_advance();
-            if (sh.sig_kind != ShTok.IntegerLiteral) {
-                sh_sig_err_here(file_idx, "expected array size");
-            }
             let size: i32 = 0;
-            if (sh.sig_kind == ShTok.IntegerLiteral) {
-                size = sh_sig_parse_i32_from_tok(file_idx);
+
+            // Slice type: `Type[]` (modeled as Array with size=0).
+            if (sh.sig_kind == ShTok.RBracket) {
                 sh_sig_advance();
-            }
-            if (sh.sig_kind != ShTok.RBracket) {
-                sh_sig_err_here(file_idx, "expected ']'");
             } else {
-                sh_sig_advance();
+                if (sh.sig_kind != ShTok.IntegerLiteral) {
+                    sh_sig_err_here(file_idx, "expected array size or ']'");
+                }
+                if (sh.sig_kind == ShTok.IntegerLiteral) {
+                    size = sh_sig_parse_i32_from_tok(file_idx);
+                    sh_sig_advance();
+                }
+                if (sh.sig_kind != ShTok.RBracket) {
+                    sh_sig_err_here(file_idx, "expected ']'");
+                } else {
+                    sh_sig_advance();
+                }
             }
 
             if (type_idx >= 0) {
