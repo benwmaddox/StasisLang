@@ -219,7 +219,8 @@ enum LlvmBlockKind {
     IfThen = 2,
     IfElse = 3,
     ForBody = 4,
-    Function = 5
+    ForeachBody = 5,
+    Function = 6
 }
 
 enum LlvmValueKind {
@@ -354,6 +355,7 @@ struct State {
     llvm_local_declared: i32[1024];
     llvm_local_declared_at: i32[1024];
     llvm_local_kind: LlvmValueKind[1024];
+    llvm_local_struct_idx: i32[1024];
     llvm_local_count: i32;
     llvm_tmp_id: i32;
     llvm_label_id: i32;
@@ -372,6 +374,9 @@ struct State {
     llvm_block_has_step: i32[256];
     llvm_block_step_start: i32[256];
     llvm_block_step_file_idx: i32[256];
+    llvm_block_foreach_index_local: i32[256];
+    llvm_block_foreach_idx_phi_tmp: i32[256];
+    llvm_block_foreach_idx_next_tmp: i32[256];
     llvm_block_len: i32;
 
     // LLVM module-level scratch (string literals).

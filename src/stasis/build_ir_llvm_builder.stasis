@@ -50,6 +50,7 @@ function llvm_add_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
     stasis.llvm_local_name_start[id] = name_start;
     stasis.llvm_local_name_len[id] = name_len;
     stasis.llvm_local_kind[id] = LlvmValueKind.I32;
+    stasis.llvm_local_struct_idx[id] = -1;
     stasis.llvm_local_count = stasis.llvm_local_count + 1;
     return id;
 }
@@ -201,6 +202,14 @@ function llvm_emit_store_local(local_id: i32, value_id: i32): void {
     ascii_append(stasis.ir_out, ", ptr ");
     llvm_append_local_ptr(local_id);
     ascii_append(stasis.ir_out, ", align 4\n");
+}
+
+function llvm_emit_store_ptr_local(local_id: i32, ptr_id: i32): void {
+    ascii_append(stasis.ir_out, "  store ptr ");
+    llvm_append_tmp(ptr_id);
+    ascii_append(stasis.ir_out, ", ptr ");
+    llvm_append_local_ptr(local_id);
+    ascii_append(stasis.ir_out, ", align 8\n");
 }
 
 function llvm_emit_load_ptr_from_local(local_id: i32): i32 {
@@ -468,6 +477,93 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                         } else {
                             if (span_eq(file_idx, stasis.tok_start, stasis.tok_len, "string")) {
                                 stasis.llvm_local_kind[local_id] = LlvmValueKind.PtrI8;
+                            }
+                        }
+                    }
+                } else {
+                    if (k == Tok.ForeachKeyword) {
+                        // foreach (let it, i in expr) { ... }
+                        let lp: Tok = lex_next_kind();
+                        if (lp != Tok.LParen) {
+                            build_err_at(file_idx, "expected '(' after 'foreach'", stasis.tok_start);
+                            return 1;
+                        }
+
+                        let has_let: i32 = 0;
+                        let it_k: Tok = lex_next_kind();
+                        if (it_k == Tok.LetKeyword) {
+                            has_let = 1;
+                            it_k = lex_next_kind();
+                        }
+
+                        if (it_k != Tok.Identifier) {
+                            build_err_at(file_idx, "expected iterator name", stasis.tok_start);
+                            return 1;
+                        }
+
+                        if (has_let != 0) {
+                            let it_local: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                            if (it_local < 0) {
+                                it_local = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                if (it_local < 0) { return 1; }
+                                stasis.llvm_local_declared[it_local] = 0;
+                                stasis.llvm_local_declared_at[it_local] = stasis.tok_start;
+                            }
+                            stasis.llvm_local_kind[it_local] = LlvmValueKind.PtrStruct;
+                            stasis.llvm_local_struct_idx[it_local] = -1;
+                        }
+
+                        let next_k2: Tok = lex_next_kind();
+                        if (next_k2 == Tok.Comma) {
+                            let idx_k: Tok = lex_next_kind();
+                            if (idx_k != Tok.Identifier) {
+                                build_err_at(file_idx, "expected index variable name", stasis.tok_start);
+                                return 1;
+                            }
+                            if (has_let != 0) {
+                                let idx_local: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                if (idx_local < 0) {
+                                    idx_local = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                    if (idx_local < 0) { return 1; }
+                                    stasis.llvm_local_declared[idx_local] = 0;
+                                    stasis.llvm_local_declared_at[idx_local] = stasis.tok_start;
+                                }
+                                stasis.llvm_local_kind[idx_local] = LlvmValueKind.I32;
+                                stasis.llvm_local_struct_idx[idx_local] = -1;
+                            }
+                            next_k2 = lex_next_kind();
+                        }
+
+                        if (next_k2 != Tok.InKeyword) {
+                            build_err_at(file_idx, "expected 'in' in foreach", stasis.tok_start);
+                            return 1;
+                        }
+
+                        // Skip the collection expression until the matching ')' (track nested () and []).
+                        let nest: i32 = 0;
+                        let done: i32 = 0;
+                        for (; done == 0; ) {
+                            let ek: Tok = lex_next_kind();
+                            if (ek == Tok.Eof) {
+                                build_err_at(file_idx, "unexpected eof in foreach header", stasis.tok_start);
+                                return 1;
+                            }
+                            if (ek == Tok.LParen || ek == Tok.LBracket) {
+                                nest = nest + 1;
+                            } else {
+                                if (ek == Tok.RParen) {
+                                    if (nest == 0) {
+                                        done = 1;
+                                    } else {
+                                        nest = nest - 1;
+                                    }
+                                } else {
+                                    if (ek == Tok.RBracket) {
+                                        if (nest > 0) {
+                                            nest = nest - 1;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
