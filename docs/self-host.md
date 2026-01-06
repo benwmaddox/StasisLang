@@ -46,7 +46,7 @@ Notes:
 
 Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan (signatures + struct/enum fields + function params/returns + global/const types); prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
-- `stasis build ...`: minimal compiler path for `function main(): i32 { return <int>; }`:
+- `stasis build ...`: minimal compiler path for `function main(): i32 { return <const-expr>; }` where `<const-expr>` is i32 literals with `+ - * /` and parentheses:
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the same minimal subset (executes the produced IR and returns the program exit code).
@@ -263,3 +263,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: added minimal `stasis build --emit-ir` + IR emit helpers (`src/stasis/emit_ir.stasis`, `src/stasis/build_ir.stasis`) and coverage in `tests/stasis_build_ir.stasis`.
 - 2026-01-06: added minimal `stasis run` for LLVM via `lli` (no linking yet; used for smoke-testing the IR path).
 - 2026-01-06: `stasis build` can now produce a native EXE for LLVM by invoking `clang` on emitted IR (still minimal-subset only).
+- 2026-01-06: minimal build now supports constant `return` expressions (literals + `+ - * /` + parentheses) via an iterative shunting-yard evaluator.
