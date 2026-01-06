@@ -54,6 +54,12 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
                 return -1;
             }
         } else {
+            if (build_type_is_string_named(p_ty)) {
+                if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.PtrI8) {
+                    build_err_at(file_idx, "invalid call arg value (expected string pointer)", stasis.expr_nodes[idx2].at);
+                    return -1;
+                }
+            } else {
             if (build_type_is_i32ish(p_ty) || build_type_is_byte_named(p_ty)) {
                 if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.I32) {
                     build_err_at(file_idx, "invalid call arg value (expected i32)", stasis.expr_nodes[idx2].at);
@@ -87,6 +93,7 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
                     build_err_at(file_idx, "invalid call arg value (expected pointer)", stasis.expr_nodes[idx2].at);
                     return -1;
                 }
+            }
             }
         }
     }
@@ -125,10 +132,14 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
         if (build_type_is_f32(p_ty2)) {
             ascii_append(stasis.ir_out, "float ");
         } else {
-            if (build_type_is_i32ish(p_ty2) || build_type_is_byte_named(p_ty2)) {
-                ascii_append(stasis.ir_out, "i32 ");
-            } else {
+            if (build_type_is_string_named(p_ty2)) {
                 ascii_append(stasis.ir_out, "ptr ");
+            } else {
+                if (build_type_is_i32ish(p_ty2) || build_type_is_byte_named(p_ty2)) {
+                    ascii_append(stasis.ir_out, "i32 ");
+                } else {
+                    ascii_append(stasis.ir_out, "ptr ");
+                }
             }
         }
         llvm_append_tmp(stasis.expr_op_at[arg_base + pi]);

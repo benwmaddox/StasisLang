@@ -465,6 +465,10 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                         }
                         if (span_eq(file_idx, stasis.tok_start, stasis.tok_len, "f32")) {
                             stasis.llvm_local_kind[local_id] = LlvmValueKind.F32;
+                        } else {
+                            if (span_eq(file_idx, stasis.tok_start, stasis.tok_len, "string")) {
+                                stasis.llvm_local_kind[local_id] = LlvmValueKind.PtrI8;
+                            }
                         }
                     }
                 }

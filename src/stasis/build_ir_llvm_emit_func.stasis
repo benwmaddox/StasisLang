@@ -68,6 +68,9 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
         if (build_type_is_f32(p_ty)) {
             param_kind = LlvmValueKind.F32;
         } else {
+        if (build_type_is_string_named(p_ty)) {
+            param_kind = LlvmValueKind.PtrI8;
+        } else {
         if (!build_type_is_i32ish(p_ty) && !build_type_is_byte_named(p_ty)) {
             let p_tkind: TypeKind = stasis.types[p_ty].kind;
             if (p_tkind != TypeKind.Array) {
@@ -90,6 +93,7 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                     }
                 }
             }
+        }
         }
         }
 

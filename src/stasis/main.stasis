@@ -48,6 +48,10 @@ function ir_needs_graphics_runtime(): bool {
     if (ascii_contains(stasis.ir_out, "call void @stasis_draw_line")) { return true; }
     if (ascii_contains(stasis.ir_out, "call void @stasis_draw_lines_f32")) { return true; }
 
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_load_font")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_draw_text")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_measure_text")) { return true; }
+
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_load_sprite")) { return true; }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_poll_reload")) { return true; }
     if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprite")) { return true; }

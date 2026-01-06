@@ -128,7 +128,19 @@ function build_type_is_byte_named(type_idx: i32): bool {
     }
     if (span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "u8")) { return true; }
     if (span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "ascii")) { return true; }
-    return span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "utf8");
+    if (span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "utf8")) { return true; }
+    return span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "string");
+}
+
+function build_type_is_string_named(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= stasis.type_count) {
+        return false;
+    }
+    let kind: TypeKind = stasis.types[type_idx].kind;
+    if (kind != TypeKind.Named) {
+        return false;
+    }
+    return span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "string");
 }
 
 function build_type_is_void(type_idx: i32): bool {
@@ -152,6 +164,7 @@ function build_header_bytes_for_elem(elem_type_idx: i32): i32 {
     }
     if (span_eq(stasis.types[elem_type_idx].file_idx, stasis.types[elem_type_idx].start, stasis.types[elem_type_idx].len, "ascii")) { return 4; }
     if (span_eq(stasis.types[elem_type_idx].file_idx, stasis.types[elem_type_idx].start, stasis.types[elem_type_idx].len, "utf8")) { return 8; }
+    if (span_eq(stasis.types[elem_type_idx].file_idx, stasis.types[elem_type_idx].start, stasis.types[elem_type_idx].len, "string")) { return 8; }
     return 0;
 }
 
@@ -245,4 +258,3 @@ function build_find_struct_field(struct_idx: i32, name_file_idx: i32, name_start
     }
     return -1;
 }
-
