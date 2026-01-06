@@ -48,7 +48,7 @@ Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
 - `stasis build ...`:
   - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
-  - LLVM: can now emit IR for a larger subset of `main` including `let` locals + assignments + expression statements + structured control flow (`if`/`else`, `for`) and a return-slot (so `return` can appear anywhere). Bring-up supports empty-arg calls like `foo()` (no call arguments yet) and emits additional entry-file no-arg `i32` helper functions with a minimal return-only body. Still no member/index yet; `&&`/`||` are not short-circuit in IR yet.
+  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), and function calls with arguments (i32/bool only). Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). Still no indexing/field access as values yet; member access is currently only used for module-qualified calls; `&&`/`||` are still eager (no short-circuit) in IR.
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
