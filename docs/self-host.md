@@ -248,8 +248,9 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
 - 2026-01-05: tokenizer now uses `enum ShTok { ... }` (explicit numeric values) instead of `const SH_TOK_*`.
 - 2026-01-05: clarified module import semantics: imported module members are in scope by default; use `ModuleName.symbol` only to disambiguate.
-- 2026-01-05: `stasis check` now prints lexer error diagnostics (file + byte offset) for unknown bytes and unterminated string literals.
+- 2026-01-05: `stasis check` now prints lexer error diagnostics (file + line/col) for unknown bytes and unterminated string literals.
 - 2026-01-05: added `--quiet` to `stasis check` and `stasis watch check` to suppress diagnostics (useful for scripting/watch output).
 - 2026-01-05: made `src/stasis/*.stasis` imports explicit (avoid relying on transitive imports under the module model).
 - 2026-01-05: added a top-level signature scan pass (`src/stasis/signatures.stasis`) + `tests/stasis_signatures.stasis`; `stasis check` now reports `sig_errors`.
 - 2026-01-05: added import-member collision detection (`src/stasis/modules.stasis`) + `tests/stasis_modules.stasis`; `stasis check` now reports `import_collisions` (non-fatal note).
+- 2026-01-05: standardized diagnostics formatting to `path:line:col` via `src/stasis/diagnostics.stasis` (lexer/parser/signatures).

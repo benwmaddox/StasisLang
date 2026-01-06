@@ -2,6 +2,7 @@ import "../stdlib/stdlib.stasis";
 import "state.stasis";
 import "imports.stasis";
 import "lexing.stasis";
+import "diagnostics.stasis";
 
 const SH_PARSE_STACK_CAP: i32 = 4096;
 
@@ -25,16 +26,10 @@ function sh_parse_print_err(file_idx: i32, msg: ascii[], at: i32): void {
         return;
     }
 
-    if (!sh_copy_file_path(sh.parse_path, file_idx)) {
-        ascii_copy(sh.parse_path, "<unknown>");
-    }
-
     print_string("error: ");
     print_string(msg);
     print_string(": ");
-    print_string(sh.parse_path);
-    print_char(58); // ':'
-    print_int(at);
+    sh_print_file_loc(file_idx, at);
     print_char(10);
 }
 

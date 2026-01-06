@@ -2,6 +2,7 @@ import "../stdlib/stdlib.stasis";
 import "state.stasis";
 import "imports.stasis";
 import "lexing.stasis";
+import "diagnostics.stasis";
 
 const SH_SYM_CAP: i32 = 20000;
 const SH_SYM_POOL_CAP: i32 = 200000;
@@ -23,16 +24,10 @@ function sh_sig_print_err_at(file_idx: i32, msg: ascii[], at: i32): void {
         return;
     }
 
-    if (!sh_copy_file_path(sh.sig_path, file_idx)) {
-        ascii_copy(sh.sig_path, "<unknown>");
-    }
-
     print_string("error: ");
     print_string(msg);
     print_string(": ");
-    print_string(sh.sig_path);
-    print_char(58); // ':'
-    print_int(at);
+    sh_print_file_loc(file_idx, at);
     print_char(10);
     sh.lex_error_printed = sh.lex_error_printed + 1;
 }
@@ -45,16 +40,10 @@ function sh_sig_print_dup_err(file_idx: i32): void {
         return;
     }
 
-    if (!sh_copy_file_path(sh.sig_path, file_idx)) {
-        ascii_copy(sh.sig_path, "<unknown>");
-    }
-
     print_string("error: duplicate top-level symbol '");
     sh_sig_print_tok_text();
     print_string("': ");
-    print_string(sh.sig_path);
-    print_char(58); // ':'
-    print_int(sh.tok_start);
+    sh_print_file_loc(file_idx, sh.tok_start);
     print_char(10);
     sh.lex_error_printed = sh.lex_error_printed + 1;
 }

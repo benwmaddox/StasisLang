@@ -1,6 +1,7 @@
 import "../stdlib/stdlib.stasis";
 import "state.stasis";
 import "imports.stasis";
+import "diagnostics.stasis";
 
 // Token kinds: enum ShTok (with explicit numeric values) lives in state.stasis.
 
@@ -31,16 +32,10 @@ function sh_lex_print_err(file_idx: i32, msg: ascii[], at: i32): void {
         return;
     }
 
-    if (!sh_copy_file_path(sh.lex_path, file_idx)) {
-        ascii_copy(sh.lex_path, "<unknown>");
-    }
-
     print_string("error: ");
     print_string(msg);
     print_string(": ");
-    print_string(sh.lex_path);
-    print_char(58); // ':'
-    print_int(at);
+    sh_print_file_loc(file_idx, at);
     print_char(10);
     sh.lex_error_printed = sh.lex_error_printed + 1;
 }
@@ -53,18 +48,12 @@ function sh_lex_print_err_byte(file_idx: i32, msg: ascii[], at: i32, b: u8): voi
         return;
     }
 
-    if (!sh_copy_file_path(sh.lex_path, file_idx)) {
-        ascii_copy(sh.lex_path, "<unknown>");
-    }
-
     print_string("error: ");
     print_string(msg);
     print_string(" (byte=");
     print_int(u8_to_i32(b));
     print_string("): ");
-    print_string(sh.lex_path);
-    print_char(58); // ':'
-    print_int(at);
+    sh_print_file_loc(file_idx, at);
     print_char(10);
     sh.lex_error_printed = sh.lex_error_printed + 1;
 }
