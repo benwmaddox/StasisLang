@@ -14,7 +14,7 @@ This is a living design + progress document for the `self-host` branch.
   - Cranelift CLIF text (compiled via existing `tools/cranelift-aot` + `clang` link), or
   - LLVM IR text (executed via `lli` when possible, else `clang` link).
 - Remains deterministic: static memory only; explicit I/O; no hidden allocation.
-- Uses a single global state struct (`sh`) to own all compiler/static allocations.
+- Uses a single global state struct (`stasis`) to own all compiler/static allocations.
 - Prefer iteration over recursion where practical (explicit stacks for parse/sema/codegen).
 
 ## Names (Stage0 vs Stage1)
@@ -288,8 +288,8 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `src/stasis/parsing.stasis` minimal parse pass (balance check) + `tests/stasis_parsing.stasis`; wired `stasis check` to run lexer+parse across the loaded source graph.
 - 2026-01-05: imports now assign a deterministic module name per file (derived from basename) and reject duplicate module names.
 - 2026-01-05: import scanning now records per-file import edges (fixed table) for future semantic module resolution.
-- 2026-01-05: refactored self-host compiler to a single global `sh: ShState` in `src/stasis/state.stasis` (no other globals under `src/stasis/`).
-- 2026-01-05: fixed LLVM + Cranelift lowering for string-buffer headers on flattened struct fields (needed for `sh.scratch_*` and other `ascii[N]` fields inside `sh`).
+- 2026-01-05: refactored self-host compiler to a single global `stasis: State` in `src/stasis/state.stasis` (no other globals under `src/stasis/`).
+- 2026-01-05: fixed LLVM + Cranelift lowering for string-buffer headers on flattened struct fields (needed for `stasis.scratch_*` and other `ascii[N]` fields inside `stasis`).
 - 2026-01-05: fixed `tools/cranelift-aot` to accept `load.r64` (pointer) instructions.
 - 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
 - 2026-01-05: tokenizer now uses `enum ShTok { ... }` (explicit numeric values) instead of `const SH_TOK_*`.
@@ -300,7 +300,7 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added a top-level signature scan pass (`src/stasis/signatures.stasis`) + `tests/stasis_signatures.stasis`; `stasis check` now reports `sig_errors`.
 - 2026-01-05: added import-member collision detection (`src/stasis/modules.stasis`) + `tests/stasis_modules.stasis`; `stasis check` now reports `import_collisions` (non-fatal note).
 - 2026-01-05: standardized diagnostics formatting to `path:line:col` via `src/stasis/diagnostics.stasis` (lexer/parser/signatures).
-- 2026-01-06: grew the signature scan into an iterative top-level decl parser that records `struct`/`enum` declarations + fields/members + basic type shapes into fixed-capacity tables under `sh`; added `tests/stasis_decls.stasis`.
+- 2026-01-06: grew the signature scan into an iterative top-level decl parser that records `struct`/`enum` declarations + fields/members + basic type shapes into fixed-capacity tables under `stasis`; added `tests/stasis_decls.stasis`.
 - 2026-01-06: signature scan now also records `function`/`test` decls (params, return type, body start) and `global`/`const` decls (type + init start) into fixed-capacity tables.
 - 2026-01-06: added minimal `stasis build --emit-ir` + IR emit helpers (`src/stasis/emit_ir.stasis`, `src/stasis/build_ir.stasis`) and coverage in `tests/stasis_build_ir.stasis`.
 - 2026-01-06: added minimal `stasis run` for LLVM via `lli` (no linking yet; used for smoke-testing the IR path).
@@ -319,10 +319,14 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: LLVM expression emission now uses a typed iterative stack; added lowering for struct members + indexing (including global `u8` assignment via trunc/zext); added IR tests.
 - 2026-01-06: fixed expression parsing for nested calls by staging per-call arg lists in a stack buffer before copying into the call-node arg arena; added LLVM IR tests for nested calls.
 - 2026-01-06: LLVM bring-up: accept `u8[]`/`i32[]` as `ptr` params (length passed separately) and recognize `u8_to_i32` / `i32_to_u8_trunc` as intrinsics; added IR tests.
-- 2026-01-06: grew `sh.ir_out` to 32MiB; added LLVM module-level string literal emission (utf8 header + null sentinel) and added IR tests.
+- 2026-01-06: grew `stasis.ir_out` to 32MiB; added LLVM module-level string literal emission (utf8 header + null sentinel) and added IR tests.
 - 2026-01-06: LLVM bring-up: lowered `print_string`/`print_int`/`print_char` and `sys_*` builtins via `printf` and `stasis_sys_*`; added IR tests.
 - 2026-01-06: fixed expression parsing of `)` so calls can close inside grouping parentheses (needed for self-host compiler code).
 - 2026-01-06: refactored LLVM IR emitter files to keep each `.stasis` source <50KiB; added void returns, char_* builtins, const resolution, and enum member lowering.
 - 2026-01-06: stage1 self-build now works: `stasis build --emit-ir src/stasis/main.stasis` emits `build/stasis_self.ll` with no stage0 help beyond bootstrap.
 - 2026-01-06: `stasis build`/`run`/`release` now link the sys runtime (`runtime/stasis_sys.c`) when invoking `clang`; `run` uses a temp exe instead of `lli`.
 - 2026-01-06: LLVM bring-up: added `f32` support end-to-end (float literals, `f32` types, locals/params/returns, `+ - * /`, comparisons, consts); added `i32_to_f32` / `f32_to_i32` intrinsics; split call lowering to keep files <50KiB; added `examples/f32_smoke.stasis`.
+- 2026-01-06: added extern function declarations (`function name(...): type;`) for runtime bindings; lowered extern calls to `stasis_<name>` and emitted LLVM `declare` lines for them.
+- 2026-01-06: filled in `src/stdlib/graphics.stasis` with runtime bindings and updated `examples/flappy_birds*.stasis` to match the current `gfx_*` API.
+- 2026-01-06: fixed LLVM float literal emission by emitting `fptrunc double <lit> to float` (clang-as does not accept decimal constants directly in `float` contexts).
+- 2026-01-06: self-host CLI now links `runtime/build/Release/stasis_graphics_static.lib` (and dependency libs) automatically when the generated LLVM IR contains calls to graphics runtime symbols.
