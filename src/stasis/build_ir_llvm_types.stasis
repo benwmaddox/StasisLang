@@ -242,6 +242,11 @@ function llvm_emit_global_defs(): i32 {
 function llvm_emit_runtime_decls_and_consts(): void {
     // C runtime
     ascii_append(stasis.ir_out, "declare i32 @printf(ptr, ...)\n");
+    ascii_append(stasis.ir_out, "declare i64 @time(ptr)\n");
+
+    // LLVM intrinsics
+    ascii_append(stasis.ir_out, "declare float @llvm.sin.f32(float)\n");
+    ascii_append(stasis.ir_out, "declare float @llvm.cos.f32(float)\n");
 
     // System: sys_* builtins
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_argc()\n");
@@ -253,6 +258,8 @@ function llvm_emit_runtime_decls_and_consts(): void {
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_file_mtime_ms(ptr)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_exec(ptr)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_sleep_ms(i32)\n");
+    ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_char()\n");
+    ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_int()\n");
     ascii_append_byte(stasis.ir_out, 10);
 
     // Extern (no-body) declarations: `function name(...): type;` -> `declare <ty> @stasis_<name>(...)`
@@ -347,4 +354,5 @@ function llvm_emit_runtime_decls_and_consts(): void {
     ascii_append_byte(stasis.ir_out, 34); // '\"'
     ascii_append(stasis.ir_out, ", align 1\n");
     ascii_append_byte(stasis.ir_out, 10);
+
 }

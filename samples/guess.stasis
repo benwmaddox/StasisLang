@@ -32,6 +32,10 @@ function print_lower(): void {
     print_char(76); print_char(111); print_char(119); print_char(101); print_char(114); print_char(10);
 }
 
+function print_invalid(): void {
+    print_char(73); print_char(110); print_char(118); print_char(97); print_char(108); print_char(105); print_char(100); print_char(10);
+}
+
 function print_out_of_tries(target: i32): void {
     print_char(79); print_char(117); print_char(116); print_char(32); print_char(111); print_char(102); print_char(32); print_char(116); print_char(114); print_char(105); print_char(101); print_char(115); print_char(46); print_char(32);
     print_char(84); print_char(97); print_char(114); print_char(103); print_char(101); print_char(116); print_char(32); print_char(119); print_char(97); print_char(115); print_char(32);

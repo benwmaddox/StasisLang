@@ -291,7 +291,19 @@ function llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_le
                     let base_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
                     let base_si: i32 = stasis.llvm_val_struct_idx[val_len - 1];
                     val_len = val_len - 1;
-     
+
+                    // Fixed array length: `some_array.length`
+                    if (mode2 == 0 && span_eq(file_idx, stasis.expr_nodes[idx2].name_start, stasis.expr_nodes[idx2].name_len, "length")) {
+                        let len2: i32 = llvm_try_resolve_fixed_array_len_from_expr(file_idx, stasis.expr_nodes[idx2].left);
+                        if (len2 >= 0) {
+                            stasis.expr_op_at[val_len] = llvm_emit_const_i32(len2);
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                            return val_len;
+                        }
+                    }
+      
                     if (base_kind == LlvmValueKind.EnumType) {
                         if (mode2 != 0) {
                             build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
@@ -661,4 +673,3 @@ function llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_le
     }
     return val_len;
 }
-

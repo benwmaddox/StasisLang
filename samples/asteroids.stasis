@@ -115,7 +115,7 @@ function next_rand(): i32 {
 
 function rand_float(max: f32): f32 {
     let r: i32 = next_rand() % 1000;
-    let rf: f32 = r;
+    let rf: f32 = i32_to_f32(r);
     return (rf / 1000.0) * max;
 }
 

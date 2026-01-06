@@ -317,3 +317,32 @@ int stasis_sys_sleep_ms(int ms)
     return 0;
 #endif
 }
+
+// Read a single character from stdin. Returns 0 on EOF.
+int stasis_sys_read_char(void)
+{
+    int c = getchar();
+    if (c == EOF)
+    {
+        return 0;
+    }
+    return c & 0xff;
+}
+
+// Read an integer from stdin. Returns 0 on EOF or parse failure.
+int stasis_sys_read_int(void)
+{
+    char buf[64];
+    if (!fgets(buf, sizeof(buf), stdin))
+    {
+        return 0;
+    }
+
+    char* end = NULL;
+    long v = strtol(buf, &end, 10);
+    if (end == buf)
+    {
+        return 0;
+    }
+    return (int)v;
+}

@@ -1,2 +1,18 @@
-// Audio/runtime bindings (marker module).
+// Audio/runtime bindings.
 // Import explicitly: import "src/stdlib/audio.stasis";
+
+// All declarations in this module are extern (no body).
+// Lowering links them from the runtime as `stasis_<name>`.
+//
+// Note: audio lives in `runtime/stasis_graphics.c` today (same link unit as graphics).
+
+function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+function audio_shutdown(): void;
+
+function audio_is_available(): bool;
+function audio_get_sample_rate(): i32;
+function audio_get_channels(): i32;
+function audio_get_queued_frames(): i32;
+function audio_get_underruns(): i32;
+
+function audio_push_f32_interleaved(interleaved_lr: f32[], frame_count: i32): i32;

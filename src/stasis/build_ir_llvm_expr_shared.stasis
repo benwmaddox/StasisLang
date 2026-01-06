@@ -96,6 +96,80 @@ function llvm_emit_member_value_or_place(file_idx: i32, expr_idx: i32, mode: i32
     return -1;
 }
 
+function llvm_try_resolve_fixed_array_len_from_expr(file_idx: i32, expr_idx: i32): i32 {
+    // Best-effort bring-up: resolve `fixed_array.length` when the base is:
+    //  - a global fixed array name, or
+    //  - a struct field access on a global struct (e.g. `state.items.length`).
+
+    if (expr_idx < 0 || expr_idx >= stasis.expr_count) {
+        return -1;
+    }
+
+    let kind: ExprKind = stasis.expr_nodes[expr_idx].kind;
+    if (kind == ExprKind.Name) {
+        let g: i32 = llvm_find_global_in_file(file_idx, stasis.expr_nodes[expr_idx].name_start, stasis.expr_nodes[expr_idx].name_len, file_idx);
+        if (g < 0) {
+            return -1;
+        }
+        let ty: i32 = stasis.globals[g].type_idx;
+        if (ty < 0 || ty >= stasis.type_count) {
+            return -1;
+        }
+        let tk: TypeKind = stasis.types[ty].kind;
+        if (tk != TypeKind.Array) {
+            return -1;
+        }
+        if (stasis.types[ty].size == 0) {
+            return -1;
+        }
+        return stasis.types[ty].size;
+    }
+
+    if (kind == ExprKind.Member) {
+        let base_expr: i32 = stasis.expr_nodes[expr_idx].left;
+        if (base_expr < 0 || base_expr >= stasis.expr_count) {
+            return -1;
+        }
+        let bk: ExprKind = stasis.expr_nodes[base_expr].kind;
+        if (bk != ExprKind.Name) {
+            return -1;
+        }
+
+        let g2: i32 = llvm_find_global_in_file(file_idx, stasis.expr_nodes[base_expr].name_start, stasis.expr_nodes[base_expr].name_len, file_idx);
+        if (g2 < 0) {
+            return -1;
+        }
+        let base_ty: i32 = stasis.globals[g2].type_idx;
+        let base_si: i32 = build_find_struct_decl_for_type(base_ty);
+        if (base_si < 0) {
+            return -1;
+        }
+
+        let field_rel: i32 = build_find_struct_field(base_si, file_idx, stasis.expr_nodes[expr_idx].name_start, stasis.expr_nodes[expr_idx].name_len);
+        if (field_rel < 0) {
+            return -1;
+        }
+        let field_abs: i32 = stasis.structs[base_si].fields_off + field_rel;
+        if (field_abs < 0 || field_abs >= stasis.field_count) {
+            return -1;
+        }
+        let field_ty: i32 = stasis.fields[field_abs].type_idx;
+        if (field_ty < 0 || field_ty >= stasis.type_count) {
+            return -1;
+        }
+        let fk: TypeKind = stasis.types[field_ty].kind;
+        if (fk != TypeKind.Array) {
+            return -1;
+        }
+        if (stasis.types[field_ty].size == 0) {
+            return -1;
+        }
+        return stasis.types[field_ty].size;
+    }
+
+    return -1;
+}
+
 function llvm_emit_index_value_or_place(file_idx: i32, expr_idx: i32, mode: i32, base_id: i32, base_kind: LlvmValueKind, base_si: i32, index_id: i32, index_kind: LlvmValueKind): i32 {
     stasis.llvm_place_kind = LlvmValueKind.I32;
     stasis.llvm_place_struct_idx = -1;

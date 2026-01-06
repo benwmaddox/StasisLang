@@ -57,6 +57,15 @@ function ir_needs_graphics_runtime(): bool {
     if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprite")) { return true; }
     if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprites_i32")) { return true; }
 
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_init")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_audio_shutdown")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_is_available")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_sample_rate")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_channels")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_queued_frames")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_underruns")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_push_f32_interleaved")) { return true; }
+
     return false;
 }
 
