@@ -51,7 +51,7 @@ Implemented:
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the same minimal subset (executes the produced IR and returns the program exit code).
 - `stasis release ...`: LLVM+`clang -O3` for the same minimal subset.
-- `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
+- `stasis watch (check|build|run) ...`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the selected subcommand on changes.
 
 Not yet implemented (but planned in the contract above):
 - `build`, `run`, `test`, `release`.
@@ -266,3 +266,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: `stasis build` can now produce a native EXE for LLVM by invoking `clang` on emitted IR (still minimal-subset only).
 - 2026-01-06: minimal build now supports constant `return` expressions (literals + `+ - * /` + parentheses) via an iterative shunting-yard evaluator.
 - 2026-01-06: added minimal `stasis release` (LLVM+clang `-O3`).
+- 2026-01-06: extended `stasis watch` to support `build` and `run` (polling).
