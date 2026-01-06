@@ -129,6 +129,24 @@ function sh_expr_make_member(file_idx: i32, at: i32, base: i32, member_tok: ShTo
     return idx;
 }
 
+function sh_expr_make_index(file_idx: i32, at: i32, base: i32, index_expr: i32): i32 {
+    let idx: i32 = sh_expr_node_new();
+    if (idx < 0) {
+        sh_expr_err_at(file_idx, "expression too complex (node cap)", at);
+        return -1;
+    }
+    sh.expr_nodes[idx].kind = ShExprKind.Index;
+    sh.expr_nodes[idx].file_idx = file_idx;
+    sh.expr_nodes[idx].at = at;
+    sh.expr_nodes[idx].op = ShTok.LBracket;
+    sh.expr_nodes[idx].left = base;
+    sh.expr_nodes[idx].right = index_expr;
+    sh.expr_nodes[idx].value = 0;
+    sh.expr_nodes[idx].name_start = 0;
+    sh.expr_nodes[idx].name_len = 0;
+    return idx;
+}
+
 function sh_expr_make_unary(file_idx: i32, at: i32, op: ShTok, operand: i32): i32 {
     let idx: i32 = sh_expr_node_new();
     if (idx < 0) {
@@ -253,6 +271,10 @@ function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
         sh_expr_err_at(file_idx, "unmatched '('", at);
         return -1;
     }
+    if (op == ShTok.IndexStart) {
+        sh_expr_err_at(file_idx, "unmatched '['", at);
+        return -1;
+    }
 
     if (op == ShTok.UnaryMinus || op == ShTok.Bang) {
         if (val_len < 1) {
@@ -290,6 +312,7 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
     sh.expr_count = 0;
     sh.expr_call_args_len = 0;
     sh.expr_call_len = 0;
+    sh.expr_index_len = 0;
 
     let op_len: i32 = 0;
     let val_len: i32 = 0;
@@ -304,7 +327,7 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
             return -1;
         }
 
-        if (expect_value == 0 && sh.expr_call_len == 0 && paren_depth == 0 && k == terminator) {
+        if (expect_value == 0 && sh.expr_call_len == 0 && sh.expr_index_len == 0 && paren_depth == 0 && k == terminator) {
             done = 1;
         }
 
@@ -465,7 +488,38 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                         expect_value = 1;
                         k = sh_lex_next_kind();
                     } else {
-                        if (k == ShTok.Comma) {
+                        if (k == ShTok.LBracket) {
+                            // Postfix index: `base[expr]`.
+                            if (val_len < 1) {
+                                sh_expr_err_at(file_idx, "expected expression before '['", sh.tok_start);
+                                return -1;
+                            }
+                            if (sh.expr_index_len >= SH_EXPR_STACK_CAP) {
+                                sh_expr_err_at(file_idx, "expression too complex (index stack)", sh.tok_start);
+                                return -1;
+                            }
+                            if (op_len >= SH_EXPR_STACK_CAP) {
+                                sh_expr_err_at(file_idx, "expression too complex (op stack)", sh.tok_start);
+                                return -1;
+                            }
+
+                            let base_node: i32 = sh.parse_stack_start[val_len - 1];
+                            val_len = val_len - 1;
+
+                            let index_idx: i32 = sh.expr_index_len;
+                            sh.expr_index_len = sh.expr_index_len + 1;
+                            sh.expr_index_base[index_idx] = base_node;
+                            sh.expr_index_val_base[index_idx] = val_len;
+                            sh.expr_index_at[index_idx] = sh.tok_start;
+
+                            sh.parse_stack_kind[op_len] = ShTok.IndexStart;
+                            sh.expr_op_at[op_len] = sh.tok_start;
+                            op_len = op_len + 1;
+
+                            expect_value = 1;
+                            k = sh_lex_next_kind();
+                        } else {
+                            if (k == ShTok.Comma) {
                             if (sh.expr_call_len <= 0 || paren_depth != 0) {
                                 sh_expr_err_at(file_idx, "unexpected ',' in expression", sh.tok_start);
                                 return -1;
@@ -594,14 +648,67 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                     k = sh_lex_next_kind();
                                 }
                             } else {
-                                if (sh_expr_is_infix(k)) {
+                                if (k == ShTok.RBracket) {
+                                    if (sh.expr_index_len <= 0) {
+                                        sh_expr_err_at(file_idx, "unmatched ']'", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    let top_index: i32 = sh.expr_index_len - 1;
+                                    let base2: i32 = sh.expr_index_val_base[top_index];
+
+                                    // Reduce operators until the index barrier.
+                                    for (; op_len > 0 && sh.parse_stack_kind[op_len - 1] != ShTok.IndexStart && sh.parse_stack_kind[op_len - 1] != ShTok.CallStart; ) {
+                                        let top_op4: ShTok = sh.parse_stack_kind[op_len - 1];
+                                        if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
+                                            return -1;
+                                        }
+                                        op_len = op_len - 1;
+                                        if (top_op4 == ShTok.UnaryMinus || top_op4 == ShTok.Bang) {
+                                            // val_len unchanged
+                                        } else {
+                                            val_len = val_len - 1;
+                                        }
+                                    }
+
+                                    if (op_len <= 0) {
+                                        sh_expr_err_at(file_idx, "internal error: index stack desync", sh.tok_start);
+                                        return -1;
+                                    }
+                                    if (sh.parse_stack_kind[op_len - 1] == ShTok.CallStart) {
+                                        sh_expr_err_at(file_idx, "expected ')' before ']'", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    if (val_len != base2 + 1) {
+                                        sh_expr_err_at(file_idx, "expected expression in index", sh.tok_start);
+                                        return -1;
+                                    }
+                                    if (sh.parse_stack_kind[op_len - 1] != ShTok.IndexStart) {
+                                        sh_expr_err_at(file_idx, "internal error: index stack desync", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    let index_expr: i32 = sh.parse_stack_start[val_len - 1];
+                                    let base_node2: i32 = sh.expr_index_base[top_index];
+
+                                    sh.expr_index_len = top_index;
+                                    op_len = op_len - 1; // pop IndexStart
+
+                                    let index_node: i32 = sh_expr_make_index(file_idx, sh.expr_nodes[base_node2].at, base_node2, index_expr);
+                                    if (index_node < 0) { return -1; }
+                                    sh.parse_stack_start[val_len - 1] = index_node;
+                                    expect_value = 0;
+                                    k = sh_lex_next_kind();
+                                } else {
+                                    if (sh_expr_is_infix(k)) {
                                     let prec: i32 = sh_expr_prec(k);
                                     let reduce: i32 = 1;
                                     for (; reduce != 0; ) {
                                         reduce = 0;
                                         if (op_len > 0) {
                                             let top2: ShTok = sh.parse_stack_kind[op_len - 1];
-                                            if (top2 != ShTok.LParen && top2 != ShTok.CallStart) {
+                                            if (top2 != ShTok.LParen && top2 != ShTok.CallStart && top2 != ShTok.IndexStart) {
                                                 let top_prec: i32 = sh_expr_prec(top2);
                                                 if (top_prec > prec || (top_prec == prec && !sh_expr_is_right_assoc(k))) {
                                                     if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
@@ -632,12 +739,14 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                     sh_expr_err_at(file_idx, "expected operator in expression", sh.tok_start);
                                     return -1;
                                 }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
     }
 
     if (expect_value != 0) {
@@ -649,6 +758,10 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
         let top3: ShTok = sh.parse_stack_kind[op_len - 1];
         if (top3 == ShTok.LParen || top3 == ShTok.CallStart) {
             sh_expr_err_at(file_idx, "unmatched '('", sh.expr_op_at[op_len - 1]);
+            return -1;
+        }
+        if (top3 == ShTok.IndexStart) {
+            sh_expr_err_at(file_idx, "unmatched '['", sh.expr_op_at[op_len - 1]);
             return -1;
         }
         if (sh_expr_reduce_top(file_idx, op_len, val_len) != 0) {
@@ -664,6 +777,10 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
 
     if (sh.expr_call_len != 0) {
         sh_expr_err_at(file_idx, "unclosed call in expression", sh.tok_start);
+        return -1;
+    }
+    if (sh.expr_index_len != 0) {
+        sh_expr_err_at(file_idx, "unclosed index in expression", sh.expr_index_at[sh.expr_index_len - 1]);
         return -1;
     }
 

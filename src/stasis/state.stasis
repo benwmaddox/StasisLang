@@ -69,7 +69,8 @@ enum ShTok {
 
     // Internal/pseudo tokens (not emitted by the lexer).
     UnaryMinus = 55,
-    CallStart = 56
+    CallStart = 56,
+    IndexStart = 57
 }
 
 enum ShSymKind {
@@ -195,7 +196,8 @@ enum ShExprKind {
     Binary = 5,
     Assign = 6,
     Call = 7,
-    Member = 8
+    Member = 8,
+    Index = 9
 }
 
 struct ShExprNode {
@@ -285,6 +287,10 @@ struct ShState {
     expr_call_arg_len: i32[4096];
     expr_call_val_base: i32[4096];
     expr_call_len: i32;
+    expr_index_base: i32[4096];
+    expr_index_val_base: i32[4096];
+    expr_index_at: i32[4096];
+    expr_index_len: i32;
     expr_op_at: i32[4096];
     expr_eval_failed: i32;
 
