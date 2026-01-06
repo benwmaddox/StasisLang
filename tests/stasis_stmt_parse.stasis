@@ -14,7 +14,7 @@ function t_init_exe_dir(): bool {
         return false;
     }
     ascii_set_len(t_argv0, n);
-    sh_path_dirname(t_exe_dir, t_argv0);
+    path_dirname(t_exe_dir, t_argv0);
     return !ascii_is_empty(t_exe_dir);
 }
 
@@ -32,7 +32,7 @@ test `stasis statement parser accepts basic constructs`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_stmt_ok.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_stmt_ok.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -46,17 +46,17 @@ test `stasis statement parser accepts basic constructs`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    let stmt_errors: i32 = sh_stmt_parse_loaded_files();
+    let stmt_errors: i32 = stmt_parse_loaded_files();
     return stmt_errors == 0;
 }
 
@@ -65,7 +65,7 @@ test `stasis statement parser rejects missing semicolons`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_stmt_bad.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_stmt_bad.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -76,17 +76,17 @@ test `stasis statement parser rejects missing semicolons`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    let stmt_errors: i32 = sh_stmt_parse_loaded_files();
+    let stmt_errors: i32 = stmt_parse_loaded_files();
     return stmt_errors != 0;
 }
 
@@ -95,7 +95,7 @@ test `stasis statement parser accepts slice types`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_stmt_slice.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_stmt_slice.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -107,16 +107,16 @@ test `stasis statement parser accepts slice types`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    let stmt_errors: i32 = sh_stmt_parse_loaded_files();
+    let stmt_errors: i32 = stmt_parse_loaded_files();
     return stmt_errors == 0;
 }

@@ -16,7 +16,7 @@ function t_init_exe_dir(): bool {
         return false;
     }
     ascii_set_len(t_argv0, n);
-    sh_path_dirname(t_exe_dir, t_argv0);
+    path_dirname(t_exe_dir, t_argv0);
     return !ascii_is_empty(t_exe_dir);
 }
 
@@ -34,7 +34,7 @@ test `stasis build emits clif for main return i32`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_ret.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_ret.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return 42; }");
@@ -42,23 +42,23 @@ test `stasis build emits clif for main return i32`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "cranelift");
+    rc = emit_main_return_i32_ir("module", "cranelift");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "function %module__main()")) { return false; }
-    if (!ascii_contains(sh.ir_out, "iconst.i32 42")) { return false; }
+    if (!ascii_contains(st.ir_out, "function %module__main()")) { return false; }
+    if (!ascii_contains(st.ir_out, "iconst.i32 42")) { return false; }
     return true;
 }
 
@@ -67,7 +67,7 @@ test `stasis build emits llvm ir for main return i32`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_ret_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_ret_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return 42; }");
@@ -75,25 +75,25 @@ test `stasis build emits llvm ir for main return i32`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @main()")) { return false; }
-    if (!ascii_contains(sh.ir_out, "%ret_slot = alloca i32")) { return false; }
-    if (!ascii_contains(sh.ir_out, "store i32 42, ptr %ret_slot")) { return false; }
-    if (!ascii_contains(sh.ir_out, "ret i32 %t")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @main()")) { return false; }
+    if (!ascii_contains(st.ir_out, "%ret_slot = alloca i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 42, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(st.ir_out, "ret i32 %t")) { return false; }
     return true;
 }
 
@@ -102,7 +102,7 @@ test `stasis build evaluates constant expressions`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_expr.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_expr.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return (1 + 2) * 3 + 4; }");
@@ -110,27 +110,27 @@ test `stasis build evaluates constant expressions`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "cranelift");
+    rc = emit_main_return_i32_ir("module", "cranelift");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(sh.ir_out, "iconst.i32 13")) { return false; }
+    if (!ascii_contains(st.ir_out, "iconst.i32 13")) { return false; }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(sh.ir_out, "store i32 13, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 13, ptr %ret_slot")) { return false; }
 
     return true;
 }
@@ -140,7 +140,7 @@ test `stasis build evaluates more operators`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_ops.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_ops.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return !0 || (10 % 3) == 1; }");
@@ -148,27 +148,27 @@ test `stasis build evaluates more operators`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "cranelift");
+    rc = emit_main_return_i32_ir("module", "cranelift");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(sh.ir_out, "iconst.i32 1")) { return false; }
+    if (!ascii_contains(st.ir_out, "iconst.i32 1")) { return false; }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
-    if (!ascii_contains(sh.ir_out, "store i32 1, ptr %ret_slot")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 1, ptr %ret_slot")) { return false; }
 
     return true;
 }
@@ -178,7 +178,7 @@ test `stasis build rejects non-constant return expressions`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_nonconst.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_nonconst.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return x = 1; }");
@@ -186,17 +186,17 @@ test `stasis build rejects non-constant return expressions`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "cranelift");
+    rc = emit_main_return_i32_ir("module", "cranelift");
     return rc != 0;
 }
 
@@ -205,7 +205,7 @@ test `stasis build emits llvm for locals and assignments`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_locals_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_locals_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -217,25 +217,25 @@ test `stasis build emits llvm for locals and assignments`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "alloca i32")) { return false; }
-    if (!ascii_contains(sh.ir_out, "store i32 40")) { return false; }
-    if (!ascii_contains(sh.ir_out, "add i32")) { return false; }
-    return ascii_contains(sh.ir_out, "ret i32 %t");
+    if (!ascii_contains(st.ir_out, "alloca i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 40")) { return false; }
+    if (!ascii_contains(st.ir_out, "add i32")) { return false; }
+    return ascii_contains(st.ir_out, "ret i32 %t");
 }
 
 test `stasis build emits llvm control flow for if`() {
@@ -243,7 +243,7 @@ test `stasis build emits llvm control flow for if`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_if_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_if_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -255,25 +255,25 @@ test `stasis build emits llvm control flow for if`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "br i1")) { return false; }
-    if (!ascii_contains(sh.ir_out, "if.then")) { return false; }
-    if (!ascii_contains(sh.ir_out, "if.else")) { return false; }
-    if (!ascii_contains(sh.ir_out, "if.end")) { return false; }
+    if (!ascii_contains(st.ir_out, "br i1")) { return false; }
+    if (!ascii_contains(st.ir_out, "if.then")) { return false; }
+    if (!ascii_contains(st.ir_out, "if.else")) { return false; }
+    if (!ascii_contains(st.ir_out, "if.end")) { return false; }
     return true;
 }
 
@@ -282,7 +282,7 @@ test `stasis build emits llvm control flow for for`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_for_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_for_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -294,25 +294,25 @@ test `stasis build emits llvm control flow for for`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "for.cond")) { return false; }
-    if (!ascii_contains(sh.ir_out, "for.body")) { return false; }
-    if (!ascii_contains(sh.ir_out, "for.step")) { return false; }
-    if (!ascii_contains(sh.ir_out, "for.end")) { return false; }
+    if (!ascii_contains(st.ir_out, "for.cond")) { return false; }
+    if (!ascii_contains(st.ir_out, "for.body")) { return false; }
+    if (!ascii_contains(st.ir_out, "for.step")) { return false; }
+    if (!ascii_contains(st.ir_out, "for.end")) { return false; }
     return true;
 }
 
@@ -321,7 +321,7 @@ test `stasis build emits llvm for empty-arg function calls`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_call_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_call_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function foo(): i32 { return 40; }");
@@ -330,23 +330,23 @@ test `stasis build emits llvm for empty-arg function calls`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @module__foo()")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @module__foo()")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @module__foo()")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @module__foo()")) { return false; }
     return true;
 }
 
@@ -355,7 +355,7 @@ test `stasis build emits llvm for call arguments`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_call_args_llvm.stasis");
+    path_join(t_path, t_exe_dir, "sh_build_ir_call_args_llvm.stasis");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function add(a: i32, b: i32): i32 { return a + b; }");
@@ -364,25 +364,25 @@ test `stasis build emits llvm for call arguments`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @module__add(i32 %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "store i32 %a0, ptr %l0")) { return false; }
-    if (!ascii_contains(sh.ir_out, "store i32 %a1, ptr %l1")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @module__add(i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @module__add(i32 %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 %a0, ptr %l0")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i32 %a1, ptr %l1")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @module__add(i32")) { return false; }
     return true;
 }
 
@@ -391,7 +391,7 @@ test `stasis build emits llvm for nested calls`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_nested_calls_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_nested_calls_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function inner(x: i32): i32 { return x + 1; }");
@@ -401,25 +401,25 @@ test `stasis build emits llvm for nested calls`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @module__inner(i32 %a0)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "define i32 @module__outer(i32 %a0)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @module__inner(i32")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @module__outer(i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @module__inner(i32 %a0)")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @module__outer(i32 %a0)")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @module__inner(i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @module__outer(i32")) { return false; }
     return true;
 }
 
@@ -428,14 +428,14 @@ test `stasis build emits llvm for module-qualified calls`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "math.stasis");
+    path_join(t_path, t_exe_dir, "math.stasis");
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function add(a: i32, b: i32): i32 { return a + b; }");
     if (!t_write_ascii(t_path, t_tmp)) {
         return false;
     }
 
-    sh_path_join(t_path2, t_exe_dir, "app.stasis");
+    path_join(t_path2, t_exe_dir, "app.stasis");
     ascii_clear(t_tmp);
     ascii_append(t_tmp, "import ");
     ascii_append_byte(t_tmp, 34); // '\"'
@@ -448,23 +448,23 @@ test `stasis build emits llvm for module-qualified calls`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path2);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path2);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @math__add(i32 %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @math__add(i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "define i32 @math__add(i32 %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @math__add(i32")) { return false; }
     return true;
 }
 
@@ -473,7 +473,7 @@ test `stasis build emits llvm for struct member access`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_member_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_member_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "struct Pair { a: i32; b: i32; }");
@@ -487,24 +487,24 @@ test `stasis build emits llvm for struct member access`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "%module__Pair = type { i32, i32 }")) { return false; }
-    if (!ascii_contains(sh.ir_out, "@module__g = global %module__Pair zeroinitializer")) { return false; }
-    if (!ascii_contains(sh.ir_out, "getelementptr inbounds %module__Pair")) { return false; }
+    if (!ascii_contains(st.ir_out, "%module__Pair = type { i32, i32 }")) { return false; }
+    if (!ascii_contains(st.ir_out, "@module__g = global %module__Pair zeroinitializer")) { return false; }
+    if (!ascii_contains(st.ir_out, "getelementptr inbounds %module__Pair")) { return false; }
     return true;
 }
 
@@ -513,7 +513,7 @@ test `stasis build emits llvm for member indexing`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_member_index_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_member_index_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "struct S { arr: i32[4]; }");
@@ -526,23 +526,23 @@ test `stasis build emits llvm for member indexing`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "[4 x i32]")) { return false; }
-    if (!ascii_contains(sh.ir_out, "getelementptr inbounds i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "[4 x i32]")) { return false; }
+    if (!ascii_contains(st.ir_out, "getelementptr inbounds i32")) { return false; }
     return true;
 }
 
@@ -551,7 +551,7 @@ test `stasis build emits llvm for global u8 assignment`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_global_u8_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_global_u8_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global g: u8;");
@@ -564,25 +564,25 @@ test `stasis build emits llvm for global u8 assignment`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "@module__g = global i8 zeroinitializer")) { return false; }
-    if (!ascii_contains(sh.ir_out, "zext i8")) { return false; }
-    if (!ascii_contains(sh.ir_out, "trunc i32")) { return false; }
-    if (!ascii_contains(sh.ir_out, "store i8")) { return false; }
+    if (!ascii_contains(st.ir_out, "@module__g = global i8 zeroinitializer")) { return false; }
+    if (!ascii_contains(st.ir_out, "zext i8")) { return false; }
+    if (!ascii_contains(st.ir_out, "trunc i32")) { return false; }
+    if (!ascii_contains(st.ir_out, "store i8")) { return false; }
     return true;
 }
 
@@ -591,7 +591,7 @@ test `stasis build emits llvm for slice params and u8 conversions`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_slice_params_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_slice_params_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function trunc_test(x: i32): i32 { return i32_to_u8_trunc(x); }");
@@ -613,29 +613,29 @@ test `stasis build emits llvm for slice params and u8 conversions`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "define i32 @module__sum(ptr %a0, i32 %a1)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 @module__sum(ptr")) { return false; }
-    if (!ascii_contains(sh.ir_out, "alloca ptr")) { return false; }
-    if (!ascii_contains(sh.ir_out, "load ptr, ptr %l0")) { return false; }
-    if (!ascii_contains(sh.ir_out, "getelementptr inbounds i8")) { return false; }
-    if (!ascii_contains(sh.ir_out, "zext i8")) { return false; }
-    if (!ascii_contains(sh.ir_out, " = and i32")) { return false; }
-    return ascii_contains(sh.ir_out, ", 255");
+    if (!ascii_contains(st.ir_out, "define i32 @module__sum(ptr %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 @module__sum(ptr")) { return false; }
+    if (!ascii_contains(st.ir_out, "alloca ptr")) { return false; }
+    if (!ascii_contains(st.ir_out, "load ptr, ptr %l0")) { return false; }
+    if (!ascii_contains(st.ir_out, "getelementptr inbounds i8")) { return false; }
+    if (!ascii_contains(st.ir_out, "zext i8")) { return false; }
+    if (!ascii_contains(st.ir_out, " = and i32")) { return false; }
+    return ascii_contains(st.ir_out, ", 255");
 }
 
 test `stasis build emits llvm for string literals`() {
@@ -643,7 +643,7 @@ test `stasis build emits llvm for string literals`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_string_lit_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_string_lit_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -659,25 +659,25 @@ test `stasis build emits llvm for string literals`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "declare i32 @printf(ptr, ...)")) { return false; }
-    if (!ascii_contains(sh.ir_out, "call i32 (ptr, ...) @printf")) { return false; }
-    if (!ascii_contains(sh.ir_out, "@.sh_str0 = private unnamed_addr constant [11 x i8]")) { return false; }
-    return ascii_contains(sh.ir_out, "getelementptr inbounds [11 x i8], ptr @.sh_str0, i32 0, i32 8");
+    if (!ascii_contains(st.ir_out, "declare i32 @printf(ptr, ...)")) { return false; }
+    if (!ascii_contains(st.ir_out, "call i32 (ptr, ...) @printf")) { return false; }
+    if (!ascii_contains(st.ir_out, "@.str0 = private unnamed_addr constant [11 x i8]")) { return false; }
+    return ascii_contains(st.ir_out, "getelementptr inbounds [11 x i8], ptr @.str0, i32 0, i32 8");
 }
 
 test `stasis build emits llvm for sys_argc`() {
@@ -685,7 +685,7 @@ test `stasis build emits llvm for sys_argc`() {
         return false;
     }
 
-    sh_path_join(t_path, t_exe_dir, "sh_build_ir_sys_argc_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "sh_build_ir_sys_argc_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return sys_argc(); }");
@@ -693,21 +693,21 @@ test `stasis build emits llvm for sys_argc`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     if (errors != 0) {
         return false;
     }
 
-    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    rc = emit_main_return_i32_ir("module", "llvm");
     if (rc != 0) {
         return false;
     }
 
-    if (!ascii_contains(sh.ir_out, "declare i32 @stasis_sys_argc()")) { return false; }
-    return ascii_contains(sh.ir_out, "call i32 @stasis_sys_argc()");
+    if (!ascii_contains(st.ir_out, "declare i32 @stasis_sys_argc()")) { return false; }
+    return ascii_contains(st.ir_out, "call i32 @stasis_sys_argc()");
 }

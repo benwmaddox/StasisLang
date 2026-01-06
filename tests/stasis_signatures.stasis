@@ -20,7 +20,7 @@ function t_init_exe_dir(): bool {
         return false;
     }
     ascii_set_len(t_argv0, n);
-    sh_path_dirname(t_exe_dir, t_argv0);
+    path_dirname(t_exe_dir, t_argv0);
     return !ascii_is_empty(t_exe_dir);
 }
 
@@ -47,7 +47,7 @@ test `stasis signature scan records declarations`() {
         return false;
     }
 
-    sh_path_join(t_path_sample, t_exe_dir, "sh_sig_sample.stasis.inc");
+    path_join(t_path_sample, t_exe_dir, "sh_sig_sample.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global g: i32;");
@@ -60,13 +60,13 @@ test `stasis signature scan records declarations`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_sample);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_sample);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
-    return errors == 0 && sh.sym_count == 6;
+    let errors: i32 = sig_scan_loaded_files();
+    return errors == 0 && st.sym_count == 6;
 }
 
 test `stasis signature scan detects duplicates`() {
@@ -74,7 +74,7 @@ test `stasis signature scan detects duplicates`() {
         return false;
     }
 
-    sh_path_join(t_path_dup, t_exe_dir, "sh_sig_dup.stasis.inc");
+    path_join(t_path_dup, t_exe_dir, "sh_sig_dup.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global g: i32;");
@@ -83,12 +83,12 @@ test `stasis signature scan detects duplicates`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_dup);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_dup);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     return errors != 0;
 }
 
@@ -97,9 +97,9 @@ test `stasis signature scan allows duplicates across modules`() {
         return false;
     }
 
-    sh_path_join(t_path_entry, t_exe_dir, "sh_sig_entry.stasis.inc");
-    sh_path_join(t_path_mod1, t_exe_dir, "sh_sig_mod1.stasis.inc");
-    sh_path_join(t_path_mod2, t_exe_dir, "sh_sig_mod2.stasis.inc");
+    path_join(t_path_entry, t_exe_dir, "sh_sig_entry.stasis.inc");
+    path_join(t_path_mod1, t_exe_dir, "sh_sig_mod1.stasis.inc");
+    path_join(t_path_mod2, t_exe_dir, "sh_sig_mod2.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function f(): i32 { return 0; }");
@@ -120,13 +120,13 @@ test `stasis signature scan allows duplicates across modules`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_entry);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_entry);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
-    return errors == 0 && sh.sym_count == 2;
+    let errors: i32 = sig_scan_loaded_files();
+    return errors == 0 && st.sym_count == 2;
 }
 
 test `stasis signature scan accepts slice types`() {
@@ -134,7 +134,7 @@ test `stasis signature scan accepts slice types`() {
         return false;
     }
 
-    sh_path_join(t_path_slice, t_exe_dir, "sh_sig_slice.stasis.inc");
+    path_join(t_path_slice, t_exe_dir, "sh_sig_slice.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function f(a: ascii[], b: u8[]): i32 { return 0; }");
@@ -142,11 +142,11 @@ test `stasis signature scan accepts slice types`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_slice);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_slice);
     if (rc != 0) {
         return false;
     }
-    let errors: i32 = sh_sig_scan_loaded_files();
+    let errors: i32 = sig_scan_loaded_files();
     return errors == 0;
 }

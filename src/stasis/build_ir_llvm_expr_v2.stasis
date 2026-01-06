@@ -15,35 +15,35 @@ import "build_ir_llvm_expr_v2_post.stasis";
 import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_func.stasis";
 
-function sh_llvm_emit_expr_value(file_idx: i32, root: i32): i32 {
-    return sh_llvm_emit_expr_i32_v2(file_idx, root);
+function llvm_emit_expr_value(file_idx: i32, root: i32): i32 {
+    return llvm_emit_expr_i32_v2(file_idx, root);
 }
 
-function sh_llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
-    let id: i32 = sh_llvm_emit_expr_value(file_idx, root);
+function llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
+    let id: i32 = llvm_emit_expr_value(file_idx, root);
     if (id < 0) {
         return -1;
     }
-    if (sh.llvm_val_kind[0] != ShLlvmValueKind.I32) {
-        sh_build_err_at(file_idx, "expected i32 expression", sh.expr_nodes[root].at);
+    if (st.llvm_val_kind[0] != LlvmValueKind.I32) {
+        build_err_at(file_idx, "expected i32 expression", st.expr_nodes[root].at);
         return -1;
     }
     return id;
 }
 
-function sh_llvm_emit_expr_f32(file_idx: i32, root: i32): i32 {
-    let id: i32 = sh_llvm_emit_expr_value(file_idx, root);
+function llvm_emit_expr_f32(file_idx: i32, root: i32): i32 {
+    let id: i32 = llvm_emit_expr_value(file_idx, root);
     if (id < 0) {
         return -1;
     }
-    if (sh.llvm_val_kind[0] != ShLlvmValueKind.F32) {
-        sh_build_err_at(file_idx, "expected f32 expression", sh.expr_nodes[root].at);
+    if (st.llvm_val_kind[0] != LlvmValueKind.F32) {
+        build_err_at(file_idx, "expected f32 expression", st.expr_nodes[root].at);
         return -1;
     }
     return id;
 }
 
-function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
+function llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     if (root < 0) {
         return -1;
     }
@@ -52,86 +52,86 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     // Negative entries are "visited" (postorder).
     let sp: i32 = 0;
     let val_len: i32 = 0;
-    sh.parse_stack_start[sp] = root * 2;
+    st.parse_stack_start[sp] = root * 2;
     sp = sp + 1;
 
     for (; sp > 0; ) {
-        let enc: i32 = sh.parse_stack_start[sp - 1];
+        let enc: i32 = st.parse_stack_start[sp - 1];
         if (enc >= 0) {
-            sh.parse_stack_start[sp - 1] = -enc - 1;
+            st.parse_stack_start[sp - 1] = -enc - 1;
 
             let idx: i32 = enc / 2;
             let mode: i32 = enc % 2;
-            let kind: ShExprKind = sh.expr_nodes[idx].kind;
+            let kind: ExprKind = st.expr_nodes[idx].kind;
 
-            if (kind == ShExprKind.Unary) {
+            if (kind == ExprKind.Unary) {
                 if (sp >= 4096) {
-                    sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                    build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                     return -1;
                 }
-                sh.parse_stack_start[sp] = sh.expr_nodes[idx].left * 2;
+                st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
                 sp = sp + 1;
             } else {
-                if (kind == ShExprKind.Call) {
-                    let argc0: i32 = sh.expr_nodes[idx].value;
-                    let off0: i32 = sh.expr_nodes[idx].right;
+                if (kind == ExprKind.Call) {
+                    let argc0: i32 = st.expr_nodes[idx].value;
+                    let off0: i32 = st.expr_nodes[idx].right;
                     if (argc0 < 0) {
-                        sh_build_err_at(file_idx, "invalid call argument count", sh.expr_nodes[idx].at);
+                        build_err_at(file_idx, "invalid call argument count", st.expr_nodes[idx].at);
                         return -1;
                     }
                     if (sp + argc0 >= 4096) {
-                        sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                        build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                         return -1;
                     }
 
                     let ai: i32 = 0;
                     for (ai = argc0 - 1; ai >= 0; ai = ai - 1) {
-                        sh.parse_stack_start[sp] = sh.expr_call_args[off0 + ai] * 2;
+                        st.parse_stack_start[sp] = st.expr_call_args[off0 + ai] * 2;
                         sp = sp + 1;
                     }
                 } else {
-                    if (kind == ShExprKind.Binary) {
+                    if (kind == ExprKind.Binary) {
                         if (sp + 1 >= 4096) {
-                            sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                            build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                             return -1;
                         }
-                        sh.parse_stack_start[sp] = sh.expr_nodes[idx].right * 2;
+                        st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
                         sp = sp + 1;
-                        sh.parse_stack_start[sp] = sh.expr_nodes[idx].left * 2;
+                        st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
                         sp = sp + 1;
                     } else {
-                        if (kind == ShExprKind.Assign) {
+                        if (kind == ExprKind.Assign) {
                             if (sp + 1 >= 4096) {
-                                sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                                build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                                 return -1;
                             }
                             // Evaluate lhs place first, then rhs value (deterministic).
-                            sh.parse_stack_start[sp] = sh.expr_nodes[idx].right * 2;
+                            st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
                             sp = sp + 1;
-                            sh.parse_stack_start[sp] = sh.expr_nodes[idx].left * 2 + 1;
+                            st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2 + 1;
                             sp = sp + 1;
                         } else {
-                            if (kind == ShExprKind.Member) {
+                            if (kind == ExprKind.Member) {
                                 if (sp >= 4096) {
-                                    sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                                    build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                                     return -1;
                                 }
-                                sh.parse_stack_start[sp] = sh.expr_nodes[idx].left * 2;
+                                st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
                                 sp = sp + 1;
                             } else {
-                                if (kind == ShExprKind.Index) {
+                                if (kind == ExprKind.Index) {
                                     if (sp + 1 >= 4096) {
-                                        sh_build_err_at(file_idx, "expression too complex (node stack)", sh.expr_nodes[idx].at);
+                                        build_err_at(file_idx, "expression too complex (node stack)", st.expr_nodes[idx].at);
                                         return -1;
                                     }
                                     // Evaluate base first, then index.
-                                    sh.parse_stack_start[sp] = sh.expr_nodes[idx].right * 2;
+                                    st.parse_stack_start[sp] = st.expr_nodes[idx].right * 2;
                                     sp = sp + 1;
-                                    sh.parse_stack_start[sp] = sh.expr_nodes[idx].left * 2;
+                                    st.parse_stack_start[sp] = st.expr_nodes[idx].left * 2;
                                     sp = sp + 1;
                                 } else {
-                                    if (mode != 0 && kind != ShExprKind.Name && kind != ShExprKind.Member && kind != ShExprKind.Index) {
-                                        sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx].at);
+                                    if (mode != 0 && kind != ExprKind.Name && kind != ExprKind.Member && kind != ExprKind.Index) {
+                                        build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx].at);
                                         return -1;
                                     }
                                 }
@@ -146,7 +146,7 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
             let mode2: i32 = enc2 % 2;
             sp = sp - 1;
 
-            val_len = sh_llvm_emit_expr_i32_v2_post(file_idx, idx2, mode2, val_len);
+            val_len = llvm_emit_expr_i32_v2_post(file_idx, idx2, mode2, val_len);
             if (val_len < 0) {
                 return -1;
             }
@@ -154,9 +154,9 @@ function sh_llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     }
 
     if (val_len != 1) {
-        sh_build_err_at(file_idx, "invalid expression", sh.expr_nodes[root].at);
+        build_err_at(file_idx, "invalid expression", st.expr_nodes[root].at);
         return -1;
     }
-    return sh.expr_op_at[0];
+    return st.expr_op_at[0];
 }
 

@@ -7,67 +7,67 @@ import "emit_ir.stasis";
 import "build_ir_common.stasis";
 import "build_ir_llvm_emit_main.stasis";
 
-function sh_emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
+function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
     // Store for downstream helpers (LLVM symbol mangling).
-    ascii_copy(sh.arg_module, module_name);
+    ascii_copy(st.arg_module, module_name);
 
-    let func_idx: i32 = sh_build_find_entry_main();
+    let func_idx: i32 = build_find_entry_main();
     if (func_idx < 0) {
-        sh_build_err_at(0, "missing entry function 'main' in entry file", 0);
+        build_err_at(0, "missing entry function 'main' in entry file", 0);
         return 1;
     }
 
-    let file_idx: i32 = sh.funcs[func_idx].file_idx;
-    let body_start: i32 = sh.funcs[func_idx].body_start;
+    let file_idx: i32 = st.funcs[func_idx].file_idx;
+    let body_start: i32 = st.funcs[func_idx].body_start;
     if (body_start < 0) {
-        sh_build_err_at(file_idx, "missing function body for 'main'", sh.funcs[func_idx].name_start);
+        build_err_at(file_idx, "missing function body for 'main'", st.funcs[func_idx].name_start);
         return 1;
     }
 
-    if (!sh_lex_begin(file_idx)) {
-        sh_build_err_at(file_idx, "failed to start lexer", 0);
+    if (!lex_begin(file_idx)) {
+        build_err_at(file_idx, "failed to start lexer", 0);
         return 1;
     }
-    sh.lex_pos = body_start;
+    st.lex_pos = body_start;
 
     if (ascii_eq(backend, "llvm")) {
-        return sh_emit_llvm_main_i32(module_name);
+        return emit_llvm_main_i32(module_name);
     }
 
-    let k: ShTok = sh_lex_next_kind();
-    if (k != ShTok.LBrace) {
-        sh_build_err_at(file_idx, "expected '{' at start of function body", sh.tok_start);
+    let k: Tok = lex_next_kind();
+    if (k != Tok.LBrace) {
+        build_err_at(file_idx, "expected '{' at start of function body", st.tok_start);
         return 1;
     }
 
-    k = sh_lex_next_kind();
-    if (k != ShTok.ReturnKeyword) {
-        sh_build_err_at(file_idx, "expected 'return' in function body (minimal build only)", sh.tok_start);
+    k = lex_next_kind();
+    if (k != Tok.ReturnKeyword) {
+        build_err_at(file_idx, "expected 'return' in function body (minimal build only)", st.tok_start);
         return 1;
     }
 
     // Parse and const-evaluate a return expression (minimal build only).
-    let root: i32 = sh_expr_parse_until(file_idx, ShTok.Semicolon);
+    let root: i32 = expr_parse_until(file_idx, Tok.Semicolon);
     if (root < 0) {
         return 1;
     }
-    let value: i32 = sh_expr_eval_i32_const(root);
-    if (sh.expr_eval_failed != 0) {
+    let value: i32 = expr_eval_i32_const(root);
+    if (st.expr_eval_failed != 0) {
         return 1;
     }
 
     // Expect '}'
-    k = sh_lex_next_kind();
-    if (k != ShTok.RBrace) {
-        sh_build_err_at(file_idx, "expected '}' after return statement", sh.tok_start);
+    k = lex_next_kind();
+    if (k != Tok.RBrace) {
+        build_err_at(file_idx, "expected '}' after return statement", st.tok_start);
         return 1;
     }
 
     if (ascii_eq(backend, "cranelift")) {
-        sh_emit_clif_main_return_i32(module_name, value);
+        emit_clif_main_return_i32(module_name, value);
         return 0;
     }
 
-    sh_build_err_at(file_idx, "unsupported backend (expected 'cranelift' or 'llvm')", body_start);
+    build_err_at(file_idx, "unsupported backend (expected 'cranelift' or 'llvm')", body_start);
     return 1;
 }

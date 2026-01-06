@@ -4,239 +4,239 @@ import "imports.stasis";
 import "lexing.stasis";
 import "diagnostics.stasis";
 
-const SH_SYM_CAP: i32 = 20000;
-const SH_SYM_POOL_CAP: i32 = 200000;
-const SH_SIG_ERR_PRINT_CAP: i32 = 16;
+const SYM_CAP: i32 = 20000;
+const SYM_POOL_CAP: i32 = 200000;
+const SIG_ERR_PRINT_CAP: i32 = 16;
 
-const SH_TYPE_CAP: i32 = 50000;
-const SH_STRUCT_CAP: i32 = 2000;
-const SH_FIELD_CAP: i32 = 50000;
-const SH_ENUM_CAP: i32 = 2000;
-const SH_ENUM_MEMBER_CAP: i32 = 50000;
-const SH_GLOBAL_CAP: i32 = 20000;
-const SH_CONST_CAP: i32 = 20000;
-const SH_FUNC_CAP: i32 = 20000;
-const SH_PARAM_CAP: i32 = 50000;
+const TYPE_CAP: i32 = 50000;
+const STRUCT_CAP: i32 = 2000;
+const FIELD_CAP: i32 = 50000;
+const ENUM_CAP: i32 = 2000;
+const ENUM_MEMBER_CAP: i32 = 50000;
+const GLOBAL_CAP: i32 = 20000;
+const CONST_CAP: i32 = 20000;
+const FUNC_CAP: i32 = 20000;
+const PARAM_CAP: i32 = 50000;
 
-function sh_sig_print_tok_text(): void {
+function sig_print_tok_text(): void {
     let i: i32 = 0;
-    for (i = 0; i < sh.tok_len; i = i + 1) {
-        let b: u8 = sh.pool[sh.lex_base + sh.tok_start + i];
+    for (i = 0; i < st.tok_len; i = i + 1) {
+        let b: u8 = st.pool[st.lex_base + st.tok_start + i];
         print_char(u8_to_i32(b));
     }
 }
 
-function sh_sig_print_err_at(file_idx: i32, msg: ascii[], at: i32): void {
-    if (sh.quiet != 0) {
+function sig_print_err_at(file_idx: i32, msg: ascii[], at: i32): void {
+    if (st.quiet != 0) {
         return;
     }
-    if (SH_SIG_ERR_PRINT_CAP > 0 && sh.lex_error_printed >= SH_SIG_ERR_PRINT_CAP) {
+    if (SIG_ERR_PRINT_CAP > 0 && st.lex_error_printed >= SIG_ERR_PRINT_CAP) {
         return;
     }
 
     print_string("error: ");
     print_string(msg);
     print_string(": ");
-    sh_print_file_loc(file_idx, at);
+    print_file_loc(file_idx, at);
     print_char(10);
-    sh.lex_error_printed = sh.lex_error_printed + 1;
+    st.lex_error_printed = st.lex_error_printed + 1;
 }
 
-function sh_sig_print_dup_err(file_idx: i32): void {
-    if (sh.quiet != 0) {
+function sig_print_dup_err(file_idx: i32): void {
+    if (st.quiet != 0) {
         return;
     }
-    if (SH_SIG_ERR_PRINT_CAP > 0 && sh.lex_error_printed >= SH_SIG_ERR_PRINT_CAP) {
+    if (SIG_ERR_PRINT_CAP > 0 && st.lex_error_printed >= SIG_ERR_PRINT_CAP) {
         return;
     }
 
     print_string("error: duplicate top-level symbol '");
-    sh_sig_print_tok_text();
+    sig_print_tok_text();
     print_string("': ");
-    sh_print_file_loc(file_idx, sh.tok_start);
+    print_file_loc(file_idx, st.tok_start);
     print_char(10);
-    sh.lex_error_printed = sh.lex_error_printed + 1;
+    st.lex_error_printed = st.lex_error_printed + 1;
 }
 
-function sh_sig_err_here(file_idx: i32, msg: ascii[]): void {
-    sh.sig_errors = sh.sig_errors + 1;
-    sh_sig_print_err_at(file_idx, msg, sh.tok_start);
+function sig_err_here(file_idx: i32, msg: ascii[]): void {
+    st.sig_errors = st.sig_errors + 1;
+    sig_print_err_at(file_idx, msg, st.tok_start);
 }
 
-function sh_sig_sym_eq_tok(sym_idx: i32): bool {
-    if (sym_idx < 0 || sym_idx >= sh.sym_count) {
+function sig_sym_eq_tok(sym_idx: i32): bool {
+    if (sym_idx < 0 || sym_idx >= st.sym_count) {
         return false;
     }
-    let len: i32 = sh.syms[sym_idx].name_len;
-    if (len != sh.tok_len) {
+    let len: i32 = st.syms[sym_idx].name_len;
+    if (len != st.tok_len) {
         return false;
     }
 
-    let off: i32 = sh.syms[sym_idx].name_off;
+    let off: i32 = st.syms[sym_idx].name_off;
     let i: i32 = 0;
     for (i = 0; i < len; i = i + 1) {
-        if (sh.sym_pool[off + i] != sh.pool[sh.lex_base + sh.tok_start + i]) {
+        if (st.sym_pool[off + i] != st.pool[st.lex_base + st.tok_start + i]) {
             return false;
         }
     }
     return true;
 }
 
-function sh_sig_add_sym(file_idx: i32, kind: ShSymKind, is_exported: i32): bool {
-    if (sh.sym_count >= SH_SYM_CAP) {
-        sh_sig_print_err_at(file_idx, "exceeded symbol capacity", sh.tok_start);
+function sig_add_sym(file_idx: i32, kind: SymKind, is_exported: i32): bool {
+    if (st.sym_count >= SYM_CAP) {
+        sig_print_err_at(file_idx, "exceeded symbol capacity", st.tok_start);
         return false;
     }
-    if (sh.sym_pool_len + sh.tok_len + 1 > SH_SYM_POOL_CAP) {
-        sh_sig_print_err_at(file_idx, "exceeded symbol name pool capacity", sh.tok_start);
+    if (st.sym_pool_len + st.tok_len + 1 > SYM_POOL_CAP) {
+        sig_print_err_at(file_idx, "exceeded symbol name pool capacity", st.tok_start);
         return false;
     }
 
-    let start: i32 = sh.files[file_idx].syms_off;
-    let n: i32 = sh.files[file_idx].syms_len;
+    let start: i32 = st.files[file_idx].syms_off;
+    let n: i32 = st.files[file_idx].syms_len;
     let i: i32 = 0;
     for (i = 0; i < n; i = i + 1) {
-        if (sh_sig_sym_eq_tok(start + i)) {
-            sh_sig_print_dup_err(file_idx);
+        if (sig_sym_eq_tok(start + i)) {
+            sig_print_dup_err(file_idx);
             return false;
         }
     }
 
-    let name_off: i32 = sh.sym_pool_len;
-    for (i = 0; i < sh.tok_len; i = i + 1) {
-        sh.sym_pool[name_off + i] = sh.pool[sh.lex_base + sh.tok_start + i];
+    let name_off: i32 = st.sym_pool_len;
+    for (i = 0; i < st.tok_len; i = i + 1) {
+        st.sym_pool[name_off + i] = st.pool[st.lex_base + st.tok_start + i];
     }
-    sh.sym_pool[name_off + sh.tok_len] = 0;
-    sh.sym_pool_len = sh.sym_pool_len + sh.tok_len + 1;
+    st.sym_pool[name_off + st.tok_len] = 0;
+    st.sym_pool_len = st.sym_pool_len + st.tok_len + 1;
 
-    let idx: i32 = sh.sym_count;
-    sh.sym_count = sh.sym_count + 1;
-    sh.files[file_idx].syms_len = sh.files[file_idx].syms_len + 1;
+    let idx: i32 = st.sym_count;
+    st.sym_count = st.sym_count + 1;
+    st.files[file_idx].syms_len = st.files[file_idx].syms_len + 1;
 
-    sh.syms[idx].kind = kind;
-    sh.syms[idx].file_idx = file_idx;
-    sh.syms[idx].name_off = name_off;
-    sh.syms[idx].name_len = sh.tok_len;
-    sh.syms[idx].name_at = sh.tok_start;
-    sh.syms[idx].is_exported = is_exported;
+    st.syms[idx].kind = kind;
+    st.syms[idx].file_idx = file_idx;
+    st.syms[idx].name_off = name_off;
+    st.syms[idx].name_len = st.tok_len;
+    st.syms[idx].name_at = st.tok_start;
+    st.syms[idx].is_exported = is_exported;
     return true;
 }
 
-function sh_sig_advance(): void {
-    sh.sig_kind = sh_lex_next_kind();
+function sig_advance(): void {
+    st.sig_kind = lex_next_kind();
 }
 
-function sh_sig_add_type_named(file_idx: i32, start: i32, len: i32): i32 {
-    if (sh.type_count >= SH_TYPE_CAP) {
-        sh_sig_err_here(file_idx, "exceeded type capacity");
+function sig_add_type_named(file_idx: i32, start: i32, len: i32): i32 {
+    if (st.type_count >= TYPE_CAP) {
+        sig_err_here(file_idx, "exceeded type capacity");
         return -1;
     }
-    let idx: i32 = sh.type_count;
-    sh.type_count = sh.type_count + 1;
+    let idx: i32 = st.type_count;
+    st.type_count = st.type_count + 1;
 
-    sh.types[idx].kind = ShTypeKind.Named;
-    sh.types[idx].file_idx = file_idx;
-    sh.types[idx].start = start;
-    sh.types[idx].len = len;
-    sh.types[idx].elem = -1;
-    sh.types[idx].size = 0;
+    st.types[idx].kind = TypeKind.Named;
+    st.types[idx].file_idx = file_idx;
+    st.types[idx].start = start;
+    st.types[idx].len = len;
+    st.types[idx].elem = -1;
+    st.types[idx].size = 0;
     return idx;
 }
 
-function sh_sig_add_type_array(file_idx: i32, elem: i32, size: i32): i32 {
-    if (sh.type_count >= SH_TYPE_CAP) {
-        sh_sig_err_here(file_idx, "exceeded type capacity");
+function sig_add_type_array(file_idx: i32, elem: i32, size: i32): i32 {
+    if (st.type_count >= TYPE_CAP) {
+        sig_err_here(file_idx, "exceeded type capacity");
         return -1;
     }
-    let idx: i32 = sh.type_count;
-    sh.type_count = sh.type_count + 1;
+    let idx: i32 = st.type_count;
+    st.type_count = st.type_count + 1;
 
-    sh.types[idx].kind = ShTypeKind.Array;
-    sh.types[idx].file_idx = file_idx;
-    sh.types[idx].start = 0;
-    sh.types[idx].len = 0;
-    sh.types[idx].elem = elem;
-    sh.types[idx].size = size;
+    st.types[idx].kind = TypeKind.Array;
+    st.types[idx].file_idx = file_idx;
+    st.types[idx].start = 0;
+    st.types[idx].len = 0;
+    st.types[idx].elem = elem;
+    st.types[idx].size = size;
     return idx;
 }
 
-function sh_sig_add_param(file_idx: i32, name_start: i32, name_len: i32, type_idx: i32): i32 {
-    if (sh.param_count >= SH_PARAM_CAP) {
-        sh_sig_err_here(file_idx, "exceeded parameter capacity");
+function sig_add_param(file_idx: i32, name_start: i32, name_len: i32, type_idx: i32): i32 {
+    if (st.param_count >= PARAM_CAP) {
+        sig_err_here(file_idx, "exceeded parameter capacity");
         return -1;
     }
-    let idx: i32 = sh.param_count;
-    sh.param_count = sh.param_count + 1;
+    let idx: i32 = st.param_count;
+    st.param_count = st.param_count + 1;
 
-    sh.params[idx].file_idx = file_idx;
-    sh.params[idx].name_start = name_start;
-    sh.params[idx].name_len = name_len;
-    sh.params[idx].type_idx = type_idx;
+    st.params[idx].file_idx = file_idx;
+    st.params[idx].name_start = name_start;
+    st.params[idx].name_len = name_len;
+    st.params[idx].type_idx = type_idx;
     return idx;
 }
 
-function sh_sig_add_func_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, is_test: i32): i32 {
-    if (sh.func_count >= SH_FUNC_CAP) {
-        sh_sig_err_here(file_idx, "exceeded function capacity");
+function sig_add_func_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, is_test: i32): i32 {
+    if (st.func_count >= FUNC_CAP) {
+        sig_err_here(file_idx, "exceeded function capacity");
         return -1;
     }
-    let idx: i32 = sh.func_count;
-    sh.func_count = sh.func_count + 1;
+    let idx: i32 = st.func_count;
+    st.func_count = st.func_count + 1;
 
-    sh.funcs[idx].file_idx = file_idx;
-    sh.funcs[idx].name_start = name_start;
-    sh.funcs[idx].name_len = name_len;
-    sh.funcs[idx].sym_idx = sym_idx;
-    sh.funcs[idx].params_off = 0;
-    sh.funcs[idx].params_len = 0;
-    sh.funcs[idx].ret_type_idx = -1;
-    sh.funcs[idx].body_start = -1;
-    sh.funcs[idx].is_test = is_test;
+    st.funcs[idx].file_idx = file_idx;
+    st.funcs[idx].name_start = name_start;
+    st.funcs[idx].name_len = name_len;
+    st.funcs[idx].sym_idx = sym_idx;
+    st.funcs[idx].params_off = 0;
+    st.funcs[idx].params_len = 0;
+    st.funcs[idx].ret_type_idx = -1;
+    st.funcs[idx].body_start = -1;
+    st.funcs[idx].is_test = is_test;
     return idx;
 }
 
-function sh_sig_add_global_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, has_init: i32, init_start: i32): i32 {
-    if (sh.global_count >= SH_GLOBAL_CAP) {
-        sh_sig_err_here(file_idx, "exceeded global capacity");
+function sig_add_global_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, has_init: i32, init_start: i32): i32 {
+    if (st.global_count >= GLOBAL_CAP) {
+        sig_err_here(file_idx, "exceeded global capacity");
         return -1;
     }
-    let idx: i32 = sh.global_count;
-    sh.global_count = sh.global_count + 1;
+    let idx: i32 = st.global_count;
+    st.global_count = st.global_count + 1;
 
-    sh.globals[idx].file_idx = file_idx;
-    sh.globals[idx].name_start = name_start;
-    sh.globals[idx].name_len = name_len;
-    sh.globals[idx].sym_idx = sym_idx;
-    sh.globals[idx].type_idx = type_idx;
-    sh.globals[idx].has_init = has_init;
-    sh.globals[idx].init_start = init_start;
+    st.globals[idx].file_idx = file_idx;
+    st.globals[idx].name_start = name_start;
+    st.globals[idx].name_len = name_len;
+    st.globals[idx].sym_idx = sym_idx;
+    st.globals[idx].type_idx = type_idx;
+    st.globals[idx].has_init = has_init;
+    st.globals[idx].init_start = init_start;
     return idx;
 }
 
-function sh_sig_add_const_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, init_start: i32): i32 {
-    if (sh.const_count >= SH_CONST_CAP) {
-        sh_sig_err_here(file_idx, "exceeded const capacity");
+function sig_add_const_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, init_start: i32): i32 {
+    if (st.const_count >= CONST_CAP) {
+        sig_err_here(file_idx, "exceeded const capacity");
         return -1;
     }
-    let idx: i32 = sh.const_count;
-    sh.const_count = sh.const_count + 1;
+    let idx: i32 = st.const_count;
+    st.const_count = st.const_count + 1;
 
-    sh.consts[idx].file_idx = file_idx;
-    sh.consts[idx].name_start = name_start;
-    sh.consts[idx].name_len = name_len;
-    sh.consts[idx].sym_idx = sym_idx;
-    sh.consts[idx].type_idx = type_idx;
-    sh.consts[idx].init_start = init_start;
+    st.consts[idx].file_idx = file_idx;
+    st.consts[idx].name_start = name_start;
+    st.consts[idx].name_len = name_len;
+    st.consts[idx].sym_idx = sym_idx;
+    st.consts[idx].type_idx = type_idx;
+    st.consts[idx].init_start = init_start;
     return idx;
 }
 
-function sh_sig_parse_i32_from_tok(file_idx: i32): i32 {
+function sig_parse_i32_from_tok(file_idx: i32): i32 {
     let v: i32 = 0;
     let i: i32 = 0;
-    for (i = 0; i < sh.tok_len; i = i + 1) {
-        let b: u8 = sh.pool[sh.lex_base + sh.tok_start + i];
+    for (i = 0; i < st.tok_len; i = i + 1) {
+        let b: u8 = st.pool[st.lex_base + st.tok_start + i];
         if (!ascii_is_digit(b)) {
-            sh_sig_err_here(file_idx, "expected integer literal");
+            sig_err_here(file_idx, "expected integer literal");
             return 0;
         }
         v = v * 10 + ascii_to_digit(b);
@@ -244,41 +244,41 @@ function sh_sig_parse_i32_from_tok(file_idx: i32): i32 {
     return v;
 }
 
-function sh_sig_parse_type(file_idx: i32): i32 {
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected type name");
+function sig_parse_type(file_idx: i32): i32 {
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected type name");
         return -1;
     }
 
-    let type_idx: i32 = sh_sig_add_type_named(file_idx, sh.tok_start, sh.tok_len);
-    sh_sig_advance();
+    let type_idx: i32 = sig_add_type_named(file_idx, st.tok_start, st.tok_len);
+    sig_advance();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.LBracket) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.LBracket) {
+            sig_advance();
             let size: i32 = 0;
 
             // Slice type: `Type[]` (modeled as Array with size=0).
-            if (sh.sig_kind == ShTok.RBracket) {
-                sh_sig_advance();
+            if (st.sig_kind == Tok.RBracket) {
+                sig_advance();
             } else {
-                if (sh.sig_kind != ShTok.IntegerLiteral) {
-                    sh_sig_err_here(file_idx, "expected array size or ']'");
+                if (st.sig_kind != Tok.IntegerLiteral) {
+                    sig_err_here(file_idx, "expected array size or ']'");
                 }
-                if (sh.sig_kind == ShTok.IntegerLiteral) {
-                    size = sh_sig_parse_i32_from_tok(file_idx);
-                    sh_sig_advance();
+                if (st.sig_kind == Tok.IntegerLiteral) {
+                    size = sig_parse_i32_from_tok(file_idx);
+                    sig_advance();
                 }
-                if (sh.sig_kind != ShTok.RBracket) {
-                    sh_sig_err_here(file_idx, "expected ']'");
+                if (st.sig_kind != Tok.RBracket) {
+                    sig_err_here(file_idx, "expected ']'");
                 } else {
-                    sh_sig_advance();
+                    sig_advance();
                 }
             }
 
             if (type_idx >= 0) {
-                type_idx = sh_sig_add_type_array(file_idx, type_idx, size);
+                type_idx = sig_add_type_array(file_idx, type_idx, size);
             }
         } else {
             done = 1;
@@ -288,145 +288,145 @@ function sh_sig_parse_type(file_idx: i32): i32 {
     return type_idx;
 }
 
-function sh_sig_skip_block(file_idx: i32): void {
-    if (sh.sig_kind != ShTok.LBrace) {
-        sh_sig_err_here(file_idx, "expected '{'");
+function sig_skip_block(file_idx: i32): void {
+    if (st.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{'");
         return;
     }
 
     let depth: i32 = 1;
-    sh_sig_advance();
+    sig_advance();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.Eof) {
-            sh_sig_err_here(file_idx, "unexpected eof in block");
+        if (st.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof in block");
             return;
         }
-        if (sh.sig_kind == ShTok.LBrace) {
+        if (st.sig_kind == Tok.LBrace) {
             depth = depth + 1;
         } else {
-            if (sh.sig_kind == ShTok.RBrace) {
+            if (st.sig_kind == Tok.RBrace) {
                 depth = depth - 1;
                 if (depth == 0) {
-                    sh_sig_advance();
+                    sig_advance();
                     return;
                 }
             }
         }
-        sh_sig_advance();
+        sig_advance();
     }
 }
 
-function sh_sig_skip_until_semicolon(file_idx: i32): void {
+function sig_skip_until_semicolon(file_idx: i32): void {
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.Semicolon) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.Semicolon) {
+            sig_advance();
             return;
         }
-        if (sh.sig_kind == ShTok.Eof) {
-            sh_sig_err_here(file_idx, "unexpected eof; expected ';'");
+        if (st.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof; expected ';'");
             return;
         }
-        sh_sig_advance();
+        sig_advance();
     }
 }
 
-function sh_sig_skip_to_field_end(file_idx: i32): void {
+function sig_skip_to_field_end(file_idx: i32): void {
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.Semicolon) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.Semicolon) {
+            sig_advance();
             return;
         }
-        if (sh.sig_kind == ShTok.RBrace) {
+        if (st.sig_kind == Tok.RBrace) {
             return;
         }
-        if (sh.sig_kind == ShTok.Eof) {
-            sh_sig_err_here(file_idx, "unexpected eof; expected field terminator");
+        if (st.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof; expected field terminator");
             return;
         }
-        sh_sig_advance();
+        sig_advance();
     }
 }
 
-function sh_sig_parse_struct_decl(file_idx: i32): void {
+function sig_parse_struct_decl(file_idx: i32): void {
     // struct
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected struct name");
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected struct name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Struct, 0)) {
-        sh.sig_errors = sh.sig_errors + 1;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
+    if (!sig_add_sym(file_idx, SymKind.Struct, 0)) {
+        st.sig_errors = st.sig_errors + 1;
     }
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.struct_count >= SH_STRUCT_CAP) {
-        sh_sig_err_here(file_idx, "exceeded struct capacity");
+    if (st.struct_count >= STRUCT_CAP) {
+        sig_err_here(file_idx, "exceeded struct capacity");
         return;
     }
 
-    let struct_idx: i32 = sh.struct_count;
-    sh.struct_count = sh.struct_count + 1;
-    sh.structs[struct_idx].file_idx = file_idx;
-    sh.structs[struct_idx].name_start = name_start;
-    sh.structs[struct_idx].name_len = name_len;
-    sh.structs[struct_idx].fields_off = sh.field_count;
-    sh.structs[struct_idx].fields_len = 0;
+    let struct_idx: i32 = st.struct_count;
+    st.struct_count = st.struct_count + 1;
+    st.structs[struct_idx].file_idx = file_idx;
+    st.structs[struct_idx].name_start = name_start;
+    st.structs[struct_idx].name_len = name_len;
+    st.structs[struct_idx].fields_off = st.field_count;
+    st.structs[struct_idx].fields_len = 0;
 
-    if (sh.sig_kind != ShTok.LBrace) {
-        sh_sig_err_here(file_idx, "expected '{' to start struct body");
+    if (st.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{' to start struct body");
         return;
     }
-    sh_sig_advance();
+    sig_advance();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.RBrace) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.RBrace) {
+            sig_advance();
             done = 1;
         } else {
-            if (sh.sig_kind == ShTok.Eof) {
-                sh_sig_err_here(file_idx, "unexpected eof in struct body");
+            if (st.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in struct body");
                 done = 1;
             } else {
-                if (sh.sig_kind != ShTok.Identifier) {
-                    sh_sig_err_here(file_idx, "expected struct field name");
-                    sh_sig_skip_to_field_end(file_idx);
+                if (st.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected struct field name");
+                    sig_skip_to_field_end(file_idx);
                 } else {
-                    let field_name_start: i32 = sh.tok_start;
-                    let field_name_len: i32 = sh.tok_len;
-                    sh_sig_advance();
-                    if (sh.sig_kind != ShTok.Colon) {
-                        sh_sig_err_here(file_idx, "expected ':' after field name");
-                        sh_sig_skip_to_field_end(file_idx);
+                    let field_name_start: i32 = st.tok_start;
+                    let field_name_len: i32 = st.tok_len;
+                    sig_advance();
+                    if (st.sig_kind != Tok.Colon) {
+                        sig_err_here(file_idx, "expected ':' after field name");
+                        sig_skip_to_field_end(file_idx);
                     } else {
-                        sh_sig_advance();
-                        let type_idx: i32 = sh_sig_parse_type(file_idx);
-                        if (sh.sig_kind != ShTok.Semicolon) {
-                            sh_sig_err_here(file_idx, "expected ';' after struct field");
-                            sh_sig_skip_to_field_end(file_idx);
+                        sig_advance();
+                        let type_idx: i32 = sig_parse_type(file_idx);
+                        if (st.sig_kind != Tok.Semicolon) {
+                            sig_err_here(file_idx, "expected ';' after struct field");
+                            sig_skip_to_field_end(file_idx);
                         } else {
-                            sh_sig_advance();
+                            sig_advance();
                         }
 
-                        if (sh.field_count >= SH_FIELD_CAP) {
-                            sh_sig_err_here(file_idx, "exceeded struct field capacity");
+                        if (st.field_count >= FIELD_CAP) {
+                            sig_err_here(file_idx, "exceeded struct field capacity");
                             done = 1;
                         } else {
-                            let fidx: i32 = sh.field_count;
-                            sh.field_count = sh.field_count + 1;
-                            sh.fields[fidx].file_idx = file_idx;
-                            sh.fields[fidx].name_start = field_name_start;
-                            sh.fields[fidx].name_len = field_name_len;
-                            sh.fields[fidx].type_idx = type_idx;
-                            sh.structs[struct_idx].fields_len = sh.structs[struct_idx].fields_len + 1;
+                            let fidx: i32 = st.field_count;
+                            st.field_count = st.field_count + 1;
+                            st.fields[fidx].file_idx = file_idx;
+                            st.fields[fidx].name_start = field_name_start;
+                            st.fields[fidx].name_len = field_name_len;
+                            st.fields[fidx].type_idx = type_idx;
+                            st.structs[struct_idx].fields_len = st.structs[struct_idx].fields_len + 1;
                         }
                     }
                 }
@@ -435,88 +435,88 @@ function sh_sig_parse_struct_decl(file_idx: i32): void {
     }
 }
 
-function sh_sig_parse_enum_decl(file_idx: i32): void {
+function sig_parse_enum_decl(file_idx: i32): void {
     // enum
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected enum name");
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected enum name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
-    if (!sh_sig_add_sym(file_idx, ShSymKind.Enum, 0)) {
-        sh.sig_errors = sh.sig_errors + 1;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
+    if (!sig_add_sym(file_idx, SymKind.Enum, 0)) {
+        st.sig_errors = st.sig_errors + 1;
     }
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.enum_count >= SH_ENUM_CAP) {
-        sh_sig_err_here(file_idx, "exceeded enum capacity");
+    if (st.enum_count >= ENUM_CAP) {
+        sig_err_here(file_idx, "exceeded enum capacity");
         return;
     }
 
-    let enum_idx: i32 = sh.enum_count;
-    sh.enum_count = sh.enum_count + 1;
-    sh.enums[enum_idx].file_idx = file_idx;
-    sh.enums[enum_idx].name_start = name_start;
-    sh.enums[enum_idx].name_len = name_len;
-    sh.enums[enum_idx].members_off = sh.enum_member_count;
-    sh.enums[enum_idx].members_len = 0;
+    let enum_idx: i32 = st.enum_count;
+    st.enum_count = st.enum_count + 1;
+    st.enums[enum_idx].file_idx = file_idx;
+    st.enums[enum_idx].name_start = name_start;
+    st.enums[enum_idx].name_len = name_len;
+    st.enums[enum_idx].members_off = st.enum_member_count;
+    st.enums[enum_idx].members_len = 0;
 
-    if (sh.sig_kind != ShTok.LBrace) {
-        sh_sig_err_here(file_idx, "expected '{' to start enum body");
+    if (st.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{' to start enum body");
         return;
     }
-    sh_sig_advance();
+    sig_advance();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.RBrace) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.RBrace) {
+            sig_advance();
             done = 1;
         } else {
-            if (sh.sig_kind == ShTok.Eof) {
-                sh_sig_err_here(file_idx, "unexpected eof in enum body");
+            if (st.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in enum body");
                 done = 1;
             } else {
-                if (sh.sig_kind != ShTok.Identifier) {
-                    sh_sig_err_here(file_idx, "expected enum member name");
-                    sh_sig_advance();
+                if (st.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected enum member name");
+                    sig_advance();
                 } else {
-                    let m_name_start: i32 = sh.tok_start;
-                    let m_name_len: i32 = sh.tok_len;
-                    sh_sig_advance();
+                    let m_name_start: i32 = st.tok_start;
+                    let m_name_len: i32 = st.tok_len;
+                    sig_advance();
 
                     let has_value: i32 = 0;
                     let value: i32 = 0;
-                    if (sh.sig_kind == ShTok.Equal) {
-                        sh_sig_advance();
-                        if (sh.sig_kind != ShTok.IntegerLiteral) {
-                            sh_sig_err_here(file_idx, "expected enum member value");
+                    if (st.sig_kind == Tok.Equal) {
+                        sig_advance();
+                        if (st.sig_kind != Tok.IntegerLiteral) {
+                            sig_err_here(file_idx, "expected enum member value");
                         } else {
                             has_value = 1;
-                            value = sh_sig_parse_i32_from_tok(file_idx);
-                            sh_sig_advance();
+                            value = sig_parse_i32_from_tok(file_idx);
+                            sig_advance();
                         }
                     }
 
-                    if (sh.enum_member_count >= SH_ENUM_MEMBER_CAP) {
-                        sh_sig_err_here(file_idx, "exceeded enum member capacity");
+                    if (st.enum_member_count >= ENUM_MEMBER_CAP) {
+                        sig_err_here(file_idx, "exceeded enum member capacity");
                         done = 1;
                     } else {
-                        let midx: i32 = sh.enum_member_count;
-                        sh.enum_member_count = sh.enum_member_count + 1;
-                        sh.enum_members[midx].file_idx = file_idx;
-                        sh.enum_members[midx].name_start = m_name_start;
-                        sh.enum_members[midx].name_len = m_name_len;
-                        sh.enum_members[midx].has_value = has_value;
-                        sh.enum_members[midx].value = value;
-                        sh.enums[enum_idx].members_len = sh.enums[enum_idx].members_len + 1;
+                        let midx: i32 = st.enum_member_count;
+                        st.enum_member_count = st.enum_member_count + 1;
+                        st.enum_members[midx].file_idx = file_idx;
+                        st.enum_members[midx].name_start = m_name_start;
+                        st.enum_members[midx].name_len = m_name_len;
+                        st.enum_members[midx].has_value = has_value;
+                        st.enum_members[midx].value = value;
+                        st.enums[enum_idx].members_len = st.enums[enum_idx].members_len + 1;
                     }
 
-                    if (sh.sig_kind == ShTok.Comma) {
-                        sh_sig_advance();
+                    if (st.sig_kind == Tok.Comma) {
+                        sig_advance();
                     }
                 }
             }
@@ -524,56 +524,56 @@ function sh_sig_parse_enum_decl(file_idx: i32): void {
     }
 }
 
-function sh_sig_parse_param_list(file_idx: i32): i32 {
-    let params_before: i32 = sh.param_count;
+function sig_parse_param_list(file_idx: i32): i32 {
+    let params_before: i32 = st.param_count;
 
-    if (sh.sig_kind != ShTok.LParen) {
-        sh_sig_err_here(file_idx, "expected '('");
+    if (st.sig_kind != Tok.LParen) {
+        sig_err_here(file_idx, "expected '('");
         return 0;
     }
-    sh_sig_advance();
+    sig_advance();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.RParen) {
-            sh_sig_advance();
+        if (st.sig_kind == Tok.RParen) {
+            sig_advance();
             done = 1;
         } else {
-            if (sh.sig_kind == ShTok.Eof) {
-                sh_sig_err_here(file_idx, "unexpected eof in parameter list");
+            if (st.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in parameter list");
                 done = 1;
             } else {
-                if (sh.sig_kind != ShTok.Identifier) {
-                    sh_sig_err_here(file_idx, "expected parameter name");
-                    sh_sig_advance();
+                if (st.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected parameter name");
+                    sig_advance();
                 } else {
-                    let name_start: i32 = sh.tok_start;
-                    let name_len: i32 = sh.tok_len;
-                    sh_sig_advance();
+                    let name_start: i32 = st.tok_start;
+                    let name_len: i32 = st.tok_len;
+                    sig_advance();
 
                     let type_idx: i32 = -1;
-                    if (sh.sig_kind != ShTok.Colon) {
-                        sh_sig_err_here(file_idx, "expected ':' after parameter name");
+                    if (st.sig_kind != Tok.Colon) {
+                        sig_err_here(file_idx, "expected ':' after parameter name");
                     } else {
-                        sh_sig_advance();
-                        type_idx = sh_sig_parse_type(file_idx);
+                        sig_advance();
+                        type_idx = sig_parse_type(file_idx);
                     }
 
-                    sh_sig_add_param(file_idx, name_start, name_len, type_idx);
+                    sig_add_param(file_idx, name_start, name_len, type_idx);
 
-                    if (sh.sig_kind == ShTok.Comma) {
-                        sh_sig_advance();
-                        if (sh.sig_kind == ShTok.RParen) {
-                            sh_sig_advance();
+                    if (st.sig_kind == Tok.Comma) {
+                        sig_advance();
+                        if (st.sig_kind == Tok.RParen) {
+                            sig_advance();
                             done = 1;
                         }
                     } else {
-                        if (sh.sig_kind == ShTok.RParen) {
-                            sh_sig_advance();
+                        if (st.sig_kind == Tok.RParen) {
+                            sig_advance();
                             done = 1;
                         } else {
-                            sh_sig_err_here(file_idx, "expected ',' or ')' in parameter list");
-                            sh_sig_advance();
+                            sig_err_here(file_idx, "expected ',' or ')' in parameter list");
+                            sig_advance();
                         }
                     }
                 }
@@ -581,275 +581,275 @@ function sh_sig_parse_param_list(file_idx: i32): i32 {
         }
     }
 
-    return sh.param_count - params_before;
+    return st.param_count - params_before;
 }
 
-function sh_sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
+function sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
     // function
-    sh_sig_advance();
+    sig_advance();
 
     // attributes
     let done_attrs: i32 = 0;
     for (; done_attrs == 0; ) {
-        if (sh.sig_kind == ShTok.At) {
-            sh_sig_advance();
-            if (sh.sig_kind != ShTok.Identifier) {
-                sh_sig_err_here(file_idx, "expected attribute name after '@'");
+        if (st.sig_kind == Tok.At) {
+            sig_advance();
+            if (st.sig_kind != Tok.Identifier) {
+                sig_err_here(file_idx, "expected attribute name after '@'");
                 done_attrs = 1;
             } else {
-                sh_sig_advance();
+                sig_advance();
             }
         } else {
             done_attrs = 1;
         }
     }
 
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected function name");
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected function name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
 
     let sym_idx: i32 = -1;
-    if (sh_sig_add_sym(file_idx, ShSymKind.Function, is_exported)) {
-        sym_idx = sh.sym_count - 1;
+    if (sig_add_sym(file_idx, SymKind.Function, is_exported)) {
+        sym_idx = st.sym_count - 1;
     } else {
-        sh.sig_errors = sh.sig_errors + 1;
+        st.sig_errors = st.sig_errors + 1;
     }
 
-    let func_idx: i32 = sh_sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 0);
-    sh_sig_advance();
+    let func_idx: i32 = sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 0);
+    sig_advance();
 
-    let params_off: i32 = sh.param_count;
-    let params_len: i32 = sh_sig_parse_param_list(file_idx);
+    let params_off: i32 = st.param_count;
+    let params_len: i32 = sig_parse_param_list(file_idx);
     if (func_idx >= 0) {
-        sh.funcs[func_idx].params_off = params_off;
-        sh.funcs[func_idx].params_len = params_len;
+        st.funcs[func_idx].params_off = params_off;
+        st.funcs[func_idx].params_len = params_len;
     }
 
     let ret_type_idx: i32 = -1;
-    if (sh.sig_kind == ShTok.Colon) {
-        sh_sig_advance();
-        ret_type_idx = sh_sig_parse_type(file_idx);
+    if (st.sig_kind == Tok.Colon) {
+        sig_advance();
+        ret_type_idx = sig_parse_type(file_idx);
     }
     if (func_idx >= 0) {
-        sh.funcs[func_idx].ret_type_idx = ret_type_idx;
+        st.funcs[func_idx].ret_type_idx = ret_type_idx;
     }
 
-    if (sh.sig_kind == ShTok.LBrace) {
+    if (st.sig_kind == Tok.LBrace) {
         if (func_idx >= 0) {
-            sh.funcs[func_idx].body_start = sh.tok_start;
+            st.funcs[func_idx].body_start = st.tok_start;
         }
     }
-    sh_sig_skip_block(file_idx);
+    sig_skip_block(file_idx);
 }
 
-function sh_sig_parse_test_decl(file_idx: i32): void {
+function sig_parse_test_decl(file_idx: i32): void {
     // test
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Identifier && sh.sig_kind != ShTok.BacktickLiteral) {
-        sh_sig_err_here(file_idx, "expected test name");
+    if (st.sig_kind != Tok.Identifier && st.sig_kind != Tok.BacktickLiteral) {
+        sig_err_here(file_idx, "expected test name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
 
     let sym_idx: i32 = -1;
-    if (sh_sig_add_sym(file_idx, ShSymKind.Test, 0)) {
-        sym_idx = sh.sym_count - 1;
+    if (sig_add_sym(file_idx, SymKind.Test, 0)) {
+        sym_idx = st.sym_count - 1;
     } else {
-        sh.sig_errors = sh.sig_errors + 1;
+        st.sig_errors = st.sig_errors + 1;
     }
 
-    let func_idx: i32 = sh_sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 1);
-    sh_sig_advance();
+    let func_idx: i32 = sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 1);
+    sig_advance();
 
-    let params_off: i32 = sh.param_count;
-    let params_len: i32 = sh_sig_parse_param_list(file_idx);
+    let params_off: i32 = st.param_count;
+    let params_len: i32 = sig_parse_param_list(file_idx);
     if (func_idx >= 0) {
-        sh.funcs[func_idx].params_off = params_off;
-        sh.funcs[func_idx].params_len = params_len;
+        st.funcs[func_idx].params_off = params_off;
+        st.funcs[func_idx].params_len = params_len;
     }
 
     let ret_type_idx: i32 = -1;
-    if (sh.sig_kind == ShTok.Colon) {
-        sh_sig_advance();
-        ret_type_idx = sh_sig_parse_type(file_idx);
+    if (st.sig_kind == Tok.Colon) {
+        sig_advance();
+        ret_type_idx = sig_parse_type(file_idx);
     }
     if (func_idx >= 0) {
-        sh.funcs[func_idx].ret_type_idx = ret_type_idx;
+        st.funcs[func_idx].ret_type_idx = ret_type_idx;
     }
 
-    if (sh.sig_kind == ShTok.LBrace) {
+    if (st.sig_kind == Tok.LBrace) {
         if (func_idx >= 0) {
-            sh.funcs[func_idx].body_start = sh.tok_start;
+            st.funcs[func_idx].body_start = st.tok_start;
         }
     }
-    sh_sig_skip_block(file_idx);
+    sig_skip_block(file_idx);
 }
 
-function sh_sig_parse_global_decl(file_idx: i32): void {
+function sig_parse_global_decl(file_idx: i32): void {
     // global
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected global name");
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected global name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
 
     let sym_idx: i32 = -1;
-    if (sh_sig_add_sym(file_idx, ShSymKind.Global, 0)) {
-        sym_idx = sh.sym_count - 1;
+    if (sig_add_sym(file_idx, SymKind.Global, 0)) {
+        sym_idx = st.sym_count - 1;
     } else {
-        sh.sig_errors = sh.sig_errors + 1;
+        st.sig_errors = st.sig_errors + 1;
     }
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Colon) {
-        sh_sig_err_here(file_idx, "expected ':' after global name");
+    if (st.sig_kind != Tok.Colon) {
+        sig_err_here(file_idx, "expected ':' after global name");
         return;
     }
-    sh_sig_advance();
-    let type_idx: i32 = sh_sig_parse_type(file_idx);
+    sig_advance();
+    let type_idx: i32 = sig_parse_type(file_idx);
 
     let has_init: i32 = 0;
     let init_start: i32 = -1;
 
-    if (sh.sig_kind == ShTok.Equal) {
+    if (st.sig_kind == Tok.Equal) {
         has_init = 1;
-        sh_sig_advance();
-        init_start = sh.tok_start;
-        sh_sig_skip_until_semicolon(file_idx);
+        sig_advance();
+        init_start = st.tok_start;
+        sig_skip_until_semicolon(file_idx);
     } else {
-        if (sh.sig_kind != ShTok.Semicolon) {
-            sh_sig_err_here(file_idx, "expected ';' after global");
-            sh_sig_skip_until_semicolon(file_idx);
+        if (st.sig_kind != Tok.Semicolon) {
+            sig_err_here(file_idx, "expected ';' after global");
+            sig_skip_until_semicolon(file_idx);
         } else {
-            sh_sig_advance();
+            sig_advance();
         }
     }
 
-    sh_sig_add_global_decl(file_idx, name_start, name_len, sym_idx, type_idx, has_init, init_start);
+    sig_add_global_decl(file_idx, name_start, name_len, sym_idx, type_idx, has_init, init_start);
 }
 
-function sh_sig_parse_const_decl(file_idx: i32): void {
+function sig_parse_const_decl(file_idx: i32): void {
     // const
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Identifier) {
-        sh_sig_err_here(file_idx, "expected const name");
+    if (st.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected const name");
         return;
     }
 
-    let name_start: i32 = sh.tok_start;
-    let name_len: i32 = sh.tok_len;
+    let name_start: i32 = st.tok_start;
+    let name_len: i32 = st.tok_len;
 
     let sym_idx: i32 = -1;
-    if (sh_sig_add_sym(file_idx, ShSymKind.Const, 0)) {
-        sym_idx = sh.sym_count - 1;
+    if (sig_add_sym(file_idx, SymKind.Const, 0)) {
+        sym_idx = st.sym_count - 1;
     } else {
-        sh.sig_errors = sh.sig_errors + 1;
+        st.sig_errors = st.sig_errors + 1;
     }
-    sh_sig_advance();
+    sig_advance();
 
-    if (sh.sig_kind != ShTok.Colon) {
-        sh_sig_err_here(file_idx, "expected ':' after const name");
+    if (st.sig_kind != Tok.Colon) {
+        sig_err_here(file_idx, "expected ':' after const name");
         return;
     }
-    sh_sig_advance();
-    let type_idx: i32 = sh_sig_parse_type(file_idx);
+    sig_advance();
+    let type_idx: i32 = sig_parse_type(file_idx);
 
-    if (sh.sig_kind != ShTok.Equal) {
-        sh_sig_err_here(file_idx, "expected '=' after const type");
-        sh_sig_skip_until_semicolon(file_idx);
-        sh_sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, -1);
+    if (st.sig_kind != Tok.Equal) {
+        sig_err_here(file_idx, "expected '=' after const type");
+        sig_skip_until_semicolon(file_idx);
+        sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, -1);
         return;
     }
 
-    sh_sig_advance();
-    let init_start: i32 = sh.tok_start;
-    sh_sig_skip_until_semicolon(file_idx);
-    sh_sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, init_start);
+    sig_advance();
+    let init_start: i32 = st.tok_start;
+    sig_skip_until_semicolon(file_idx);
+    sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, init_start);
 }
 
-function sh_sig_scan_file(file_idx: i32): i32 {
-    sh.files[file_idx].syms_off = sh.sym_count;
-    sh.files[file_idx].syms_len = 0;
+function sig_scan_file(file_idx: i32): i32 {
+    st.files[file_idx].syms_off = st.sym_count;
+    st.files[file_idx].syms_len = 0;
 
-    if (!sh_lex_begin(file_idx)) {
-        sh_sig_print_err_at(file_idx, "failed to start lexer", 0);
+    if (!lex_begin(file_idx)) {
+        sig_print_err_at(file_idx, "failed to start lexer", 0);
         return 1;
     }
 
     // Avoid duplicate lexer diagnostics when `check` has already lexed these files.
-    sh.lex_quiet = 1;
-    sh.lex_error_printed = 0;
+    st.lex_quiet = 1;
+    st.lex_error_printed = 0;
 
     let export_pending: i32 = 0;
 
-    let errors_before: i32 = sh.sig_errors;
-    sh.sig_kind = sh_lex_next_kind();
+    let errors_before: i32 = st.sig_errors;
+    st.sig_kind = lex_next_kind();
 
     let done: i32 = 0;
     for (; done == 0; ) {
-        if (sh.sig_kind == ShTok.Eof) {
+        if (st.sig_kind == Tok.Eof) {
             done = 1;
         } else {
-            if (export_pending != 0 && sh.sig_kind != ShTok.FunctionKeyword) {
-                sh_sig_err_here(file_idx, "expected 'function' after 'export'");
+            if (export_pending != 0 && st.sig_kind != Tok.FunctionKeyword) {
+                sig_err_here(file_idx, "expected 'function' after 'export'");
                 export_pending = 0;
             }
 
-            if (sh.sig_kind == ShTok.ImportKeyword) {
+            if (st.sig_kind == Tok.ImportKeyword) {
                 export_pending = 0;
                 // import "path" [;]
-                sh_sig_advance();
-                if (sh.sig_kind != ShTok.StringLiteral) {
-                    sh_sig_err_here(file_idx, "expected import path string literal");
+                sig_advance();
+                if (st.sig_kind != Tok.StringLiteral) {
+                    sig_err_here(file_idx, "expected import path string literal");
                 } else {
-                    sh_sig_advance();
+                    sig_advance();
                 }
-                if (sh.sig_kind == ShTok.Semicolon) {
-                    sh_sig_advance();
+                if (st.sig_kind == Tok.Semicolon) {
+                    sig_advance();
                 }
             } else {
-                if (sh.sig_kind == ShTok.ExportKeyword) {
+                if (st.sig_kind == Tok.ExportKeyword) {
                     export_pending = 1;
-                    sh_sig_advance();
+                    sig_advance();
                 } else {
-                    if (sh.sig_kind == ShTok.StructKeyword) {
+                    if (st.sig_kind == Tok.StructKeyword) {
                         export_pending = 0;
-                        sh_sig_parse_struct_decl(file_idx);
+                        sig_parse_struct_decl(file_idx);
                     } else {
-                        if (sh.sig_kind == ShTok.EnumKeyword) {
+                        if (st.sig_kind == Tok.EnumKeyword) {
                             export_pending = 0;
-                            sh_sig_parse_enum_decl(file_idx);
+                            sig_parse_enum_decl(file_idx);
                         } else {
-                            if (sh.sig_kind == ShTok.GlobalKeyword) {
+                            if (st.sig_kind == Tok.GlobalKeyword) {
                                 export_pending = 0;
-                                sh_sig_parse_global_decl(file_idx);
+                                sig_parse_global_decl(file_idx);
                             } else {
-                                if (sh.sig_kind == ShTok.ConstKeyword) {
+                                if (st.sig_kind == Tok.ConstKeyword) {
                                     export_pending = 0;
-                                    sh_sig_parse_const_decl(file_idx);
+                                    sig_parse_const_decl(file_idx);
                                 } else {
-                                    if (sh.sig_kind == ShTok.FunctionKeyword) {
-                                        sh_sig_parse_function_decl(file_idx, export_pending);
+                                    if (st.sig_kind == Tok.FunctionKeyword) {
+                                        sig_parse_function_decl(file_idx, export_pending);
                                         export_pending = 0;
                                     } else {
-                                        if (sh.sig_kind == ShTok.TestKeyword) {
+                                        if (st.sig_kind == Tok.TestKeyword) {
                                             export_pending = 0;
-                                            sh_sig_parse_test_decl(file_idx);
+                                            sig_parse_test_decl(file_idx);
                                         } else {
                                             export_pending = 0;
-                                            sh_sig_advance();
+                                            sig_advance();
                                         }
                                     }
                                 }
@@ -861,26 +861,26 @@ function sh_sig_scan_file(file_idx: i32): i32 {
         }
     }
 
-    return sh.sig_errors - errors_before;
+    return st.sig_errors - errors_before;
 }
 
-function sh_sig_scan_loaded_files(): i32 {
-    sh.sym_pool_len = 0;
-    sh.sym_count = 0;
-    sh.sig_errors = 0;
-    sh.type_count = 0;
-    sh.struct_count = 0;
-    sh.field_count = 0;
-    sh.enum_count = 0;
-    sh.enum_member_count = 0;
-    sh.global_count = 0;
-    sh.const_count = 0;
-    sh.func_count = 0;
-    sh.param_count = 0;
+function sig_scan_loaded_files(): i32 {
+    st.sym_pool_len = 0;
+    st.sym_count = 0;
+    st.sig_errors = 0;
+    st.type_count = 0;
+    st.struct_count = 0;
+    st.field_count = 0;
+    st.enum_count = 0;
+    st.enum_member_count = 0;
+    st.global_count = 0;
+    st.const_count = 0;
+    st.func_count = 0;
+    st.param_count = 0;
 
     let i: i32 = 0;
-    for (i = 0; i < sh.file_count; i = i + 1) {
-        sh_sig_scan_file(i);
+    for (i = 0; i < st.file_count; i = i + 1) {
+        sig_scan_file(i);
     }
-    return sh.sig_errors;
+    return st.sig_errors;
 }

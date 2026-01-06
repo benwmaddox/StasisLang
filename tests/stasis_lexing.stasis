@@ -9,7 +9,7 @@ global t_path_sample: ascii[260];
 global t_path_unknown: ascii[260];
 
 global t_tmp: ascii[2048];
-global t_kinds: ShTok[128];
+global t_kinds: Tok[128];
 
 function t_init_exe_dir(): bool {
     let n: i32 = sys_argv(0, t_argv0, 260);
@@ -17,7 +17,7 @@ function t_init_exe_dir(): bool {
         return false;
     }
     ascii_set_len(t_argv0, n);
-    sh_path_dirname(t_exe_dir, t_argv0);
+    path_dirname(t_exe_dir, t_argv0);
     return !ascii_is_empty(t_exe_dir);
 }
 
@@ -31,23 +31,23 @@ function t_write_ascii(path: ascii[], text: ascii[]): bool {
 }
 
 function t_lex_file(path: ascii[]): i32 {
-    let rc: i32 = sh_load_graph(path);
+    let rc: i32 = load_graph(path);
     if (rc != 0) {
         return -1;
     }
 
-    let idx: i32 = sh_find_file(path);
+    let idx: i32 = find_file(path);
     if (idx < 0) {
         return -1;
     }
-    if (!sh_lex_begin(idx)) {
+    if (!lex_begin(idx)) {
         return -1;
     }
 
     let n: i32 = 0;
     for (n = 0; n < 128; n = n + 1) {
-        t_kinds[n] = sh_lex_next_kind();
-        if (t_kinds[n] == ShTok.Eof) {
+        t_kinds[n] = lex_next_kind();
+        if (t_kinds[n] == Tok.Eof) {
             return n + 1;
         }
     }
@@ -59,7 +59,7 @@ test `stasis lexer basic tokens`() {
         return false;
     }
 
-    sh_path_join(t_path_sample, t_exe_dir, "sh_lex_sample.stasis.inc");
+    path_join(t_path_sample, t_exe_dir, "sh_lex_sample.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global x: i32;");
@@ -79,50 +79,50 @@ test `stasis lexer basic tokens`() {
     if (n != 35) {
         return false;
     }
-    if (sh.lex_error_count != 0) {
+    if (st.lex_error_count != 0) {
         return false;
     }
 
-    if (t_kinds[0] != ShTok.GlobalKeyword) { return false; }
-    if (t_kinds[1] != ShTok.Identifier) { return false; }
-    if (t_kinds[2] != ShTok.Colon) { return false; }
-    if (t_kinds[3] != ShTok.Identifier) { return false; }
-    if (t_kinds[4] != ShTok.Semicolon) { return false; }
+    if (t_kinds[0] != Tok.GlobalKeyword) { return false; }
+    if (t_kinds[1] != Tok.Identifier) { return false; }
+    if (t_kinds[2] != Tok.Colon) { return false; }
+    if (t_kinds[3] != Tok.Identifier) { return false; }
+    if (t_kinds[4] != Tok.Semicolon) { return false; }
 
-    if (t_kinds[5] != ShTok.FunctionKeyword) { return false; }
-    if (t_kinds[6] != ShTok.Identifier) { return false; }
-    if (t_kinds[7] != ShTok.LParen) { return false; }
-    if (t_kinds[8] != ShTok.RParen) { return false; }
-    if (t_kinds[9] != ShTok.Colon) { return false; }
-    if (t_kinds[10] != ShTok.Identifier) { return false; }
-    if (t_kinds[11] != ShTok.LBrace) { return false; }
+    if (t_kinds[5] != Tok.FunctionKeyword) { return false; }
+    if (t_kinds[6] != Tok.Identifier) { return false; }
+    if (t_kinds[7] != Tok.LParen) { return false; }
+    if (t_kinds[8] != Tok.RParen) { return false; }
+    if (t_kinds[9] != Tok.Colon) { return false; }
+    if (t_kinds[10] != Tok.Identifier) { return false; }
+    if (t_kinds[11] != Tok.LBrace) { return false; }
 
-    if (t_kinds[12] != ShTok.LetKeyword) { return false; }
-    if (t_kinds[13] != ShTok.Identifier) { return false; }
-    if (t_kinds[14] != ShTok.Colon) { return false; }
-    if (t_kinds[15] != ShTok.Identifier) { return false; }
-    if (t_kinds[16] != ShTok.Equal) { return false; }
-    if (t_kinds[17] != ShTok.IntegerLiteral) { return false; }
-    if (t_kinds[18] != ShTok.Plus) { return false; }
-    if (t_kinds[19] != ShTok.IntegerLiteral) { return false; }
-    if (t_kinds[20] != ShTok.Star) { return false; }
-    if (t_kinds[21] != ShTok.IntegerLiteral) { return false; }
-    if (t_kinds[22] != ShTok.Semicolon) { return false; }
+    if (t_kinds[12] != Tok.LetKeyword) { return false; }
+    if (t_kinds[13] != Tok.Identifier) { return false; }
+    if (t_kinds[14] != Tok.Colon) { return false; }
+    if (t_kinds[15] != Tok.Identifier) { return false; }
+    if (t_kinds[16] != Tok.Equal) { return false; }
+    if (t_kinds[17] != Tok.IntegerLiteral) { return false; }
+    if (t_kinds[18] != Tok.Plus) { return false; }
+    if (t_kinds[19] != Tok.IntegerLiteral) { return false; }
+    if (t_kinds[20] != Tok.Star) { return false; }
+    if (t_kinds[21] != Tok.IntegerLiteral) { return false; }
+    if (t_kinds[22] != Tok.Semicolon) { return false; }
 
-    if (t_kinds[23] != ShTok.LetKeyword) { return false; }
-    if (t_kinds[24] != ShTok.Identifier) { return false; }
-    if (t_kinds[25] != ShTok.Colon) { return false; }
-    if (t_kinds[26] != ShTok.Identifier) { return false; }
-    if (t_kinds[27] != ShTok.Equal) { return false; }
-    if (t_kinds[28] != ShTok.FloatLiteral) { return false; }
-    if (t_kinds[29] != ShTok.Semicolon) { return false; }
+    if (t_kinds[23] != Tok.LetKeyword) { return false; }
+    if (t_kinds[24] != Tok.Identifier) { return false; }
+    if (t_kinds[25] != Tok.Colon) { return false; }
+    if (t_kinds[26] != Tok.Identifier) { return false; }
+    if (t_kinds[27] != Tok.Equal) { return false; }
+    if (t_kinds[28] != Tok.FloatLiteral) { return false; }
+    if (t_kinds[29] != Tok.Semicolon) { return false; }
 
-    if (t_kinds[30] != ShTok.ReturnKeyword) { return false; }
-    if (t_kinds[31] != ShTok.Identifier) { return false; }
-    if (t_kinds[32] != ShTok.Semicolon) { return false; }
+    if (t_kinds[30] != Tok.ReturnKeyword) { return false; }
+    if (t_kinds[31] != Tok.Identifier) { return false; }
+    if (t_kinds[32] != Tok.Semicolon) { return false; }
 
-    if (t_kinds[33] != ShTok.RBrace) { return false; }
-    if (t_kinds[34] != ShTok.Eof) { return false; }
+    if (t_kinds[33] != Tok.RBrace) { return false; }
+    if (t_kinds[34] != Tok.Eof) { return false; }
 
     return true;
 }
@@ -132,7 +132,7 @@ test `stasis lexer unknown char`() {
         return false;
     }
 
-    sh_path_join(t_path_unknown, t_exe_dir, "sh_lex_unknown.stasis.inc");
+    path_join(t_path_unknown, t_exe_dir, "sh_lex_unknown.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global x: i32 = 1 & 2;");
@@ -144,20 +144,20 @@ test `stasis lexer unknown char`() {
     if (n <= 0) {
         return false;
     }
-    if (sh.lex_error_count != 1) {
+    if (st.lex_error_count != 1) {
         return false;
     }
 
-    if (t_kinds[0] != ShTok.GlobalKeyword) { return false; }
-    if (t_kinds[1] != ShTok.Identifier) { return false; }
-    if (t_kinds[2] != ShTok.Colon) { return false; }
-    if (t_kinds[3] != ShTok.Identifier) { return false; }
-    if (t_kinds[4] != ShTok.Equal) { return false; }
-    if (t_kinds[5] != ShTok.IntegerLiteral) { return false; }
-    if (t_kinds[6] != ShTok.Unknown) { return false; }
-    if (t_kinds[7] != ShTok.IntegerLiteral) { return false; }
-    if (t_kinds[8] != ShTok.Semicolon) { return false; }
-    if (t_kinds[9] != ShTok.Eof) { return false; }
+    if (t_kinds[0] != Tok.GlobalKeyword) { return false; }
+    if (t_kinds[1] != Tok.Identifier) { return false; }
+    if (t_kinds[2] != Tok.Colon) { return false; }
+    if (t_kinds[3] != Tok.Identifier) { return false; }
+    if (t_kinds[4] != Tok.Equal) { return false; }
+    if (t_kinds[5] != Tok.IntegerLiteral) { return false; }
+    if (t_kinds[6] != Tok.Unknown) { return false; }
+    if (t_kinds[7] != Tok.IntegerLiteral) { return false; }
+    if (t_kinds[8] != Tok.Semicolon) { return false; }
+    if (t_kinds[9] != Tok.Eof) { return false; }
 
     return true;
 }

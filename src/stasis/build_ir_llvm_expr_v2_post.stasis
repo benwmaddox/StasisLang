@@ -15,130 +15,130 @@ import "build_ir_llvm_expr_v2.stasis";
 import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_func.stasis";
 
-function sh_llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_len: i32): i32 {
+function llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_len: i32): i32 {
     if (val_len >= 4096) {
-        sh_build_err_at(file_idx, "expression too complex (value stack)", sh.expr_nodes[idx2].at);
+        build_err_at(file_idx, "expression too complex (value stack)", st.expr_nodes[idx2].at);
         return -1;
     }
     
-    let kind2: ShExprKind = sh.expr_nodes[idx2].kind;
-    if (kind2 == ShExprKind.IntLiteral || kind2 == ShExprKind.BoolLiteral) {
+    let kind2: ExprKind = st.expr_nodes[idx2].kind;
+    if (kind2 == ExprKind.IntLiteral || kind2 == ExprKind.BoolLiteral) {
         if (mode2 != 0) {
-            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+            build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
             return -1;
         }
-        sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(sh.expr_nodes[idx2].value);
-        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-        sh.llvm_val_struct_idx[val_len] = -1;
+        st.expr_op_at[val_len] = llvm_emit_const_i32(st.expr_nodes[idx2].value);
+        st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+        st.llvm_val_struct_idx[val_len] = -1;
         val_len = val_len + 1;
     } else {
-        if (kind2 == ShExprKind.FloatLiteral) {
+        if (kind2 == ExprKind.FloatLiteral) {
             if (mode2 != 0) {
-                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                 return -1;
             }
-            sh.expr_op_at[val_len] = sh_llvm_emit_const_f32_from_span(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len);
-            sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-            sh.llvm_val_struct_idx[val_len] = -1;
+            st.expr_op_at[val_len] = llvm_emit_const_f32_from_span(file_idx, st.expr_nodes[idx2].name_start, st.expr_nodes[idx2].name_len);
+            st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+            st.llvm_val_struct_idx[val_len] = -1;
             val_len = val_len + 1;
         } else {
-        if (kind2 == ShExprKind.StringLiteral) {
+        if (kind2 == ExprKind.StringLiteral) {
             if (mode2 != 0) {
-                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                 return -1;
             }
-            let ptr_id: i32 = sh_llvm_emit_utf8_string_lit_ptr(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len);
+            let ptr_id: i32 = llvm_emit_utf8_string_lit_ptr(file_idx, st.expr_nodes[idx2].name_start, st.expr_nodes[idx2].name_len);
             if (ptr_id < 0) {
                 return -1;
             }
-            sh.expr_op_at[val_len] = ptr_id;
-            sh.llvm_val_kind[val_len] = ShLlvmValueKind.PtrI8;
-            sh.llvm_val_struct_idx[val_len] = -1;
+            st.expr_op_at[val_len] = ptr_id;
+            st.llvm_val_kind[val_len] = LlvmValueKind.PtrI8;
+            st.llvm_val_struct_idx[val_len] = -1;
             val_len = val_len + 1;
         } else {
-        if (kind2 == ShExprKind.Call) {
-            return sh_llvm_emit_expr_i32_v2_post_call(file_idx, idx2, mode2, val_len);
+        if (kind2 == ExprKind.Call) {
+            return llvm_emit_expr_i32_v2_post_call(file_idx, idx2, mode2, val_len);
         } else {
-            if (kind2 == ShExprKind.Name) {
-                let name_start: i32 = sh.expr_nodes[idx2].name_start;
-                let name_len: i32 = sh.expr_nodes[idx2].name_len;
+            if (kind2 == ExprKind.Name) {
+                let name_start: i32 = st.expr_nodes[idx2].name_start;
+                let name_len: i32 = st.expr_nodes[idx2].name_len;
     
-                let local_id: i32 = sh_llvm_find_local(file_idx, name_start, name_len);
+                let local_id: i32 = llvm_find_local(file_idx, name_start, name_len);
                 if (local_id >= 0) {
-                    if (sh.llvm_local_declared[local_id] == 0) {
-                        sh_build_err_at(file_idx, "local used before declaration", sh.expr_nodes[idx2].at);
+                    if (st.llvm_local_declared[local_id] == 0) {
+                        build_err_at(file_idx, "local used before declaration", st.expr_nodes[idx2].at);
                         return -1;
                     }
-                    let lkind: ShLlvmValueKind = sh.llvm_local_kind[local_id];
-                    if (lkind == ShLlvmValueKind.I32) {
+                    let lkind: LlvmValueKind = st.llvm_local_kind[local_id];
+                    if (lkind == LlvmValueKind.I32) {
                         if (mode2 == 0) {
-                            sh.expr_op_at[val_len] = sh_llvm_emit_load_local(local_id);
-                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                            sh.llvm_val_struct_idx[val_len] = -1;
+                            st.expr_op_at[val_len] = llvm_emit_load_local(local_id);
+                            st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            st.llvm_val_struct_idx[val_len] = -1;
                             val_len = val_len + 1;
                         } else {
-                            sh.expr_op_at[val_len] = sh_llvm_emit_gep0_local_i32(local_id);
-                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                            sh.llvm_val_struct_idx[val_len] = -1;
+                            st.expr_op_at[val_len] = llvm_emit_gep0_local_i32(local_id);
+                            st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            st.llvm_val_struct_idx[val_len] = -1;
                             val_len = val_len + 1;
                         }
                     } else {
-                        if (lkind == ShLlvmValueKind.F32) {
-                            let ptr_id_f32_local: i32 = sh_llvm_emit_gep0_local_f32(local_id);
+                        if (lkind == LlvmValueKind.F32) {
+                            let ptr_id_f32_local: i32 = llvm_emit_gep0_local_f32(local_id);
                             if (mode2 == 0) {
-                                sh.expr_op_at[val_len] = sh_llvm_emit_load_f32_from_ptr(ptr_id_f32_local);
-                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                sh.llvm_val_struct_idx[val_len] = -1;
+                                st.expr_op_at[val_len] = llvm_emit_load_f32_from_ptr(ptr_id_f32_local);
+                                st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                st.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
                             } else {
-                                sh.expr_op_at[val_len] = ptr_id_f32_local;
-                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                sh.llvm_val_struct_idx[val_len] = -1;
+                                st.expr_op_at[val_len] = ptr_id_f32_local;
+                                st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                st.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
                             }
                         } else {
-                        if (lkind == ShLlvmValueKind.PtrI8 || lkind == ShLlvmValueKind.PtrI32 || lkind == ShLlvmValueKind.PtrF32 || lkind == ShLlvmValueKind.PtrStruct) {
+                        if (lkind == LlvmValueKind.PtrI8 || lkind == LlvmValueKind.PtrI32 || lkind == LlvmValueKind.PtrF32 || lkind == LlvmValueKind.PtrStruct) {
                             if (mode2 != 0) {
-                                sh_build_err_at(file_idx, "unsupported assignment target", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "unsupported assignment target", st.expr_nodes[idx2].at);
                                 return -1;
                             }
-                            sh.expr_op_at[val_len] = sh_llvm_emit_load_ptr_from_local(local_id);
-                            sh.llvm_val_kind[val_len] = lkind;
-                            sh.llvm_val_struct_idx[val_len] = -1;
+                            st.expr_op_at[val_len] = llvm_emit_load_ptr_from_local(local_id);
+                            st.llvm_val_kind[val_len] = lkind;
+                            st.llvm_val_struct_idx[val_len] = -1;
                             val_len = val_len + 1;
                         } else {
-                            sh_build_err_at(file_idx, "unsupported local kind (llvm bring-up)", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unsupported local kind (llvm bring-up)", st.expr_nodes[idx2].at);
                             return -1;
                         }
                         }
                     }
                 } else {
-                    let c: i32 = sh_llvm_try_resolve_unqualified_const(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                    let c: i32 = llvm_try_resolve_unqualified_const(file_idx, name_start, name_len, st.expr_nodes[idx2].at);
                     if (c >= 0) {
                         if (mode2 != 0) {
-                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                             return -1;
                         }
-                        let c_ty: i32 = sh.consts[c].type_idx;
-                        if (sh_build_type_is_i32ish(c_ty) || sh_build_type_is_byte_named(c_ty)) {
-                            let v: i32 = sh_llvm_eval_const_i32(file_idx, c, sh.expr_nodes[idx2].at);
-                            if (sh.expr_eval_failed != 0) {
+                        let c_ty: i32 = st.consts[c].type_idx;
+                        if (build_type_is_i32ish(c_ty) || build_type_is_byte_named(c_ty)) {
+                            let v: i32 = llvm_eval_const_i32(file_idx, c, st.expr_nodes[idx2].at);
+                            if (st.expr_eval_failed != 0) {
                                 return -1;
                             }
-                            sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(v);
-                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                            sh.llvm_val_struct_idx[val_len] = -1;
+                            st.expr_op_at[val_len] = llvm_emit_const_i32(v);
+                            st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            st.llvm_val_struct_idx[val_len] = -1;
                             val_len = val_len + 1;
                         } else {
-                            if (sh_build_type_is_f32(c_ty)) {
-                                let fv: i32 = sh_llvm_emit_const_f32_from_const(file_idx, c, sh.expr_nodes[idx2].at);
+                            if (build_type_is_f32(c_ty)) {
+                                let fv: i32 = llvm_emit_const_f32_from_const(file_idx, c, st.expr_nodes[idx2].at);
                                 if (fv < 0) { return -1; }
-                                sh.expr_op_at[val_len] = fv;
-                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                sh.llvm_val_struct_idx[val_len] = -1;
+                                st.expr_op_at[val_len] = fv;
+                                st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                st.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
                             } else {
-                                sh_build_err_at(file_idx, "unsupported const type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "unsupported const type (llvm bring-up)", st.expr_nodes[idx2].at);
                                 return -1;
                             }
                         }
@@ -147,133 +147,133 @@ function sh_llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val
                             return -1;
                         }
 
-                        let e: i32 = sh_llvm_try_resolve_unqualified_enum(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                        let e: i32 = llvm_try_resolve_unqualified_enum(file_idx, name_start, name_len, st.expr_nodes[idx2].at);
                         if (e >= 0) {
                             if (mode2 != 0) {
-                                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                                 return -1;
                             }
-                            sh.expr_op_at[val_len] = 0;
-                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.EnumType;
-                            sh.llvm_val_struct_idx[val_len] = e;
+                            st.expr_op_at[val_len] = 0;
+                            st.llvm_val_kind[val_len] = LlvmValueKind.EnumType;
+                            st.llvm_val_struct_idx[val_len] = e;
                             val_len = val_len + 1;
                         } else {
                             if (e == -2) {
                                 return -1;
                             }
-                            let g: i32 = sh_llvm_resolve_unqualified_global(file_idx, name_start, name_len, sh.expr_nodes[idx2].at);
+                            let g: i32 = llvm_resolve_unqualified_global(file_idx, name_start, name_len, st.expr_nodes[idx2].at);
                             if (g < 0) {
                                 return -1;
                             }
       
-                    let ty: i32 = sh.globals[g].type_idx;
-                    if (ty < 0 || ty >= sh.type_count) {
-                        sh_build_err_at(file_idx, "invalid global type", sh.expr_nodes[idx2].at);
+                    let ty: i32 = st.globals[g].type_idx;
+                    if (ty < 0 || ty >= st.type_count) {
+                        build_err_at(file_idx, "invalid global type", st.expr_nodes[idx2].at);
                         return -1;
                     }
     
-                        let tkind: ShTypeKind = sh.types[ty].kind;
-                        if (tkind == ShTypeKind.Named) {
-                            if (sh_build_type_is_i32ish(ty)) {
-                            let ptr_id_global: i32 = sh_llvm_emit_gep0_global(g, ty);
+                        let tkind: TypeKind = st.types[ty].kind;
+                        if (tkind == TypeKind.Named) {
+                            if (build_type_is_i32ish(ty)) {
+                            let ptr_id_global: i32 = llvm_emit_gep0_global(g, ty);
                             if (ptr_id_global < 0) {
-                                sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                                 return -1;
                             }
 
                             if (mode2 == 0) {
-                                sh.expr_op_at[val_len] = sh_llvm_emit_load_i32_from_ptr(ptr_id_global);
-                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                sh.llvm_val_struct_idx[val_len] = -1;
+                                st.expr_op_at[val_len] = llvm_emit_load_i32_from_ptr(ptr_id_global);
+                                st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                st.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
                             } else {
-                                sh.expr_op_at[val_len] = ptr_id_global;
-                                sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                sh.llvm_val_struct_idx[val_len] = -1;
+                                st.expr_op_at[val_len] = ptr_id_global;
+                                st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                st.llvm_val_struct_idx[val_len] = -1;
                                 val_len = val_len + 1;
                             }
                         } else {
-                            if (sh_build_type_is_f32(ty)) {
-                                let ptr_id_f32: i32 = sh_llvm_emit_gep0_global(g, ty);
+                            if (build_type_is_f32(ty)) {
+                                let ptr_id_f32: i32 = llvm_emit_gep0_global(g, ty);
                                 if (ptr_id_f32 < 0) {
-                                    sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                    build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                                     return -1;
                                 }
 
                                 if (mode2 == 0) {
-                                    sh.expr_op_at[val_len] = sh_llvm_emit_load_f32_from_ptr(ptr_id_f32);
-                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    st.expr_op_at[val_len] = llvm_emit_load_f32_from_ptr(ptr_id_f32);
+                                    st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                    st.llvm_val_struct_idx[val_len] = -1;
                                     val_len = val_len + 1;
                                 } else {
-                                    sh.expr_op_at[val_len] = ptr_id_f32;
-                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    st.expr_op_at[val_len] = ptr_id_f32;
+                                    st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                    st.llvm_val_struct_idx[val_len] = -1;
                                     val_len = val_len + 1;
                                 }
                             } else {
-                                if (sh_build_type_is_byte_named(ty)) {
-                                    let ptr_id2: i32 = sh_llvm_emit_gep0_global(g, ty);
+                                if (build_type_is_byte_named(ty)) {
+                                    let ptr_id2: i32 = llvm_emit_gep0_global(g, ty);
                                     if (ptr_id2 < 0) {
-                                        sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
     
                                     if (mode2 == 0) {
-                                        sh.expr_op_at[val_len] = sh_llvm_emit_load_i8_zext_from_ptr(ptr_id2);
-                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        st.expr_op_at[val_len] = llvm_emit_load_i8_zext_from_ptr(ptr_id2);
+                                        st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        st.llvm_val_struct_idx[val_len] = -1;
                                         val_len = val_len + 1;
                                     } else {
-                                        sh.expr_op_at[val_len] = ptr_id2;
-                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I8;
-                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        st.expr_op_at[val_len] = ptr_id2;
+                                        st.llvm_val_kind[val_len] = LlvmValueKind.I8;
+                                        st.llvm_val_struct_idx[val_len] = -1;
                                         val_len = val_len + 1;
                                     }
                                 } else {
-                                    let si: i32 = sh_build_find_struct_decl_for_type(ty);
+                                    let si: i32 = build_find_struct_decl_for_type(ty);
                                     if (si < 0) {
-                                        sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
     
-                                    let ptr_id3: i32 = sh_llvm_emit_gep0_global(g, ty);
+                                    let ptr_id3: i32 = llvm_emit_gep0_global(g, ty);
                                     if (ptr_id3 < 0) {
-                                        sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
     
-                                    sh.expr_op_at[val_len] = ptr_id3;
-                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.PtrStruct;
-                                    sh.llvm_val_struct_idx[val_len] = si;
+                                    st.expr_op_at[val_len] = ptr_id3;
+                                    st.llvm_val_kind[val_len] = LlvmValueKind.PtrStruct;
+                                    st.llvm_val_struct_idx[val_len] = si;
                                     val_len = val_len + 1;
                                 }
                             }
                         }
                     } else {
-                        if (tkind == ShTypeKind.Array) {
-                            if (sh.types[ty].size == 0) {
-                                sh_build_err_at(file_idx, "slice globals not yet supported (llvm bring-up)", sh.expr_nodes[idx2].at);
+                        if (tkind == TypeKind.Array) {
+                            if (st.types[ty].size == 0) {
+                                build_err_at(file_idx, "slice globals not yet supported (llvm bring-up)", st.expr_nodes[idx2].at);
                                 return -1;
                             }
     
-                            let array_ptr: i32 = sh_llvm_emit_gep0_global(g, ty);
+                            let array_ptr: i32 = llvm_emit_gep0_global(g, ty);
                             if (array_ptr < 0) {
-                                sh_build_err_at(file_idx, "unsupported global array type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "unsupported global array type (llvm bring-up)", st.expr_nodes[idx2].at);
                                 return -1;
                             }
     
-                            let data_ptr: i32 = sh_llvm_decay_fixed_array_ptr(file_idx, sh.expr_nodes[idx2].at, array_ptr, ty);
+                            let data_ptr: i32 = llvm_decay_fixed_array_ptr(file_idx, st.expr_nodes[idx2].at, array_ptr, ty);
                             if (data_ptr < 0) {
                                 return -1;
                             }
     
-                            sh.expr_op_at[val_len] = data_ptr;
-                            sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
-                            sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                            st.expr_op_at[val_len] = data_ptr;
+                            st.llvm_val_kind[val_len] = st.llvm_place_kind;
+                            st.llvm_val_struct_idx[val_len] = st.llvm_place_struct_idx;
                             val_len = val_len + 1;
                         } else {
-                            sh_build_err_at(file_idx, "unsupported global type (llvm bring-up)", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unsupported global type (llvm bring-up)", st.expr_nodes[idx2].at);
                             return -1;
                         }
                     }
@@ -281,373 +281,373 @@ function sh_llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val
                 }
             }
         } else {
-            if (kind2 == ShExprKind.Member) {
+            if (kind2 == ExprKind.Member) {
                     if (val_len < 1) {
-                        sh_build_err_at(file_idx, "invalid member expression", sh.expr_nodes[idx2].at);
+                        build_err_at(file_idx, "invalid member expression", st.expr_nodes[idx2].at);
                         return -1;
                     }
     
-                    let base_id: i32 = sh.expr_op_at[val_len - 1];
-                    let base_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
-                    let base_si: i32 = sh.llvm_val_struct_idx[val_len - 1];
+                    let base_id: i32 = st.expr_op_at[val_len - 1];
+                    let base_kind: LlvmValueKind = st.llvm_val_kind[val_len - 1];
+                    let base_si: i32 = st.llvm_val_struct_idx[val_len - 1];
                     val_len = val_len - 1;
      
-                    if (base_kind == ShLlvmValueKind.EnumType) {
+                    if (base_kind == LlvmValueKind.EnumType) {
                         if (mode2 != 0) {
-                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                             return -1;
                         }
-                        let enum_member_abs_idx: i32 = sh_llvm_find_enum_member(file_idx, sh.expr_nodes[idx2].name_start, sh.expr_nodes[idx2].name_len, base_si);
+                        let enum_member_abs_idx: i32 = llvm_find_enum_member(file_idx, st.expr_nodes[idx2].name_start, st.expr_nodes[idx2].name_len, base_si);
                         if (enum_member_abs_idx < 0) {
-                            sh_build_err_at(file_idx, "unknown enum member", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unknown enum member", st.expr_nodes[idx2].at);
                             return -1;
                         }
-                        sh.expr_op_at[val_len] = sh_llvm_emit_const_i32(sh.enum_members[enum_member_abs_idx].value);
-                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                        sh.llvm_val_struct_idx[val_len] = -1;
+                        st.expr_op_at[val_len] = llvm_emit_const_i32(st.enum_members[enum_member_abs_idx].value);
+                        st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                        st.llvm_val_struct_idx[val_len] = -1;
                         val_len = val_len + 1;
                     } else {
-                        let out_idm: i32 = sh_llvm_emit_member_value_or_place(file_idx, idx2, mode2, base_id, base_kind, base_si);
+                        let out_idm: i32 = llvm_emit_member_value_or_place(file_idx, idx2, mode2, base_id, base_kind, base_si);
                         if (out_idm < 0) {
                             return -1;
                         }
      
-                        sh.expr_op_at[val_len] = out_idm;
-                        sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
-                        sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                        st.expr_op_at[val_len] = out_idm;
+                        st.llvm_val_kind[val_len] = st.llvm_place_kind;
+                        st.llvm_val_struct_idx[val_len] = st.llvm_place_struct_idx;
                         val_len = val_len + 1;
                     }
         } else {
-            if (kind2 == ShExprKind.Index) {
+            if (kind2 == ExprKind.Index) {
                         if (val_len < 2) {
-                            sh_build_err_at(file_idx, "invalid index expression", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid index expression", st.expr_nodes[idx2].at);
                             return -1;
                         }
     
-                        let index_id: i32 = sh.expr_op_at[val_len - 1];
-                        let index_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
-                        let base_id2: i32 = sh.expr_op_at[val_len - 2];
-                        let base_kind2: ShLlvmValueKind = sh.llvm_val_kind[val_len - 2];
-                        let base_si2: i32 = sh.llvm_val_struct_idx[val_len - 2];
+                        let index_id: i32 = st.expr_op_at[val_len - 1];
+                        let index_kind: LlvmValueKind = st.llvm_val_kind[val_len - 1];
+                        let base_id2: i32 = st.expr_op_at[val_len - 2];
+                        let base_kind2: LlvmValueKind = st.llvm_val_kind[val_len - 2];
+                        let base_si2: i32 = st.llvm_val_struct_idx[val_len - 2];
                         val_len = val_len - 2;
     
-                        let out_idi: i32 = sh_llvm_emit_index_value_or_place(file_idx, idx2, mode2, base_id2, base_kind2, base_si2, index_id, index_kind);
+                        let out_idi: i32 = llvm_emit_index_value_or_place(file_idx, idx2, mode2, base_id2, base_kind2, base_si2, index_id, index_kind);
                         if (out_idi < 0) {
                             return -1;
                         }
     
-                        sh.expr_op_at[val_len] = out_idi;
-                        sh.llvm_val_kind[val_len] = sh.llvm_place_kind;
-                        sh.llvm_val_struct_idx[val_len] = sh.llvm_place_struct_idx;
+                        st.expr_op_at[val_len] = out_idi;
+                        st.llvm_val_kind[val_len] = st.llvm_place_kind;
+                        st.llvm_val_struct_idx[val_len] = st.llvm_place_struct_idx;
                         val_len = val_len + 1;
                     } else {
-                if (kind2 == ShExprKind.Unary) {
+                if (kind2 == ExprKind.Unary) {
                     if (mode2 != 0) {
-                        sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                        build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                         return -1;
                     }
                     if (val_len < 1) {
-                        sh_build_err_at(file_idx, "invalid expression", sh.expr_nodes[idx2].at);
+                        build_err_at(file_idx, "invalid expression", st.expr_nodes[idx2].at);
                         return -1;
                     }
-                    let op: ShTok = sh.expr_nodes[idx2].op;
-                    let v_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
-                    let v_id: i32 = sh.expr_op_at[val_len - 1];
+                    let op: Tok = st.expr_nodes[idx2].op;
+                    let v_kind: LlvmValueKind = st.llvm_val_kind[val_len - 1];
+                    let v_id: i32 = st.expr_op_at[val_len - 1];
                     val_len = val_len - 1;
     
                     let out_id: i32 = -1;
-                    let out_kind: ShLlvmValueKind = ShLlvmValueKind.I32;
-                    if (op == ShTok.UnaryMinus) {
-                        if (v_kind == ShLlvmValueKind.I32) {
-                            let zero_id: i32 = sh_llvm_emit_const_i32(0);
-                            out_id = sh_llvm_new_tmp();
-                            ascii_append(sh.ir_out, "  ");
-                            sh_llvm_append_tmp(out_id);
-                            ascii_append(sh.ir_out, " = sub i32 ");
-                            sh_llvm_append_tmp(zero_id);
-                            ascii_append(sh.ir_out, ", ");
-                            sh_llvm_append_tmp(v_id);
-                            ascii_append(sh.ir_out, "\n");
-                            out_kind = ShLlvmValueKind.I32;
+                    let out_kind: LlvmValueKind = LlvmValueKind.I32;
+                    if (op == Tok.UnaryMinus) {
+                        if (v_kind == LlvmValueKind.I32) {
+                            let zero_id: i32 = llvm_emit_const_i32(0);
+                            out_id = llvm_new_tmp();
+                            ascii_append(st.ir_out, "  ");
+                            llvm_append_tmp(out_id);
+                            ascii_append(st.ir_out, " = sub i32 ");
+                            llvm_append_tmp(zero_id);
+                            ascii_append(st.ir_out, ", ");
+                            llvm_append_tmp(v_id);
+                            ascii_append(st.ir_out, "\n");
+                            out_kind = LlvmValueKind.I32;
                         } else {
-                            if (v_kind == ShLlvmValueKind.F32) {
-                                out_id = sh_llvm_new_tmp();
-                                ascii_append(sh.ir_out, "  ");
-                                sh_llvm_append_tmp(out_id);
-                                ascii_append(sh.ir_out, " = fsub float 0.0, ");
-                                sh_llvm_append_tmp(v_id);
-                                ascii_append(sh.ir_out, "\n");
-                                out_kind = ShLlvmValueKind.F32;
+                            if (v_kind == LlvmValueKind.F32) {
+                                out_id = llvm_new_tmp();
+                                ascii_append(st.ir_out, "  ");
+                                llvm_append_tmp(out_id);
+                                ascii_append(st.ir_out, " = fsub float 0.0, ");
+                                llvm_append_tmp(v_id);
+                                ascii_append(st.ir_out, "\n");
+                                out_kind = LlvmValueKind.F32;
                             } else {
-                                sh_build_err_at(file_idx, "invalid unary operand", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "invalid unary operand", st.expr_nodes[idx2].at);
                                 return -1;
                             }
                         }
                     } else {
-                        if (op == ShTok.Bang) {
-                            if (v_kind != ShLlvmValueKind.I32) {
-                                sh_build_err_at(file_idx, "invalid unary operand (expected i32)", sh.expr_nodes[idx2].at);
+                        if (op == Tok.Bang) {
+                            if (v_kind != LlvmValueKind.I32) {
+                                build_err_at(file_idx, "invalid unary operand (expected i32)", st.expr_nodes[idx2].at);
                                 return -1;
                             }
-                            let zero_id2: i32 = sh_llvm_emit_const_i32(0);
-                            out_id = sh_llvm_emit_icmp_to_i32("eq", v_id, zero_id2);
-                            out_kind = ShLlvmValueKind.I32;
+                            let zero_id2: i32 = llvm_emit_const_i32(0);
+                            out_id = llvm_emit_icmp_to_i32("eq", v_id, zero_id2);
+                            out_kind = LlvmValueKind.I32;
                         } else {
-                            sh_build_err_at(file_idx, "unsupported unary operator", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unsupported unary operator", st.expr_nodes[idx2].at);
                             return -1;
                         }
                     }
     
-                    sh.expr_op_at[val_len] = out_id;
-                    sh.llvm_val_kind[val_len] = out_kind;
-                    sh.llvm_val_struct_idx[val_len] = -1;
+                    st.expr_op_at[val_len] = out_id;
+                    st.llvm_val_kind[val_len] = out_kind;
+                    st.llvm_val_struct_idx[val_len] = -1;
                     val_len = val_len + 1;
                 } else {
-                    if (kind2 == ShExprKind.Binary) {
+                    if (kind2 == ExprKind.Binary) {
                         if (mode2 != 0) {
-                            sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                             return -1;
                         }
                         if (val_len < 2) {
-                            sh_build_err_at(file_idx, "invalid expression", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid expression", st.expr_nodes[idx2].at);
                             return -1;
                         }
-                        let b_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
-                        let a_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 2];
+                        let b_kind: LlvmValueKind = st.llvm_val_kind[val_len - 1];
+                        let a_kind: LlvmValueKind = st.llvm_val_kind[val_len - 2];
                         if (a_kind != b_kind) {
-                            sh_build_err_at(file_idx, "invalid binary operand (type mismatch)", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "invalid binary operand (type mismatch)", st.expr_nodes[idx2].at);
                             return -1;
                         }
     
-                        let b_id: i32 = sh.expr_op_at[val_len - 1];
-                        let a_id: i32 = sh.expr_op_at[val_len - 2];
+                        let b_id: i32 = st.expr_op_at[val_len - 1];
+                        let a_id: i32 = st.expr_op_at[val_len - 2];
                         val_len = val_len - 2;
     
-                        let op2: ShTok = sh.expr_nodes[idx2].op;
+                        let op2: Tok = st.expr_nodes[idx2].op;
                         let out2: i32 = -1;
-                        let out_kind2: ShLlvmValueKind = ShLlvmValueKind.I32;
+                        let out_kind2: LlvmValueKind = LlvmValueKind.I32;
     
-                        if (a_kind == ShLlvmValueKind.I32) {
-                            if (op2 == ShTok.Plus || op2 == ShTok.Minus || op2 == ShTok.Star || op2 == ShTok.Slash || op2 == ShTok.Percent) {
-                                out2 = sh_llvm_new_tmp();
-                                ascii_append(sh.ir_out, "  ");
-                                sh_llvm_append_tmp(out2);
-                                ascii_append(sh.ir_out, " = ");
-                                if (op2 == ShTok.Plus) { ascii_append(sh.ir_out, "add"); }
-                                if (op2 == ShTok.Minus) { ascii_append(sh.ir_out, "sub"); }
-                                if (op2 == ShTok.Star) { ascii_append(sh.ir_out, "mul"); }
-                                if (op2 == ShTok.Slash) { ascii_append(sh.ir_out, "sdiv"); }
-                                if (op2 == ShTok.Percent) { ascii_append(sh.ir_out, "srem"); }
-                                ascii_append(sh.ir_out, " i32 ");
-                                sh_llvm_append_tmp(a_id);
-                                ascii_append(sh.ir_out, ", ");
-                                sh_llvm_append_tmp(b_id);
-                                ascii_append(sh.ir_out, "\n");
-                                out_kind2 = ShLlvmValueKind.I32;
+                        if (a_kind == LlvmValueKind.I32) {
+                            if (op2 == Tok.Plus || op2 == Tok.Minus || op2 == Tok.Star || op2 == Tok.Slash || op2 == Tok.Percent) {
+                                out2 = llvm_new_tmp();
+                                ascii_append(st.ir_out, "  ");
+                                llvm_append_tmp(out2);
+                                ascii_append(st.ir_out, " = ");
+                                if (op2 == Tok.Plus) { ascii_append(st.ir_out, "add"); }
+                                if (op2 == Tok.Minus) { ascii_append(st.ir_out, "sub"); }
+                                if (op2 == Tok.Star) { ascii_append(st.ir_out, "mul"); }
+                                if (op2 == Tok.Slash) { ascii_append(st.ir_out, "sdiv"); }
+                                if (op2 == Tok.Percent) { ascii_append(st.ir_out, "srem"); }
+                                ascii_append(st.ir_out, " i32 ");
+                                llvm_append_tmp(a_id);
+                                ascii_append(st.ir_out, ", ");
+                                llvm_append_tmp(b_id);
+                                ascii_append(st.ir_out, "\n");
+                                out_kind2 = LlvmValueKind.I32;
                             } else {
                                 // Comparisons + logical.
                                 let handled_cmp: i32 = 0;
-                                if (op2 == ShTok.EqualEqual) { out2 = sh_llvm_emit_icmp_to_i32("eq", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.BangEqual) { out2 = sh_llvm_emit_icmp_to_i32("ne", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.Less) { out2 = sh_llvm_emit_icmp_to_i32("slt", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.LessEqual) { out2 = sh_llvm_emit_icmp_to_i32("sle", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.Greater) { out2 = sh_llvm_emit_icmp_to_i32("sgt", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.GreaterEqual) { out2 = sh_llvm_emit_icmp_to_i32("sge", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.AmpAmp) { out2 = sh_llvm_emit_logic_to_i32("and", a_id, b_id); handled_cmp = 1; }
-                                if (op2 == ShTok.PipePipe) { out2 = sh_llvm_emit_logic_to_i32("or", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.EqualEqual) { out2 = llvm_emit_icmp_to_i32("eq", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.BangEqual) { out2 = llvm_emit_icmp_to_i32("ne", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.Less) { out2 = llvm_emit_icmp_to_i32("slt", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.LessEqual) { out2 = llvm_emit_icmp_to_i32("sle", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.Greater) { out2 = llvm_emit_icmp_to_i32("sgt", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.GreaterEqual) { out2 = llvm_emit_icmp_to_i32("sge", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.AmpAmp) { out2 = llvm_emit_logic_to_i32("and", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.PipePipe) { out2 = llvm_emit_logic_to_i32("or", a_id, b_id); handled_cmp = 1; }
     
                                 if (handled_cmp == 0) {
-                                    sh_build_err_at(file_idx, "unsupported operator", sh.expr_nodes[idx2].at);
+                                    build_err_at(file_idx, "unsupported operator", st.expr_nodes[idx2].at);
                                     return -1;
                                 }
-                                out_kind2 = ShLlvmValueKind.I32;
+                                out_kind2 = LlvmValueKind.I32;
                             }
                         } else {
-                            if (a_kind == ShLlvmValueKind.F32) {
-                                if (op2 == ShTok.Plus || op2 == ShTok.Minus || op2 == ShTok.Star || op2 == ShTok.Slash) {
-                                    out2 = sh_llvm_new_tmp();
-                                    ascii_append(sh.ir_out, "  ");
-                                    sh_llvm_append_tmp(out2);
-                                    ascii_append(sh.ir_out, " = ");
-                                    if (op2 == ShTok.Plus) { ascii_append(sh.ir_out, "fadd"); }
-                                    if (op2 == ShTok.Minus) { ascii_append(sh.ir_out, "fsub"); }
-                                    if (op2 == ShTok.Star) { ascii_append(sh.ir_out, "fmul"); }
-                                    if (op2 == ShTok.Slash) { ascii_append(sh.ir_out, "fdiv"); }
-                                    ascii_append(sh.ir_out, " float ");
-                                    sh_llvm_append_tmp(a_id);
-                                    ascii_append(sh.ir_out, ", ");
-                                    sh_llvm_append_tmp(b_id);
-                                    ascii_append(sh.ir_out, "\n");
-                                    out_kind2 = ShLlvmValueKind.F32;
+                            if (a_kind == LlvmValueKind.F32) {
+                                if (op2 == Tok.Plus || op2 == Tok.Minus || op2 == Tok.Star || op2 == Tok.Slash) {
+                                    out2 = llvm_new_tmp();
+                                    ascii_append(st.ir_out, "  ");
+                                    llvm_append_tmp(out2);
+                                    ascii_append(st.ir_out, " = ");
+                                    if (op2 == Tok.Plus) { ascii_append(st.ir_out, "fadd"); }
+                                    if (op2 == Tok.Minus) { ascii_append(st.ir_out, "fsub"); }
+                                    if (op2 == Tok.Star) { ascii_append(st.ir_out, "fmul"); }
+                                    if (op2 == Tok.Slash) { ascii_append(st.ir_out, "fdiv"); }
+                                    ascii_append(st.ir_out, " float ");
+                                    llvm_append_tmp(a_id);
+                                    ascii_append(st.ir_out, ", ");
+                                    llvm_append_tmp(b_id);
+                                    ascii_append(st.ir_out, "\n");
+                                    out_kind2 = LlvmValueKind.F32;
                                 } else {
                                     let handled_fcmp: i32 = 0;
-                                    if (op2 == ShTok.EqualEqual) { out2 = sh_llvm_emit_fcmp_to_i32("oeq", a_id, b_id); handled_fcmp = 1; }
-                                    if (op2 == ShTok.BangEqual) { out2 = sh_llvm_emit_fcmp_to_i32("one", a_id, b_id); handled_fcmp = 1; }
-                                    if (op2 == ShTok.Less) { out2 = sh_llvm_emit_fcmp_to_i32("olt", a_id, b_id); handled_fcmp = 1; }
-                                    if (op2 == ShTok.LessEqual) { out2 = sh_llvm_emit_fcmp_to_i32("ole", a_id, b_id); handled_fcmp = 1; }
-                                    if (op2 == ShTok.Greater) { out2 = sh_llvm_emit_fcmp_to_i32("ogt", a_id, b_id); handled_fcmp = 1; }
-                                    if (op2 == ShTok.GreaterEqual) { out2 = sh_llvm_emit_fcmp_to_i32("oge", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.EqualEqual) { out2 = llvm_emit_fcmp_to_i32("oeq", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.BangEqual) { out2 = llvm_emit_fcmp_to_i32("one", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.Less) { out2 = llvm_emit_fcmp_to_i32("olt", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.LessEqual) { out2 = llvm_emit_fcmp_to_i32("ole", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.Greater) { out2 = llvm_emit_fcmp_to_i32("ogt", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.GreaterEqual) { out2 = llvm_emit_fcmp_to_i32("oge", a_id, b_id); handled_fcmp = 1; }
     
                                     if (handled_fcmp == 0) {
-                                        sh_build_err_at(file_idx, "unsupported operator (float)", sh.expr_nodes[idx2].at);
+                                        build_err_at(file_idx, "unsupported operator (float)", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
-                                    out_kind2 = ShLlvmValueKind.I32;
+                                    out_kind2 = LlvmValueKind.I32;
                                 }
                             } else {
-                                sh_build_err_at(file_idx, "invalid binary operand type", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "invalid binary operand type", st.expr_nodes[idx2].at);
                                 return -1;
                             }
                         }
     
-                        sh.expr_op_at[val_len] = out2;
-                        sh.llvm_val_kind[val_len] = out_kind2;
-                        sh.llvm_val_struct_idx[val_len] = -1;
+                        st.expr_op_at[val_len] = out2;
+                        st.llvm_val_kind[val_len] = out_kind2;
+                        st.llvm_val_struct_idx[val_len] = -1;
                         val_len = val_len + 1;
                     } else {
-                        if (kind2 == ShExprKind.Assign) {
+                        if (kind2 == ExprKind.Assign) {
                             if (mode2 != 0) {
-                                sh_build_err_at(file_idx, "invalid assignment target", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "invalid assignment target", st.expr_nodes[idx2].at);
                                 return -1;
                             }
                             if (val_len < 2) {
-                                sh_build_err_at(file_idx, "invalid assignment expression", sh.expr_nodes[idx2].at);
+                                build_err_at(file_idx, "invalid assignment expression", st.expr_nodes[idx2].at);
                                 return -1;
                             }
     
-                            let rhs_id: i32 = sh.expr_op_at[val_len - 1];
-                            let rhs_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 1];
-                            let lhs_ptr: i32 = sh.expr_op_at[val_len - 2];
-                            let lhs_kind: ShLlvmValueKind = sh.llvm_val_kind[val_len - 2];
+                            let rhs_id: i32 = st.expr_op_at[val_len - 1];
+                            let rhs_kind: LlvmValueKind = st.llvm_val_kind[val_len - 1];
+                            let lhs_ptr: i32 = st.expr_op_at[val_len - 2];
+                            let lhs_kind: LlvmValueKind = st.llvm_val_kind[val_len - 2];
                             val_len = val_len - 2;
     
-                            let aop: ShTok = sh.expr_nodes[idx2].op;
-                            if (lhs_kind == ShLlvmValueKind.I32) {
-                                if (rhs_kind != ShLlvmValueKind.I32) {
-                                    sh_build_err_at(file_idx, "invalid assignment rhs (expected i32)", sh.expr_nodes[idx2].at);
+                            let aop: Tok = st.expr_nodes[idx2].op;
+                            if (lhs_kind == LlvmValueKind.I32) {
+                                if (rhs_kind != LlvmValueKind.I32) {
+                                    build_err_at(file_idx, "invalid assignment rhs (expected i32)", st.expr_nodes[idx2].at);
                                     return -1;
                                 }
-                                if (aop == ShTok.Equal) {
-                                    sh_llvm_emit_store_i32_to_ptr(lhs_ptr, rhs_id);
-                                    sh.expr_op_at[val_len] = rhs_id;
-                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                if (aop == Tok.Equal) {
+                                    llvm_emit_store_i32_to_ptr(lhs_ptr, rhs_id);
+                                    st.expr_op_at[val_len] = rhs_id;
+                                    st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                    st.llvm_val_struct_idx[val_len] = -1;
                                     val_len = val_len + 1;
                                 } else {
-                                    let old_id: i32 = sh_llvm_emit_load_i32_from_ptr(lhs_ptr);
-                                    let new_id: i32 = sh_llvm_new_tmp();
+                                    let old_id: i32 = llvm_emit_load_i32_from_ptr(lhs_ptr);
+                                    let new_id: i32 = llvm_new_tmp();
     
-                                    ascii_append(sh.ir_out, "  ");
-                                    sh_llvm_append_tmp(new_id);
-                                    ascii_append(sh.ir_out, " = ");
-                                    if (aop == ShTok.PlusEqual) { ascii_append(sh.ir_out, "add"); }
-                                    if (aop == ShTok.MinusEqual) { ascii_append(sh.ir_out, "sub"); }
-                                    if (aop == ShTok.StarEqual) { ascii_append(sh.ir_out, "mul"); }
-                                    if (aop == ShTok.SlashEqual) { ascii_append(sh.ir_out, "sdiv"); }
-                                    if (aop == ShTok.PercentEqual) { ascii_append(sh.ir_out, "srem"); }
-                                    ascii_append(sh.ir_out, " i32 ");
-                                    sh_llvm_append_tmp(old_id);
-                                    ascii_append(sh.ir_out, ", ");
-                                    sh_llvm_append_tmp(rhs_id);
-                                    ascii_append(sh.ir_out, "\n");
+                                    ascii_append(st.ir_out, "  ");
+                                    llvm_append_tmp(new_id);
+                                    ascii_append(st.ir_out, " = ");
+                                    if (aop == Tok.PlusEqual) { ascii_append(st.ir_out, "add"); }
+                                    if (aop == Tok.MinusEqual) { ascii_append(st.ir_out, "sub"); }
+                                    if (aop == Tok.StarEqual) { ascii_append(st.ir_out, "mul"); }
+                                    if (aop == Tok.SlashEqual) { ascii_append(st.ir_out, "sdiv"); }
+                                    if (aop == Tok.PercentEqual) { ascii_append(st.ir_out, "srem"); }
+                                    ascii_append(st.ir_out, " i32 ");
+                                    llvm_append_tmp(old_id);
+                                    ascii_append(st.ir_out, ", ");
+                                    llvm_append_tmp(rhs_id);
+                                    ascii_append(st.ir_out, "\n");
     
-                                    sh_llvm_emit_store_i32_to_ptr(lhs_ptr, new_id);
-                                    sh.expr_op_at[val_len] = new_id;
-                                    sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                    sh.llvm_val_struct_idx[val_len] = -1;
+                                    llvm_emit_store_i32_to_ptr(lhs_ptr, new_id);
+                                    st.expr_op_at[val_len] = new_id;
+                                    st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                    st.llvm_val_struct_idx[val_len] = -1;
                                     val_len = val_len + 1;
                                 }
                             } else {
-                                if (lhs_kind == ShLlvmValueKind.I8) {
-                                    if (rhs_kind != ShLlvmValueKind.I32) {
-                                        sh_build_err_at(file_idx, "invalid assignment rhs (expected i32)", sh.expr_nodes[idx2].at);
+                                if (lhs_kind == LlvmValueKind.I8) {
+                                    if (rhs_kind != LlvmValueKind.I32) {
+                                        build_err_at(file_idx, "invalid assignment rhs (expected i32)", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
-                                    if (aop == ShTok.Equal) {
-                                        sh_llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, rhs_id);
-                                        sh.expr_op_at[val_len] = rhs_id;
-                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                    if (aop == Tok.Equal) {
+                                        llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, rhs_id);
+                                        st.expr_op_at[val_len] = rhs_id;
+                                        st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        st.llvm_val_struct_idx[val_len] = -1;
                                         val_len = val_len + 1;
                                     } else {
-                                        let old_id2: i32 = sh_llvm_emit_load_i8_zext_from_ptr(lhs_ptr);
-                                        let new_id2: i32 = sh_llvm_new_tmp();
+                                        let old_id2: i32 = llvm_emit_load_i8_zext_from_ptr(lhs_ptr);
+                                        let new_id2: i32 = llvm_new_tmp();
     
-                                        ascii_append(sh.ir_out, "  ");
-                                        sh_llvm_append_tmp(new_id2);
-                                        ascii_append(sh.ir_out, " = ");
-                                        if (aop == ShTok.PlusEqual) { ascii_append(sh.ir_out, "add"); }
-                                        if (aop == ShTok.MinusEqual) { ascii_append(sh.ir_out, "sub"); }
-                                        if (aop == ShTok.StarEqual) { ascii_append(sh.ir_out, "mul"); }
-                                        if (aop == ShTok.SlashEqual) { ascii_append(sh.ir_out, "sdiv"); }
-                                        if (aop == ShTok.PercentEqual) { ascii_append(sh.ir_out, "srem"); }
-                                        ascii_append(sh.ir_out, " i32 ");
-                                        sh_llvm_append_tmp(old_id2);
-                                        ascii_append(sh.ir_out, ", ");
-                                        sh_llvm_append_tmp(rhs_id);
-                                        ascii_append(sh.ir_out, "\n");
+                                        ascii_append(st.ir_out, "  ");
+                                        llvm_append_tmp(new_id2);
+                                        ascii_append(st.ir_out, " = ");
+                                        if (aop == Tok.PlusEqual) { ascii_append(st.ir_out, "add"); }
+                                        if (aop == Tok.MinusEqual) { ascii_append(st.ir_out, "sub"); }
+                                        if (aop == Tok.StarEqual) { ascii_append(st.ir_out, "mul"); }
+                                        if (aop == Tok.SlashEqual) { ascii_append(st.ir_out, "sdiv"); }
+                                        if (aop == Tok.PercentEqual) { ascii_append(st.ir_out, "srem"); }
+                                        ascii_append(st.ir_out, " i32 ");
+                                        llvm_append_tmp(old_id2);
+                                        ascii_append(st.ir_out, ", ");
+                                        llvm_append_tmp(rhs_id);
+                                        ascii_append(st.ir_out, "\n");
     
-                                        sh_llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, new_id2);
-                                        sh.expr_op_at[val_len] = new_id2;
-                                        sh.llvm_val_kind[val_len] = ShLlvmValueKind.I32;
-                                        sh.llvm_val_struct_idx[val_len] = -1;
+                                        llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, new_id2);
+                                        st.expr_op_at[val_len] = new_id2;
+                                        st.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        st.llvm_val_struct_idx[val_len] = -1;
                                         val_len = val_len + 1;
                                     }
                                 } else {
-                                    if (lhs_kind == ShLlvmValueKind.F32) {
-                                        if (rhs_kind != ShLlvmValueKind.F32) {
-                                            sh_build_err_at(file_idx, "invalid assignment rhs (expected f32)", sh.expr_nodes[idx2].at);
+                                    if (lhs_kind == LlvmValueKind.F32) {
+                                        if (rhs_kind != LlvmValueKind.F32) {
+                                            build_err_at(file_idx, "invalid assignment rhs (expected f32)", st.expr_nodes[idx2].at);
                                             return -1;
                                         }
 
-                                        if (aop == ShTok.Equal) {
-                                            sh_llvm_emit_store_f32_to_ptr(lhs_ptr, rhs_id);
-                                            sh.expr_op_at[val_len] = rhs_id;
-                                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                            sh.llvm_val_struct_idx[val_len] = -1;
+                                        if (aop == Tok.Equal) {
+                                            llvm_emit_store_f32_to_ptr(lhs_ptr, rhs_id);
+                                            st.expr_op_at[val_len] = rhs_id;
+                                            st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                            st.llvm_val_struct_idx[val_len] = -1;
                                             val_len = val_len + 1;
                                         } else {
-                                            let old_f: i32 = sh_llvm_emit_load_f32_from_ptr(lhs_ptr);
-                                            let new_f: i32 = sh_llvm_new_tmp();
+                                            let old_f: i32 = llvm_emit_load_f32_from_ptr(lhs_ptr);
+                                            let new_f: i32 = llvm_new_tmp();
 
-                                            if (aop == ShTok.PercentEqual) {
-                                                sh_build_err_at(file_idx, "unsupported f32 operator (no %)", sh.expr_nodes[idx2].at);
+                                            if (aop == Tok.PercentEqual) {
+                                                build_err_at(file_idx, "unsupported f32 operator (no %)", st.expr_nodes[idx2].at);
                                                 return -1;
                                             }
 
-                                            ascii_append(sh.ir_out, "  ");
-                                            sh_llvm_append_tmp(new_f);
-                                            ascii_append(sh.ir_out, " = ");
-                                            if (aop == ShTok.PlusEqual) { ascii_append(sh.ir_out, "fadd"); } else {
-                                                if (aop == ShTok.MinusEqual) { ascii_append(sh.ir_out, "fsub"); } else {
-                                                    if (aop == ShTok.StarEqual) { ascii_append(sh.ir_out, "fmul"); } else {
-                                                        if (aop == ShTok.SlashEqual) { ascii_append(sh.ir_out, "fdiv"); } else {
-                                                            sh_build_err_at(file_idx, "unsupported assignment operator (f32)", sh.expr_nodes[idx2].at);
+                                            ascii_append(st.ir_out, "  ");
+                                            llvm_append_tmp(new_f);
+                                            ascii_append(st.ir_out, " = ");
+                                            if (aop == Tok.PlusEqual) { ascii_append(st.ir_out, "fadd"); } else {
+                                                if (aop == Tok.MinusEqual) { ascii_append(st.ir_out, "fsub"); } else {
+                                                    if (aop == Tok.StarEqual) { ascii_append(st.ir_out, "fmul"); } else {
+                                                        if (aop == Tok.SlashEqual) { ascii_append(st.ir_out, "fdiv"); } else {
+                                                            build_err_at(file_idx, "unsupported assignment operator (f32)", st.expr_nodes[idx2].at);
                                                             return -1;
                                                         }
                                                     }
                                                 }
                                             }
-                                            ascii_append(sh.ir_out, " float ");
-                                            sh_llvm_append_tmp(old_f);
-                                            ascii_append(sh.ir_out, ", ");
-                                            sh_llvm_append_tmp(rhs_id);
-                                            ascii_append(sh.ir_out, "\n");
+                                            ascii_append(st.ir_out, " float ");
+                                            llvm_append_tmp(old_f);
+                                            ascii_append(st.ir_out, ", ");
+                                            llvm_append_tmp(rhs_id);
+                                            ascii_append(st.ir_out, "\n");
 
-                                            sh_llvm_emit_store_f32_to_ptr(lhs_ptr, new_f);
-                                            sh.expr_op_at[val_len] = new_f;
-                                            sh.llvm_val_kind[val_len] = ShLlvmValueKind.F32;
-                                            sh.llvm_val_struct_idx[val_len] = -1;
+                                            llvm_emit_store_f32_to_ptr(lhs_ptr, new_f);
+                                            st.expr_op_at[val_len] = new_f;
+                                            st.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                            st.llvm_val_struct_idx[val_len] = -1;
                                             val_len = val_len + 1;
                                         }
                                     } else {
-                                        sh_build_err_at(file_idx, "unsupported assignment target", sh.expr_nodes[idx2].at);
+                                        build_err_at(file_idx, "unsupported assignment target", st.expr_nodes[idx2].at);
                                         return -1;
                                     }
                                 }
                             }
                         } else {
-                            sh_build_err_at(file_idx, "unsupported expression", sh.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "unsupported expression", st.expr_nodes[idx2].at);
                             return -1;
                         }
                     }

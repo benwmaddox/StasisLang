@@ -19,7 +19,7 @@ function t_init_exe_dir(): bool {
         return false;
     }
     ascii_set_len(t_argv0, n);
-    sh_path_dirname(t_exe_dir, t_argv0);
+    path_dirname(t_exe_dir, t_argv0);
     return !ascii_is_empty(t_exe_dir);
 }
 
@@ -46,8 +46,8 @@ function t_write_module_pair(): bool {
         return false;
     }
 
-    sh_path_join(t_path_mod1, t_exe_dir, "sh_mod1.stasis.inc");
-    sh_path_join(t_path_mod2, t_exe_dir, "sh_mod2.stasis.inc");
+    path_join(t_path_mod1, t_exe_dir, "sh_mod1.stasis.inc");
+    path_join(t_path_mod2, t_exe_dir, "sh_mod2.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function f(): i32 { return 0; }");
@@ -69,7 +69,7 @@ test `stasis import collision scan detects conflicts`() {
         return false;
     }
 
-    sh_path_join(t_path_entry, t_exe_dir, "sh_entry_collision.stasis.inc");
+    path_join(t_path_entry, t_exe_dir, "sh_entry_collision.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_import_line(t_tmp, "sh_mod1.stasis.inc");
@@ -78,16 +78,16 @@ test `stasis import collision scan detects conflicts`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_entry);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_entry);
     if (rc != 0) {
         return false;
     }
-    let sig_errors: i32 = sh_sig_scan_loaded_files();
+    let sig_errors: i32 = sig_scan_loaded_files();
     if (sig_errors != 0) {
         return false;
     }
-    let collisions: i32 = sh_check_import_member_collisions();
+    let collisions: i32 = check_import_member_collisions();
     return collisions == 1;
 }
 
@@ -96,7 +96,7 @@ test `stasis import collision scan ignores shadowed names`() {
         return false;
     }
 
-    sh_path_join(t_path_entry_shadow, t_exe_dir, "sh_entry_shadow.stasis.inc");
+    path_join(t_path_entry_shadow, t_exe_dir, "sh_entry_shadow.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_import_line(t_tmp, "sh_mod1.stasis.inc");
@@ -106,16 +106,16 @@ test `stasis import collision scan ignores shadowed names`() {
         return false;
     }
 
-    sh.quiet = 1;
-    let rc: i32 = sh_load_graph(t_path_entry_shadow);
+    st.quiet = 1;
+    let rc: i32 = load_graph(t_path_entry_shadow);
     if (rc != 0) {
         return false;
     }
-    let sig_errors: i32 = sh_sig_scan_loaded_files();
+    let sig_errors: i32 = sig_scan_loaded_files();
     if (sig_errors != 0) {
         return false;
     }
-    let collisions: i32 = sh_check_import_member_collisions();
+    let collisions: i32 = check_import_member_collisions();
     return collisions == 0;
 }
 

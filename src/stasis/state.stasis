@@ -5,7 +5,7 @@
 // easy to reason about limits.
 
 // Token kinds (mirrors Stage0 TokenKind ordering, plus a few Stage1-only tokens).
-enum ShTok {
+enum Tok {
     Eof = 0,
     Unknown = 1,
 
@@ -73,7 +73,7 @@ enum ShTok {
     IndexStart = 57
 }
 
-enum ShSymKind {
+enum SymKind {
     Struct = 1,
     Enum = 2,
     Global = 3,
@@ -82,8 +82,8 @@ enum ShSymKind {
     Test = 6
 }
 
-struct ShSym {
-    kind: ShSymKind;
+struct Sym {
+    kind: SymKind;
     file_idx: i32;
     name_off: i32;
     name_len: i32;
@@ -91,13 +91,13 @@ struct ShSym {
     is_exported: i32;
 }
 
-enum ShTypeKind {
+enum TypeKind {
     Named = 1,
     Array = 2
 }
 
-struct ShType {
-    kind: ShTypeKind;
+struct Type {
+    kind: TypeKind;
     file_idx: i32;
     start: i32;
     len: i32;
@@ -105,7 +105,7 @@ struct ShType {
     size: i32;
 }
 
-struct ShStructDecl {
+struct StructDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -113,14 +113,14 @@ struct ShStructDecl {
     fields_len: i32;
 }
 
-struct ShStructField {
+struct StructField {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
     type_idx: i32;
 }
 
-struct ShEnumDecl {
+struct EnumDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -128,7 +128,7 @@ struct ShEnumDecl {
     members_len: i32;
 }
 
-struct ShEnumMember {
+struct EnumMember {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -136,14 +136,14 @@ struct ShEnumMember {
     value: i32;
 }
 
-struct ShParamDecl {
+struct ParamDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
     type_idx: i32;
 }
 
-struct ShFuncDecl {
+struct FuncDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -155,7 +155,7 @@ struct ShFuncDecl {
     is_test: i32;
 }
 
-struct ShGlobalDecl {
+struct GlobalDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -165,7 +165,7 @@ struct ShGlobalDecl {
     init_start: i32;
 }
 
-struct ShConstDecl {
+struct ConstDecl {
     file_idx: i32;
     name_start: i32;
     name_len: i32;
@@ -174,7 +174,7 @@ struct ShConstDecl {
     init_start: i32;
 }
 
-struct ShFile {
+struct File {
     path_off: i32;
     path_len: i32;
     mod_off: i32;
@@ -188,7 +188,7 @@ struct ShFile {
     mtime_ms: i32;
 }
 
-enum ShExprKind {
+enum ExprKind {
     IntLiteral = 1,
     BoolLiteral = 2,
     Name = 3,
@@ -202,11 +202,11 @@ enum ShExprKind {
     FloatLiteral = 11
 }
 
-struct ShExprNode {
-    kind: ShExprKind;
+struct ExprNode {
+    kind: ExprKind;
     file_idx: i32;
     at: i32;
-    op: ShTok;
+    op: Tok;
     left: i32;
     right: i32;
     value: i32;
@@ -214,7 +214,7 @@ struct ShExprNode {
     name_len: i32;
 }
 
-enum ShLlvmBlockKind {
+enum LlvmBlockKind {
     Plain = 1,
     IfThen = 2,
     IfElse = 3,
@@ -222,7 +222,7 @@ enum ShLlvmBlockKind {
     Function = 5
 }
 
-enum ShLlvmValueKind {
+enum LlvmValueKind {
     I32 = 1,
     I8 = 2,
     PtrI8 = 3,
@@ -234,7 +234,7 @@ enum ShLlvmValueKind {
     PtrF32 = 9
 }
 
-struct ShState {
+struct State {
     // CLI scratch
     cmd: ascii[64];
     subcmd: ascii[64];
@@ -247,7 +247,7 @@ struct ShState {
     exec_cmd: ascii[4096];
 
     // Import/source graph
-    files: ShFile[300];
+    files: File[300];
     file_count: i32;
 
     pool: u8[16000000];
@@ -287,14 +287,14 @@ struct ShState {
     tok_len: i32;
 
     // Parser (currently: balance check)
-    parse_stack_kind: ShTok[4096];
+    parse_stack_kind: Tok[4096];
     parse_stack_start: i32[4096];
     parse_stack_len: i32;
     parse_path: ascii[260];
     parse_quiet: i32;
 
     // Expression parsing scratch (per-expression; reused across passes).
-    expr_nodes: ShExprNode[16384];
+    expr_nodes: ExprNode[16384];
     expr_count: i32;
     expr_call_args: i32[32768];
     expr_call_args_len: i32;
@@ -315,33 +315,33 @@ struct ShState {
     // Signature scan (top-level declarations)
     sym_pool: u8[200000];
     sym_pool_len: i32;
-    syms: ShSym[20000];
+    syms: Sym[20000];
     sym_count: i32;
-    sig_kind: ShTok;
+    sig_kind: Tok;
     sig_errors: i32;
 
     // Types + decls (parsed from source)
-    types: ShType[50000];
+    types: Type[50000];
     type_count: i32;
 
-    structs: ShStructDecl[2000];
+    structs: StructDecl[2000];
     struct_count: i32;
-    fields: ShStructField[50000];
+    fields: StructField[50000];
     field_count: i32;
 
-    enums: ShEnumDecl[2000];
+    enums: EnumDecl[2000];
     enum_count: i32;
-    enum_members: ShEnumMember[50000];
+    enum_members: EnumMember[50000];
     enum_member_count: i32;
 
-    globals: ShGlobalDecl[20000];
+    globals: GlobalDecl[20000];
     global_count: i32;
-    consts: ShConstDecl[20000];
+    consts: ConstDecl[20000];
     const_count: i32;
 
-    funcs: ShFuncDecl[20000];
+    funcs: FuncDecl[20000];
     func_count: i32;
-    params: ShParamDecl[50000];
+    params: ParamDecl[50000];
     param_count: i32;
     sig_path: ascii[260];
 
@@ -350,18 +350,18 @@ struct ShState {
     llvm_local_name_len: i32[1024];
     llvm_local_declared: i32[1024];
     llvm_local_declared_at: i32[1024];
-    llvm_local_kind: ShLlvmValueKind[1024];
+    llvm_local_kind: LlvmValueKind[1024];
     llvm_local_count: i32;
     llvm_tmp_id: i32;
     llvm_label_id: i32;
     llvm_bb_terminated: i32;
     llvm_place_stack: i32[4096];
     llvm_place_len: i32;
-    llvm_place_kind: ShLlvmValueKind;
+    llvm_place_kind: LlvmValueKind;
     llvm_place_struct_idx: i32;
-    llvm_val_kind: ShLlvmValueKind[4096];
+    llvm_val_kind: LlvmValueKind[4096];
     llvm_val_struct_idx: i32[4096];
-    llvm_block_kind: ShLlvmBlockKind[256];
+    llvm_block_kind: LlvmBlockKind[256];
     llvm_block_end_label: i32[256];
     llvm_block_else_label: i32[256];
     llvm_block_cond_label: i32[256];
@@ -381,4 +381,4 @@ struct ShState {
     llvm_str_count: i32;
 }
 
-global sh: ShState;
+global st: State;
