@@ -48,7 +48,7 @@ Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
 - `stasis build ...`:
   - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
-  - LLVM: can now emit IR for a larger subset of `main` including `let` locals + assignments + expression statements + return (still no control-flow/calls/member/index yet; return must currently be the last statement).
+  - LLVM: can now emit IR for a larger subset of `main` including `let` locals + assignments + expression statements + structured control flow (`if`/`else`, `for`) and a return-slot (so `return` can appear anywhere). Still no calls/member/index yet; `&&`/`||` are not short-circuit in IR yet.
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
@@ -311,3 +311,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: added iterative expression parser + const evaluator (`src/stasis/expr_parse.stasis`) and reused it for minimal `build` return expressions (more operators, better errors).
 - 2026-01-06: added a first-pass function-body statement parser (`src/stasis/stmt_parse.stasis`) and wired it into `stasis check` (syntax-only; expressions are skipped structurally for now).
 - 2026-01-06: LLVM IR emit now supports a larger `main` subset (locals + assignments + expression statements + non-constant returns) and `stasis run/build/release` can execute/build that subset.
+- 2026-01-06: LLVM IR emit now supports structured control flow (`if`/`else`, `for`) and a return-slot + `exit:` block so `return` no longer has to be the final statement; added IR-level tests for `if` and `for`.

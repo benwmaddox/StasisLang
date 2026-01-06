@@ -207,6 +207,14 @@ struct ShExprNode {
     name_len: i32;
 }
 
+enum ShLlvmBlockKind {
+    Plain = 1,
+    IfThen = 2,
+    IfElse = 3,
+    ForBody = 4,
+    Function = 5
+}
+
 struct ShState {
     // CLI scratch
     cmd: ascii[64];
@@ -306,8 +314,21 @@ struct ShState {
     // LLVM codegen scratch (minimal bring-up; grows over time).
     llvm_local_name_start: i32[1024];
     llvm_local_name_len: i32[1024];
+    llvm_local_declared: i32[1024];
+    llvm_local_declared_at: i32[1024];
     llvm_local_count: i32;
     llvm_tmp_id: i32;
+    llvm_label_id: i32;
+    llvm_bb_terminated: i32;
+    llvm_block_kind: ShLlvmBlockKind[256];
+    llvm_block_end_label: i32[256];
+    llvm_block_else_label: i32[256];
+    llvm_block_cond_label: i32[256];
+    llvm_block_step_label: i32[256];
+    llvm_block_has_step: i32[256];
+    llvm_block_step_start: i32[256];
+    llvm_block_step_file_idx: i32[256];
+    llvm_block_len: i32;
 }
 
 global sh: ShState;
