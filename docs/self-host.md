@@ -45,7 +45,7 @@ Notes:
 ## Current Status (Today)
 
 Implemented:
-- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level signature scan; prints `files/lex_errors/parse_errors/sig_errors`.
+- `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level signature scan; prints `files/lex_errors/parse_errors/sig_errors/import_collisions`.
 - `stasis watch check <entry.stasis>`: polling watch loop based on `sys_file_mtime_ms` + `sys_sleep_ms`; reruns the same `check` on changes.
 
 Not yet implemented (but planned in the contract above):
@@ -252,3 +252,4 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: added `--quiet` to `stasis check` and `stasis watch check` to suppress diagnostics (useful for scripting/watch output).
 - 2026-01-05: made `src/stasis/*.stasis` imports explicit (avoid relying on transitive imports under the module model).
 - 2026-01-05: added a top-level signature scan pass (`src/stasis/signatures.stasis`) + `tests/stasis_signatures.stasis`; `stasis check` now reports `sig_errors`.
+- 2026-01-05: added import-member collision detection (`src/stasis/modules.stasis`) + `tests/stasis_modules.stasis`; `stasis check` now reports `import_collisions` (non-fatal note).

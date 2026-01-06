@@ -1,0 +1,135 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "imports.stasis";
+
+const SH_IMPORT_COLLISION_PRINT_CAP: i32 = 16;
+
+function sh_sym_names_eq(a_idx: i32, b_idx: i32): bool {
+    if (a_idx < 0 || a_idx >= sh.sym_count) { return false; }
+    if (b_idx < 0 || b_idx >= sh.sym_count) { return false; }
+
+    let a_len: i32 = sh.syms[a_idx].name_len;
+    if (a_len != sh.syms[b_idx].name_len) {
+        return false;
+    }
+
+    let a_off: i32 = sh.syms[a_idx].name_off;
+    let b_off: i32 = sh.syms[b_idx].name_off;
+
+    let i: i32 = 0;
+    for (i = 0; i < a_len; i = i + 1) {
+        if (sh.sym_pool[a_off + i] != sh.sym_pool[b_off + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sh_print_sym_name(sym_idx: i32): void {
+    if (sym_idx < 0 || sym_idx >= sh.sym_count) {
+        return;
+    }
+
+    let off: i32 = sh.syms[sym_idx].name_off;
+    let len: i32 = sh.syms[sym_idx].name_len;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        print_char(u8_to_i32(sh.sym_pool[off + i]));
+    }
+}
+
+function sh_file_has_local_name(file_idx: i32, imported_sym_idx: i32): bool {
+    let off: i32 = sh.files[file_idx].syms_off;
+    let n: i32 = sh.files[file_idx].syms_len;
+
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        if (sh_sym_names_eq(off + i, imported_sym_idx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function sh_note_import_collision(file_idx: i32, mod_a: i32, mod_b: i32, sym_idx: i32): void {
+    if (sh.quiet != 0) {
+        return;
+    }
+
+    if (!sh_copy_file_path(sh.sig_path, file_idx)) {
+        ascii_copy(sh.sig_path, "<unknown>");
+    }
+
+    ascii_clear(sh.scratch_mod);
+    let have_a: bool = sh_copy_file_module(sh.scratch_mod, mod_a);
+
+    print_string("note: ambiguous import name '");
+    sh_print_sym_name(sym_idx);
+    print_string("'");
+
+    if (have_a) {
+        print_string(" from ");
+        print_string(sh.scratch_mod);
+    }
+
+    ascii_clear(sh.scratch_mod);
+    let have_b: bool = sh_copy_file_module(sh.scratch_mod, mod_b);
+    if (have_b) {
+        print_string(" and ");
+        print_string(sh.scratch_mod);
+    }
+
+    print_string("; use ModuleName.symbol: ");
+    print_string(sh.sig_path);
+    print_char(10);
+}
+
+function sh_check_import_member_collisions(): i32 {
+    let printed: i32 = 0;
+    let collisions: i32 = 0;
+
+    let file_idx: i32 = 0;
+    for (file_idx = 0; file_idx < sh.file_count; file_idx = file_idx + 1) {
+        let imp_off: i32 = sh.files[file_idx].imports_off;
+        let imp_len: i32 = sh.files[file_idx].imports_len;
+        if (imp_len > 1) {
+            let i: i32 = 0;
+            for (i = 0; i < imp_len; i = i + 1) {
+                let mod_a: i32 = sh.imports[imp_off + i];
+                if (mod_a >= 0 && mod_a < sh.file_count) {
+                    let a_sym_off: i32 = sh.files[mod_a].syms_off;
+                    let a_sym_len: i32 = sh.files[mod_a].syms_len;
+
+                    let a_si: i32 = 0;
+                    for (a_si = 0; a_si < a_sym_len; a_si = a_si + 1) {
+                        let a_sym_idx: i32 = a_sym_off + a_si;
+                        if (!sh_file_has_local_name(file_idx, a_sym_idx)) {
+                            let j: i32 = 0;
+                            for (j = i + 1; j < imp_len; j = j + 1) {
+                                let mod_b: i32 = sh.imports[imp_off + j];
+                                if (mod_b >= 0 && mod_b < sh.file_count) {
+                                    let b_sym_off: i32 = sh.files[mod_b].syms_off;
+                                    let b_sym_len: i32 = sh.files[mod_b].syms_len;
+
+                                    let b_si: i32 = 0;
+                                    for (b_si = 0; b_si < b_sym_len; b_si = b_si + 1) {
+                                        let b_sym_idx: i32 = b_sym_off + b_si;
+                                        if (sh_sym_names_eq(a_sym_idx, b_sym_idx)) {
+                                            collisions = collisions + 1;
+                                            if (printed < SH_IMPORT_COLLISION_PRINT_CAP) {
+                                                sh_note_import_collision(file_idx, mod_a, mod_b, a_sym_idx);
+                                                printed = printed + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return collisions;
+}
