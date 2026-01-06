@@ -4,6 +4,7 @@ import "imports.stasis";
 import "parsing.stasis";
 import "signatures.stasis";
 import "modules.stasis";
+import "stmt_parse.stasis";
 import "build_ir.stasis";
 
 function sh_usage(): void {
@@ -62,6 +63,7 @@ function sh_check_loaded_files(): i32 {
     let lex_errors: i32 = 0;
     let parse_errors: i32 = 0;
     let sig_errors: i32 = 0;
+    let stmt_errors: i32 = 0;
     let import_collisions: i32 = 0;
 
     let i: i32 = 0;
@@ -71,6 +73,7 @@ function sh_check_loaded_files(): i32 {
     }
 
     sig_errors = sh_sig_scan_loaded_files();
+    stmt_errors = sh_stmt_parse_loaded_files();
     import_collisions = sh_check_import_member_collisions();
 
     print_string("check: files=");
@@ -81,6 +84,8 @@ function sh_check_loaded_files(): i32 {
     print_int(parse_errors);
     print_string(" sig_errors=");
     print_int(sig_errors);
+    print_string(" stmt_errors=");
+    print_int(stmt_errors);
     print_string(" import_collisions=");
     print_int(import_collisions);
     print_char(10);
@@ -88,6 +93,7 @@ function sh_check_loaded_files(): i32 {
     if (lex_errors != 0) { return 1; }
     if (parse_errors != 0) { return 1; }
     if (sig_errors != 0) { return 1; }
+    if (stmt_errors != 0) { return 1; }
     return 0;
 }
 
