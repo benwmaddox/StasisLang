@@ -188,6 +188,11 @@ struct ShState {
     cmd: ascii[64];
     subcmd: ascii[64];
     arg_entry: ascii[260];
+    arg_out: ascii[260];
+    arg_backend: ascii[16];
+    arg_module: ascii[96];
+    emit_ir: i32;
+    ir_out: ascii[262144];
 
     // Import/source graph
     files: ShFile[300];

@@ -1,0 +1,132 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "emit_ir.stasis";
+
+function sh_span_eq(file_idx: i32, start: i32, len: i32, lit: ascii[]): bool {
+    if (file_idx < 0 || file_idx >= sh.file_count) {
+        return false;
+    }
+    if (len != ascii_len(lit)) {
+        return false;
+    }
+
+    let base: i32 = sh.files[file_idx].offset + start;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        if (sh.pool[base + i] != lit[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sh_build_err_at(file_idx: i32, msg: ascii[], at: i32): void {
+    if (sh.quiet != 0) {
+        return;
+    }
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    sh_print_file_loc(file_idx, at);
+    print_char(10);
+}
+
+function sh_build_parse_i32_from_tok(file_idx: i32): i32 {
+    let v: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < sh.tok_len; i = i + 1) {
+        let b: u8 = sh.pool[sh.lex_base + sh.tok_start + i];
+        if (!ascii_is_digit(b)) {
+            sh_build_err_at(file_idx, "expected integer literal", sh.tok_start);
+            return 0;
+        }
+        v = v * 10 + ascii_to_digit(b);
+    }
+    return v;
+}
+
+function sh_build_find_entry_main(): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < sh.func_count; i = i + 1) {
+        if (sh.funcs[i].is_test == 0) {
+            if (sh.funcs[i].file_idx == 0) {
+                if (sh_span_eq(sh.funcs[i].file_idx, sh.funcs[i].name_start, sh.funcs[i].name_len, "main")) {
+                    return i;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+function sh_emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
+    let func_idx: i32 = sh_build_find_entry_main();
+    if (func_idx < 0) {
+        sh_build_err_at(0, "missing entry function 'main' in entry file", 0);
+        return 1;
+    }
+
+    let file_idx: i32 = sh.funcs[func_idx].file_idx;
+    let body_start: i32 = sh.funcs[func_idx].body_start;
+    if (body_start < 0) {
+        sh_build_err_at(file_idx, "missing function body for 'main'", sh.funcs[func_idx].name_start);
+        return 1;
+    }
+
+    if (!sh_lex_begin(file_idx)) {
+        sh_build_err_at(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+    sh.lex_pos = body_start;
+
+    let k: ShTok = sh_lex_next_kind();
+    if (k != ShTok.LBrace) {
+        sh_build_err_at(file_idx, "expected '{' at start of function body", sh.tok_start);
+        return 1;
+    }
+
+    k = sh_lex_next_kind();
+    if (k != ShTok.ReturnKeyword) {
+        sh_build_err_at(file_idx, "expected 'return' in function body (minimal build only)", sh.tok_start);
+        return 1;
+    }
+
+    k = sh_lex_next_kind();
+    let sign: i32 = 1;
+    if (k == ShTok.Minus) {
+        sign = -1;
+        k = sh_lex_next_kind();
+    }
+    if (k != ShTok.IntegerLiteral) {
+        sh_build_err_at(file_idx, "expected integer literal after return (minimal build only)", sh.tok_start);
+        return 1;
+    }
+    let value: i32 = sh_build_parse_i32_from_tok(file_idx) * sign;
+
+    k = sh_lex_next_kind();
+    if (k != ShTok.Semicolon) {
+        sh_build_err_at(file_idx, "expected ';' after return value", sh.tok_start);
+        return 1;
+    }
+
+    k = sh_lex_next_kind();
+    if (k != ShTok.RBrace) {
+        sh_build_err_at(file_idx, "expected '}' after return statement", sh.tok_start);
+        return 1;
+    }
+
+    if (ascii_eq(backend, "cranelift")) {
+        sh_emit_clif_main_return_i32(module_name, value);
+        return 0;
+    }
+    if (ascii_eq(backend, "llvm")) {
+        sh_emit_llvm_main_return_i32(module_name, value);
+        return 0;
+    }
+
+    sh_build_err_at(file_idx, "unsupported backend (expected 'cranelift' or 'llvm')", body_start);
+    return 1;
+}
+
