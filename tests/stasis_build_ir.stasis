@@ -386,6 +386,43 @@ test `stasis build emits llvm for call arguments`() {
     return true;
 }
 
+test `stasis build emits llvm for nested calls`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path, t_exe_dir, "sh_build_ir_nested_calls_llvm.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function inner(x: i32): i32 { return x + 1; }");
+    t_append_line(t_tmp, "function outer(x: i32): i32 { return x + 2; }");
+    t_append_line(t_tmp, "function main(): i32 { return outer(inner(40)); }");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(sh.ir_out, "define i32 @module__inner(i32 %a0)")) { return false; }
+    if (!ascii_contains(sh.ir_out, "define i32 @module__outer(i32 %a0)")) { return false; }
+    if (!ascii_contains(sh.ir_out, "call i32 @module__inner(i32")) { return false; }
+    if (!ascii_contains(sh.ir_out, "call i32 @module__outer(i32")) { return false; }
+    return true;
+}
+
 test `stasis build emits llvm for module-qualified calls`() {
     if (!t_init_exe_dir()) {
         return false;
@@ -547,4 +584,56 @@ test `stasis build emits llvm for global u8 assignment`() {
     if (!ascii_contains(sh.ir_out, "trunc i32")) { return false; }
     if (!ascii_contains(sh.ir_out, "store i8")) { return false; }
     return true;
+}
+
+test `stasis build emits llvm for slice params and u8 conversions`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    sh_path_join(t_path, t_exe_dir, "sh_build_ir_slice_params_llvm.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function trunc_test(x: i32): i32 { return i32_to_u8_trunc(x); }");
+    t_append_line(t_tmp, "function sum(buf: u8[], n: i32): i32 {");
+    t_append_line(t_tmp, "  let i: i32 = 0;");
+    t_append_line(t_tmp, "  let s: i32 = 0;");
+    t_append_line(t_tmp, "  for (i = 0; i < n; i = i + 1) { s = s + u8_to_i32(buf[i]); }");
+    t_append_line(t_tmp, "  return s;");
+    t_append_line(t_tmp, "}");
+    t_append_line(t_tmp, "global g: u8[4];");
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  g[0] = 1;");
+    t_append_line(t_tmp, "  g[1] = 2;");
+    t_append_line(t_tmp, "  g[2] = 3;");
+    t_append_line(t_tmp, "  g[3] = 4;");
+    t_append_line(t_tmp, "  return sum(g, 4) + trunc_test(257);");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    sh.quiet = 1;
+    let rc: i32 = sh_load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sh_sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = sh_emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(sh.ir_out, "define i32 @module__sum(ptr %a0, i32 %a1)")) { return false; }
+    if (!ascii_contains(sh.ir_out, "call i32 @module__sum(ptr")) { return false; }
+    if (!ascii_contains(sh.ir_out, "alloca ptr")) { return false; }
+    if (!ascii_contains(sh.ir_out, "load ptr, ptr %l0")) { return false; }
+    if (!ascii_contains(sh.ir_out, "getelementptr inbounds i8")) { return false; }
+    if (!ascii_contains(sh.ir_out, "zext i8")) { return false; }
+    if (!ascii_contains(sh.ir_out, " = and i32")) { return false; }
+    return ascii_contains(sh.ir_out, ", 255");
 }

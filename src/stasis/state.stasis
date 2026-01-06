@@ -290,6 +290,8 @@ struct ShState {
     expr_count: i32;
     expr_call_args: i32[32768];
     expr_call_args_len: i32;
+    expr_call_tmp_args: i32[32768];
+    expr_call_tmp_args_len: i32;
     expr_call_callee: i32[4096];
     expr_call_arg_off: i32[4096];
     expr_call_arg_len: i32[4096];

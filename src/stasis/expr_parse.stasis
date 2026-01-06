@@ -311,6 +311,7 @@ function sh_expr_reduce_top(file_idx: i32, op_len: i32, val_len: i32): i32 {
 function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTok): i32 {
     sh.expr_count = 0;
     sh.expr_call_args_len = 0;
+    sh.expr_call_tmp_args_len = 0;
     sh.expr_call_len = 0;
     sh.expr_index_len = 0;
 
@@ -346,12 +347,13 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                     }
 
                     let callee0: i32 = sh.expr_call_callee[top_call];
-                    let args_off0: i32 = sh.expr_call_arg_off[top_call];
+                    let tmp_args_off0: i32 = sh.expr_call_arg_off[top_call];
 
                     sh.expr_call_len = top_call;
                     op_len = op_len - 1; // pop CallStart
+                    sh.expr_call_tmp_args_len = tmp_args_off0;
 
-                    let call_node0: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee0].at, callee0, args_off0, 0);
+                    let call_node0: i32 = sh_expr_make_call(file_idx, sh.expr_nodes[callee0].at, callee0, sh.expr_call_args_len, 0);
                     if (call_node0 < 0) { return -1; }
                     if (val_len >= SH_EXPR_STACK_CAP) {
                         sh_expr_err_at(file_idx, "expression too complex (value stack)", sh.tok_start);
@@ -474,12 +476,12 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
 
                         // Pop callee from the value stack, then parse call args as a sub-context.
                         val_len = val_len - 1;
-                        let call_idx: i32 = sh.expr_call_len;
-                        sh.expr_call_len = sh.expr_call_len + 1;
-                        sh.expr_call_callee[call_idx] = callee;
-                        sh.expr_call_arg_off[call_idx] = sh.expr_call_args_len;
-                        sh.expr_call_arg_len[call_idx] = 0;
-                        sh.expr_call_val_base[call_idx] = val_len;
+                         let call_idx: i32 = sh.expr_call_len;
+                         sh.expr_call_len = sh.expr_call_len + 1;
+                         sh.expr_call_callee[call_idx] = callee;
+                         sh.expr_call_arg_off[call_idx] = sh.expr_call_tmp_args_len;
+                         sh.expr_call_arg_len[call_idx] = 0;
+                         sh.expr_call_val_base[call_idx] = val_len;
 
                         sh.parse_stack_kind[op_len] = ShTok.CallStart;
                         sh.expr_op_at[op_len] = sh.tok_start;
@@ -546,12 +548,12 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                 sh_expr_err_at(file_idx, "expected expression in call argument", sh.tok_start);
                                 return -1;
                             }
-                            if (sh.expr_call_args_len >= 32768) {
+                            if (sh.expr_call_tmp_args_len >= 32768) {
                                 sh_expr_err_at(file_idx, "too many call arguments (cap)", sh.tok_start);
                                 return -1;
                             }
-                            sh.expr_call_args[sh.expr_call_args_len] = sh.parse_stack_start[val_len - 1];
-                            sh.expr_call_args_len = sh.expr_call_args_len + 1;
+                            sh.expr_call_tmp_args[sh.expr_call_tmp_args_len] = sh.parse_stack_start[val_len - 1];
+                            sh.expr_call_tmp_args_len = sh.expr_call_tmp_args_len + 1;
                             sh.expr_call_arg_len[top_call2] = sh.expr_call_arg_len[top_call2] + 1;
 
                             // Pop the argument value and continue with the next arg.
@@ -620,18 +622,31 @@ function sh_expr_parse_after_first(file_idx: i32, first: ShTok, terminator: ShTo
                                         return -1;
                                     }
 
-                                    if (sh.expr_call_args_len >= 32768) {
+                                    if (sh.expr_call_tmp_args_len >= 32768) {
                                         sh_expr_err_at(file_idx, "too many call arguments (cap)", sh.tok_start);
                                         return -1;
                                     }
-                                    sh.expr_call_args[sh.expr_call_args_len] = sh.parse_stack_start[val_len - 1];
-                                    sh.expr_call_args_len = sh.expr_call_args_len + 1;
+                                    sh.expr_call_tmp_args[sh.expr_call_tmp_args_len] = sh.parse_stack_start[val_len - 1];
+                                    sh.expr_call_tmp_args_len = sh.expr_call_tmp_args_len + 1;
                                     sh.expr_call_arg_len[top_call3] = sh.expr_call_arg_len[top_call3] + 1;
                                     val_len = base3;
 
                                     let callee3: i32 = sh.expr_call_callee[top_call3];
-                                    let args_off3: i32 = sh.expr_call_arg_off[top_call3];
                                     let args_len3: i32 = sh.expr_call_arg_len[top_call3];
+                                    let tmp_args_off3: i32 = sh.expr_call_arg_off[top_call3];
+                                    let args_off3: i32 = sh.expr_call_args_len;
+                                    if (args_off3 + args_len3 > 32768) {
+                                        sh_expr_err_at(file_idx, "too many call arguments (cap)", sh.tok_start);
+                                        return -1;
+                                    }
+
+                                    let arg_i: i32 = 0;
+                                    for (; arg_i < args_len3; ) {
+                                        sh.expr_call_args[args_off3 + arg_i] = sh.expr_call_tmp_args[tmp_args_off3 + arg_i];
+                                        arg_i = arg_i + 1;
+                                    }
+                                    sh.expr_call_args_len = sh.expr_call_args_len + args_len3;
+                                    sh.expr_call_tmp_args_len = tmp_args_off3;
 
                                     sh.expr_call_len = top_call3;
                                     op_len = op_len - 1; // pop CallStart

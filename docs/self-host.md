@@ -15,6 +15,7 @@ This is a living design + progress document for the `self-host` branch.
   - LLVM IR text (executed via `lli` when possible, else `clang` link).
 - Remains deterministic: static memory only; explicit I/O; no hidden allocation.
 - Uses a single global state struct (`sh`) to own all compiler/static allocations.
+- Prefer iteration over recursion where practical (explicit stacks for parse/sema/codegen).
 
 ## Names (Stage0 vs Stage1)
 
@@ -48,7 +49,7 @@ Implemented:
 - `stasis check <entry.stasis>`: loads the import dependency graph then runs lexer + minimal parsing (paren/brace/bracket balance) + top-level decl scan; also does a first-pass function-body statement parse; prints `files/lex_errors/parse_errors/sig_errors/stmt_errors/import_collisions`.
 - `stasis build ...`:
   - Cranelift: still minimal compiler path for `function main(): i32 { return <const-expr>; }` (const-folded i32/bool expression subset).
-  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), function calls with arguments (i32/bool only), struct field access (`a.b`), and indexing (`a[i]`) for fixed arrays/byte buffers. Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). Slices are still not supported in LLVM bring-up; `&&`/`||` are still eager (no short-circuit) in IR.
+  - LLVM: can now emit IR for multi-function programs (across all loaded modules) for the current bring-up subset: i32/bool locals, assignments, expression statements, structured control flow (`if`/`else`, `for`), return-slot (so `return` can appear anywhere), function calls with scalar args (i32ish/u8) and ptr args (u8[]/i32ish[]), struct field access (`a.b`), and indexing (`a[i]`) for fixed arrays/byte buffers. Module-qualified calls like `math.add(1, 2)` are supported; functions are mangled as `module__name` (entry `main` remains `@main`). `u8_to_i32()` and `i32_to_u8_trunc()` are recognized as bring-up intrinsics. `&&`/`||` are still eager (no short-circuit) in IR.
   - `--emit-ir` writes CLIF/LLVM IR to `--out`
   - `--backend llvm` without `--emit-ir` builds a native EXE via `clang`
 - `stasis run ...`: LLVM+`lli` runner for the current LLVM subset (executes the produced IR and returns the program exit code).
@@ -316,3 +317,5 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: expression parser now supports slice types in decls and statements, and indexing expressions (`a[i]`).
 - 2026-01-06: LLVM IR emitter can now emit struct type definitions and global variable definitions (zeroinitializer + align).
 - 2026-01-06: LLVM expression emission now uses a typed iterative stack; added lowering for struct members + indexing (including global `u8` assignment via trunc/zext); added IR tests.
+- 2026-01-06: fixed expression parsing for nested calls by staging per-call arg lists in a stack buffer before copying into the call-node arg arena; added LLVM IR tests for nested calls.
+- 2026-01-06: LLVM bring-up: accept `u8[]`/`i32[]` as `ptr` params (length passed separately) and recognize `u8_to_i32` / `i32_to_u8_trunc` as intrinsics; added IR tests.
