@@ -268,8 +268,11 @@ struct State {
     scratch_dir: ascii[260];
     scratch_resolved: ascii[260];
     scratch_runtime: ascii[260];
+    scratch_graphics: ascii[260];
+    scratch_graphics_dll: ascii[260];
     scratch_exe: ascii[260];
     scratch_watch_path: ascii[260];
+    scratch_out_dir: ascii[260];
     scratch_mod: ascii[96];
 
     quiet: i32;
