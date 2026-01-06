@@ -119,9 +119,11 @@ function llvm_emit_const_f32_from_span(file_idx: i32, start: i32, len: i32): i32
     let id: i32 = llvm_new_tmp();
     ascii_append(stasis.ir_out, "  ");
     llvm_append_tmp(id);
-    ascii_append(stasis.ir_out, " = fadd float 0.0, ");
+    // LLVM IR does not accept decimal literals directly in `float` contexts (clang-as).
+    // Emit the literal as `double` and truncate it to `float`.
+    ascii_append(stasis.ir_out, " = fptrunc double ");
     ir_append_span(stasis.ir_out, file_idx, start, len);
-    ascii_append(stasis.ir_out, "\n");
+    ascii_append(stasis.ir_out, " to float\n");
     return id;
 }
 
@@ -472,4 +474,3 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
 
     return 0;
 }
-
