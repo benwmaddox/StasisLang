@@ -1,6 +1,6 @@
 param(
   [string]$TestsDir = 'tests',
-  [string]$SelfHostExe = 'build/stasis_stage10.exe',
+  [string]$SelfHostExe = 'build/stasis_release.exe',
   [string]$Stage0Exe = 'build/aot/Stasis.Cli.exe',
   [string]$Backend = 'llvm',
   [int]$Runs = 2,
@@ -19,6 +19,8 @@ function Find-LatestSelfHostExe {
   if ($candidates.Count -eq 0) { return $null }
   return ($candidates | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
 }
+
+$releaseCandidate = Resolve-RepoPath 'build/stasis_release.exe'
 
 function Invoke-Timed {
   param(
@@ -50,8 +52,12 @@ $outCsvPath = Resolve-RepoPath $OutCsv
 if (!(Test-Path $stage0)) { throw "Stage0 CLI not found: $stage0" }
 
 if (!$PSBoundParameters.ContainsKey('SelfHostExe')) {
-  $latest = Find-LatestSelfHostExe
-  if ($null -ne $latest) { $selfhost = $latest }
+  if (Test-Path $releaseCandidate) {
+    $selfhost = $releaseCandidate
+  } else {
+    $latest = Find-LatestSelfHostExe
+    if ($null -ne $latest) { $selfhost = $latest }
+  }
 }
 
 if (!(Test-Path $selfhost)) {
