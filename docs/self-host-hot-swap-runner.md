@@ -55,6 +55,17 @@ On `samples/hotstate_tick_watch.stasis` (module `hot`), one edit-triggered swap 
 
 These numbers will vary significantly by machine and by whether the OS/AV aggressively scans newly-written DLLs.
 
+## Getting below 250ms consistently (Windows)
+
+Right now the dominant cost in the hot swap loop is typically the Windows loader time reported by the runner (`HOTSWAP ok: load=...us`). On this machine, the runner consistently reports ~350–550ms just inside `LoadLibraryExA` even for ~100–150KiB swap DLLs, which strongly suggests real-time scanning (Defender/AV) rather than "real work" (relocations/import fixups).
+
+Practical mitigations:
+
+- Put the hot-swap output directory (default `build/hotstate/`) on a Defender/AV exclusion list.
+- If available, use a Windows Dev Drive / Performance mode for the hotstate directory.
+
+If we want sub-100ms without relying on OS configuration, the likely path is to avoid swapping PE DLLs entirely (e.g., a JIT/interpreter path for dev, or an in-runner JIT that consumes IR/bytecode).
+
 ## How to benchmark locally
 
 - Build the runtime (runner + graphics DLL/import lib): `runtime/build.bat`
@@ -63,4 +74,3 @@ These numbers will vary significantly by machine and by whether the OS/AV aggres
   - `HOTRELOAD phases(ms): ...`
   - `HOTSWAP latency(ms): ...`
   - `HOTSWAP ok: ...` in `build/hotstate/*.runner.err.log`
-
