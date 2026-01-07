@@ -34,24 +34,24 @@ function cli_parse_i32(src: ascii[]): i32 {
     if (len <= 0) { return 0; }
 
     let i: i32 = 0;
-    let neg: i32 = 0;
+    let neg: bool = false;
     if (src[0] == 45) { // '-'
-        neg = 1;
+        neg = true;
         i = 1;
     }
 
     let v: i32 = 0;
-    let done: i32 = 0;
-    for (i = i; i < len && done == 0; i = i + 1) {
+    let done: bool = false;
+    for (i = i; i < len && !done; i = i + 1) {
         let b: u8 = src[i];
         if (!ascii_is_digit(b)) {
-            done = 1;
+            done = true;
         } else {
             v = v * 10 + ascii_to_digit(b);
         }
     }
 
-    if (neg != 0) { return 0 - v; }
+    if (neg) { return 0 - v; }
     return v;
 }
 
@@ -65,22 +65,22 @@ function hotswap_try_find_runner_path(dst: ascii[]): bool {
     // Prefer repo-root relative lookups, otherwise fall back to exe-dir relative.
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
 
-    let root_ok: i32 = 0;
+    let root_ok: bool = false;
     path_join(stasis.scratch_resolved, stasis.scratch_dir, "src/stasis/state.stasis");
     if (sys_file_exists(stasis.scratch_resolved)) {
         ascii_copy(stasis.scratch_resolved, stasis.scratch_dir);
-        root_ok = 1;
+        root_ok = true;
     } else {
         path_dirname(stasis.scratch_resolved, stasis.scratch_dir);
         if (!ascii_is_empty(stasis.scratch_resolved)) {
             path_join(stasis.scratch_import, stasis.scratch_resolved, "src/stasis/state.stasis");
             if (sys_file_exists(stasis.scratch_import)) {
-                root_ok = 1;
+                root_ok = true;
             }
         }
     }
 
-    if (root_ok != 0) {
+    if (root_ok) {
         // stasis.scratch_resolved holds repo root
         path_join(dst, stasis.scratch_resolved, "runtime/build/bin/Release/stasis_runner.exe");
         if (sys_file_exists(dst)) {
@@ -1978,24 +1978,24 @@ function cli_cmd_watch(argc: i32): i32 {
                 return 1;
             }
 
-            let handled: i32 = 0;
+            let handled: bool = false;
             if (expect_backend3 != 0) {
                 ascii_copy(stasis.arg_backend, stasis.scratch_import);
                 expect_backend3 = 0;
-                handled = 1;
+                handled = true;
             }
-            if (handled == 0 && expect_module3 != 0) {
+            if (!handled && expect_module3 != 0) {
                 ascii_copy(stasis.arg_module, stasis.scratch_import);
                 expect_module3 = 0;
-                handled = 1;
+                handled = true;
             }
-            if (handled == 0 && expect_fps3 != 0) {
+            if (!handled && expect_fps3 != 0) {
                 stasis.watch_hot_fps = cli_parse_i32(stasis.scratch_import);
                 expect_fps3 = 0;
-                handled = 1;
+                handled = true;
             }
 
-            if (handled == 0) {
+            if (!handled) {
                 if (ascii_eq(stasis.scratch_import, "-h") || ascii_eq(stasis.scratch_import, "--help")) {
                     usage();
                     return 0;
