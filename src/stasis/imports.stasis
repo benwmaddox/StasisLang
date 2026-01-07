@@ -28,6 +28,7 @@ function reset() {
     stasis.const_count = 0;
     stasis.func_count = 0;
     stasis.param_count = 0;
+    stasis.llvm_emit_native_main = 1;
     ascii_clear(stasis.scratch_import);
     ascii_clear(stasis.scratch_dir);
     ascii_clear(stasis.scratch_resolved);

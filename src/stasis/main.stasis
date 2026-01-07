@@ -22,11 +22,373 @@ function usage(): void {
     print_string("  stasis test [--quiet] [--backend llvm] [--module <name>] <dir-or-file.stasis>\n");
     print_string("  stasis watch check [--quiet] <entry.stasis>\n");
     print_string("  stasis watch build [--quiet] [--backend cranelift|llvm] [--module <name>] --out <path> [--emit-ir] <entry.stasis>\n");
-    print_string("  stasis watch run [--quiet] [--backend llvm] [--module <name>] <entry.stasis>\n");
+    print_string("  stasis watch run [--quiet] [--backend llvm] [--module <name>] [--hot-swap] [--fps <n>] <entry.stasis>\n");
     print_string("\n");
     print_string("notes:\n");
     print_string("  - This CLI is under active development on branch self-host.\n");
     print_string("  - Current stage: import graph + lexer + minimal parsing (balance check) + decl scan + minimal build/run/release.\n");
+}
+
+function cli_parse_i32(src: ascii[]): i32 {
+    let len: i32 = ascii_len(src);
+    if (len <= 0) { return 0; }
+
+    let i: i32 = 0;
+    let neg: i32 = 0;
+    if (src[0] == 45) { // '-'
+        neg = 1;
+        i = 1;
+    }
+
+    let v: i32 = 0;
+    let done: i32 = 0;
+    for (i = i; i < len && done == 0; i = i + 1) {
+        let b: u8 = src[i];
+        if (!ascii_is_digit(b)) {
+            done = 1;
+        } else {
+            v = v * 10 + ascii_to_digit(b);
+        }
+    }
+
+    if (neg != 0) { return 0 - v; }
+    return v;
+}
+
+function hotswap_try_find_runner_path(dst: ascii[]): bool {
+    ascii_clear(dst);
+
+    if (!read_arg(0, stasis.scratch_import, 260)) {
+        return false;
+    }
+
+    // Prefer repo-root relative lookups, otherwise fall back to exe-dir relative.
+    path_dirname(stasis.scratch_dir, stasis.scratch_import);
+
+    let root_ok: i32 = 0;
+    path_join(stasis.scratch_resolved, stasis.scratch_dir, "src/stasis/state.stasis");
+    if (sys_file_exists(stasis.scratch_resolved)) {
+        ascii_copy(stasis.scratch_resolved, stasis.scratch_dir);
+        root_ok = 1;
+    } else {
+        path_dirname(stasis.scratch_resolved, stasis.scratch_dir);
+        if (!ascii_is_empty(stasis.scratch_resolved)) {
+            path_join(stasis.scratch_import, stasis.scratch_resolved, "src/stasis/state.stasis");
+            if (sys_file_exists(stasis.scratch_import)) {
+                root_ok = 1;
+            }
+        }
+    }
+
+    if (root_ok != 0) {
+        // stasis.scratch_resolved holds repo root
+        path_join(dst, stasis.scratch_resolved, "runtime/build/bin/Release/stasis_runner.exe");
+        if (sys_file_exists(dst)) {
+            return true;
+        }
+    }
+
+    path_join(dst, stasis.scratch_dir, "../runtime/build/bin/Release/stasis_runner.exe");
+    return sys_file_exists(dst);
+}
+
+function hotswap_prepare_paths(entry_path: ascii[]): bool {
+    if (!module_name_from_path(stasis.scratch_mod, entry_path)) {
+        return false;
+    }
+
+    // Resolve repo root to ensure absolute paths (runner changes cwd to the DLL directory).
+    if (!read_arg(0, stasis.scratch_import, 260)) {
+        return false;
+    }
+    path_dirname(stasis.scratch_dir, stasis.scratch_import);
+    ascii_copy(stasis.scratch_resolved, stasis.scratch_dir);
+
+    path_join(stasis.scratch_import, stasis.scratch_resolved, "src/stasis/state.stasis");
+    if (!sys_file_exists(stasis.scratch_import)) {
+        path_dirname(stasis.scratch_resolved, stasis.scratch_dir);
+        path_join(stasis.scratch_import, stasis.scratch_resolved, "src/stasis/state.stasis");
+        if (!sys_file_exists(stasis.scratch_import)) {
+            // Best-effort fallback: use exe dir as base.
+            ascii_copy(stasis.scratch_resolved, stasis.scratch_dir);
+        }
+    }
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "build/hotstate/");
+    ascii_append(stasis.scratch_import, stasis.scratch_mod);
+    ascii_append_byte(stasis.scratch_import, 46);
+    ascii_append(stasis.scratch_import, stasis.arg_module);
+    ascii_append(stasis.scratch_import, ".swap");
+    path_join(stasis.watch_hot_swap_file, stasis.scratch_resolved, stasis.scratch_import);
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "build/hotstate/");
+    ascii_append(stasis.scratch_import, stasis.scratch_mod);
+    ascii_append_byte(stasis.scratch_import, 46);
+    ascii_append(stasis.scratch_import, stasis.arg_module);
+    ascii_append(stasis.scratch_import, ".hotswap.ll");
+    path_join(stasis.watch_hot_ir_path, stasis.scratch_resolved, stasis.scratch_import);
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "build/hotstate/");
+    ascii_append(stasis.scratch_import, stasis.scratch_mod);
+    ascii_append_byte(stasis.scratch_import, 46);
+    ascii_append(stasis.scratch_import, stasis.arg_module);
+    ascii_append(stasis.scratch_import, ".swapA.dll");
+    path_join(stasis.watch_hot_dll_a, stasis.scratch_resolved, stasis.scratch_import);
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "build/hotstate/");
+    ascii_append(stasis.scratch_import, stasis.scratch_mod);
+    ascii_append_byte(stasis.scratch_import, 46);
+    ascii_append(stasis.scratch_import, stasis.arg_module);
+    ascii_append(stasis.scratch_import, ".swapB.dll");
+    path_join(stasis.watch_hot_dll_b, stasis.scratch_resolved, stasis.scratch_import);
+
+    return true;
+}
+
+function hotswap_write_swap_file(dll_path: ascii[]): bool {
+    let t0: i32 = sys_time_ms();
+
+    ascii_clear(stasis.exec_cmd);
+    ascii_append(stasis.exec_cmd, dll_path);
+    ascii_append_byte(stasis.exec_cmd, 10);
+
+    let ok: bool = sys_write_file(stasis.watch_hot_swap_file, stasis.exec_cmd, ascii_len(stasis.exec_cmd));
+    stasis.watch_hot_ms_swap_write = sys_time_ms() - t0;
+    return ok;
+}
+
+function hotswap_build_dll_after_check(dll_out: ascii[]): i32 {
+    let tick_idx: i32 = build_find_entry_tick();
+    if (tick_idx < 0) {
+        print_string("error: --hot-swap requires entry function 'tick' in entry file\n");
+        return 1;
+    }
+    if (stasis.funcs[tick_idx].body_start < 0) {
+        print_string("error: --hot-swap requires a body for entry function 'tick'\n");
+        return 1;
+    }
+
+    let t_total0: i32 = sys_time_ms();
+
+    stasis.llvm_emit_native_main = 0;
+    let t_emit0: i32 = sys_time_ms();
+    let rc: i32 = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
+    stasis.watch_hot_ms_emit = sys_time_ms() - t_emit0;
+    if (rc != 0) {
+        stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
+        return rc;
+    }
+
+    if (!sys_write_file(stasis.watch_hot_ir_path, stasis.ir_out, ascii_len(stasis.ir_out))) {
+        print_string("error: failed to write hot IR: ");
+        print_string(stasis.watch_hot_ir_path);
+        print_char(10);
+        stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
+        return 1;
+    }
+
+    let needs_graphics: bool = ir_needs_graphics_runtime();
+    let needs_sys: bool = ir_needs_sys_runtime();
+
+    let t_link0: i32 = sys_time_ms();
+
+    ascii_clear(stasis.exec_cmd);
+    ascii_append(stasis.exec_cmd, "clang -shared -Wl,/NOLOGO -Wno-override-module -O3 ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.watch_hot_ir_path);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    if (needs_sys) {
+        if (!append_sys_runtime_link_input()) {
+            stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
+            return 1;
+        }
+    }
+
+    if (needs_graphics) {
+        if (!append_graphics_static_link_inputs()) {
+            stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
+            return 1;
+        }
+    }
+
+    ascii_append(stasis.exec_cmd, " -o ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, dll_out);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    ascii_append(stasis.exec_cmd, " -Wl,/EXPORT:");
+    ascii_append(stasis.exec_cmd, stasis.arg_module);
+    ascii_append(stasis.exec_cmd, "__main");
+    ascii_append(stasis.exec_cmd, " -Wl,/EXPORT:");
+    ascii_append(stasis.exec_cmd, stasis.arg_module);
+    ascii_append(stasis.exec_cmd, "__tick");
+
+    let exit_code: i32 = cli_spawn_retry(stasis.exec_cmd);
+    stasis.watch_hot_ms_link = sys_time_ms() - t_link0;
+    stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
+    if (exit_code != 0) {
+        print_string("error: clang failed (exit=");
+        print_int(exit_code);
+        print_string(")\n");
+        return exit_code;
+    }
+
+    return 0;
+}
+
+function hotswap_start_runner(dll_path: ascii[]): bool {
+    if (!hotswap_try_find_runner_path(stasis.watch_hot_runner_path)) {
+        print_string("error: stasis_runner not found. Build it in runtime/ (expects runtime/build/bin/Release/stasis_runner.exe)\n");
+        return false;
+    }
+
+    // Best-effort cleanup: prevent an old swap file from triggering an immediate swap on launch.
+    sys_delete_file(stasis.watch_hot_swap_file);
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, stasis.arg_module);
+    ascii_append(stasis.scratch_import, "__main");
+
+    ascii_clear(stasis.exec_cmd);
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.watch_hot_runner_path);
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append_byte(stasis.exec_cmd, 32);
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, dll_path);
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append_byte(stasis.exec_cmd, 32);
+    ascii_append(stasis.exec_cmd, stasis.scratch_import);
+    ascii_append(stasis.exec_cmd, " --swap-file ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.watch_hot_swap_file);
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, " --fps ");
+    ir_append_i32(stasis.exec_cmd, stasis.watch_hot_fps);
+
+    stasis.watch_hot_runner_pid = sys_spawn_async(stasis.exec_cmd);
+    if (stasis.watch_hot_runner_pid <= 0) {
+        print_string("error: failed to start runner\n");
+        return false;
+    }
+
+    if (stasis.quiet == 0) {
+        print_string("watch: hot runner pid=");
+        print_int(stasis.watch_hot_runner_pid);
+        print_char(10);
+        sys_flush();
+    }
+
+    return true;
+}
+
+function watch_run_hotswap(): i32 {
+    print_string("watch: run --hot-swap (polling)\n");
+    print_string("watch: ctrl+c to stop\n");
+
+    if (stasis.watch_hot_fps < 1) { stasis.watch_hot_fps = 1; }
+    if (stasis.watch_hot_fps > 240) { stasis.watch_hot_fps = 240; }
+
+    if (!hotswap_prepare_paths(stasis.arg_entry)) {
+        print_string("error: failed to prepare hot-swap paths\n");
+        return 1;
+    }
+
+    stasis.watch_hot_flip = 0;
+
+    let rc: i32 = load_graph(stasis.arg_entry);
+    if (rc == 0) {
+        rc = check_loaded_files();
+    }
+
+    if (rc == 0) {
+        rc = hotswap_build_dll_after_check(stasis.watch_hot_dll_a);
+        if (rc == 0) {
+            if (!hotswap_start_runner(stasis.watch_hot_dll_a)) {
+                return 1;
+            }
+            if (stasis.quiet == 0) {
+                print_string("HOTRELOAD phases(ms): emit=");
+                print_int(stasis.watch_hot_ms_emit);
+                print_string(" link=");
+                print_int(stasis.watch_hot_ms_link);
+                print_string(" total=");
+                print_int(stasis.watch_hot_ms_total);
+                print_char(10);
+                sys_flush();
+            }
+        }
+    } else {
+        print_string("warning: initial build failed; waiting for changes.\n");
+        sys_flush();
+    }
+
+    let tick: i32 = 0;
+    for (tick = 0; 1; tick = tick + 1) {
+        sys_sleep_ms(50);
+
+        let reload_rc: i32 = watch_reload_changed_files();
+        if (reload_rc != 0) {
+            if (stasis.quiet == 0) {
+                print_string("watch: rebuilding\n");
+                sys_flush();
+            }
+
+            let t_total0: i32 = sys_time_ms();
+            let check_rc: i32 = 0;
+
+            if (reload_rc == 2) {
+                check_rc = load_graph(stasis.arg_entry);
+                if (check_rc == 0) { check_rc = check_loaded_files(); }
+            } else {
+                if (reload_rc < 0) { return 1; }
+                check_rc = check_loaded_files();
+            }
+
+            if (check_rc == 0) {
+                if (stasis.watch_hot_flip == 0) {
+                    stasis.watch_hot_flip = 1;
+                    rc = hotswap_build_dll_after_check(stasis.watch_hot_dll_b);
+                    if (rc == 0) {
+                        if (!hotswap_write_swap_file(stasis.watch_hot_dll_b)) {
+                            print_string("error: failed to write swap file\n");
+                            return 1;
+                        }
+                    }
+                } else {
+                    stasis.watch_hot_flip = 0;
+                    rc = hotswap_build_dll_after_check(stasis.watch_hot_dll_a);
+                    if (rc == 0) {
+                        if (!hotswap_write_swap_file(stasis.watch_hot_dll_a)) {
+                            print_string("error: failed to write swap file\n");
+                            return 1;
+                        }
+                    }
+                }
+
+                if (rc == 0 && stasis.quiet == 0) {
+                    let total_ms: i32 = sys_time_ms() - t_total0;
+                    print_string("HOTRELOAD phases(ms): emit=");
+                    print_int(stasis.watch_hot_ms_emit);
+                    print_string(" link=");
+                    print_int(stasis.watch_hot_ms_link);
+                    print_string(" swapWrite=");
+                    print_int(stasis.watch_hot_ms_swap_write);
+                    print_string(" total=");
+                    print_int(total_ms);
+                    print_char(10);
+                    sys_flush();
+                }
+            }
+        }
+    }
+
+    return rc;
 }
 
 function watch_check(entry_path: ascii[]): i32 {
@@ -66,6 +428,7 @@ function watch_check(entry_path: ascii[]): i32 {
 }
 
 function cmd_build_after_check(): i32 {
+    stasis.llvm_emit_native_main = 1;
     let rc: i32 = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
     if (rc != 0) {
         return rc;
@@ -163,6 +526,7 @@ function cmd_build(): i32 {
 }
 
 function cmd_run_after_check(): i32 {
+    stasis.llvm_emit_native_main = 1;
     let rc: i32 = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
     if (rc != 0) {
         return rc;
@@ -267,6 +631,7 @@ function cmd_release(): i32 {
         return rc;
     }
 
+    stasis.llvm_emit_native_main = 1;
     rc = emit_main_return_i32_ir(stasis.arg_module, "llvm");
     if (rc != 0) {
         return rc;
@@ -367,6 +732,10 @@ function watch_build(): i32 {
 }
 
 function watch_run(): i32 {
+    if (stasis.watch_hot_swap != 0) {
+        return watch_run_hotswap();
+    }
+
     print_string("watch: run (polling)\n");
     print_string("watch: ctrl+c to stop\n");
 
@@ -1594,10 +1963,13 @@ function cli_cmd_watch(argc: i32): i32 {
         ascii_copy(stasis.arg_backend, "llvm");
         ascii_copy(stasis.arg_module, "module");
         stasis.use_mir = 0;
+        stasis.watch_hot_swap = 0;
+        stasis.watch_hot_fps = 60;
 
         let have_entry3: i32 = 0;
         let expect_backend3: i32 = 0;
         let expect_module3: i32 = 0;
+        let expect_fps3: i32 = 0;
 
         let i3: i32 = 0;
         for (i3 = 3; i3 < argc; i3 = i3 + 1) {
@@ -1606,45 +1978,62 @@ function cli_cmd_watch(argc: i32): i32 {
                 return 1;
             }
 
+            let handled: i32 = 0;
             if (expect_backend3 != 0) {
                 ascii_copy(stasis.arg_backend, stasis.scratch_import);
                 expect_backend3 = 0;
-            } else {
-                if (expect_module3 != 0) {
-                    ascii_copy(stasis.arg_module, stasis.scratch_import);
-                    expect_module3 = 0;
+                handled = 1;
+            }
+            if (handled == 0 && expect_module3 != 0) {
+                ascii_copy(stasis.arg_module, stasis.scratch_import);
+                expect_module3 = 0;
+                handled = 1;
+            }
+            if (handled == 0 && expect_fps3 != 0) {
+                stasis.watch_hot_fps = cli_parse_i32(stasis.scratch_import);
+                expect_fps3 = 0;
+                handled = 1;
+            }
+
+            if (handled == 0) {
+                if (ascii_eq(stasis.scratch_import, "-h") || ascii_eq(stasis.scratch_import, "--help")) {
+                    usage();
+                    return 0;
+                }
+
+                if (ascii_eq(stasis.scratch_import, "-q") || ascii_eq(stasis.scratch_import, "--quiet")) {
+                    stasis.quiet = 1;
                 } else {
-                    if (ascii_eq(stasis.scratch_import, "-h") || ascii_eq(stasis.scratch_import, "--help")) {
-                        usage();
-                        return 0;
-                    }
-
-                    if (ascii_eq(stasis.scratch_import, "-q") || ascii_eq(stasis.scratch_import, "--quiet")) {
-                        stasis.quiet = 1;
+                    if (ascii_eq(stasis.scratch_import, "--mir")) {
+                        stasis.use_mir = 1;
                     } else {
-                        if (ascii_eq(stasis.scratch_import, "--mir")) {
-                            stasis.use_mir = 1;
+                        if (ascii_eq(stasis.scratch_import, "--hot-swap")) {
+                            stasis.watch_hot_swap = 1;
                         } else {
-                            if (ascii_eq(stasis.scratch_import, "--backend")) {
-                                expect_backend3 = 1;
+                            if (ascii_eq(stasis.scratch_import, "--fps")) {
+                                expect_fps3 = 1;
                             } else {
-                                if (ascii_eq(stasis.scratch_import, "--module")) {
-                                    expect_module3 = 1;
+                                if (ascii_eq(stasis.scratch_import, "--backend")) {
+                                    expect_backend3 = 1;
                                 } else {
-                                    if (ascii_starts_with(stasis.scratch_import, "-")) {
-                                        print_string("error: unknown option: ");
-                                        print_string(stasis.scratch_import);
-                                        print_char(10);
-                                        return 1;
-                                    }
+                                    if (ascii_eq(stasis.scratch_import, "--module")) {
+                                        expect_module3 = 1;
+                                    } else {
+                                        if (ascii_starts_with(stasis.scratch_import, "-")) {
+                                            print_string("error: unknown option: ");
+                                            print_string(stasis.scratch_import);
+                                            print_char(10);
+                                            return 1;
+                                        }
 
-                                    if (have_entry3 != 0) {
-                                        print_string("error: watch run expects 1 <entry.stasis>\n");
-                                        usage();
-                                        return 1;
+                                        if (have_entry3 != 0) {
+                                            print_string("error: watch run expects 1 <entry.stasis>\n");
+                                            usage();
+                                            return 1;
+                                        }
+                                        ascii_copy(stasis.arg_entry, stasis.scratch_import);
+                                        have_entry3 = 1;
                                     }
-                                    ascii_copy(stasis.arg_entry, stasis.scratch_import);
-                                    have_entry3 = 1;
                                 }
                             }
                         }
@@ -1653,7 +2042,7 @@ function cli_cmd_watch(argc: i32): i32 {
             }
         }
 
-        if (expect_backend3 != 0 || expect_module3 != 0) {
+        if (expect_backend3 != 0 || expect_module3 != 0 || expect_fps3 != 0) {
             print_string("error: watch run missing option value\n");
             return 1;
         }

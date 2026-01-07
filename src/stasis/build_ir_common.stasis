@@ -83,6 +83,20 @@ function build_find_entry_main(): i32 {
     return -1;
 }
 
+function build_find_entry_tick(): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < stasis.func_count; i = i + 1) {
+        if (stasis.funcs[i].is_test == 0) {
+            if (stasis.funcs[i].file_idx == 0) {
+                if (span_eq(stasis.funcs[i].file_idx, stasis.funcs[i].name_start, stasis.funcs[i].name_len, "tick")) {
+                    return i;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
 function build_type_is_i32(type_idx: i32): bool {
     if (type_idx < 0 || type_idx >= stasis.type_count) {
         return false;

@@ -288,6 +288,7 @@ struct State {
     arg_module: ascii[96];
     emit_ir: i32;
     use_mir: i32;
+    llvm_emit_native_main: i32;
     ir_out: ascii[33554432];
     exec_cmd: ascii[4096];
 
@@ -312,6 +313,21 @@ struct State {
     // Watch mode scratch (incremental file reload).
     watch_imports_tmp: i32[1024];
     watch_imports_tmp_len: i32;
+
+    // Watch hot-swap
+    watch_hot_swap: i32;
+    watch_hot_fps: i32;
+    watch_hot_runner_pid: i32;
+    watch_hot_flip: i32;
+    watch_hot_ms_emit: i32;
+    watch_hot_ms_link: i32;
+    watch_hot_ms_swap_write: i32;
+    watch_hot_ms_total: i32;
+    watch_hot_runner_path: ascii[260];
+    watch_hot_swap_file: ascii[260];
+    watch_hot_ir_path: ascii[260];
+    watch_hot_dll_a: ascii[260];
+    watch_hot_dll_b: ascii[260];
 
     // Import/source graph
     files: File[300];

@@ -771,7 +771,17 @@ int main(int argc, char **argv)
     HMODULE lib = LoadLibraryA(dll_path);
     if (!lib)
     {
-        fprintf(stderr, "error: failed to load %s\n", dll_path);
+        DWORD err = GetLastError();
+        char msg[512];
+        msg[0] = '\0';
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL,
+                       err,
+                       0,
+                       msg,
+                       (DWORD)sizeof(msg),
+                       NULL);
+        fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", dll_path, err, msg);
         return 1;
     }
 
@@ -997,7 +1007,17 @@ int main(int argc, char **argv)
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
                             {
-                                fprintf(stderr, "error: failed to load %s\n", load_path);
+                                DWORD err = GetLastError();
+                                char msg[512];
+                                msg[0] = '\0';
+                                FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                               NULL,
+                                               err,
+                                               0,
+                                               msg,
+                                               (DWORD)sizeof(msg),
+                                               NULL);
+                                fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", load_path, err, msg);
                                 free(buffer);
                                 result = 1;
                                 break;
