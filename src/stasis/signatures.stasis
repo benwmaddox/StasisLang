@@ -488,6 +488,7 @@ function sig_parse_enum_decl(file_idx: i32): void {
     }
     sig_advance();
 
+    let next_value: i32 = 0;
     let done: i32 = 0;
     for (; done == 0; ) {
         if (stasis.sig_kind == Tok.RBrace) {
@@ -518,6 +519,11 @@ function sig_parse_enum_decl(file_idx: i32): void {
                             sig_advance();
                         }
                     }
+
+                    if (has_value == 0) {
+                        value = next_value;
+                    }
+                    next_value = value + 1;
 
                     if (stasis.enum_member_count >= ENUM_MEMBER_CAP) {
                         sig_err_here(file_idx, "exceeded enum member capacity");

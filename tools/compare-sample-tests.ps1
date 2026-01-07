@@ -1,10 +1,9 @@
 param(
-  [string]$TestsDir = 'tests',
+  [string[]]$Roots = @('samples', 'examples'),
   [string]$SelfHostExe = 'build/stasis_stage10.exe',
   [string]$Stage0Exe = 'build/aot/Stasis.Cli.exe',
   [string]$Backend = 'llvm',
-  [int]$Runs = 2,
-  [string]$OutCsv = 'build/test_perf_compare.csv'
+  [string]$OutCsv = 'build/sample_test_compare.csv'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,12 +38,21 @@ function Invoke-Timed {
   }
 }
 
+function Has-Tests([string]$path) {
+  $text = Get-Content $path -Raw
+  return ($text -match '(?m)^\s*test\s+')
+}
+
+function Uses-Graphics([string]$path) {
+  $text = Get-Content $path -Raw
+  return ($text -match 'graphics\.stasis' -or $text -match '\bgfx_' -or $text -match 'stasis_graphics')
+}
+
 $repoRoot = (Get-Location).Path
 if (!$repoRoot.EndsWith('\')) { $repoRoot = $repoRoot + '\' }
 
 $stage0 = Resolve-RepoPath $Stage0Exe
 $selfhost = Resolve-RepoPath $SelfHostExe
-$testsRoot = Resolve-RepoPath $TestsDir
 $outCsvPath = Resolve-RepoPath $OutCsv
 
 if (!(Test-Path $stage0)) { throw "Stage0 CLI not found: $stage0" }
@@ -59,49 +67,58 @@ if (!(Test-Path $selfhost)) {
   if ($null -eq $latest) { throw "Self-host exe not found: $selfhost" }
   $selfhost = $latest
 }
-if (!(Test-Path $testsRoot)) { throw "Tests dir not found: $testsRoot" }
 
-$files = Get-ChildItem -Recurse $testsRoot -Filter *.stasis | Sort-Object FullName
-if ($files.Count -eq 0) { throw "No .stasis files found under: $testsRoot" }
+$files = @()
+foreach ($root in $Roots) {
+  if (!(Test-Path $root)) { continue }
+  $files += Get-ChildItem -Recurse $root -Filter *.stasis
+}
+
+$files = @($files | Sort-Object FullName)
+if ($files.Count -eq 0) { throw "No .stasis files found under: $($Roots -join ', ')" }
 
 $rows = @()
 foreach ($file in $files) {
-  $rel = $file.FullName
+  $path = $file.FullName
+  if (!(Has-Tests $path)) { continue }
+
+  $rel = $path
   if ($rel.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
     $rel = $rel.Substring($repoRoot.Length)
   }
 
-  $stage0Runs = @()
-  $selfRuns = @()
-  $stage0Exit = 0
-  $selfExit = 0
-
-  for ($i = 0; $i -lt $Runs; $i++) {
-    $r0 = Invoke-Timed $stage0 test --backend $Backend $rel
-    $stage0Runs += $r0.Ms
-    if ($r0.ExitCode -ne 0) { $stage0Exit = $r0.ExitCode }
-
-    $r1 = Invoke-Timed $selfhost test --backend $Backend $rel
-    $selfRuns += $r1.Ms
-    if ($r1.ExitCode -ne 0) { $selfExit = $r1.ExitCode }
-  }
-
+  $graphics = Uses-Graphics $path
   $row = [ordered]@{
     file = $rel
-    stage0_exit = $stage0Exit
-    selfhost_exit = $selfExit
+    graphics = $graphics
+    stage0_exit = ''
+    stage0_ms = ''
+    selfhost_exit = ''
+    selfhost_ms = ''
+    note = ''
   }
-  for ($i = 0; $i -lt $Runs; $i++) {
-    $row["stage0_ms_run$($i+1)"] = $stage0Runs[$i]
-    $row["selfhost_ms_run$($i+1)"] = $selfRuns[$i]
+
+  if ($graphics) {
+    $row.note = 'skipped (graphics/interactive)'
+    $rows += [pscustomobject]$row
+    continue
   }
+
+  $r0 = Invoke-Timed $stage0 test --backend $Backend $rel
+  $r1 = Invoke-Timed $selfhost test --backend $Backend $rel
+
+  $row.stage0_exit = $r0.ExitCode
+  $row.stage0_ms = $r0.Ms
+  $row.selfhost_exit = $r1.ExitCode
+  $row.selfhost_ms = $r1.Ms
   $rows += [pscustomobject]$row
 }
 
 $rows | Export-Csv -NoTypeInformation -Encoding ascii -Path $outCsvPath
 
-$failStage0 = @($rows | Where-Object { $_.stage0_exit -ne 0 }).Count
-$failSelf = @($rows | Where-Object { $_.selfhost_exit -ne 0 }).Count
+$failed0 = @($rows | Where-Object { $_.stage0_exit -ne '' -and $_.stage0_exit -ne '0' }).Count
+$failed1 = @($rows | Where-Object { $_.selfhost_exit -ne '' -and $_.selfhost_exit -ne '0' }).Count
+$skipped = @($rows | Where-Object { $_.note -ne '' }).Count
 
 Write-Host "wrote: $outCsvPath"
-Write-Host ("files={0} stage0_failed={1} selfhost_failed={2} runs={3} backend={4}" -f $rows.Count, $failStage0, $failSelf, $Runs, $Backend)
+Write-Host ("files_with_tests={0} skipped={1} stage0_failed={2} selfhost_failed={3} backend={4}" -f $rows.Count, $skipped, $failed0, $failed1, $Backend)
