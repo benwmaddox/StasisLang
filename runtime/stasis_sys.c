@@ -285,11 +285,8 @@ int stasis_sys_file_mtime_ms(const char *path)
 
     uint64_t unix_100ns = ft.QuadPart - epoch_diff_100ns;
     uint64_t ms = unix_100ns / 10000ULL;
-    if (ms > 0x7fffffffULL)
-    {
-        return 0x7fffffff;
-    }
-    return (int)ms;
+    // Preserve change detection semantics while staying in i32: wrap into the signed range.
+    return (int)(ms & 0x7fffffffULL);
 #else
     return -1;
 #endif
