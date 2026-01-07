@@ -68,6 +68,7 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
 {
     let triple = Triple::from_str(target)
         .map_err(|_| anyhow::anyhow!("invalid target triple: {target}"))?;
+    let target_is_windows = matches!(triple.operating_system, OperatingSystem::Windows);
 
     let flags = build_flags(opt_level, &triple)?;
     let isa = isa::lookup(triple.clone())
@@ -111,8 +112,16 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
     let mut function_ids = std::collections::HashMap::new();
     for ext in &parsed.externals
     {
-        // Alias printf_* to printf (workaround for variadic printf)
-        let link_name = if ext.name == "printf_str" || ext.name == "printf3" { "printf" } else { &ext.name };
+        // Alias printf3 to either printf (Windows) or a fixed-arity wrapper (SysV varargs can crash if called as non-variadic).
+        let link_name =
+            if ext.name == "printf_str" || ext.name == "printf3"
+            {
+                if target_is_windows { "printf" } else { "stasis_printf3" }
+            }
+            else
+            {
+                &ext.name
+            };
 
         let id = module
             .declare_function(link_name, Linkage::Import, &ext.signature)

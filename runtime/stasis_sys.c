@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -745,6 +746,132 @@ int stasis_sys_read_int(void)
         return 0;
     }
     return (int)v;
+}
+
+/*
+ * Fixed-arity printf wrapper for Cranelift output.
+ *
+ * On some ABIs (notably SysV), calling variadic functions requires extra
+ * calling convention machinery (register save area). Treating printf as a
+ * non-variadic import can crash at runtime, so Cranelift lowers print_* builtins
+ * to this fixed signature instead.
+ */
+int stasis_printf3(const char *fmt, int64_t arg1, int64_t arg2)
+{
+    if (!fmt)
+    {
+        return 0;
+    }
+
+    /* Count up to two format specifiers (skip %%). */
+    int spec_count = 0;
+    char specs[2] = {0, 0};
+    int lens[2] = {0, 0}; /* 0=default, 1=l, 2=ll */
+
+    for (const char *p = fmt; *p && spec_count < 2; p++)
+    {
+        if (*p != '%')
+        {
+            continue;
+        }
+
+        p++;
+        if (!*p)
+        {
+            break;
+        }
+        if (*p == '%')
+        {
+            continue;
+        }
+
+        /* length modifier */
+        int len = 0;
+        if (*p == 'l')
+        {
+            len = 1;
+            if (p[1] == 'l')
+            {
+                len = 2;
+                p++;
+            }
+            p++;
+        }
+
+        /* specifier */
+        char s = *p;
+        if (s == 'd' || s == 'i' || s == 'u' || s == 'x' || s == 'X' || s == 'c' || s == 's')
+        {
+            lens[spec_count] = len;
+            specs[spec_count] = s;
+            spec_count++;
+        }
+    }
+
+    if (spec_count == 0)
+    {
+        return fputs(fmt, stdout) < 0 ? -1 : 0;
+    }
+
+    if (spec_count == 1)
+    {
+        switch (specs[0])
+        {
+            case 's':
+                return printf(fmt, (const char *)(intptr_t)arg1);
+            case 'c':
+                return printf(fmt, (int)arg1);
+            case 'u':
+            case 'x':
+            case 'X':
+                if (lens[0] == 2)
+                {
+                    return printf(fmt, (unsigned long long)arg1);
+                }
+                if (lens[0] == 1)
+                {
+                    return printf(fmt, (unsigned long)arg1);
+                }
+                return printf(fmt, (unsigned int)arg1);
+            case 'd':
+            case 'i':
+            default:
+                if (lens[0] == 2)
+                {
+                    return printf(fmt, (long long)arg1);
+                }
+                if (lens[0] == 1)
+                {
+                    return printf(fmt, (long)arg1);
+                }
+                return printf(fmt, (int)arg1);
+        }
+    }
+
+    /* spec_count == 2 */
+    if (specs[0] == 's' && specs[1] == 's')
+    {
+        return printf(fmt, (const char *)(intptr_t)arg1, (const char *)(intptr_t)arg2);
+    }
+    if (specs[0] == 's' && specs[1] == 'd')
+    {
+        return printf(fmt, (const char *)(intptr_t)arg1, (int)arg2);
+    }
+    if (specs[0] == 's' && specs[1] == 'i')
+    {
+        return printf(fmt, (const char *)(intptr_t)arg1, (int)arg2);
+    }
+    if ((specs[0] == 'd' || specs[0] == 'i') && (specs[1] == 'd' || specs[1] == 'i'))
+    {
+        return printf(fmt, (int)arg1, (int)arg2);
+    }
+    if (specs[0] == 'c' && specs[1] == 'c')
+    {
+        return printf(fmt, (int)arg1, (int)arg2);
+    }
+
+    /* Fallback: treat args as int64. */
+    return printf(fmt, (long long)arg1, (long long)arg2);
 }
 
 int stasis_sys_list_dir(const char *path, unsigned char *out, int out_cap)
