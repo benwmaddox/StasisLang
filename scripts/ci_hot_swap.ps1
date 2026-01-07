@@ -72,7 +72,6 @@ function Run-HotSwapBench {
     $errLog = Join-Path $buildDir ("ci_{0}.err.log" -f $Name)
 
     $cap = Start-LoggedProcess -Exe $Exe -ProcessArgs $CompilerArgs -OutLog $outLog -ErrLog $errLog -Env $Env
-    Start-Sleep -Seconds 2
 
     function Read-TextFileShared {
         param([string]$Path)
@@ -88,6 +87,37 @@ function Run-HotSwapBench {
             if ($fs) { try { $fs.Dispose() } catch {} }
         }
     }
+
+    function Wait-ForText {
+        param(
+            [string]$Path,
+            [string]$Pattern,
+            [int]$TimeoutMs
+        )
+
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($cap.Process.HasExited) { throw "$Name compiler exited early (code=$($cap.Process.ExitCode))" }
+            if (Test-Path $Path) {
+                try {
+                    $text = Read-TextFileShared -Path $Path
+                    if ($text -match $Pattern) { return }
+                } catch {
+                    # ignore
+                }
+            }
+            Start-Sleep -Milliseconds 50
+        }
+
+        throw "$Name timed out waiting for $Pattern in $Path"
+    }
+
+    # Wait for the initial build to finish (and the watch loop/file watcher to be set up) before editing.
+    Wait-ForText -Path $errLog -Pattern "HOTRELOAD phases\(ms\):" -TimeoutMs 180000
+    if (![string]::IsNullOrEmpty($SwapOkLog)) {
+        try { Wait-ForText -Path $SwapOkLog -Pattern "HOTSWAP loading:|HOTSWAP ok:" -TimeoutMs 60000 } catch {}
+    }
+    Start-Sleep -Milliseconds 250
 
     function Get-SwapOkCount {
         if (![string]::IsNullOrEmpty($SwapOkLog) -and (Test-Path $SwapOkLog)) {
@@ -138,7 +168,7 @@ function Run-HotSwapBench {
     for ($i = 0; $i -lt $Iterations; $i++) {
         if ($cap.Process.HasExited) { throw "$Name compiler exited early (code=$($cap.Process.ExitCode))" }
         $prevCount = Get-SwapOkCount
-        Add-Content -Path "samples/hotstate_tick_watch.stasis" -Value "// ci bench $Name $i"
+        Add-Content -Path "samples/hotstate_tick_watch.stasis" -Value "// ci bench $Name $i" -Encoding ascii
         Start-Sleep -Milliseconds $SleepAfterEditMs
         Wait-ForSwapOk -PrevCount $prevCount
     }

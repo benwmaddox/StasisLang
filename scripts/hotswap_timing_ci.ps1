@@ -4,6 +4,8 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $sample = Join-Path $root "samples\hotstate_tick_watch.stasis"
 $outLog = Join-Path $root "build\ci_hotswap_timing.out.log"
 $errLog = Join-Path $root "build\ci_hotswap_timing.err.log"
+$sampleBase = [System.IO.Path]::GetFileNameWithoutExtension($sample)
+$runnerErrLog = Join-Path $root ("build\hotstate\{0}.hot.runner.err.log" -f $sampleBase)
 
 if (-not (Test-Path $sample)) {
     Write-Error "Sample not found: $sample"
@@ -50,6 +52,7 @@ function Fail([string]$message) {
     Write-Host $message
     Show-LogTail "ERR" $errLog
     Show-LogTail "OUT" $outLog
+    Show-LogTail "RUNNER_ERR" $runnerErrLog
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
     exit 1
 }
@@ -59,6 +62,7 @@ if (Test-Path $aotTool) {
     Write-Host ("AOT: {0}" -f $aotTool)
 }
 Write-Host ("Sample: {0}" -f $sample)
+Write-Host ("Runner log: {0}" -f $runnerErrLog)
 
 $cliProject = Join-Path $root "Stasis.Cli\Stasis.Cli.csproj"
 $cmd = "dotnet"
@@ -73,8 +77,8 @@ function Wait-ForLine([string]$pattern, [int]$timeoutSeconds, [Diagnostics.Proce
         if ($proc.HasExited) {
             return $false
         }
-        if (Test-Path $errLog) {
-            $lines = Get-Content $errLog -ErrorAction SilentlyContinue
+        if (Test-Path $runnerErrLog) {
+            $lines = Get-Content $runnerErrLog -ErrorAction SilentlyContinue
             if ($lines | Where-Object { $_ -match $pattern }) {
                 return $true
             }
@@ -135,25 +139,29 @@ if (Test-Path $errLog) {
 } else {
     $errLines = @()
 }
+$runnerLines = if (Test-Path $runnerErrLog) { Get-Content $runnerErrLog } else { @() }
 $parseAttempts = 0
 do {
     $parseAttempts++
-    $layoutWarnings = $errLines | Where-Object { $_ -match "^HOTSWAP warning: state layout changed" }
+    $layoutWarnings = $runnerLines | Where-Object { $_ -match "^HOTSWAP warning: state layout changed" }
     $reloads = @()
     $swaps = @()
     foreach ($line in $errLines) {
-        if ($line -match "HOTRELOAD phases\\(ms\\):") {
+        if ($line -match "HOTRELOAD phases\(ms\):") {
             $fields = @{}
-            $parts = $line -replace ".*HOTRELOAD phases\\(ms\\):\\s*", "" -split "\\s+"
+            $parts = $line -replace ".*HOTRELOAD phases\(ms\):\s*", "" -split "\s+"
             foreach ($p in $parts) {
-                if ($p -match "^(\\w+)=([0-9]+)$") { $fields[$matches[1]] = [int]$matches[2] }
+                if ($p -match "^(\w+)=([0-9]+)$") { $fields[$matches[1]] = [int]$matches[2] }
             }
             if ($fields.ContainsKey("total")) { $reloads += $fields }
-        } elseif ($line -match "HOTSWAP ok:") {
+        }
+    }
+    foreach ($line in $runnerLines) {
+        if ($line -match "HOTSWAP ok:") {
             $fields = @{}
-            $parts = $line -replace ".*HOTSWAP ok:\\s*", "" -split "\\s+"
+            $parts = $line -replace ".*HOTSWAP ok:\s*", "" -split "\s+"
             foreach ($p in $parts) {
-                if ($p -match "^(\\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+                if ($p -match "^(\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
             }
             if ($fields.ContainsKey("load")) { $swaps += $fields }
         }
@@ -161,21 +169,22 @@ do {
     if ($swaps.Count -eq 0 -and $parseAttempts -lt 5) {
         Start-Sleep -Seconds 2
         $errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
+        $runnerLines = if (Test-Path $runnerErrLog) { Get-Content $runnerErrLog } else { @() }
     }
 } while ($swaps.Count -eq 0 -and $parseAttempts -lt 5)
 
 if ($swaps.Count -eq 0) {
-    if (Test-Path $errLog) {
+    if (Test-Path $runnerErrLog) {
         Start-Sleep -Seconds 5
-        $raw = Get-Content $errLog -Raw
+        $raw = Get-Content $runnerErrLog -Raw
         $rawMatches = [regex]::Matches($raw, "HOTSWAP ok:[^\r\n]*")
         if ($rawMatches.Count -gt 0) {
             $swaps = @()
             foreach ($m in $rawMatches) {
                 $fields = @{}
-                $parts = $m.Value -replace ".*HOTSWAP ok:\\s*", "" -split "\\s+"
+                $parts = $m.Value -replace ".*HOTSWAP ok:\s*", "" -split "\s+"
                 foreach ($p in $parts) {
-                    if ($p -match "^(\\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+                    if ($p -match "^(\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
                 }
                 if ($fields.ContainsKey("load")) { $swaps += $fields }
             }
