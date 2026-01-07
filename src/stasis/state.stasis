@@ -309,6 +309,10 @@ struct State {
     resolve_epoch: i32;
     resolve_sp: i32;
 
+    // Watch mode scratch (incremental file reload).
+    watch_imports_tmp: i32[1024];
+    watch_imports_tmp_len: i32;
+
     // Import/source graph
     files: File[300];
     file_count: i32;

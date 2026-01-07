@@ -42,10 +42,21 @@ function watch_check(entry_path: ascii[]): i32 {
     for (tick = 0; 1; tick = tick + 1) {
         sys_sleep_ms(200);
 
-        if (any_file_mtime_changed()) {
-            print_string("watch: rebuilding\n");
-            rc = load_graph(entry_path);
-            if (rc == 0) {
+        let reload_rc: i32 = watch_reload_changed_files();
+        if (reload_rc != 0) {
+            if (stasis.quiet == 0) {
+                print_string("watch: rebuilding\n");
+            }
+
+            if (reload_rc == 2) {
+                rc = load_graph(entry_path);
+                if (rc == 0) {
+                    rc = check_loaded_files();
+                }
+            } else {
+                if (reload_rc < 0) {
+                    return 1;
+                }
                 rc = check_loaded_files();
             }
         }
@@ -54,17 +65,8 @@ function watch_check(entry_path: ascii[]): i32 {
     return rc;
 }
 
-function cmd_build(): i32 {
-    let rc: i32 = load_graph(stasis.arg_entry);
-    if (rc != 0) {
-        return rc;
-    }
-    rc = check_loaded_files();
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
+function cmd_build_after_check(): i32 {
+    let rc: i32 = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
     if (rc != 0) {
         return rc;
     }
@@ -147,12 +149,7 @@ function cmd_build(): i32 {
     return exit_code;
 }
 
-function cmd_run(): i32 {
-    if (!ascii_eq(stasis.arg_backend, "llvm")) {
-        print_string("error: run currently supports --backend llvm only\n");
-        return 1;
-    }
-
+function cmd_build(): i32 {
     let rc: i32 = load_graph(stasis.arg_entry);
     if (rc != 0) {
         return rc;
@@ -162,7 +159,11 @@ function cmd_run(): i32 {
         return rc;
     }
 
-    rc = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
+    return cmd_build_after_check();
+}
+
+function cmd_run_after_check(): i32 {
+    let rc: i32 = emit_main_return_i32_ir(stasis.arg_module, stasis.arg_backend);
     if (rc != 0) {
         return rc;
     }
@@ -236,6 +237,24 @@ function cmd_run(): i32 {
     ascii_append(stasis.exec_cmd, stasis.scratch_exe);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     return sys_exec(stasis.exec_cmd);
+}
+
+function cmd_run(): i32 {
+    if (!ascii_eq(stasis.arg_backend, "llvm")) {
+        print_string("error: run currently supports --backend llvm only\n");
+        return 1;
+    }
+
+    let rc: i32 = load_graph(stasis.arg_entry);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_loaded_files();
+    if (rc != 0) {
+        return rc;
+    }
+
+    return cmd_run_after_check();
 }
 
 function cmd_release(): i32 {
@@ -314,15 +333,33 @@ function watch_build(): i32 {
     print_string("watch: build (polling)\n");
     print_string("watch: ctrl+c to stop\n");
 
-    let rc: i32 = cmd_build();
+    let rc: i32 = load_graph(stasis.arg_entry);
+    if (rc == 0) {
+        rc = check_loaded_files();
+    }
+    if (rc == 0) {
+        rc = cmd_build_after_check();
+    }
 
     let tick: i32 = 0;
     for (tick = 0; 1; tick = tick + 1) {
         sys_sleep_ms(200);
 
-        if (any_file_mtime_changed()) {
-            print_string("watch: rebuilding\n");
-            rc = cmd_build();
+        let reload_rc: i32 = watch_reload_changed_files();
+        if (reload_rc != 0) {
+            if (stasis.quiet == 0) {
+                print_string("watch: rebuilding\n");
+            }
+            if (reload_rc == 2) {
+                rc = load_graph(stasis.arg_entry);
+                if (rc == 0) { rc = check_loaded_files(); }
+            } else {
+                if (reload_rc < 0) { return 1; }
+                rc = check_loaded_files();
+            }
+            if (rc == 0) {
+                rc = cmd_build_after_check();
+            }
         }
     }
 
@@ -333,15 +370,33 @@ function watch_run(): i32 {
     print_string("watch: run (polling)\n");
     print_string("watch: ctrl+c to stop\n");
 
-    let rc: i32 = cmd_run();
+    let rc: i32 = load_graph(stasis.arg_entry);
+    if (rc == 0) {
+        rc = check_loaded_files();
+    }
+    if (rc == 0) {
+        rc = cmd_run_after_check();
+    }
 
     let tick: i32 = 0;
     for (tick = 0; 1; tick = tick + 1) {
         sys_sleep_ms(200);
 
-        if (any_file_mtime_changed()) {
-            print_string("watch: rebuilding\n");
-            rc = cmd_run();
+        let reload_rc: i32 = watch_reload_changed_files();
+        if (reload_rc != 0) {
+            if (stasis.quiet == 0) {
+                print_string("watch: rebuilding\n");
+            }
+            if (reload_rc == 2) {
+                rc = load_graph(stasis.arg_entry);
+                if (rc == 0) { rc = check_loaded_files(); }
+            } else {
+                if (reload_rc < 0) { return 1; }
+                rc = check_loaded_files();
+            }
+            if (rc == 0) {
+                rc = cmd_run_after_check();
+            }
         }
     }
 
