@@ -1,9 +1,11 @@
 name: hot-swap-bench
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch: {}
-  push:
-    branches: [ self-host ]
   pull_request:
     branches: [ main, self-host ]
 
