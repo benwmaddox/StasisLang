@@ -175,7 +175,17 @@ function Run-HotSwapBench {
         Write-Host $label
         Write-Host $path
         if (Test-Path $path) {
-            try { Get-Content -Tail $lines $path } catch {}
+            try {
+                $info = Get-Item $path -ErrorAction Stop
+                Write-Host ("(size={0} bytes)" -f $info.Length)
+            } catch {
+                Write-Host ("(size=unknown: {0})" -f $_.Exception.Message)
+            }
+            try {
+                Get-Content -Tail $lines $path -ErrorAction Stop
+            } catch {
+                Write-Host ("(failed to read: {0})" -f $_.Exception.Message)
+            }
         } else {
             Write-Host "(missing)"
         }
