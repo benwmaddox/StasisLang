@@ -9,7 +9,11 @@ on:
 
 jobs:
   hot-swap:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -21,9 +25,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: MSVC dev cmd
+        if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Tools (clang)
+      - name: Tools (clang) [Windows]
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
@@ -31,12 +37,23 @@ jobs:
           }
           clang --version
 
+      - name: Tools (clang/lld) [Linux]
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+          clang --version
+          ld.lld --version
+
       - name: Build cranelift-aot (release)
         shell: pwsh
         run: |
           cargo build -p stasis-cranelift-aot --release --manifest-path tools/cranelift-aot/Cargo.toml
 
-      - name: Build native runner + sys runtime (no SDL)
+      - name: Build native runner + sys runtime (no SDL) [Windows]
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path runtime/build/bin/Release | Out-Null
@@ -49,22 +66,26 @@ jobs:
           Copy-Item -Force runtime/build/Release/stasis_sys_static.lib build/stasis_sys_static.lib
           Copy-Item -Force runtime/build/Release/stasis_sys_static.lib stasis_sys_static.lib
 
+      - name: Build native runner + sys runtime (no SDL) [Linux]
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p runtime/build/bin/Release runtime/build/Release build
+          clang -O2 -Wno-unused-function -D_CRT_SECURE_NO_WARNINGS \
+            runtime/stasis_runner.c runtime/stasis_data.c runtime/cJSON.c \
+            -ldl -o runtime/build/bin/Release/stasis_runner
+          clang -O2 -D_CRT_SECURE_NO_WARNINGS -c runtime/stasis_sys.c -o runtime/build/Release/stasis_sys_static.o
+          ar rcs runtime/build/Release/libstasis_sys_static.a runtime/build/Release/stasis_sys_static.o
+          cp -f runtime/build/bin/Release/stasis_runner build/stasis_runner
+          cp -f runtime/build/bin/Release/stasis_runner stasis_runner
+          cp -f runtime/build/Release/libstasis_sys_static.a build/libstasis_sys_static.a
+          cp -f runtime/build/Release/libstasis_sys_static.a libstasis_sys_static.a
+
       - name: Build C# compiler (release)
         shell: pwsh
         run: |
           dotnet build Stasis.Cli/Stasis.Cli.csproj -c Release
-
-      - name: Build self-host compiler exe (via C# compiler)
-        shell: pwsh
-        run: |
-          $stasisc = Get-ChildItem -Recurse -Filter "Stasis.Cli.exe" -Path "Stasis.Cli\\bin" |
-            Where-Object { $_.FullName -like "*\\Release\\net9.0\\Stasis.Cli.exe" } |
-            Select-Object -First 1
-          if (!$stasisc) {
-            Get-ChildItem -Recurse -Path "Stasis.Cli\\bin" | Select-Object -First 100 | Format-Table -AutoSize
-            throw "missing Stasis.Cli.exe under Stasis.Cli\\bin"
-          }
-          & $stasisc.FullName build src/stasis/main.stasis --backend llvm --module stasis --out build/stasis_selfhost.exe --opt-level 3 --lto
 
       - name: Hot swap benchmark
         shell: pwsh

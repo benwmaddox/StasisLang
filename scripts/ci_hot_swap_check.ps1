@@ -101,15 +101,9 @@ function Check-Thresholds {
     return 0
 }
 
-$selfOut = Join-Path $repoRoot "build/ci_selfhost.out.log"
-$selfErr = Join-Path $repoRoot "build/ci_selfhost.err.log"
-$csOut = Join-Path $repoRoot "build/ci_csharp.out.log"
-$csErr = Join-Path $repoRoot "build/ci_csharp.err.log"
+$outLog = Join-Path $repoRoot "build/ci_cranelift.out.log"
+$errLog = Join-Path $repoRoot "build/ci_cranelift.err.log"
 
-$self = Get-Latencies -OutLog $selfOut -ErrLog $selfErr -MaxCount $Iterations
-$cs = Get-Latencies -OutLog $csOut -ErrLog $csErr -MaxCount $Iterations
-
-$rc1 = Check-Thresholds -Name "selfhost" -Latencies $self
-$rc2 = Check-Thresholds -Name "csharp" -Latencies $cs
-
-exit ([Math]::Max($rc1, $rc2))
+$latencies = Get-Latencies -OutLog $outLog -ErrLog $errLog -MaxCount $Iterations
+$rc = Check-Thresholds -Name "cranelift" -Latencies $latencies
+exit $rc
