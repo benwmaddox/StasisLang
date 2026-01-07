@@ -4,7 +4,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 
 ## Inbox
 
-- [x] Fix PR `#24` (enum explicit values + SDL scancodes): resolve conflicts and restore CI green.
+- [ ] Close self-host compiler gap: execute `docs/self-host-gap-closure.md`.
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
@@ -16,7 +16,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
 - [ ] Follow through: execute `docs/android-plan.md` (Android runtime build + host proof-of-concept).
 - [ ] Follow through: execute `docs/brickout-android-debug-plan.md` (debug APK + adb asset push workflow).
-- [ ] Follow through: execute `docs/self-hosted-compiler-plan.md` (bootstrap milestones).
+- [ ] Follow through: review `docs/self-hosted-compiler-plan.md` (background; superseded by `docs/self-host-gap-closure.md`).
 - [ ] Follow through: execute `docs/svg-migration-plan.md` (finish SVG pipeline + validation).
 - [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 - [ ] Maintenance: regularly scan open PRs for merge conflicts and fix by merging `main` into the PR branch (or rebasing) so PRs stay mergeable.
