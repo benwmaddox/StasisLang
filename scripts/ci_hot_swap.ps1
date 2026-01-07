@@ -186,6 +186,18 @@ function Run-HotSwapBench {
             } catch {
                 Write-Host ("(failed to read: {0})" -f $_.Exception.Message)
             }
+
+            # If the file is very small and line parsing yields nothing, dump raw bytes for diagnostics.
+            try {
+                $info = Get-Item $path -ErrorAction Stop
+                if ($info.Length -gt 0 -and $info.Length -le 4096) {
+                    $bytes = [System.IO.File]::ReadAllBytes($path)
+                    $hex = ($bytes | ForEach-Object { $_.ToString("X2") }) -join " "
+                    Write-Host "(raw hex) $hex"
+                }
+            } catch {
+                # ignore
+            }
         } else {
             Write-Host "(missing)"
         }
