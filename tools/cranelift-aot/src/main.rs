@@ -74,12 +74,13 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
         .context("failed to look up ISA for target")?
         .finish(flags)
         .context("failed to finalize ISA")?;
+    let default_cc = isa.default_call_conv();
 
     let builder = ObjectBuilder::new(isa, module_name.to_string(), default_libcall_names())
         .context("failed to create ObjectBuilder")?;
     let mut module = ObjectModule::new(builder);
 
-    let parsed = parse_stasis_clif(clif).context("failed to parse stasis CLIF")?;
+    let parsed = parse_stasis_clif(clif, default_cc).context("failed to parse stasis CLIF")?;
 
     // First declare all globals.
     let mut data_ids = std::collections::HashMap::new();
@@ -308,7 +309,7 @@ struct ParsedBlock
     instructions: Vec<String>,
 }
 
-fn parse_stasis_clif(input: &str) -> Result<ParsedModule>
+fn parse_stasis_clif(input: &str, default_cc: CallConv) -> Result<ParsedModule>
 {
     let mut globals = Vec::new();
     let mut externals = Vec::new();
@@ -338,7 +339,7 @@ fn parse_stasis_clif(input: &str) -> Result<ParsedModule>
         if line.starts_with("external ")
         {
             lines.next();
-            let (name, signature) = parse_external_decl(line)
+            let (name, signature) = parse_external_decl(line, default_cc)
                 .with_context(|| format!("failed to parse external declaration: {line}"))?;
             externals.push(ParsedExternal { name, signature });
             continue;
@@ -353,7 +354,7 @@ fn parse_stasis_clif(input: &str) -> Result<ParsedModule>
         let (_, header_line) = lines.next().unwrap();
         let header = header_line.trim();
 
-        let (name, signature) = parse_function_header(header)
+        let (name, signature) = parse_function_header(header, default_cc)
             .with_context(|| format!("failed to parse function header: {header}"))?;
 
         // Collect body lines until closing brace.
@@ -483,7 +484,7 @@ fn parse_bytes_literal_comment(comment: &str) -> Option<Vec<u8>>
     Some(bytes)
 }
 
-fn parse_external_decl(line: &str) -> Result<(String, Signature)>
+fn parse_external_decl(line: &str, default_cc: CallConv) -> Result<(String, Signature)>
 {
     // Example: "external printf(i64) -> i32 windows_fastcall"
     // Strip "external " prefix
@@ -501,7 +502,7 @@ fn parse_external_decl(line: &str) -> Result<(String, Signature)>
     let param_str = rest[open + 1..close].trim();
     let after = rest[close + 1..].trim();
 
-    let mut sig = Signature::new(CallConv::WindowsFastcall);
+    let mut sig = Signature::new(default_cc);
 
     if !param_str.is_empty()
     {
@@ -523,7 +524,7 @@ fn parse_external_decl(line: &str) -> Result<(String, Signature)>
     Ok((name, sig))
 }
 
-fn parse_function_header(line: &str) -> Result<(String, Signature)>
+fn parse_function_header(line: &str, default_cc: CallConv) -> Result<(String, Signature)>
 {
     // Example:
     // function %main() -> i32 windows_fastcall {
@@ -547,7 +548,7 @@ fn parse_function_header(line: &str) -> Result<(String, Signature)>
     let param_str = rest[open + 1..close].trim();
     let after = rest[close + 1..].trim();
 
-    let mut sig = Signature::new(CallConv::WindowsFastcall);
+    let mut sig = Signature::new(default_cc);
 
     if !param_str.is_empty()
     {
