@@ -7,7 +7,7 @@ This is a living design + progress document for the `self-host` branch.
 ## Non-Negotiables
 
 - Self-hosted compiler is written in Stasis and is directly runnable as a CLI (no C# wrapper required at runtime).
-- Supports up to 300 source files per build (imports), up to 50 KiB per file.
+- Supports up to 300 source files per build (imports), up to 1 MiB per file.
 - Provides CLI modes: `watch`, `run`, `release` (and `build`/`test` as needed for parity).
 - No import expansion/flattening: compilation operates on a multi-file source graph.
 - Emits either:
@@ -133,8 +133,8 @@ Notes:
 Hard limits (per compilation):
 
 - Max files: 300
-- Max bytes per file: 51200 (50 KiB)
-- Max total source bytes: 300 * 51200 = 15360000
+- Max bytes per file: 1048576 (1 MiB)
+- Max total source bytes: 300 * 1048576 = 314572800
 
 Planned static allocations in `stasis` (tunable as we learn real-world pressure):
 
@@ -190,7 +190,7 @@ This milestone includes:
 
 - Parse argv, print usage
 - Read a single `.stasis` file into a fixed buffer
-- Load the import graph (up to 300 files, 50 KiB each) without flattening
+- Load the import graph (up to 300 files, 1 MiB each) without flattening
 - Emit "phase timing" logs similar to the C# CLI (optional but useful for watch)
 
 Implementation notes:
@@ -265,8 +265,8 @@ We will reach this in stages: first "compile more programs", then "compile most 
 ## Import + Source Limits (Enforced)
 
 - Max files: 300 (including stdlib imports).
-- Max bytes per file: 51200.
-- Max total source bytes: 300 * 51200 = 15360000 (plus small headers).
+- Max bytes per file: 1048576.
+- Max total source bytes: 300 * 1048576 = 314572800 (plus small headers).
 
 If a limit is exceeded, compilation fails with a precise diagnostic:
 - which import exceeded the limit
@@ -281,6 +281,7 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed Cranelift backend to accept string literals for `sys_*` string args; updated syscalls smoke test to use `argv0` paths (backend-independent).
 - 2026-01-05: added `sys_file_size` to support enforcing per-file byte limits (50 KiB) without ambiguous truncation.
 - 2026-01-05: implemented import graph loading (300 files / 50 KiB limits) and fixed Cranelift `print_string` to accept array/string args.
+- 2026-01-07: raised per-file import limit to 1 MiB and increased the source pool to 320 MiB.
 - 2026-01-05: added `tests/stasis_imports.stasis` coverage for import graph loading + limits; taught LLVM lowering to accept string literals as array arguments (needed for stasis under LLVM).
 - 2026-01-05: added `sys_sleep_ms` (polling watch support) and implemented `stasis watch check` based on `sys_file_mtime_ms`.
 - 2026-01-05: added `src/stasis/lexing.stasis` streaming lexer + `tests/stasis_lexing.stasis` coverage (comments, numbers, keywords, punctuation).
@@ -292,7 +293,7 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-05: fixed LLVM + Cranelift lowering for string-buffer headers on flattened struct fields (needed for `stasis.scratch_*` and other `ascii[N]` fields inside `stasis`).
 - 2026-01-05: fixed `tools/cranelift-aot` to accept `load.r64` (pointer) instructions.
 - 2026-01-05: fixed Stage0 Cranelift artifact cache invalidation under `dotnet run` by salting with loaded assembly stamps (CLI + compiler).
-- 2026-01-05: tokenizer now uses `enum ShTok { ... }` (explicit numeric values) instead of `const SH_TOK_*`.
+- 2026-01-05: tokenizer now uses `enum Tok { ... }` (explicit numeric values) instead of `const TOK_*` constants.
 - 2026-01-05: clarified module import semantics: imported module members are in scope by default; use `ModuleName.symbol` only to disambiguate.
 - 2026-01-05: `stasis check` now prints lexer error diagnostics (file + line/col) for unknown bytes and unterminated string literals.
 - 2026-01-05: added `--quiet` to `stasis check` and `stasis watch check` to suppress diagnostics (useful for scripting/watch output).
@@ -322,10 +323,10 @@ If a limit is exceeded, compilation fails with a precise diagnostic:
 - 2026-01-06: grew `stasis.ir_out` to 32MiB; added LLVM module-level string literal emission (utf8 header + null sentinel) and added IR tests.
 - 2026-01-06: LLVM bring-up: lowered `print_string`/`print_int`/`print_char` and `sys_*` builtins via `printf` and `stasis_sys_*`; added IR tests.
 - 2026-01-06: fixed expression parsing of `)` so calls can close inside grouping parentheses (needed for self-host compiler code).
-- 2026-01-06: refactored LLVM IR emitter files to keep each `.stasis` source <50KiB; added void returns, char_* builtins, const resolution, and enum member lowering.
+- 2026-01-06: refactored LLVM IR emitter files for size/manageability; added void returns, char_* builtins, const resolution, and enum member lowering.
 - 2026-01-06: stage1 self-build now works: `stasis build --emit-ir src/stasis/main.stasis` emits `build/stasis_self.ll` with no stage0 help beyond bootstrap.
 - 2026-01-06: `stasis build`/`run`/`release` now link the sys runtime (`runtime/stasis_sys.c`) when invoking `clang`; `run` uses a temp exe instead of `lli`.
-- 2026-01-06: LLVM bring-up: added `f32` support end-to-end (float literals, `f32` types, locals/params/returns, `+ - * /`, comparisons, consts); added `i32_to_f32` / `f32_to_i32` intrinsics; split call lowering to keep files <50KiB; added `examples/f32_smoke.stasis`.
+- 2026-01-06: LLVM bring-up: added `f32` support end-to-end (float literals, `f32` types, locals/params/returns, `+ - * /`, comparisons, consts); added `i32_to_f32` / `f32_to_i32` intrinsics; split call lowering for size/manageability; added `examples/f32_smoke.stasis`.
 - 2026-01-06: added extern function declarations (`function name(...): type;`) for runtime bindings; lowered extern calls to `stasis_<name>` and emitted LLVM `declare` lines for them.
 - 2026-01-06: filled in `src/stdlib/graphics.stasis` with runtime bindings and updated `examples/flappy_birds*.stasis` to match the current `gfx_*` API.
 - 2026-01-06: fixed LLVM float literal emission by emitting `fptrunc double <lit> to float` (clang-as does not accept decimal constants directly in `float` contexts).

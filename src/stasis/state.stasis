@@ -269,7 +269,8 @@ struct State {
     files: File[300];
     file_count: i32;
 
-    pool: u8[134217728];
+    // Source bytes pool. Sized to allow MAX_FILES (300) at MAX_FILE_BYTES (1 MiB) each, plus slack.
+    pool: u8[335544320];
     pool_len: i32;
 
     path_pool: u8[90000];

@@ -160,10 +160,10 @@ import "relative/path/to/file.stasis";
 ```
 
 - Imports are resolved relative to the importing file.
+- Each imported file is a module (file = module); imports introduce modules (see "Modules").
 - Imported files are included once (duplicate imports are ignored).
-- Compilers may implement imports via textual inlining or as a multi-file source graph; diagnostics should preserve per-file spans.
+- Imports are graph edges; compilers build a multi-file source graph (no textual import expansion).
 - Standard library modules are regular imports; the compiler does not auto-include them.
-- If an implementation uses concatenation internally, it should keep a source map so diagnostics still reference the original file.
 
 ### Struct Types
 

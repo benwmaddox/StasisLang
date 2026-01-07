@@ -1,6 +1,6 @@
 ﻿**updated Stasis grammar and parser notes** incorporating:
 
-- **Assignment via infix `=`** instead of `.=( )`
+- **Assignment via infix `=`**
 - **Pratt parser for all expressions** (assignment is right-associative)
 - **Operator-method calls stay for arithmetic/comparison**
 - **AoS -> SoA semantics represented cleanly**
@@ -50,7 +50,7 @@ Parsing note:
   - local declarations first
   - then imported module members (in scope by default)
   - and `ModuleName.symbol` for disambiguation
-  - imports are file-scoped (not transitive)
+  - imports are transitive for compilation (the build graph includes imported files and their imports)
 
 ## 2.1 Struct Declarations
 
