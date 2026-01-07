@@ -238,6 +238,48 @@ test `stasis build emits llvm for locals and assignments`() {
     return ascii_contains(stasis.ir_out, "ret i32 %t");
 }
 
+test `stasis build emits llvm via MIR (locals and assignments)`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    path_join(t_path, t_exe_dir, "stasis_build_ir_locals_llvm_mir.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  let x: i32 = 40;");
+    t_append_line(t_tmp, "  x = x + 2;");
+    t_append_line(t_tmp, "  return x;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    stasis.use_mir = 0;
+    let rc: i32 = load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    stasis.use_mir = 1;
+    rc = emit_main_return_i32_ir("module", "llvm");
+    stasis.use_mir = 0;
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(stasis.ir_out, "alloca i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "add i32 0, 40")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "load i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "add i32")) { return false; }
+    return ascii_contains(stasis.ir_out, "ret i32 %t");
+}
+
 test `stasis build supports string const initializers`() {
     if (!t_init_exe_dir()) {
         return false;

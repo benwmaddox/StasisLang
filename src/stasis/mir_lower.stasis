@@ -3,7 +3,6 @@ import "state.stasis";
 import "diagnostics.stasis";
 import "lexing.stasis";
 import "expr_parse.stasis";
-import "expr_eval.stasis";
 import "build_ir_llvm_builder.stasis";
 
 function mir_reset(): void {
@@ -90,11 +89,7 @@ function mir_lower_expr_i32(file_idx: i32, root: i32): i32 {
                 let at: i32 = stasis.expr_nodes[idx].at;
 
                 if (kind2 == ExprKind.IntLiteral) {
-                    let folded: i32 = expr_eval_i32_const(idx);
-                    if (stasis.expr_eval_failed != 0) {
-                        build_err_at(file_idx, "expected integer literal", at);
-                        return -1;
-                    }
+                    let folded: i32 = stasis.expr_nodes[idx].value;
                     let v: i32 = mir_add_inst(MirInstKind.ConstI32, at, MirValKind.I32, 0, 0, 0, folded);
                     if (v < 0) { return -1; }
                     stasis.expr_op_at[val_sp] = v;
@@ -184,12 +179,13 @@ function mir_lower_expr_i32(file_idx: i32, root: i32): i32 {
                                     }
                                 } else {
                                     if (kind2 == ExprKind.Assign) {
-                                        if (val_sp < 1) {
+                                        if (val_sp < 2) {
                                             build_err_at(file_idx, "invalid assignment expression", at);
                                             return -1;
                                         }
                                         let rhs2: i32 = stasis.expr_op_at[val_sp - 1];
-                                        val_sp = val_sp - 1;
+                                        // Discard the lowered LHS value; the assignment target is resolved from the AST.
+                                        val_sp = val_sp - 2;
 
                                         let lhs_idx: i32 = stasis.expr_nodes[idx].left;
                                         if (lhs_idx < 0 || lhs_idx >= stasis.expr_count) {
