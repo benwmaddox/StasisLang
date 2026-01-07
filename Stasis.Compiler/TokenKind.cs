@@ -20,6 +20,7 @@ public enum TokenKind
     EnumKeyword,
     GlobalKeyword,
     ConstKeyword,
+    ExternKeyword,
     FunctionKeyword,
     ExportKeyword,
     TestKeyword,

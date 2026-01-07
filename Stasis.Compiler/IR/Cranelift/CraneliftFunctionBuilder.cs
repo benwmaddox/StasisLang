@@ -76,6 +76,12 @@ public sealed class CraneliftFunctionBuilder
 
         _valueCounter = function.Parameters.Count;
 
+        if (function.Body is null)
+        {
+            _diagnostics.Add(new Diagnostic($"Function '{function.Name.Text}' has no body.", function.Span));
+            return string.Empty;
+        }
+
         // Create entry block with parameters
         var entryBlock = NewBlock();
         _instructions.AppendLine($"{entryBlock}({FormatBlockParams(function.Parameters)}):");
@@ -94,10 +100,11 @@ public sealed class CraneliftFunctionBuilder
         }
 
         // Lower the function body
-        LowerBlock(function.Body);
+        var body = function.Body;
+        LowerBlock(body);
 
         // Ensure we have a return
-        if (!EndsWithReturn(function.Body))
+        if (!EndsWithReturn(body))
         {
             var returnType = function.ReturnType is null
                 ? new VoidTypeSymbol()
@@ -699,7 +706,8 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
-        var callName = IsBuiltinFunction(funcName) ? funcName : MangleFunctionName(funcName);
+        var isExtern = IsExternFunction(funcName);
+        var callName = IsBuiltinFunction(funcName) ? funcName : (isExtern ? funcName : MangleFunctionName(funcName));
         var argList = string.Join(", ", args);
         if (IsVoidFunction(funcName))
         {
@@ -718,6 +726,11 @@ public sealed class CraneliftFunctionBuilder
     {
         result = string.Empty;
         if (!_functions.TryGetValue(funcName, out var func))
+        {
+            return false;
+        }
+
+        if (func.IsExtern || func.Body is null)
         {
             return false;
         }
@@ -1313,6 +1326,8 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {call} = call %stasis_sys_flush()");
         return call;
     }
+    private bool IsExternFunction(string name) =>
+        _functions.TryGetValue(name, out var func) && func.IsExtern;
 
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 

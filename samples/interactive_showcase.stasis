@@ -1,7 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/game_draw.stasis";
 import "../src/stdlib/game_math.stasis";
-import "../src/stdlib/graphics.stasis";
 import "../src/stdlib/audio.stasis";
 
 // Interactive showcase sample:

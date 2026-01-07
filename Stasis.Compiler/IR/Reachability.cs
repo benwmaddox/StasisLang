@@ -13,6 +13,12 @@ public static class Reachability
         var callGraph = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var (name, func) in functions)
         {
+            if (func.Body is null)
+            {
+                callGraph[name] = new HashSet<string>(StringComparer.Ordinal);
+                continue;
+            }
+
             callGraph[name] = CollectCalledFunctions(func.Body, functions);
         }
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())

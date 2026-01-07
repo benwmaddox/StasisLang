@@ -1,6 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/ui_button_9slice.stasis";
-import "../src/stdlib/graphics.stasis";
 
 global font_handle: i32;
 global button_top_left: i32;

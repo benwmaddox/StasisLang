@@ -42,11 +42,12 @@ public sealed class Parser
     {
         return Current.Kind switch
         {
+            TokenKind.At => ParseLinkDirective(),
             TokenKind.StructKeyword => ParseStruct(),
             TokenKind.EnumKeyword => ParseEnum(),
             TokenKind.GlobalKeyword => ParseGlobal(),
             TokenKind.ConstKeyword => ParseConst(),
-            TokenKind.ExportKeyword or TokenKind.FunctionKeyword => ParseFunction(),
+            TokenKind.ExportKeyword or TokenKind.ExternKeyword or TokenKind.FunctionKeyword => ParseFunction(),
             TokenKind.TestKeyword => ParseTest(),
             _ => UnexpectedTopLevel()
         };
@@ -57,6 +58,17 @@ public sealed class Parser
         AddDiagnostic("Unexpected token at top-level.", Current.Span);
         Advance();
         return null;
+    }
+
+    private LinkDirectiveSyntax ParseLinkDirective()
+    {
+        var at = Consume(TokenKind.At, "Expected '@'.");
+        var name = Consume(TokenKind.Identifier, "Expected directive name.");
+        Consume(TokenKind.LParen, "Expected '(' after directive name.");
+        var value = Consume(TokenKind.StringLiteral, "Expected string literal in directive.");
+        var closeParen = Consume(TokenKind.RParen, "Expected ')' after directive value.");
+        var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after directive.");
+        return new LinkDirectiveSyntax(at, name, value, closeParen, semicolon);
     }
 
     private StructDeclarationSyntax ParseStruct()
@@ -160,6 +172,12 @@ public sealed class Parser
             exportKeyword = Previous;
         }
 
+        Token? externKeyword = null;
+        if (Match(TokenKind.ExternKeyword))
+        {
+            externKeyword = Previous;
+        }
+
         var functionKeyword = Consume(TokenKind.FunctionKeyword, "Expected 'function'.");
         var attributes = new List<Token>();
         while (Match(TokenKind.At))
@@ -184,8 +202,14 @@ public sealed class Parser
             returnType = ParseType();
         }
 
+        if (externKeyword is not null)
+        {
+            var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after extern function declaration.");
+            return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, Body: null, Semicolon: semicolon);
+        }
+
         var body = ParseBlock();
-        return new FunctionDeclarationSyntax(functionKeyword, attributes, name, parameters, returnType, body, exportKeyword);
+        return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, body, Semicolon: null);
     }
 
     private TestDeclarationSyntax ParseTest()
