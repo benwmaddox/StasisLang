@@ -109,6 +109,29 @@ function Run-HotSwapBench {
             if ($count -gt $PrevCount) { return }
             Start-Sleep -Milliseconds 50
         }
+
+        Write-Host "$Name timeout: expected runner HOTSWAP ok: (prevCount=$PrevCount)"
+        Write-Host "runner log: $SwapOkLog"
+        if (Test-Path $SwapOkLog) {
+            try { Get-Content -Tail 80 $SwapOkLog } catch {}
+        } else {
+            Write-Host "runner log missing"
+        }
+
+        Write-Host "compiler out log: $outLog"
+        if (Test-Path $outLog) {
+            try { Get-Content -Tail 80 $outLog } catch {}
+        } else {
+            Write-Host "compiler out log missing"
+        }
+
+        Write-Host "compiler err log: $errLog"
+        if (Test-Path $errLog) {
+            try { Get-Content -Tail 80 $errLog } catch {}
+        } else {
+            Write-Host "compiler err log missing"
+        }
+
         throw "$Name timed out waiting for HOTSWAP ok: in runner log (prevCount=$PrevCount)"
     }
 

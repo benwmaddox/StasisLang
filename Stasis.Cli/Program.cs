@@ -1231,11 +1231,6 @@ static bool CanUseCranelift(bool emitIrOnly)
         return true;
     }
 
-    if (!OperatingSystem.IsWindows())
-    {
-        return false;
-    }
-
     if (!TryFindCraneliftAot(out _))
     {
         return false;
