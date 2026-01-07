@@ -72,7 +72,7 @@ function cli_spawn_retry(cmd: ascii[]): i32 {
     // retry briefly to reduce flaky runs (especially during benchmarks that re-run the same file).
     let attempts: i32 = 0;
     for (attempts = 0; attempts < 12; attempts = attempts + 1) {
-        let rc: i32 = sys_spawn(cmd);
+        let rc: i32 = sys_exec(cmd);
         if (rc != 1104) {
             return rc;
         }

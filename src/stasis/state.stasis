@@ -236,6 +236,43 @@ enum LlvmValueKind {
     PtrF32 = 9
 }
 
+enum MirValKind {
+    I32 = 1,
+    F32 = 2,
+    Ptr = 3,
+    Void = 4
+}
+
+enum MirInstKind {
+    // Values
+    ConstI32 = 1,
+    ConstF32 = 2,
+    AddI32 = 3,
+    SubI32 = 4,
+    MulI32 = 5,
+    DivI32 = 6,
+    RemI32 = 7,
+    NegI32 = 8,
+    NotI32 = 9,
+    IcmpI32 = 10,
+    LoadLocalI32 = 11,
+
+    // Side effects / control
+    StoreLocalI32 = 20,
+    RetI32 = 21
+}
+
+struct MirInst {
+    kind: MirInstKind;
+    at: i32;
+    result_kind: MirValKind;
+    a: i32;
+    b: i32;
+    c: i32;
+    imm_i32: i32;
+    imm_tok: Tok;
+}
+
 struct State {
     // CLI scratch
     cmd: ascii[64];
@@ -245,6 +282,7 @@ struct State {
     arg_backend: ascii[16];
     arg_module: ascii[96];
     emit_ir: i32;
+    use_mir: i32;
     ir_out: ascii[33554432];
     exec_cmd: ascii[4096];
 
@@ -413,6 +451,11 @@ struct State {
     llvm_str_byte_len: i32[4096];
     llvm_str_char_len: i32[4096];
     llvm_str_count: i32;
+
+    // MIR scratch (per-function; grows over time).
+    mir_insts: MirInst[131072];
+    mir_inst_count: i32;
+    mir_value_llvm_tmp: i32[131072];
 }
 
 global stasis: State;

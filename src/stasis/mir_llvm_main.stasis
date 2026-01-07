@@ -1,0 +1,170 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_emit_func.stasis";
+import "mir_lower.stasis";
+import "mir_emit_llvm.stasis";
+
+function emit_llvm_main_i32_mir(module_name: ascii[]): i32 {
+    let func_idx: i32 = build_find_entry_main();
+    if (func_idx < 0) {
+        build_err_at(0, "missing entry function 'main' in entry file", 0);
+        return 1;
+    }
+
+    let file_idx: i32 = stasis.funcs[func_idx].file_idx;
+    let body_start: i32 = stasis.funcs[func_idx].body_start;
+    if (body_start < 0) {
+        build_err_at(file_idx, "missing function body for 'main'", stasis.funcs[func_idx].name_start);
+        return 1;
+    }
+
+    if (!lex_begin(file_idx)) {
+        build_err_at(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+
+    // Use existing local prescan (LLVM scratch) for now; MIR bring-up uses those local ids for loads/stores.
+    llvm_reset();
+    stasis.llvm_str_count = 0;
+    if (llvm_scan_locals_in_body(file_idx, body_start) != 0) {
+        return 1;
+    }
+
+    mir_reset();
+    if (mir_lower_func_body_i32_simple(file_idx, body_start) != 0) {
+        return 1;
+    }
+
+    ascii_clear(stasis.ir_out);
+    ascii_append(stasis.ir_out, "; ModuleID = '");
+    ascii_append(stasis.ir_out, module_name);
+    ascii_append(stasis.ir_out, "'\n");
+    ascii_append(stasis.ir_out, "source_filename = ");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, module_name);
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append_byte(stasis.ir_out, 10);
+    ascii_append(stasis.ir_out, "target triple = ");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, "x86_64-pc-windows-msvc");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, "\n\n");
+
+    llvm_emit_runtime_decls_and_consts();
+    if (llvm_emit_struct_type_defs() != 0) {
+        build_err_at(file_idx, "failed to emit struct type definitions (llvm bring-up)", stasis.tok_start);
+        return 1;
+    }
+    if (llvm_emit_global_defs() != 0) {
+        build_err_at(file_idx, "failed to emit global definitions (llvm bring-up)", stasis.tok_start);
+        return 1;
+    }
+
+    ascii_append(stasis.ir_out, "define i32 @");
+    llvm_append_func_ir_name(func_idx);
+    ascii_append(stasis.ir_out, "() {\n");
+    ascii_append(stasis.ir_out, "entry:\n");
+
+    let exit_label: i32 = llvm_new_label();
+
+    ascii_append(stasis.ir_out, "  %ret_slot = alloca i32, align 4\n");
+    ascii_append(stasis.ir_out, "  store i32 0, ptr %ret_slot, align 4\n");
+
+    // Locals (same scheme as direct LLVM emitter).
+    let i: i32 = 0;
+    for (i = 0; i < stasis.llvm_local_count; i = i + 1) {
+        let lkind: LlvmValueKind = stasis.llvm_local_kind[i];
+        if (lkind != LlvmValueKind.I32) {
+            build_err_at(file_idx, "unsupported local kind in MIR bring-up", body_start);
+            return 1;
+        }
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_local_ptr(i);
+        ascii_append(stasis.ir_out, " = alloca i32, align 4\n");
+        ascii_append(stasis.ir_out, "  store i32 0, ptr ");
+        llvm_append_local_ptr(i);
+        ascii_append(stasis.ir_out, ", align 4\n");
+    }
+
+    if (mir_emit_llvm_from_mir_i32(file_idx, exit_label) != 0) {
+        return 1;
+    }
+
+    if (stasis.llvm_bb_terminated == 0) {
+        llvm_emit_br("exit", exit_label);
+    }
+
+    ascii_append(stasis.ir_out, "\n");
+    llvm_emit_label_def("exit", exit_label);
+
+    let ret_tmp: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(ret_tmp);
+    ascii_append(stasis.ir_out, " = load i32, ptr %ret_slot, align 4\n");
+    ascii_append(stasis.ir_out, "  ret i32 ");
+    llvm_append_tmp(ret_tmp);
+    ascii_append(stasis.ir_out, "\n");
+    ascii_append(stasis.ir_out, "}\n\n");
+
+    // Emit other supported functions using the existing direct emitter for now.
+    let f: i32 = 0;
+    for (f = 0; f < stasis.func_count; f = f + 1) {
+        if (stasis.funcs[f].is_test == 0) {
+            if (f != func_idx && stasis.funcs[f].body_start >= 0) {
+                let ok: i32 = 1;
+                let ret_ty: i32 = stasis.funcs[f].ret_type_idx;
+                if (ret_ty >= 0 && !build_type_is_i32ish(ret_ty) && !build_type_is_byte_named(ret_ty) && !build_type_is_void(ret_ty) && !build_type_is_f32(ret_ty)) {
+                    ok = 0;
+                }
+                if (ok != 0) {
+                    let pi: i32 = 0;
+                    for (pi = 0; pi < stasis.funcs[f].params_len; pi = pi + 1) {
+                        let p_decl: i32 = stasis.funcs[f].params_off + pi;
+                        if (p_decl < 0 || p_decl >= stasis.param_count) {
+                            ok = 0;
+                        } else {
+                            let p_ty: i32 = stasis.params[p_decl].type_idx;
+                            if (p_ty < 0 || p_ty >= stasis.type_count) {
+                                ok = 0;
+                            } else {
+                                if (!build_type_is_i32ish(p_ty) && !build_type_is_byte_named(p_ty) && !build_type_is_f32(p_ty)) {
+                                    let pk: TypeKind = stasis.types[p_ty].kind;
+                                    if (pk != TypeKind.Array) {
+                                        ok = 0;
+                                    } else {
+                                        let elem: i32 = stasis.types[p_ty].elem;
+                                        if (!build_type_is_i32ish(elem) && !build_type_is_byte_named(elem) && !build_type_is_f32(elem)) {
+                                            ok = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (ok != 0) {
+                    let rc2: i32 = emit_llvm_func_i32ish(f);
+                    if (rc2 != 0) {
+                        return rc2;
+                    }
+                }
+            }
+        }
+    }
+
+    if (llvm_emit_string_literal_globals() != 0) {
+        return 1;
+    }
+    llvm_emit_sys_runtime_decls_if_needed();
+    llvm_emit_graphics_builtin_decls_if_needed();
+    return 0;
+}
+

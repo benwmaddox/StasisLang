@@ -8,6 +8,7 @@ import "emit_ir.stasis";
 import "build_ir_common.stasis";
 import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_tests.stasis";
+import "mir_llvm_main.stasis";
 
 function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
     // Store for downstream helpers (LLVM symbol mangling).
@@ -33,6 +34,9 @@ function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
     stasis.lex_pos = body_start;
 
     if (ascii_eq(backend, "llvm")) {
+        if (stasis.use_mir != 0) {
+            return emit_llvm_main_i32_mir(module_name);
+        }
         return emit_llvm_main_i32(module_name);
     }
 
