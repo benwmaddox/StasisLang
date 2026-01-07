@@ -165,8 +165,30 @@ function Run-HotSwapBench {
         throw "$Name timed out waiting for HOTSWAP ok: in runner log (prevCount=$PrevCount)"
     }
 
+    function Dump-Tail {
+        param(
+            [string]$label,
+            [string]$path,
+            [int]$lines = 80
+        )
+
+        Write-Host $label
+        Write-Host $path
+        if (Test-Path $path) {
+            try { Get-Content -Tail $lines $path } catch {}
+        } else {
+            Write-Host "(missing)"
+        }
+    }
+
     for ($i = 0; $i -lt $Iterations; $i++) {
-        if ($cap.Process.HasExited) { throw "$Name compiler exited early (code=$($cap.Process.ExitCode))" }
+        if ($cap.Process.HasExited) {
+            Write-Host "$Name compiler exited early (code=$($cap.Process.ExitCode))"
+            Dump-Tail -label "runner log:" -path $SwapOkLog
+            Dump-Tail -label "compiler out log:" -path $outLog
+            Dump-Tail -label "compiler err log:" -path $errLog
+            throw "$Name compiler exited early (code=$($cap.Process.ExitCode))"
+        }
         $prevCount = Get-SwapOkCount
         Add-Content -Path "samples/hotstate_tick_watch.stasis" -Value "// ci bench $Name $i" -Encoding ascii
         Start-Sleep -Milliseconds $SleepAfterEditMs

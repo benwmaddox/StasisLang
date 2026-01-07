@@ -66,7 +66,7 @@ Write-Host ("Runner log: {0}" -f $runnerErrLog)
 
 $cliProject = Join-Path $root "Stasis.Cli\Stasis.Cli.csproj"
 $cmd = "dotnet"
-$args = @("run", "--no-build", "--configuration", "Release", "--project", $cliProject, "--", "run", $sample, "--backend", "cranelift", "--watch", "--fps", "30")
+$args = @("run", "--no-build", "--configuration", "Release", "--project", $cliProject, "--", "run", $sample, "--backend", "cranelift", "--watch", "--module", "hot", "--fps", "30")
 $proc = Start-Process -FilePath $cmd -ArgumentList $args -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 Write-Host ("Started stasis: pid={0}" -f $proc.Id)
 
