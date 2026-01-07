@@ -32,7 +32,7 @@ test `stasis statement parser accepts basic constructs`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_stmt_ok.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_stmt_ok.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -65,7 +65,7 @@ test `stasis statement parser rejects missing semicolons`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_stmt_bad.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_stmt_bad.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -95,7 +95,7 @@ test `stasis statement parser accepts slice types`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_stmt_slice.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_stmt_slice.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");

@@ -46,8 +46,8 @@ function t_write_module_pair(): bool {
         return false;
     }
 
-    path_join(t_path_mod1, t_exe_dir, "sh_mod1.stasis.inc");
-    path_join(t_path_mod2, t_exe_dir, "sh_mod2.stasis.inc");
+    path_join(t_path_mod1, t_exe_dir, "stasis_mod1.stasis.inc");
+    path_join(t_path_mod2, t_exe_dir, "stasis_mod2.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function f(): i32 { return 0; }");
@@ -69,11 +69,11 @@ test `stasis import collision scan detects conflicts`() {
         return false;
     }
 
-    path_join(t_path_entry, t_exe_dir, "sh_entry_collision.stasis.inc");
+    path_join(t_path_entry, t_exe_dir, "stasis_entry_collision.stasis.inc");
 
     ascii_clear(t_tmp);
-    t_append_import_line(t_tmp, "sh_mod1.stasis.inc");
-    t_append_import_line(t_tmp, "sh_mod2.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod1.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod2.stasis.inc");
     if (!t_write_ascii(t_path_entry, t_tmp)) {
         return false;
     }
@@ -96,11 +96,11 @@ test `stasis import collision scan ignores shadowed names`() {
         return false;
     }
 
-    path_join(t_path_entry_shadow, t_exe_dir, "sh_entry_shadow.stasis.inc");
+    path_join(t_path_entry_shadow, t_exe_dir, "stasis_entry_shadow.stasis.inc");
 
     ascii_clear(t_tmp);
-    t_append_import_line(t_tmp, "sh_mod1.stasis.inc");
-    t_append_import_line(t_tmp, "sh_mod2.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod1.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod2.stasis.inc");
     t_append_line(t_tmp, "function f(): i32 { return 2; }");
     if (!t_write_ascii(t_path_entry_shadow, t_tmp)) {
         return false;
@@ -118,4 +118,3 @@ test `stasis import collision scan ignores shadowed names`() {
     let collisions: i32 = check_import_member_collisions();
     return collisions == 0;
 }
-

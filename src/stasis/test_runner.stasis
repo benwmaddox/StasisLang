@@ -5,6 +5,7 @@ import "check_loaded_files.stasis";
 import "cli_linking.stasis";
 import "cli_args.stasis";
 import "build_ir.stasis";
+import "emit_ir.stasis";
 
 function ascii_ends_with_lit(s: ascii[], suffix: ascii[]): bool {
     let slen: i32 = ascii_len(s);
@@ -187,7 +188,7 @@ function test_collect_stasis_files(root_dir: ascii[]): i32 {
     return 0;
 }
 
-function test_run_file(entry_path: ascii[]): i32 {
+function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     if (!ascii_eq(stasis.arg_backend, "llvm")) {
         print_string("error: test currently supports --backend llvm only\n");
         return 1;
@@ -207,8 +208,20 @@ function test_run_file(entry_path: ascii[]): i32 {
         return 1;
     }
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
-    path_join(stasis.scratch_resolved, stasis.scratch_dir, "stasis_test.ll");
-    path_join(stasis.scratch_exe, stasis.scratch_dir, "stasis_test.exe");
+
+    // Use per-test outputs to avoid transient Windows file-lock collisions when re-linking.
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "stasis_test_");
+    ir_append_i32(stasis.scratch_import, test_index);
+    ascii_append(stasis.scratch_import, ".ll");
+    path_join(stasis.scratch_resolved, stasis.scratch_dir, stasis.scratch_import);
+
+    ascii_clear(stasis.scratch_import);
+    ascii_append(stasis.scratch_import, "stasis_test_");
+    ir_append_i32(stasis.scratch_import, test_index);
+    ascii_append(stasis.scratch_import, ".exe");
+    path_join(stasis.scratch_exe, stasis.scratch_dir, stasis.scratch_import);
+
     path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
 
     if (!sys_write_file(stasis.scratch_resolved, stasis.ir_out, ascii_len(stasis.ir_out))) {
@@ -274,7 +287,7 @@ function test_run_dir(root_dir: ascii[]): i32 {
             print_char(10);
         }
 
-        let exit_code: i32 = test_run_file(stasis.arg_entry);
+        let exit_code: i32 = test_run_file(stasis.arg_entry, i);
         if (exit_code != 0) {
             failed_files = failed_files + 1;
             total_failures = total_failures + exit_code;

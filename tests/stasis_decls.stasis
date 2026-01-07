@@ -50,7 +50,7 @@ test `stasis decl parsing records struct fields`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_decls_struct.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_decls_struct.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "struct S {");
@@ -108,7 +108,7 @@ test `stasis decl parsing records enum members`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_decls_enum.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_decls_enum.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "enum E { A = 3, B }");
@@ -151,7 +151,7 @@ test `stasis decl parsing records function decls and params`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_decls_func.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_decls_func.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function f(a: i32, b: i32[4]): i32 { return a; }");
@@ -215,7 +215,7 @@ test `stasis decl parsing records global and const decls`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_decls_values.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_decls_values.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global g: i32 = 1;");

@@ -34,7 +34,7 @@ test `stasis build emits clif for main return i32`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_ret.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_ret.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return 42; }");
@@ -67,7 +67,7 @@ test `stasis build emits llvm ir for main return i32`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_ret_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_ret_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return 42; }");
@@ -102,7 +102,7 @@ test `stasis build evaluates constant expressions`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_expr.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_expr.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return (1 + 2) * 3 + 4; }");
@@ -140,7 +140,7 @@ test `stasis build evaluates more operators`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_ops.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_ops.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return !0 || (10 % 3) == 1; }");
@@ -178,7 +178,7 @@ test `stasis build rejects non-constant return expressions`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_nonconst.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_nonconst.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return x = 1; }");
@@ -205,7 +205,7 @@ test `stasis build emits llvm for locals and assignments`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_locals_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_locals_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -243,7 +243,7 @@ test `stasis build emits llvm control flow for if`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_if_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_if_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -282,7 +282,7 @@ test `stasis build emits llvm control flow for for`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_for_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_for_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -321,7 +321,7 @@ test `stasis build emits llvm for empty-arg function calls`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_call_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_call_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function foo(): i32 { return 40; }");
@@ -355,7 +355,7 @@ test `stasis build emits llvm for call arguments`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_call_args_llvm.stasis");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_call_args_llvm.stasis");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function add(a: i32, b: i32): i32 { return a + b; }");
@@ -391,7 +391,7 @@ test `stasis build emits llvm for nested calls`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_nested_calls_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_nested_calls_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function inner(x: i32): i32 { return x + 1; }");
@@ -473,7 +473,7 @@ test `stasis build emits llvm for struct member access`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_member_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_member_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "struct Pair { a: i32; b: i32; }");
@@ -513,7 +513,7 @@ test `stasis build emits llvm for member indexing`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_member_index_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_member_index_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "struct S { arr: i32[4]; }");
@@ -551,7 +551,7 @@ test `stasis build emits llvm for global u8 assignment`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_global_u8_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_global_u8_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global g: u8;");
@@ -591,7 +591,7 @@ test `stasis build emits llvm for slice params and u8 conversions`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_slice_params_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_slice_params_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function trunc_test(x: i32): i32 { return i32_to_u8_trunc(x); }");
@@ -643,7 +643,7 @@ test `stasis build emits llvm for string literals`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_string_lit_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_string_lit_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 {");
@@ -685,7 +685,7 @@ test `stasis build emits llvm for sys_argc`() {
         return false;
     }
 
-    path_join(t_path, t_exe_dir, "sh_build_ir_sys_argc_llvm.stasis.inc");
+    path_join(t_path, t_exe_dir, "stasis_build_ir_sys_argc_llvm.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "function main(): i32 { return sys_argc(); }");

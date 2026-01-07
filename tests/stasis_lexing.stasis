@@ -59,7 +59,7 @@ test `stasis lexer basic tokens`() {
         return false;
     }
 
-    path_join(t_path_sample, t_exe_dir, "sh_lex_sample.stasis.inc");
+    path_join(t_path_sample, t_exe_dir, "stasis_lex_sample.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global x: i32;");
@@ -132,7 +132,7 @@ test `stasis lexer unknown char`() {
         return false;
     }
 
-    path_join(t_path_unknown, t_exe_dir, "sh_lex_unknown.stasis.inc");
+    path_join(t_path_unknown, t_exe_dir, "stasis_lex_unknown.stasis.inc");
 
     ascii_clear(t_tmp);
     t_append_line(t_tmp, "global x: i32 = 1 & 2;");
