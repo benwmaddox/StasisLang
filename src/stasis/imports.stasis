@@ -2,10 +2,10 @@ import "../stdlib/stdlib.stasis";
 import "state.stasis";
 
 const MAX_FILES: i32 = 300;
-const MAX_FILE_BYTES: i32 = 51200;
+const MAX_FILE_BYTES: i32 = 1048576;
 const MAX_PATH_BYTES: i32 = 260;
 const MAX_MOD_BYTES: i32 = 96;
-const POOL_CAP: i32 = 16000000;
+const POOL_CAP: i32 = 134217728;
 const PATH_POOL_CAP: i32 = 90000;
 const MOD_POOL_CAP: i32 = 20000;
 const IMPORTS_CAP: i32 = 90000;
@@ -398,7 +398,7 @@ function load_file(path: ascii[]): i32 {
     }
     if (size > MAX_FILE_BYTES) {
         if (stasis.quiet == 0) {
-            print_string("error: file exceeds 50KiB limit: ");
+            print_string("error: file exceeds 1MiB limit: ");
             print_string(path);
             print_char(10);
         }

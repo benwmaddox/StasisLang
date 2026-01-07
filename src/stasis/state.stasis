@@ -252,7 +252,7 @@ struct State {
     files: File[300];
     file_count: i32;
 
-    pool: u8[16000000];
+    pool: u8[134217728];
     pool_len: i32;
 
     path_pool: u8[90000];
@@ -264,7 +264,7 @@ struct State {
     imports: i32[90000];
     imports_len: i32;
 
-    read: u8[51201];
+    read: u8[1048577];
 
     scratch_import: ascii[260];
     scratch_dir: ascii[260];

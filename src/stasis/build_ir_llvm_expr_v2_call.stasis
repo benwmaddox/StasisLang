@@ -20,7 +20,7 @@ import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_func.stasis";
 
 function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, val_len: i32): i32 {
-    // Large call lowering extracted from llvm_emit_expr_i32_v2 to keep files <50KiB.
+    // Large call lowering extracted from llvm_emit_expr_i32_v2 to keep files under size limits.
     // Assumes the argument values are already on st.expr_op_at / st.llvm_val_kind stacks.
     let kind2: ExprKind = stasis.expr_nodes[idx2].kind;
     if (kind2 != ExprKind.Call) {
