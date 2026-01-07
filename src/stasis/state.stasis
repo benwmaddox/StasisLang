@@ -276,6 +276,8 @@ struct State {
     scratch_out_dir: ascii[260];
     scratch_mod: ascii[96];
 
+    path_norm_seg_starts: i32[96];
+
     quiet: i32;
 
     // Lexer (streaming)
