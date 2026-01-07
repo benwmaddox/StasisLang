@@ -1207,6 +1207,7 @@ public sealed class ModuleLowerer
             "sys_argc",
             "sys_argv",
             "sys_read_file",
+            "sys_list_dir",
             "sys_write_file",
             "sys_file_exists",
             "sys_file_size",
@@ -2435,6 +2436,39 @@ public sealed class ModuleLowerer
                         var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.path");
                         var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.out");
                         return builder.BuildCall2(fnType, fn, new[] { pathCast, outCast, outCap }, "sys_read_file.call");
+                    }
+
+                case "sys_list_dir":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_list_dir expects (path: string, out: u8[], out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_list_dir requires an output buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_list_dir");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_list_dir", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_list_dir.path");
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_list_dir.out");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, outCast, outCap }, "sys_list_dir.call");
                     }
 
                 case "sys_write_file":

@@ -1,0 +1,125 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "imports.stasis";
+
+function ir_needs_graphics_runtime(): bool {
+    // Only link graphics when it is actually called (declares alone should not trigger linking).
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_init_window")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_begin_frame")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_end_frame")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_should_quit")) { return true; }
+
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_get_time_ms")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_sleep_ms")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_is_key_down")) { return true; }
+
+    if (ascii_contains(stasis.ir_out, "call void @stasis_clear")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_draw_line")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_draw_lines_f32")) { return true; }
+
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_load_font")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_draw_text")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_measure_text")) { return true; }
+
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_load_sprite")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_poll_reload")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprite")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprites_i32")) { return true; }
+
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_init")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call void @stasis_audio_shutdown")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_is_available")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_sample_rate")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_channels")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_queued_frames")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_get_underruns")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_push_f32_interleaved")) { return true; }
+
+    return false;
+}
+
+function append_graphics_static_link_inputs(): bool {
+    // Static graphics bundle from `runtime/build.bat` (includes dependency libs in the same folder).
+    path_join(stasis.scratch_graphics, stasis.scratch_dir, "../runtime/build/Release");
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "stasis_graphics_static.lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics runtime: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        print_string("hint: build the graphics runtime (e.g. run `runtime/build.bat`) to produce runtime/build/Release/stasis_graphics_static.lib\n");
+        return false;
+    }
+
+    // Main static graphics lib
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+
+    // Dependency libs (copied by runtime/build.bat).
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "SDL2main.lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics dependency: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        return false;
+    }
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "SDL2-static.lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics dependency: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        return false;
+    }
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "libglew32.lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics dependency: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        return false;
+    }
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "OpenGL32.Lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics dependency: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        return false;
+    }
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "GlU32.Lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        print_string("error: missing graphics dependency: ");
+        print_string(stasis.scratch_graphics_dll);
+        print_char(10);
+        return false;
+    }
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34);
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34);
+
+    // Windows SDK / system libs needed by SDL2 + OpenGL + input.
+    ascii_append(stasis.exec_cmd, " -luser32 -lgdi32 -limm32 -lshell32 -lsetupapi -lwinmm -lversion -lole32 -loleaut32 -ladvapi32 -lcfgmgr32 -lbcrypt");
+
+    return true;
+}

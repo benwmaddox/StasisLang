@@ -2,28 +2,6 @@
 // Import explicitly: import "src/stdlib/stdlib.stasis";
 // For runtime bindings: import "src/stdlib/graphics.stasis" and/or "src/stdlib/audio.stasis".
 
-function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
-    if (dst_max <= 0) {
-        return 0;
-    }
-
-    let i: i32 = 0;
-    let limit: i32 = dst_max - 1;
-    for (i = 0; i < limit; i = i + 1) {
-        let b: u8 = src[i];
-        if (b == 0) {
-            dst[i] = 0;
-            utf8_set_len_ascii(dst, i);
-            return i;
-        }
-        dst[i] = b;
-    }
-
-    dst[i] = 0;
-    utf8_set_len_ascii(dst, i);
-    return i;
-}
-
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }
@@ -390,4 +368,26 @@ function utf8_set_len_ascii(s: utf8[], len: i32): void {
 function utf8_clear_ascii(s: utf8[]): void {
     s[0] = 0;
     utf8_set_len_ascii(s, 0);
+}
+
+function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
+    if (dst_max <= 0) {
+        return 0;
+    }
+
+    let i: i32 = 0;
+    let limit: i32 = dst_max - 1;
+    for (i = 0; i < limit; i = i + 1) {
+        let b: u8 = src[i];
+        if (b == 0) {
+            dst[i] = 0;
+            utf8_set_len_ascii(dst, i);
+            return i;
+        }
+        dst[i] = b;
+    }
+
+    dst[i] = 0;
+    utf8_set_len_ascii(dst, i);
+    return i;
 }

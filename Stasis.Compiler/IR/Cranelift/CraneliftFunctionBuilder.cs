@@ -962,6 +962,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_argc" => true,
             "sys_argv" => true,
             "sys_read_file" => true,
+            "sys_list_dir" => true,
             "sys_write_file" => true,
             "sys_file_exists" => true,
             "sys_file_size" => true,
@@ -1108,6 +1109,28 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string LowerSysListDir(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_list_dir({path}, {outPtr}, {cap})");
+        return result;
+    }
+
     private string LowerSysWriteFile(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 3)
@@ -1243,6 +1266,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSysArgv(arguments);
             case "sys_read_file":
                 return LowerSysReadFile(arguments);
+            case "sys_list_dir":
+                return LowerSysListDir(arguments);
             case "sys_write_file":
                 return LowerSysWriteFile(arguments);
             case "sys_file_exists":

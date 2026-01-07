@@ -105,6 +105,78 @@ function llvm_find_imported_module(caller_file_idx: i32, mod_start: i32, mod_len
     return -1;
 }
 
+function llvm_import_walk_init(caller_file_idx: i32, at: i32): i32 {
+    stasis.resolve_sp = 0;
+    stasis.resolve_epoch = stasis.resolve_epoch + 1;
+    if (stasis.resolve_epoch <= 0) {
+        // Epoch wrapped; clear the seen array (bounded by our fixed cap).
+        stasis.resolve_epoch = 1;
+        let clear_i: i32 = 0;
+        for (clear_i = 0; clear_i < 4096; clear_i = clear_i + 1) {
+            stasis.resolve_seen_epoch[clear_i] = 0;
+        }
+    }
+
+    if (caller_file_idx >= 0 && caller_file_idx < 4096) {
+        stasis.resolve_seen_epoch[caller_file_idx] = stasis.resolve_epoch;
+    }
+
+    if (caller_file_idx < 0 || caller_file_idx >= stasis.file_count) {
+        build_err_at(caller_file_idx, "invalid file for import walk", at);
+        return 1;
+    }
+
+    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
+    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
+    let imp_i: i32 = 0;
+    for (imp_i = 0; imp_i < imp_len; imp_i = imp_i + 1) {
+        let mod_file: i32 = stasis.imports[imp_off + imp_i];
+        if (mod_file >= 0 && mod_file < stasis.file_count && mod_file < 4096) {
+            if (stasis.resolve_seen_epoch[mod_file] != stasis.resolve_epoch) {
+                stasis.resolve_seen_epoch[mod_file] = stasis.resolve_epoch;
+                if (stasis.resolve_sp >= 4096) {
+                    build_err_at(caller_file_idx, "import graph too deep (resolver)", at);
+                    return 1;
+                }
+                stasis.resolve_stack[stasis.resolve_sp] = mod_file;
+                stasis.resolve_sp = stasis.resolve_sp + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+function llvm_import_walk_next(caller_file_idx: i32, at: i32): i32 {
+    for (; stasis.resolve_sp > 0; ) {
+        stasis.resolve_sp = stasis.resolve_sp - 1;
+        let file_idx: i32 = stasis.resolve_stack[stasis.resolve_sp];
+        if (file_idx < 0 || file_idx >= stasis.file_count) {
+            // Skip invalids (shouldn't happen).
+        } else {
+            let imp_off: i32 = stasis.files[file_idx].imports_off;
+            let imp_len: i32 = stasis.files[file_idx].imports_len;
+            let i: i32 = 0;
+            for (i = 0; i < imp_len; i = i + 1) {
+                let mod_file: i32 = stasis.imports[imp_off + i];
+                if (mod_file >= 0 && mod_file < stasis.file_count && mod_file < 4096) {
+                    if (stasis.resolve_seen_epoch[mod_file] != stasis.resolve_epoch) {
+                        stasis.resolve_seen_epoch[mod_file] = stasis.resolve_epoch;
+                        if (stasis.resolve_sp >= 4096) {
+                            build_err_at(caller_file_idx, "import graph too deep (resolver)", at);
+                            return -2;
+                        }
+                        stasis.resolve_stack[stasis.resolve_sp] = mod_file;
+                        stasis.resolve_sp = stasis.resolve_sp + 1;
+                    }
+                }
+            }
+
+            return file_idx;
+        }
+    }
+    return -1;
+}
+
 function llvm_find_func_in_file(named_file_idx: i32, name_start: i32, name_len: i32, target_file_idx: i32): i32 {
     let i: i32 = 0;
     for (i = 0; i < stasis.func_count; i = i + 1) {
@@ -149,20 +221,29 @@ function llvm_try_resolve_unqualified_const(caller_file_idx: i32, name_start: i3
         return local;
     }
 
-    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
-    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
-    let i: i32 = 0;
-    for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = stasis.imports[imp_off + i];
-        let hit: i32 = llvm_find_const_in_file(caller_file_idx, name_start, name_len, mod_file);
-        if (hit >= 0) {
-            if (found < 0) {
-                found = hit;
-            } else {
-                build_err_at(caller_file_idx, "ambiguous const name (use Module.symbol)", at);
-                return -2;
+    if (llvm_import_walk_init(caller_file_idx, at) != 0) {
+        return -2;
+    }
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        let mod_file: i32 = llvm_import_walk_next(caller_file_idx, at);
+        if (mod_file == -2) {
+            return -2;
+        }
+        if (mod_file < 0) {
+            done = 1;
+        } else {
+            let hit: i32 = llvm_find_const_in_file(caller_file_idx, name_start, name_len, mod_file);
+            if (hit >= 0) {
+                if (found < 0) {
+                    found = hit;
+                } else {
+                    build_err_at(caller_file_idx, "ambiguous const name (use Module.symbol)", at);
+                    return -2;
+                }
             }
         }
     }
@@ -276,20 +357,29 @@ function llvm_try_resolve_unqualified_enum(caller_file_idx: i32, name_start: i32
         return local;
     }
 
-    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
-    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
-    let i: i32 = 0;
-    for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = stasis.imports[imp_off + i];
-        let hit: i32 = llvm_find_enum_in_file(caller_file_idx, name_start, name_len, mod_file);
-        if (hit >= 0) {
-            if (found < 0) {
-                found = hit;
-            } else {
-                build_err_at(caller_file_idx, "ambiguous enum name (use Module.symbol)", at);
-                return -2;
+    if (llvm_import_walk_init(caller_file_idx, at) != 0) {
+        return -2;
+    }
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        let mod_file: i32 = llvm_import_walk_next(caller_file_idx, at);
+        if (mod_file == -2) {
+            return -2;
+        }
+        if (mod_file < 0) {
+            done = 1;
+        } else {
+            let hit: i32 = llvm_find_enum_in_file(caller_file_idx, name_start, name_len, mod_file);
+            if (hit >= 0) {
+                if (found < 0) {
+                    found = hit;
+                } else {
+                    build_err_at(caller_file_idx, "ambiguous enum name (use Module.symbol)", at);
+                    return -2;
+                }
             }
         }
     }
@@ -321,20 +411,29 @@ function llvm_resolve_unqualified_global(caller_file_idx: i32, name_start: i32, 
         return local;
     }
 
-    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
-    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
-    let i: i32 = 0;
-    for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = stasis.imports[imp_off + i];
-        let hit: i32 = llvm_find_global_in_file(caller_file_idx, name_start, name_len, mod_file);
-        if (hit >= 0) {
-            if (found < 0) {
-                found = hit;
-            } else {
-                build_err_at(caller_file_idx, "ambiguous global name (use Module.symbol)", at);
-                return -1;
+    if (llvm_import_walk_init(caller_file_idx, at) != 0) {
+        return -1;
+    }
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        let mod_file: i32 = llvm_import_walk_next(caller_file_idx, at);
+        if (mod_file == -2) {
+            return -1;
+        }
+        if (mod_file < 0) {
+            done = 1;
+        } else {
+            let hit: i32 = llvm_find_global_in_file(caller_file_idx, name_start, name_len, mod_file);
+            if (hit >= 0) {
+                if (found < 0) {
+                    found = hit;
+                } else {
+                    build_err_at(caller_file_idx, "ambiguous global name (use Module.symbol)", at);
+                    return -1;
+                }
             }
         }
     }
@@ -352,25 +451,57 @@ function llvm_resolve_unqualified_func(caller_file_idx: i32, name_start: i32, na
         return local;
     }
 
-    let imp_off: i32 = stasis.files[caller_file_idx].imports_off;
-    let imp_len: i32 = stasis.files[caller_file_idx].imports_len;
     let found: i32 = -1;
 
-    let i: i32 = 0;
-    for (i = 0; i < imp_len; i = i + 1) {
-        let mod_file: i32 = stasis.imports[imp_off + i];
-        let hit: i32 = llvm_find_func_in_file(caller_file_idx, name_start, name_len, mod_file);
-        if (hit >= 0) {
-            if (found < 0) {
-                found = hit;
-            } else {
-                build_err_at(caller_file_idx, "ambiguous function name (use Module.symbol)", at);
-                return -1;
+    if (llvm_import_walk_init(caller_file_idx, at) != 0) {
+        return -1;
+    }
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        let mod_file: i32 = llvm_import_walk_next(caller_file_idx, at);
+        if (mod_file == -2) {
+            return -1;
+        }
+        if (mod_file < 0) {
+            done = 1;
+        } else {
+            let hit: i32 = llvm_find_func_in_file(caller_file_idx, name_start, name_len, mod_file);
+            if (hit >= 0) {
+                if (found < 0) {
+                    found = hit;
+                } else {
+                    build_err_at(caller_file_idx, "ambiguous function name (use Module.symbol)", at);
+                    return -1;
+                }
             }
         }
     }
 
     if (found < 0) {
+        // Bring-up: if nothing is found through direct/transitive imports, fall back to
+        // searching the whole loaded graph (matches earlier stage0 behavior more closely).
+        let global_found: i32 = -1;
+        let gi: i32 = 0;
+        for (gi = 0; gi < stasis.func_count; gi = gi + 1) {
+            if (stasis.funcs[gi].is_test == 0) {
+                let target_file_idx: i32 = stasis.funcs[gi].file_idx;
+                if (target_file_idx >= 0 && target_file_idx < stasis.file_count) {
+                    if (span_eq_span_cross(caller_file_idx, name_start, name_len, target_file_idx, stasis.funcs[gi].name_start, stasis.funcs[gi].name_len)) {
+                        if (global_found < 0) {
+                            global_found = gi;
+                        } else {
+                            build_err_at(caller_file_idx, "ambiguous function name (use Module.symbol)", at);
+                            return -1;
+                        }
+                    }
+                }
+            }
+        }
+        if (global_found >= 0) {
+            return global_found;
+        }
+
         build_err_at(caller_file_idx, "unknown function", at);
         return -1;
     }
@@ -427,4 +558,3 @@ function llvm_resolve_callee_func(caller_file_idx: i32, callee_expr: i32, at: i3
     build_err_at(caller_file_idx, "unsupported call target", at);
     return -1;
 }
-

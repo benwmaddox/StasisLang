@@ -248,6 +248,23 @@ struct State {
     ir_out: ascii[33554432];
     exec_cmd: ascii[4096];
 
+    // Test runner (directory traversal + file list)
+    test_dir_out: u8[1048577];
+    test_pool: u8[2097152];
+    test_pool_len: i32;
+    test_dirs_off: i32[2048];
+    test_dirs_len: i32[2048];
+    test_dirs_sp: i32;
+    test_files_off: i32[4096];
+    test_files_len: i32[4096];
+    test_files_count: i32;
+
+    // Resolver scratch (import graph traversal).
+    resolve_stack: i32[4096];
+    resolve_seen_epoch: i32[4096];
+    resolve_epoch: i32;
+    resolve_sp: i32;
+
     // Import/source graph
     files: File[300];
     file_count: i32;

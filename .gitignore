@@ -35,6 +35,11 @@ build/aot/
 build/*.clif
 build/*.ll
 build/*_expanded.stasis
+build/*.stasis
+build/*.stasis.*
+build/*.txt
+stasis_sys_static.lib
+build/stasis_sys_static.lib
 
 # Android local build outputs
 android/out/

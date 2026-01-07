@@ -346,3 +346,77 @@ int stasis_sys_read_int(void)
     }
     return (int)v;
 }
+
+int stasis_sys_list_dir(const char *path, unsigned char *out, int out_cap)
+{
+    if (!out || out_cap <= 0)
+    {
+        return -1;
+    }
+    out[0] = 0;
+
+    if (!path || !*path)
+    {
+        path = ".";
+    }
+
+    int wrote = 0;
+
+#ifdef _WIN32
+    char search_path[512];
+    snprintf(search_path, sizeof(search_path), "%s\\*", path);
+
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_path, &find_data);
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        return -1;
+    }
+
+    do
+    {
+        const char *name = find_data.cFileName;
+        if (!name)
+        {
+            continue;
+        }
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        {
+            continue;
+        }
+
+        const int is_dir = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+        const char prefix0 = is_dir ? 'D' : 'F';
+
+        int name_len = 0;
+        while (name[name_len] != '\0')
+        {
+            name_len++;
+        }
+
+        const int line_len = 2 + name_len + 1;
+        if (wrote + line_len >= out_cap)
+        {
+            break;
+        }
+
+        out[wrote + 0] = (unsigned char)prefix0;
+        out[wrote + 1] = (unsigned char)' ';
+        memcpy(out + wrote + 2, name, (size_t)name_len);
+        out[wrote + 2 + name_len] = (unsigned char)'\n';
+        wrote += line_len;
+    } while (FindNextFileA(hFind, &find_data) != 0);
+
+    FindClose(hFind);
+#else
+    (void)wrote;
+    return -1;
+#endif
+
+    if (wrote >= out_cap)
+    {
+        wrote = out_cap - 1;
+    }
+    out[wrote] = 0;
+    return wrote;
+}

@@ -12,7 +12,7 @@ global t_argv0: ascii[260];
 global t_exe_dir: ascii[260];
 
 global t_tmp: ascii[2048];
-global t_big_data: u8[51201];
+global t_big_data: u8[1048577];
 
 function t_init_cache_dir(): bool {
     let n: i32 = sys_argv(0, t_argv0, 260);
@@ -47,9 +47,9 @@ test `stasis import graph loads files`() {
         return false;
     }
 
-    path_join(t_path_common, t_exe_dir, "sh_common.stasis");
-    path_join(t_path_a, t_exe_dir, "sh_a.stasis");
-    path_join(t_path_entry, t_exe_dir, "sh_entry.stasis");
+    path_join(t_path_common, t_exe_dir, "stasis_common.stasis");
+    path_join(t_path_a, t_exe_dir, "stasis_a.stasis");
+    path_join(t_path_entry, t_exe_dir, "stasis_entry.stasis");
 
     // common
     ascii_clear(t_tmp);
@@ -61,7 +61,7 @@ test `stasis import graph loads files`() {
 
     // a imports common
     ascii_clear(t_tmp);
-    t_append_import(t_tmp, "sh_common.stasis");
+    t_append_import(t_tmp, "stasis_common.stasis");
     t_append_line(t_tmp, "// a-marker");
     t_append_line(t_tmp, "global a_value: i32;");
     if (!t_write_ascii(t_path_a, t_tmp)) {
@@ -70,8 +70,8 @@ test `stasis import graph loads files`() {
 
     // entry imports a, then duplicates common
     ascii_clear(t_tmp);
-    t_append_import(t_tmp, "sh_a.stasis");
-    t_append_import(t_tmp, "sh_common.stasis");
+    t_append_import(t_tmp, "stasis_a.stasis");
+    t_append_import(t_tmp, "stasis_common.stasis");
     t_append_line(t_tmp, "// entry-marker");
     t_append_line(t_tmp, "global entry_value: i32;");
     if (!t_write_ascii(t_path_entry, t_tmp)) {
@@ -108,31 +108,31 @@ test `stasis import graph loads files`() {
     return find_file(t_path_common) >= 0
         && find_file(t_path_a) >= 0
         && find_file(t_path_entry) >= 0
-        && find_module("sh_common") >= 0
-        && find_module("sh_a") >= 0
-        && find_module("sh_entry") >= 0;
+        && find_module("stasis_common") >= 0
+        && find_module("stasis_a") >= 0
+        && find_module("stasis_entry") >= 0;
 }
 
-test `stasis import graph enforces 50KiB`() {
+test `stasis import graph enforces 1MiB`() {
     if (!t_init_cache_dir()) {
         return false;
     }
 
     stasis.quiet = 1;
 
-    path_join(t_path_big, t_exe_dir, "sh_big.stasis");
-    path_join(t_path_big_entry, t_exe_dir, "sh_big_entry.stasis");
+    path_join(t_path_big, t_exe_dir, "stasis_big.stasis");
+    path_join(t_path_big_entry, t_exe_dir, "stasis_big_entry.stasis");
 
     let i: i32 = 0;
-    for (i = 0; i < 51201; i = i + 1) {
+    for (i = 0; i < 1048577; i = i + 1) {
         t_big_data[i] = 97; // 'a'
     }
-    if (!sys_write_file(t_path_big, t_big_data, 51201)) {
+    if (!sys_write_file(t_path_big, t_big_data, 1048577)) {
         return false;
     }
 
     ascii_clear(t_tmp);
-    t_append_import(t_tmp, "sh_big.stasis");
+    t_append_import(t_tmp, "stasis_big.stasis");
     t_append_line(t_tmp, "// big-entry-marker");
     if (!t_write_ascii(t_path_big_entry, t_tmp)) {
         return false;

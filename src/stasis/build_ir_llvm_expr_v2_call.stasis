@@ -257,38 +257,70 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                     stasis.llvm_val_struct_idx[val_len] = -1;
                     val_len = val_len + 1;
                 } else {
-                    if (span_eq(file_idx, cname_start2, cname_len2, "sys_write_file")) {
+                    if (span_eq(file_idx, cname_start2, cname_len2, "sys_list_dir")) {
                         handled_intr = 1;
                         if (argc != 3) {
-                            build_err_at(file_idx, "sys_write_file expects 3 arguments", stasis.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "sys_list_dir expects 3 arguments", stasis.expr_nodes[idx2].at);
                             return -1;
                         }
                         if (stasis.llvm_val_kind[arg_base + 2] != LlvmValueKind.I32) {
-                            build_err_at(file_idx, "sys_write_file expects i32 argument (len)", stasis.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "sys_list_dir expects i32 argument (out_cap)", stasis.expr_nodes[idx2].at);
                             return -1;
                         }
                         if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.PtrI8 || stasis.llvm_val_kind[arg_base + 1] != LlvmValueKind.PtrI8) {
-                            build_err_at(file_idx, "sys_write_file expects pointer arguments (path, data)", stasis.expr_nodes[idx2].at);
+                            build_err_at(file_idx, "sys_list_dir expects pointer arguments (path, out)", stasis.expr_nodes[idx2].at);
                             return -1;
                         }
-    
-                        let out_id3: i32 = llvm_new_tmp();
+
+                        let out_id2b: i32 = llvm_new_tmp();
                         ascii_append(stasis.ir_out, "  ");
-                        llvm_append_tmp(out_id3);
-                        ascii_append(stasis.ir_out, " = call i32 @stasis_sys_write_file(ptr ");
+                        llvm_append_tmp(out_id2b);
+                        ascii_append(stasis.ir_out, " = call i32 @stasis_sys_list_dir(ptr ");
                         llvm_append_tmp(stasis.expr_op_at[arg_base]);
                         ascii_append(stasis.ir_out, ", ptr ");
                         llvm_append_tmp(stasis.expr_op_at[arg_base + 1]);
                         ascii_append(stasis.ir_out, ", i32 ");
                         llvm_append_tmp(stasis.expr_op_at[arg_base + 2]);
                         ascii_append(stasis.ir_out, ")\n");
-    
+
                         val_len = arg_base;
-                        stasis.expr_op_at[val_len] = out_id3;
+                        stasis.expr_op_at[val_len] = out_id2b;
                         stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
                         stasis.llvm_val_struct_idx[val_len] = -1;
                         val_len = val_len + 1;
                     } else {
+                        if (span_eq(file_idx, cname_start2, cname_len2, "sys_write_file")) {
+                            handled_intr = 1;
+                            if (argc != 3) {
+                                build_err_at(file_idx, "sys_write_file expects 3 arguments", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            if (stasis.llvm_val_kind[arg_base + 2] != LlvmValueKind.I32) {
+                                build_err_at(file_idx, "sys_write_file expects i32 argument (len)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.PtrI8 || stasis.llvm_val_kind[arg_base + 1] != LlvmValueKind.PtrI8) {
+                                build_err_at(file_idx, "sys_write_file expects pointer arguments (path, data)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+
+                            let out_id3: i32 = llvm_new_tmp();
+                            ascii_append(stasis.ir_out, "  ");
+                            llvm_append_tmp(out_id3);
+                            ascii_append(stasis.ir_out, " = call i32 @stasis_sys_write_file(ptr ");
+                            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+                            ascii_append(stasis.ir_out, ", ptr ");
+                            llvm_append_tmp(stasis.expr_op_at[arg_base + 1]);
+                            ascii_append(stasis.ir_out, ", i32 ");
+                            llvm_append_tmp(stasis.expr_op_at[arg_base + 2]);
+                            ascii_append(stasis.ir_out, ")\n");
+
+                            val_len = arg_base;
+                            stasis.expr_op_at[val_len] = out_id3;
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
                         if (span_eq(file_idx, cname_start2, cname_len2, "sys_file_exists")) {
                             handled_intr = 1;
                             if (argc != 1) {
@@ -936,6 +968,7 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
             stasis.llvm_val_struct_idx[val_len] = -1;
             val_len = val_len + 1;
         }
+    }
     }
     
     if (handled_intr == 0) {

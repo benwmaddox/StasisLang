@@ -152,6 +152,15 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             );
         }
 
+        if (builtins.Contains("sys_list_dir"))
+        {
+            builder.DeclareExternal("stasis_sys_list_dir", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64, // path
+                CraneliftTypeMapper.ClifType.R64, // out
+                CraneliftTypeMapper.ClifType.I32  // out_cap
+            );
+        }
+
         if (builtins.Contains("sys_write_file"))
         {
             builder.DeclareExternal("stasis_sys_write_file", CraneliftTypeMapper.ClifType.I32,
@@ -1190,7 +1199,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         name is "print_int" or "print_char" or "print_string" or "read_int" or "read_char"
             or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
             or "sys_argc" or "sys_argv"
-            or "sys_read_file" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
+            or "sys_read_file" or "sys_list_dir" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
             or "sys_exec" or "sys_sleep_ms"
             or "time" or "get_time_ms" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"

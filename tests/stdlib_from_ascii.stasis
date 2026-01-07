@@ -8,9 +8,9 @@ test `from_ascii copies ascii`(): bool {
     ascii_src[1] = 105;
     ascii_src[2] = 0;
 
-    from_ascii(utf8_dst, ascii_src, utf8_dst.length);
+    stdlib.from_ascii(utf8_dst, ascii_src, utf8_dst.length);
 
-    return str_len(utf8_dst) == 2
-        && str_get(utf8_dst, 0) == 72
-        && str_get(utf8_dst, 1) == 105;
+    return utf8_char_len(utf8_dst) == 2
+        && utf8_dst[0] == 72
+        && utf8_dst[1] == 105;
 }

@@ -67,7 +67,11 @@ function path_dirname(dst: ascii[], path: ascii[]): i32 {
         limit = MAX_PATH_BYTES - 1;
     }
     for (i = 0; i < limit; i = i + 1) {
-        dst[i] = path[i];
+        let b: u8 = path[i];
+        if (b == 92) { // '\\'
+            b = 47; // '/'
+        }
+        dst[i] = b;
     }
     dst[i] = 0;
     ascii_set_len(dst, i);
@@ -82,7 +86,14 @@ function path_join(dst: ascii[], dir: ascii[], rel: ascii[]): i32 {
     }
 
     ascii_copy(dst, dir);
-    let dlen: i32 = ascii_len(dst);
+    let dlen: i32 = ascii_recount(dst);
+
+    let di: i32 = 0;
+    for (di = 0; di < dlen; di = di + 1) {
+        if (dst[di] == 92) { // '\\'
+            dst[di] = 47; // '/'
+        }
+    }
     if (dlen > 0) {
         let last: u8 = dst[dlen - 1];
         if (last != 47 && last != 92) {
@@ -623,7 +634,11 @@ function path_dirname_from_pool(dst: ascii[], path_off: i32, path_len: i32): i32
         limit = MAX_PATH_BYTES - 1;
     }
     for (i = 0; i < limit; i = i + 1) {
-        dst[i] = stasis.path_pool[path_off + i];
+        let b2: u8 = stasis.path_pool[path_off + i];
+        if (b2 == 92) { // '\\'
+            b2 = 47; // '/'
+        }
+        dst[i] = b2;
     }
     dst[i] = 0;
     ascii_set_len(dst, i);

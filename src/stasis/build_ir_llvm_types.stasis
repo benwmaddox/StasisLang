@@ -15,6 +15,47 @@ import "build_ir_llvm_expr_v2.stasis";
 import "build_ir_llvm_emit_main.stasis";
 import "build_ir_llvm_emit_func.stasis";
 
+function llvm_is_ident_start_byte(b: u8): bool {
+    return (b >= 65u8 && b <= 90u8) || (b >= 97u8 && b <= 122u8) || b == 95u8;
+}
+
+function llvm_is_ident_continue_byte(b: u8): bool {
+    if (llvm_is_ident_start_byte(b)) { return true; }
+    return b >= 48u8 && b <= 57u8;
+}
+
+function llvm_span_is_simple_ident(file_idx: i32, start: i32, len: i32): bool {
+    if (file_idx < 0 || file_idx >= stasis.file_count) { return false; }
+    if (len <= 0) { return false; }
+
+    let base: i32 = stasis.files[file_idx].offset + start;
+    let b0: u8 = stasis.pool[base];
+    if (!llvm_is_ident_start_byte(b0)) { return false; }
+
+    let i: i32 = 1;
+    for (i = i; i < len; i = i + 1) {
+        if (!llvm_is_ident_continue_byte(stasis.pool[base + i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function llvm_ascii_is_simple_ident(s: ascii[]): bool {
+    let len: i32 = ascii_len(s);
+    if (len <= 0) { return false; }
+    let b0: u8 = s[0];
+    if (!llvm_is_ident_start_byte(b0)) { return false; }
+
+    let i: i32 = 1;
+    for (i = i; i < len; i = i + 1) {
+        if (!llvm_is_ident_continue_byte(s[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function llvm_append_func_ir_name(func_idx: i32): void {
     if (func_idx < 0 || func_idx >= stasis.func_count) {
         return;
@@ -33,19 +74,57 @@ function llvm_append_func_ir_name(func_idx: i32): void {
         return;
     }
 
+    let name_simple: i32 = 0;
+    if (llvm_span_is_simple_ident(file_idx, stasis.funcs[func_idx].name_start, stasis.funcs[func_idx].name_len)) {
+        name_simple = 1;
+    }
+
+    let mod_simple: i32 = 1;
+    if (file_idx == 0) {
+        if (!llvm_ascii_is_simple_ident(stasis.arg_module)) {
+            mod_simple = 0;
+        }
+    }
+
+    let needs_quotes: i32 = 0;
+    if (name_simple == 0 || mod_simple == 0) {
+        needs_quotes = 1;
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
     if (file_idx == 0) {
         ascii_append(stasis.ir_out, stasis.arg_module);
     } else {
         let off: i32 = stasis.files[file_idx].mod_off;
         let len: i32 = stasis.files[file_idx].mod_len;
-        let i: i32 = 0;
-        for (i = 0; i < len; i = i + 1) {
-            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + i]);
+        let mod_i: i32 = 0;
+        for (mod_i = 0; mod_i < len; mod_i = mod_i + 1) {
+            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + mod_i]);
         }
     }
 
     ascii_append(stasis.ir_out, "__");
-    ir_append_span(stasis.ir_out, file_idx, stasis.funcs[func_idx].name_start, stasis.funcs[func_idx].name_len);
+
+    if (needs_quotes == 0) {
+        ir_append_span(stasis.ir_out, file_idx, stasis.funcs[func_idx].name_start, stasis.funcs[func_idx].name_len);
+    } else {
+        let base: i32 = stasis.files[file_idx].offset + stasis.funcs[func_idx].name_start;
+        let name_i: i32 = 0;
+        for (name_i = 0; name_i < stasis.funcs[func_idx].name_len; name_i = name_i + 1) {
+            let b: u8 = stasis.pool[base + name_i];
+            if (b == 34 || b == 92) {
+                ascii_append_byte(stasis.ir_out, 95); // '_'
+            } else {
+                ascii_append_byte(stasis.ir_out, b);
+            }
+        }
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
 }
 
 function llvm_append_struct_ir_name(struct_idx: i32): void {
@@ -54,19 +133,57 @@ function llvm_append_struct_ir_name(struct_idx: i32): void {
     }
 
     let file_idx: i32 = stasis.structs[struct_idx].file_idx;
+    let name_simple: i32 = 0;
+    if (llvm_span_is_simple_ident(file_idx, stasis.structs[struct_idx].name_start, stasis.structs[struct_idx].name_len)) {
+        name_simple = 1;
+    }
+
+    let mod_simple: i32 = 1;
+    if (file_idx == 0) {
+        if (!llvm_ascii_is_simple_ident(stasis.arg_module)) {
+            mod_simple = 0;
+        }
+    }
+
+    let needs_quotes: i32 = 0;
+    if (name_simple == 0 || mod_simple == 0) {
+        needs_quotes = 1;
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
     if (file_idx == 0) {
         ascii_append(stasis.ir_out, stasis.arg_module);
     } else {
         let off: i32 = stasis.files[file_idx].mod_off;
         let len: i32 = stasis.files[file_idx].mod_len;
-        let i: i32 = 0;
-        for (i = 0; i < len; i = i + 1) {
-            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + i]);
+        let mod_i: i32 = 0;
+        for (mod_i = 0; mod_i < len; mod_i = mod_i + 1) {
+            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + mod_i]);
         }
     }
 
     ascii_append(stasis.ir_out, "__");
-    ir_append_span(stasis.ir_out, file_idx, stasis.structs[struct_idx].name_start, stasis.structs[struct_idx].name_len);
+
+    if (needs_quotes == 0) {
+        ir_append_span(stasis.ir_out, file_idx, stasis.structs[struct_idx].name_start, stasis.structs[struct_idx].name_len);
+    } else {
+        let base: i32 = stasis.files[file_idx].offset + stasis.structs[struct_idx].name_start;
+        let name_i: i32 = 0;
+        for (name_i = 0; name_i < stasis.structs[struct_idx].name_len; name_i = name_i + 1) {
+            let b: u8 = stasis.pool[base + name_i];
+            if (b == 34 || b == 92) {
+                ascii_append_byte(stasis.ir_out, 95); // '_'
+            } else {
+                ascii_append_byte(stasis.ir_out, b);
+            }
+        }
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
 }
 
 function llvm_append_global_ir_name(global_idx: i32): void {
@@ -75,19 +192,57 @@ function llvm_append_global_ir_name(global_idx: i32): void {
     }
 
     let file_idx: i32 = stasis.globals[global_idx].file_idx;
+    let name_simple: i32 = 0;
+    if (llvm_span_is_simple_ident(file_idx, stasis.globals[global_idx].name_start, stasis.globals[global_idx].name_len)) {
+        name_simple = 1;
+    }
+
+    let mod_simple: i32 = 1;
+    if (file_idx == 0) {
+        if (!llvm_ascii_is_simple_ident(stasis.arg_module)) {
+            mod_simple = 0;
+        }
+    }
+
+    let needs_quotes: i32 = 0;
+    if (name_simple == 0 || mod_simple == 0) {
+        needs_quotes = 1;
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
     if (file_idx == 0) {
         ascii_append(stasis.ir_out, stasis.arg_module);
     } else {
         let off: i32 = stasis.files[file_idx].mod_off;
         let len: i32 = stasis.files[file_idx].mod_len;
-        let i: i32 = 0;
-        for (i = 0; i < len; i = i + 1) {
-            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + i]);
+        let mod_i: i32 = 0;
+        for (mod_i = 0; mod_i < len; mod_i = mod_i + 1) {
+            ascii_append_byte(stasis.ir_out, stasis.mod_pool[off + mod_i]);
         }
     }
 
     ascii_append(stasis.ir_out, "__");
-    ir_append_span(stasis.ir_out, file_idx, stasis.globals[global_idx].name_start, stasis.globals[global_idx].name_len);
+
+    if (needs_quotes == 0) {
+        ir_append_span(stasis.ir_out, file_idx, stasis.globals[global_idx].name_start, stasis.globals[global_idx].name_len);
+    } else {
+        let base: i32 = stasis.files[file_idx].offset + stasis.globals[global_idx].name_start;
+        let name_i: i32 = 0;
+        for (name_i = 0; name_i < stasis.globals[global_idx].name_len; name_i = name_i + 1) {
+            let b: u8 = stasis.pool[base + name_i];
+            if (b == 34 || b == 92) {
+                ascii_append_byte(stasis.ir_out, 95); // '_'
+            } else {
+                ascii_append_byte(stasis.ir_out, b);
+            }
+        }
+    }
+
+    if (needs_quotes != 0) {
+        ascii_append_byte(stasis.ir_out, 34); // '"'
+    }
 }
 
 function llvm_emit_type(type_idx: i32): i32 {
@@ -253,6 +408,7 @@ function llvm_emit_runtime_decls_and_consts(): void {
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_argc()\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_argv(i32, ptr, i32)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_file(ptr, ptr, i32)\n");
+    ascii_append(stasis.ir_out, "declare i32 @stasis_sys_list_dir(ptr, ptr, i32)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_write_file(ptr, ptr, i32)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_file_exists(ptr)\n");
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_file_size(ptr)\n");
