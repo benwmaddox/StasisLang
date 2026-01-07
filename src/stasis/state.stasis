@@ -259,7 +259,12 @@ enum MirInstKind {
 
     // Side effects / control
     StoreLocalI32 = 20,
-    RetI32 = 21
+    RetI32 = 21,
+
+    // Control flow
+    Label = 30,
+    Br = 31,
+    BrCondI32 = 32
 }
 
 struct MirInst {

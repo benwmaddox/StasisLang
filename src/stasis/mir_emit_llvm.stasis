@@ -28,6 +28,21 @@ function mir_emit_llvm_from_mir_i32(file_idx: i32, exit_label: i32): i32 {
             ir_append_i32(stasis.ir_out, stasis.mir_insts[i].imm_i32);
             ascii_append(stasis.ir_out, "\n");
         } else {
+            if (k == MirInstKind.Label) {
+                ascii_append(stasis.ir_out, "\n");
+                llvm_emit_label_def("m", stasis.mir_insts[i].imm_i32);
+            } else {
+                if (k == MirInstKind.Br) {
+                    llvm_emit_br("m", stasis.mir_insts[i].imm_i32);
+                } else {
+                    if (k == MirInstKind.BrCondI32) {
+                        let cond_val: i32 = stasis.mir_insts[i].a;
+                        let then_label: i32 = stasis.mir_insts[i].b;
+                        let else_label: i32 = stasis.mir_insts[i].c;
+                        let cond_tmp: i32 = stasis.mir_value_llvm_tmp[cond_val];
+                        let cond_i1: i32 = llvm_emit_icmp_i1("ne", cond_tmp, 0);
+                        llvm_emit_br_i1(cond_i1, "m", then_label, "m", else_label);
+                    } else {
             if (k == MirInstKind.LoadLocalI32) {
                 let local_id: i32 = stasis.mir_insts[i].a;
                 ascii_append(stasis.ir_out, "  ");
@@ -127,6 +142,9 @@ function mir_emit_llvm_from_mir_i32(file_idx: i32, exit_label: i32): i32 {
                                 }
                             }
                         }
+                    }
+                }
+            }
                     }
                 }
             }
