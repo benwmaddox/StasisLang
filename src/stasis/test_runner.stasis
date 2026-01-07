@@ -222,7 +222,7 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     ascii_append(stasis.scratch_import, ".exe");
     path_join(stasis.scratch_exe, stasis.scratch_dir, stasis.scratch_import);
 
-    path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
+    // `stasis.scratch_runtime` is filled by `append_sys_runtime_link_input()` if needed.
 
     if (!sys_write_file(stasis.scratch_resolved, stasis.ir_out, ascii_len(stasis.ir_out))) {
         print_string("error: failed to write temp ir: ");
@@ -231,17 +231,36 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
         return 1;
     }
 
+    let needs_graphics: bool = ir_needs_graphics_runtime();
+    let needs_sys: bool = ir_needs_sys_runtime();
+
+    // Fast path: if we don't need native linking, try `lli` (matches stage0 behavior and avoids clang/link cost).
+    if (!needs_graphics && !needs_sys) {
+        ascii_clear(stasis.exec_cmd);
+        ascii_append(stasis.exec_cmd, "lli ");
+        ascii_append_byte(stasis.exec_cmd, 34); // '"'
+        ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
+        ascii_append_byte(stasis.exec_cmd, 34); // '"'
+        let lli_exit: i32 = sys_exec(stasis.exec_cmd);
+        // `system()` returns 9009 on Windows when the command is missing; fall back to clang in that case.
+        if (lli_exit != 9009 && lli_exit != 127) {
+            return lli_exit;
+        }
+    }
+
     ascii_clear(stasis.exec_cmd);
     ascii_append(stasis.exec_cmd, "clang -Wno-override-module ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    ascii_append(stasis.exec_cmd, " ");
-    ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
-    ascii_append_byte(stasis.exec_cmd, 34); // '"'
 
-    if (ir_needs_graphics_runtime()) {
+    if (needs_sys) {
+        if (!append_sys_runtime_link_input()) {
+            return 1;
+        }
+    }
+
+    if (needs_graphics) {
         if (!append_graphics_static_link_inputs()) {
             return 1;
         }

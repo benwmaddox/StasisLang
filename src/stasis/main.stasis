@@ -96,7 +96,7 @@ function cmd_build(): i32 {
     }
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
     path_join(stasis.scratch_resolved, stasis.scratch_dir, "stasis_build.ll");
-    path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
+    // `stasis.scratch_runtime` is filled by `append_sys_runtime_link_input()` if needed.
 
     if (!sys_write_file(stasis.scratch_resolved, stasis.ir_out, ascii_len(stasis.ir_out))) {
         print_string("error: failed to write temp ir: ");
@@ -112,8 +112,9 @@ function cmd_build(): i32 {
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, " ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
-    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    if (!append_sys_runtime_link_input()) {
+        return 1;
+    }
 
     if (ir_needs_graphics_runtime()) {
         if (!append_graphics_static_link_inputs()) {
@@ -170,7 +171,7 @@ function cmd_run(): i32 {
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
     path_join(stasis.scratch_resolved, stasis.scratch_dir, "stasis_run.ll");
     path_join(stasis.scratch_exe, stasis.scratch_dir, "stasis_run.exe");
-    path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
+    // `stasis.scratch_runtime` is filled by `append_sys_runtime_link_input()` if needed.
 
     if (!sys_write_file(stasis.scratch_resolved, stasis.ir_out, ascii_len(stasis.ir_out))) {
         print_string("error: failed to write temp ir: ");
@@ -186,8 +187,9 @@ function cmd_run(): i32 {
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, " ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
-    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    if (!append_sys_runtime_link_input()) {
+        return 1;
+    }
 
     if (ir_needs_graphics_runtime()) {
         if (!append_graphics_static_link_inputs()) {
@@ -236,7 +238,7 @@ function cmd_release(): i32 {
     }
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
     path_join(stasis.scratch_resolved, stasis.scratch_dir, "stasis_release.ll");
-    path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
+    // `stasis.scratch_runtime` is filled by `append_sys_runtime_link_input()` if needed.
 
     if (!sys_write_file(stasis.scratch_resolved, stasis.ir_out, ascii_len(stasis.ir_out))) {
         print_string("error: failed to write temp ir: ");
@@ -252,8 +254,9 @@ function cmd_release(): i32 {
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, " ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
-    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    if (!append_sys_runtime_link_input()) {
+        return 1;
+    }
 
     if (ir_needs_graphics_runtime()) {
         if (!append_graphics_static_link_inputs()) {

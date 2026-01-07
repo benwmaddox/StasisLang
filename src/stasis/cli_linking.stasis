@@ -38,6 +38,39 @@ function ir_needs_graphics_runtime(): bool {
     return false;
 }
 
+function ir_needs_sys_runtime(): bool {
+    // Self-host syscalls are lowered to `stasis_sys_*` symbols in the native runtime (`runtime/stasis_sys.c`).
+    // Keep this as a cheap text heuristic (matches stage0 behavior).
+    return ascii_contains(stasis.ir_out, "stasis_sys_");
+}
+
+function append_sys_runtime_link_input(): bool {
+    // Prefer a prebuilt sys runtime lib (faster than compiling the C file each time).
+    path_join(stasis.scratch_runtime, stasis.scratch_dir, "stasis_sys_static.lib");
+    if (sys_file_exists(stasis.scratch_runtime)) {
+        ascii_append(stasis.exec_cmd, " ");
+        ascii_append_byte(stasis.exec_cmd, 34); // '"'
+        ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
+        ascii_append_byte(stasis.exec_cmd, 34); // '"'
+        return true;
+    }
+
+    // Fallback: compile and link the runtime C file.
+    path_join(stasis.scratch_runtime, stasis.scratch_dir, "../runtime/stasis_sys.c");
+    if (!sys_file_exists(stasis.scratch_runtime)) {
+        print_string("error: missing sys runtime: ");
+        print_string(stasis.scratch_runtime);
+        print_char(10);
+        return false;
+    }
+
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    ascii_append(stasis.exec_cmd, stasis.scratch_runtime);
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    return true;
+}
+
 function append_graphics_static_link_inputs(): bool {
     // Static graphics bundle from `runtime/build.bat` (includes dependency libs in the same folder).
     path_join(stasis.scratch_graphics, stasis.scratch_dir, "../runtime/build/Release");
