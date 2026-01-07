@@ -260,7 +260,7 @@ function hotswap_build_dll_after_check(dll_out: ascii[]): i32 {
     }
 
     if (needs_graphics) {
-        if (!append_graphics_static_link_inputs()) {
+        if (!append_graphics_link_inputs()) {
             stasis.watch_hot_ms_total = sys_time_ms() - t_total0;
             return 1;
         }
@@ -571,7 +571,7 @@ function cmd_build_after_check(): i32 {
     }
 
     if (needs_graphics) {
-        if (!append_graphics_static_link_inputs()) {
+        if (!append_graphics_link_inputs()) {
             return 1;
         }
     }
@@ -663,7 +663,7 @@ function cmd_run_after_check(): i32 {
     }
 
     if (needs_graphics) {
-        if (!append_graphics_static_link_inputs()) {
+        if (!append_graphics_link_inputs()) {
             return 1;
         }
     }
@@ -753,7 +753,7 @@ function cmd_release(): i32 {
     }
 
     if (needs_graphics) {
-        if (!append_graphics_static_link_inputs()) {
+        if (!append_graphics_link_inputs()) {
             return 1;
         }
     }

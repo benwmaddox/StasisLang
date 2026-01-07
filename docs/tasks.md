@@ -6,6 +6,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 
 - [ ] Close self-host compiler gap: execute `docs/self-host-gap-closure.md`.
 - [ ] Self-host compiler: implement MIR + incremental compilation plan in `docs/self-host-ir-and-incremental.md`.
+- [ ] Self-host hot swap runner notes: `docs/self-host-hot-swap-runner.md`.
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.

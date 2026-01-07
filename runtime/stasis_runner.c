@@ -101,6 +101,213 @@ static void set_runtime_dir(const char *dll_path)
 #endif
 }
 
+#ifdef _WIN32
+static int file_exists(const char *path);
+
+typedef BOOL(WINAPI *stasis_SetDefaultDllDirectoriesFn)(DWORD);
+typedef DLL_DIRECTORY_COOKIE(WINAPI *stasis_AddDllDirectoryFn)(PCWSTR);
+
+static int stasis_path_dirname(const char *path, char *out, size_t out_cap)
+{
+    size_t len = strlen(path);
+    if (len == 0 || len + 1 > out_cap)
+    {
+        return 1;
+    }
+
+    memcpy(out, path, len + 1);
+
+    char *slash = strrchr(out, '\\');
+    char *fslash = strrchr(out, '/');
+    char *sep = slash > fslash ? slash : fslash;
+    if (!sep)
+    {
+        return 1;
+    }
+
+    *sep = '\0';
+    return out[0] == '\0' ? 1 : 0;
+}
+
+static int stasis_add_dll_directory_utf8(stasis_AddDllDirectoryFn add_dir, const char *utf8_path)
+{
+    wchar_t wide[1024];
+    int got = MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wide, (int)(sizeof(wide) / sizeof(wide[0])));
+    if (got == 0)
+    {
+        got = MultiByteToWideChar(CP_ACP, 0, utf8_path, -1, wide, (int)(sizeof(wide) / sizeof(wide[0])));
+        if (got == 0)
+        {
+            return 1;
+        }
+    }
+
+    return add_dir(wide) ? 0 : 1;
+}
+
+static void stasis_try_add_relative_runtime_dir(const char *base_dir, const char *rel, char *out_dir, size_t out_cap)
+{
+    if (out_dir[0] != '\0')
+    {
+        return;
+    }
+
+    char probe_dir[1024];
+    char probe_dll[1024];
+    probe_dir[0] = '\0';
+    probe_dll[0] = '\0';
+
+    size_t base_len = strlen(base_dir);
+    size_t rel_len = strlen(rel);
+    if (base_len + 1 + rel_len + 1 >= sizeof(probe_dir))
+    {
+        return;
+    }
+
+    memcpy(probe_dir, base_dir, base_len);
+    probe_dir[base_len] = '\\';
+    memcpy(probe_dir + base_len + 1, rel, rel_len);
+    probe_dir[base_len + 1 + rel_len] = '\0';
+
+    size_t dir_len = strlen(probe_dir);
+    const char *dll_name = "stasis_graphics.dll";
+    size_t dll_len = strlen(dll_name);
+    if (dir_len + 1 + dll_len + 1 >= sizeof(probe_dll))
+    {
+        return;
+    }
+
+    memcpy(probe_dll, probe_dir, dir_len);
+    probe_dll[dir_len] = '\\';
+    memcpy(probe_dll + dir_len + 1, dll_name, dll_len);
+    probe_dll[dir_len + 1 + dll_len] = '\0';
+
+    if (file_exists(probe_dll))
+    {
+        strncpy(out_dir, probe_dir, out_cap - 1);
+        out_dir[out_cap - 1] = '\0';
+    }
+}
+
+static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path, char *out_runtime_dir, size_t out_cap)
+{
+    out_runtime_dir[0] = '\0';
+
+    char exe_dir[1024];
+    exe_dir[0] = '\0';
+    if (exe_path && stasis_path_dirname(exe_path, exe_dir, sizeof(exe_dir)) == 0)
+    {
+        char probe[1024];
+        probe[0] = '\0';
+
+        size_t dir_len = strlen(exe_dir);
+        const char *dll_name = "stasis_graphics.dll";
+        size_t dll_len = strlen(dll_name);
+        if (dir_len + 1 + dll_len + 1 < sizeof(probe))
+        {
+            memcpy(probe, exe_dir, dir_len);
+            probe[dir_len] = '\\';
+            memcpy(probe + dir_len + 1, dll_name, dll_len);
+            probe[dir_len + 1 + dll_len] = '\0';
+            if (file_exists(probe))
+            {
+                strncpy(out_runtime_dir, exe_dir, out_cap - 1);
+                out_runtime_dir[out_cap - 1] = '\0';
+                return;
+            }
+        }
+
+        /* Common layouts when the runner is copied to repo root or build/. */
+        stasis_try_add_relative_runtime_dir(exe_dir, "runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
+        stasis_try_add_relative_runtime_dir(exe_dir, "..\\runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
+    }
+
+    (void)dll_path;
+}
+
+static void stasis_enable_dll_search(const char *exe_path, const char *dll_path)
+{
+    char dll_dir[1024];
+    dll_dir[0] = '\0';
+    if (dll_path)
+    {
+        (void)stasis_path_dirname(dll_path, dll_dir, sizeof(dll_dir));
+    }
+
+    char runtime_dir[1024];
+    stasis_setup_runtime_dirs(exe_path, dll_path, runtime_dir, sizeof(runtime_dir));
+
+    if (dll_dir[0] != '\0')
+    {
+        /* Keep program-relative file IO working as before. */
+        SetCurrentDirectoryA(dll_dir);
+    }
+
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    stasis_SetDefaultDllDirectoriesFn set_default = NULL;
+    stasis_AddDllDirectoryFn add_dir = NULL;
+    if (k32)
+    {
+        set_default = (stasis_SetDefaultDllDirectoriesFn)GetProcAddress(k32, "SetDefaultDllDirectories");
+        add_dir = (stasis_AddDllDirectoryFn)GetProcAddress(k32, "AddDllDirectory");
+    }
+
+    if (set_default && add_dir)
+    {
+        set_default(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        if (dll_dir[0] != '\0')
+        {
+            (void)stasis_add_dll_directory_utf8(add_dir, dll_dir);
+        }
+        if (runtime_dir[0] != '\0')
+        {
+            (void)stasis_add_dll_directory_utf8(add_dir, runtime_dir);
+        }
+    }
+    else
+    {
+        /* Fallback: app directory is still searched; add program DLL directory as well. */
+        if (dll_dir[0] != '\0')
+        {
+            SetDllDirectoryA(dll_dir);
+        }
+    }
+
+    /* Optional preload: keep runtime DLLs resident across swaps. */
+    if (runtime_dir[0] != '\0')
+    {
+        char gfx_path[1024];
+        gfx_path[0] = '\0';
+        size_t dir_len = strlen(runtime_dir);
+        const char *dll_name = "stasis_graphics.dll";
+        size_t dll_len = strlen(dll_name);
+        if (dir_len + 1 + dll_len + 1 < sizeof(gfx_path))
+        {
+            memcpy(gfx_path, runtime_dir, dir_len);
+            gfx_path[dir_len] = '\\';
+            memcpy(gfx_path + dir_len + 1, dll_name, dll_len);
+            gfx_path[dir_len + 1 + dll_len] = '\0';
+            if (file_exists(gfx_path))
+            {
+                (void)LoadLibraryA(gfx_path);
+            }
+        }
+    }
+}
+
+static HMODULE stasis_load_program_library(const char *path)
+{
+    HMODULE lib = LoadLibraryExA(path,
+                                NULL,
+                                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    if (!lib)
+    {
+        lib = LoadLibraryA(path);
+    }
+    return lib;
+}
+#endif
+
 static int read_state_map(const char *path, uint64_t *out_hash, stasis_state_symbol **out_syms, uint32_t *out_count, uint32_t *out_total)
 {
     FILE *f = fopen(path, "rb");
@@ -640,10 +847,13 @@ int main(int argc, char **argv)
             req_dll_path[dll_len] = '\0';
             req_entry_name[entry_len] = '\0';
 
+#ifndef _WIN32
             set_runtime_dir(req_dll_path);
+#endif
 
 #ifdef _WIN32
-            HMODULE lib = LoadLibraryA(req_dll_path);
+            stasis_enable_dll_search(argv[0], req_dll_path);
+            HMODULE lib = stasis_load_program_library(req_dll_path);
             if (!lib)
             {
                 fprintf(stderr, "ERR failed to load\n");
@@ -765,10 +975,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef _WIN32
     set_runtime_dir(dll_path);
+#endif
 
 #ifdef _WIN32
-    HMODULE lib = LoadLibraryA(dll_path);
+    stasis_enable_dll_search(argv[0], dll_path);
+    HMODULE lib = stasis_load_program_library(dll_path);
     if (!lib)
     {
         DWORD err = GetLastError();
@@ -1002,7 +1215,7 @@ int main(int argc, char **argv)
                             }
 
                             QueryPerformanceCounter(&sw_t0);
-                            HMODULE new_lib = LoadLibraryA(load_path);
+                            HMODULE new_lib = stasis_load_program_library(load_path);
                             QueryPerformanceCounter(&sw_t1);
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)

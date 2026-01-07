@@ -193,3 +193,24 @@ function append_graphics_static_link_inputs(): bool {
 
     return true;
 }
+
+function append_graphics_shared_link_inputs(): bool {
+    // Prefer shared graphics runtime: link against the import library so we don't re-link big static deps on every build.
+    path_join(stasis.scratch_graphics, stasis.scratch_dir, "../runtime/build/bin/Release");
+
+    path_join(stasis.scratch_graphics_dll, stasis.scratch_graphics, "stasis_graphics.lib");
+    if (!sys_file_exists(stasis.scratch_graphics_dll)) {
+        return false;
+    }
+
+    ascii_append(stasis.exec_cmd, " ");
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    ascii_append(stasis.exec_cmd, stasis.scratch_graphics_dll);
+    ascii_append_byte(stasis.exec_cmd, 34); // '"'
+    return true;
+}
+
+function append_graphics_link_inputs(): bool {
+    if (append_graphics_shared_link_inputs()) { return true; }
+    return append_graphics_static_link_inputs();
+}

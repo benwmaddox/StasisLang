@@ -265,7 +265,7 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     }
 
     if (needs_graphics) {
-        if (!append_graphics_static_link_inputs()) {
+        if (!append_graphics_link_inputs()) {
             return 1;
         }
     }
