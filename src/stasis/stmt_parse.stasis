@@ -194,7 +194,7 @@ function stmt_skip_type(file_idx: i32): i32 {
             if (k == Tok.RBracket) {
                 k = lex_next_kind();
             } else {
-                if (k != Tok.IntegerLiteral) {
+                if (k != Tok.IntegerLiteral && k != Tok.U8Literal) {
                     errors = errors + 1;
                     stmt_err_at(file_idx, "expected array size or ']'", stasis.tok_start);
                 } else {

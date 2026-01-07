@@ -458,7 +458,7 @@ public sealed class CraneliftFunctionBuilder
         var val = NewValue();
         var literalText = lit.Literal.Text;
 
-        if (lit.Literal.Kind == TokenKind.IntegerLiteral)
+        if (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal)
         {
             _instructions.AppendLine($"    {val} = iconst.i32 {literalText}");
         }
@@ -3217,7 +3217,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (expr is LiteralExpressionSyntax lit)
         {
-            if (lit.Literal.Kind == TokenKind.IntegerLiteral &&
+            if ((lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
                 (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
                 long.TryParse(lit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
             {
@@ -3239,7 +3239,7 @@ public sealed class CraneliftFunctionBuilder
         if (expr is UnaryExpressionSyntax unary &&
             unary.OperatorToken.Kind == TokenKind.Minus &&
             unary.Operand is LiteralExpressionSyntax innerLit &&
-            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
             (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
             long.TryParse(innerLit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var innerParsed))
         {
@@ -4407,6 +4407,7 @@ public sealed class CraneliftFunctionBuilder
             LiteralExpressionSyntax lit => lit.Literal.Kind switch
             {
                 TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                 TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                 TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                 TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),

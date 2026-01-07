@@ -311,7 +311,7 @@ public sealed class ModuleLowerer
         {
             return lit.Literal.Kind switch
             {
-                TokenKind.IntegerLiteral => int.TryParse(lit.Literal.Text, out var i)
+                TokenKind.IntegerLiteral or TokenKind.U8Literal => int.TryParse(lit.Literal.Text, out var i)
                     ? LLVMValueRef.CreateConstInt(targetType, (ulong)i, true)
                     : default,
                 TokenKind.FloatLiteral => double.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)
@@ -1624,7 +1624,7 @@ public sealed class ModuleLowerer
         {
             switch (lit.Literal.Kind)
             {
-                case TokenKind.IntegerLiteral when int.TryParse(lit.Literal.Text, out var ival):
+                case TokenKind.IntegerLiteral or TokenKind.U8Literal when int.TryParse(lit.Literal.Text, out var ival):
                     return ConstI32(ival);
                 case TokenKind.FloatLiteral when float.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var fval):
                     return LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("f32")), fval);
@@ -1652,7 +1652,7 @@ public sealed class ModuleLowerer
 
             long value;
             if (expr is LiteralExpressionSyntax lit &&
-                lit.Literal.Kind == TokenKind.IntegerLiteral &&
+                (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
                 long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
             {
                 value = parsed;
@@ -1660,7 +1660,7 @@ public sealed class ModuleLowerer
             else if (expr is UnaryExpressionSyntax unary &&
                      unary.OperatorToken.Kind == TokenKind.Minus &&
                      unary.Operand is LiteralExpressionSyntax innerLit &&
-                     innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+                     (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
                      long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
             {
                 value = -innerParsed;

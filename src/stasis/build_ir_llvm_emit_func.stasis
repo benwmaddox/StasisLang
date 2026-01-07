@@ -3,6 +3,7 @@ import "state.stasis";
 import "lexing.stasis";
 import "diagnostics.stasis";
 import "expr_parse.stasis";
+import "expr_eval.stasis";
 import "emit_ir.stasis";
 import "build_ir_common.stasis";
 import "build_ir_llvm_strings.stasis";

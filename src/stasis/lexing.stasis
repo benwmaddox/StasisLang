@@ -59,28 +59,11 @@ function lex_print_err_byte(file_idx: i32, msg: ascii[], at: i32, b: u8): void {
 }
 
 function is_alpha(b: u8): bool {
-    let v: i32 = u8_to_i32(b);
-    if (v >= 65) {
-        if (v <= 90) {
-            return true;
-        }
-    }
-    if (v >= 97) {
-        if (v <= 122) {
-            return true;
-        }
-    }
-    return false;
+    return (b >= 65u8 && b <= 90u8) || (b >= 97u8 && b <= 122u8);
 }
 
 function is_digit(b: u8): bool {
-    let v: i32 = u8_to_i32(b);
-    if (v >= 48) {
-        if (v <= 57) {
-            return true;
-        }
-    }
-    return false;
+    return b >= 48u8 && b <= 57u8;
 }
 
 function is_ident_continue(b: u8): bool {
@@ -90,7 +73,7 @@ function is_ident_continue(b: u8): bool {
     if (is_digit(b)) {
         return true;
     }
-    return u8_to_i32(b) == 95;
+    return b == 95u8;
 }
 
 function lex_is_at_end(): bool {
@@ -228,6 +211,23 @@ function lex_number(): Tok {
     if (has_dot != 0) {
         return Tok.FloatLiteral;
     }
+
+    // Integer suffix: `123u8`
+    if (!lex_is_at_end()) {
+        if (lex_current() == 117 && stasis.lex_pos + 1 < stasis.lex_len && stasis.pool[stasis.lex_base + stasis.lex_pos + 1] == 56) {
+            let after: i32 = stasis.lex_pos + 2;
+            let after_b: u8 = i32_to_u8_trunc(0);
+            if (after < stasis.lex_len) {
+                after_b = stasis.pool[stasis.lex_base + after];
+            }
+            if (!is_ident_continue(after_b)) {
+                lex_advance(); // 'u'
+                lex_advance(); // '8'
+                stasis.tok_len = stasis.lex_pos - start;
+                return Tok.U8Literal;
+            }
+        }
+    }
     return Tok.IntegerLiteral;
 }
 
@@ -269,7 +269,7 @@ function lex_next_kind(): Tok {
     let start: i32 = stasis.lex_pos;
     let b: u8 = lex_current();
 
-    if (is_alpha(b) || u8_to_i32(b) == 95) {
+    if (is_alpha(b) || b == 95u8) {
         return lex_identifier_or_keyword();
     }
 

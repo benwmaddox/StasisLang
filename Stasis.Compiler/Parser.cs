@@ -96,7 +96,7 @@ public sealed class Parser
                 if (Match(TokenKind.Equal))
                 {
                     equalsToken = Previous;
-                    valueToken = Consume(TokenKind.IntegerLiteral, "Expected integer literal after '=' in enum member.");
+                    valueToken = ConsumeOneOf("Expected integer literal after '=' in enum member.", TokenKind.IntegerLiteral, TokenKind.U8Literal);
                 }
                 Token? trailingComma = null;
                 if (Match(TokenKind.Comma))
@@ -548,7 +548,7 @@ public sealed class Parser
         return Current.Kind switch
         {
             TokenKind.Identifier => new IdentifierExpressionSyntax(NextToken()),
-            TokenKind.IntegerLiteral or TokenKind.FloatLiteral or TokenKind.StringLiteral or TokenKind.BacktickLiteral => new LiteralExpressionSyntax(NextToken()),
+            TokenKind.IntegerLiteral or TokenKind.U8Literal or TokenKind.FloatLiteral or TokenKind.StringLiteral or TokenKind.BacktickLiteral => new LiteralExpressionSyntax(NextToken()),
             TokenKind.TrueKeyword or TokenKind.FalseKeyword => new LiteralExpressionSyntax(NextToken()),
             TokenKind.LParen => ParseParenthesized(),
             _ => UnexpectedPrimary()
@@ -590,7 +590,7 @@ public sealed class Parser
             Token? sizeToken = null;
             if (Current.Kind != TokenKind.RBracket)
             {
-                sizeToken = Consume(TokenKind.IntegerLiteral, "Expected array size.");
+                sizeToken = ConsumeOneOf("Expected array size.", TokenKind.IntegerLiteral, TokenKind.U8Literal);
             }
             var rbracket = Consume(TokenKind.RBracket, "Expected ']'.");
             return new ArrayTypeSyntax(type, lbracket, sizeToken, rbracket);

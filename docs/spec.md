@@ -37,12 +37,13 @@ The core design pillars are:
 ### Identifiers
 
 ```
-[a-zA-Z][a-zA-Z0-9_]*
+[_a-zA-Z][_a-zA-Z0-9_]*
 ```
 
 ### Literals
 
-- Integer literal (base-10)
+- Integer literal (base-10): `123`
+- `u8` integer literal (base-10, 0..255): `123u8`
 - Float literal (IEEE-compliant textual form)
 - String literal: `" ... "`
 - Backtick literal: `` ` ... ` `` (used for test names)

@@ -1014,6 +1014,7 @@ public sealed class SemanticAnalyzer
                 return lit.Literal.Kind switch
                 {
                     TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                    TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                     TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                     TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
                     TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
@@ -1238,7 +1239,7 @@ public sealed class SemanticAnalyzer
     private static bool TryGetIntegerLiteralValue(ExpressionSyntax expr, out long value)
     {
         if (expr is LiteralExpressionSyntax lit &&
-            lit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
             long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
         {
             value = parsed;
@@ -1248,7 +1249,7 @@ public sealed class SemanticAnalyzer
         if (expr is UnaryExpressionSyntax unary &&
             unary.OperatorToken.Kind == TokenKind.Minus &&
             unary.Operand is LiteralExpressionSyntax innerLit &&
-            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
             long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
         {
             value = -innerParsed;
