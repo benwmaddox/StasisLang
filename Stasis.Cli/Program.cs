@@ -2520,6 +2520,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var swapDir = Path.Combine(repoRoot, "build", "hotstate");
     var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA.dll");
     var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB.dll");
+    var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
+    var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
     var pid = Environment.ProcessId;
     var hotClifPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap.clif");
     var hotObjPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap{GetObjectFileExtension()}");
@@ -2536,6 +2538,50 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         // ignore
     }
 
+    static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+                while (!token.IsCancellationRequested)
+                {
+                    var line = reader.ReadLine();
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    onLine?.Invoke(line);
+                    writer.WriteLine(line);
+                }
+            }
+            catch
+            {
+                // Best-effort logging.
+            }
+        }, token);
+    }
+
+    static int WaitForRunnerHotSwapOkCount(Func<int> getOkCount, int prevOkCount, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (getOkCount() > prevOkCount)
+            {
+                return (int)sw.ElapsedMilliseconds;
+            }
+
+            Thread.Sleep(1);
+        }
+
+        return -1;
+    }
+
     using var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) =>
     {
@@ -2545,6 +2591,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
     string? activeDll = null;
     Process? runner = null;
+    var runnerHotSwapOkCount = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
     {
@@ -2683,10 +2730,30 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     FileName = runnerPath,
                     Arguments = runnerArgs,
                     UseShellExecute = false,
-                    WorkingDirectory = repoRoot
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
                 };
                 psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
                 var spawnSw = Stopwatch.StartNew();
+
+                try
+                {
+                    if (File.Exists(runnerOutLog))
+                    {
+                        File.Delete(runnerOutLog);
+                    }
+                    if (File.Exists(runnerErrLog))
+                    {
+                        File.Delete(runnerErrLog);
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+
                 runner = Process.Start(psi);
                 spawnSw.Stop();
                 runnerSpawnMs = spawnSw.ElapsedMilliseconds;
@@ -2695,18 +2762,40 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     Console.Error.WriteLine("error: failed to start runner.");
                     return 1;
                 }
+
+                StartLogPump(runner.StandardOutput, runnerOutLog, cts.Token);
+                StartLogPump(
+                    runner.StandardError,
+                    runnerErrLog,
+                    cts.Token,
+                    line =>
+                    {
+                        if (line.Contains("HOTSWAP ok:", StringComparison.Ordinal))
+                        {
+                            Interlocked.Increment(ref runnerHotSwapOkCount);
+                        }
+                    });
+
                 swTotal.Stop();
                 timingLine =
                     $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite=0 runnerSpawn={runnerSpawnMs} total={swTotal.ElapsedMilliseconds}";
                 return 0;
             }
 
+            var prevOkCount = Volatile.Read(ref runnerHotSwapOkCount);
             var swapText = hotDll + "\n" + plan.MapPath;
             File.WriteAllText(swapFile, swapText, Encoding.ASCII);
             swapWriteMs = phase.ElapsedMilliseconds;
             swTotal.Stop();
             timingLine =
                 $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite={swapWriteMs} total={swTotal.ElapsedMilliseconds}";
+
+            var swapLatencyMs =
+                WaitForRunnerHotSwapOkCount(
+                    () => Volatile.Read(ref runnerHotSwapOkCount),
+                    prevOkCount,
+                    timeoutMs: 20000);
+            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
             return 0;
         }
         finally

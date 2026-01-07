@@ -1,0 +1,71 @@
+name: hot-swap-bench
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ self-host ]
+  pull_request:
+    branches: [ main, self-host ]
+
+jobs:
+  hot-swap:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: MSVC dev cmd
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Tools (clang)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y
+          }
+          clang --version
+
+      - name: Build cranelift-aot (release)
+        shell: pwsh
+        run: |
+          cargo build -p stasis-cranelift-aot --release --manifest-path tools/cranelift-aot/Cargo.toml
+
+      - name: Build native runner + sys runtime (no SDL)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime/build/bin/Release | Out-Null
+          New-Item -ItemType Directory -Force -Path runtime/build/Release | Out-Null
+          cl /nologo /O2 /W1 /D _CRT_SECURE_NO_WARNINGS runtime/stasis_runner.c runtime/stasis_data.c runtime/cJSON.c /Fe:runtime/build/bin/Release/stasis_runner.exe
+          cl /nologo /O2 /W1 /D _CRT_SECURE_NO_WARNINGS /c runtime/stasis_sys.c /Fo:runtime/build/Release/stasis_sys_static.obj
+          lib /nologo /OUT:runtime/build/Release/stasis_sys_static.lib runtime/build/Release/stasis_sys_static.obj
+          Copy-Item -Force runtime/build/bin/Release/stasis_runner.exe build/stasis_runner.exe
+          Copy-Item -Force runtime/build/bin/Release/stasis_runner.exe stasis_runner.exe
+          Copy-Item -Force runtime/build/Release/stasis_sys_static.lib build/stasis_sys_static.lib
+          Copy-Item -Force runtime/build/Release/stasis_sys_static.lib stasis_sys_static.lib
+
+      - name: Build C# compiler (release)
+        shell: pwsh
+        run: |
+          dotnet build Stasis.Cli/Stasis.Cli.csproj -c Release
+
+      - name: Build self-host compiler exe (via C# compiler)
+        shell: pwsh
+        run: |
+          $stasisc = "Stasis.Cli/bin/Release/net9.0/Stasis.Cli.exe"
+          & $stasisc build src/stasis/main.stasis --backend llvm --module stasis --out build/stasis_selfhost.exe --opt-level 3 --lto
+
+      - name: Hot swap benchmark
+        shell: pwsh
+        run: |
+          ./scripts/ci_hot_swap.ps1 -Iterations 5 -Fps 60 -SleepAfterEditMs 6000 -PostEditsMs 25000
+
+      - name: Hot swap thresholds (warn>=250ms fail>=500ms)
+        shell: pwsh
+        run: |
+          ./scripts/ci_hot_swap_check.ps1 -Iterations 5 -WarnMs 250 -FailMs 500

@@ -1159,6 +1159,7 @@ int main(int argc, char **argv)
                                     state_map_buf[sizeof(state_map_buf) - 1] = '\0';
                                     state_map_path = state_map_buf;
                                     fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                    fflush(stderr);
                                 }
                             }
 
@@ -1186,6 +1187,7 @@ int main(int argc, char **argv)
                             }
 
                             fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                            fflush(stderr);
 
                             uint8_t *buffer = NULL;
                             uint32_t missing_save = 0;
@@ -1263,14 +1265,17 @@ int main(int argc, char **argv)
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
                                 fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                fflush(stderr);
                                 if (missing_save > 0 || missing_restore > 0)
                                 {
                                     fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                    fflush(stderr);
                                 }
                             }
                             else
                             {
                                 fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                                fflush(stderr);
                             }
 
                             if (old_lib)
