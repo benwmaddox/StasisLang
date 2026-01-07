@@ -391,13 +391,3 @@ function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     utf8_set_len_ascii(dst, i);
     return i;
 }
-
-function print_cell(value: i32, is_clue: i32): void {
-    // Minimal helper for text-mode Sudoku-like grids.
-    // `is_clue` is reserved for future styling.
-    if (value <= 0) {
-        print_char(46); // '.'
-        return;
-    }
-    print_char(48 + value); // '0' + value (expects 1..9)
-}
