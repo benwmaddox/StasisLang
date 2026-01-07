@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -760,6 +761,178 @@ static DWORD WINAPI hot_exit_thread(LPVOID user_data)
         Sleep(10);
     }
 }
+#else
+static int file_exists(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return 0;
+    }
+
+    return access(path, F_OK) == 0;
+}
+
+static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char *map_out, size_t map_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return 1;
+    }
+
+    if (!fgets(dll_out, (int)dll_cap, f))
+    {
+        fclose(f);
+        return 1;
+    }
+    if (dll_out[0] == '\0')
+    {
+        fclose(f);
+        return 1;
+    }
+
+    size_t dll_len = strlen(dll_out);
+    while (dll_len > 0 && (dll_out[dll_len - 1] == '\n' || dll_out[dll_len - 1] == '\r' || dll_out[dll_len - 1] == ' ' || dll_out[dll_len - 1] == '\t'))
+    {
+        dll_out[--dll_len] = '\0';
+    }
+    size_t start = 0;
+    while (dll_out[start] == ' ' || dll_out[start] == '\t')
+    {
+        start++;
+    }
+    if (start > 0)
+    {
+        memmove(dll_out, dll_out + start, strlen(dll_out + start) + 1);
+    }
+
+    if (map_out && map_cap > 0)
+    {
+        map_out[0] = '\0';
+        if (fgets(map_out, (int)map_cap, f))
+        {
+            size_t map_len = strlen(map_out);
+            while (map_len > 0 && (map_out[map_len - 1] == '\n' || map_out[map_len - 1] == '\r' || map_out[map_len - 1] == ' ' || map_out[map_len - 1] == '\t'))
+            {
+                map_out[--map_len] = '\0';
+            }
+            size_t map_start = 0;
+            while (map_out[map_start] == ' ' || map_out[map_start] == '\t')
+            {
+                map_start++;
+            }
+            if (map_start > 0)
+            {
+                memmove(map_out, map_out + map_start, strlen(map_out + map_start) + 1);
+            }
+        }
+    }
+
+    fclose(f);
+    return dll_out[0] == '\0' ? 1 : 0;
+}
+
+static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
+{
+    if (!syms || !*syms || !sym_count)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < *sym_count; i++)
+    {
+        free((*syms)[i].name);
+    }
+    free(*syms);
+    *syms = NULL;
+    *sym_count = 0;
+}
+
+static int copy_state_to_buffer(void *lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        void *addr = dlsym(lib, syms[i].name);
+        if (!addr)
+        {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                memset(buffer + syms[i].offset, 0, syms[i].size);
+                continue;
+            }
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy(buffer + syms[i].offset, (void *)addr, syms[i].size);
+    }
+    return 0;
+}
+
+static int copy_state_from_buffer(void *lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        void *addr = dlsym(lib, syms[i].name);
+        if (!addr)
+        {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                continue;
+            }
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy((void *)addr, buffer + syms[i].offset, syms[i].size);
+    }
+    return 0;
+}
+
+static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap)
+{
+    const char *suffix_a = ".swapA.so";
+    const char *suffix_b = ".swapB.so";
+    const char *fixed = ".swap.so";
+    size_t len = strlen(input);
+    size_t a_len = strlen(suffix_a);
+    size_t b_len = strlen(suffix_b);
+
+    if (len >= a_len && strcmp(input + len - a_len, suffix_a) == 0)
+    {
+        size_t base_len = len - a_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    if (len >= b_len && strcmp(input + len - b_len, suffix_b) == 0)
+    {
+        size_t base_len = len - b_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    return 0;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -1389,6 +1562,8 @@ int main(int argc, char **argv)
     FreeLibrary(lib);
     return result;
 #else
+    set_runtime_dir(dll_path);
+
     void *lib = dlopen(dll_path, RTLD_NOW);
     if (!lib)
     {
@@ -1404,8 +1579,225 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    char tick_name[512];
+    tick_name[0] = '\0';
+    void *tick_sym = NULL;
+    size_t entry_len = strlen(entry_name);
+    if (entry_len >= 4 && strcmp(entry_name + entry_len - 4, "main") == 0)
+    {
+        size_t prefix_len = entry_len - 4;
+        if (prefix_len + 4 < sizeof(tick_name))
+        {
+            memcpy(tick_name, entry_name, prefix_len);
+            memcpy(tick_name + prefix_len, "tick", 5);
+        }
+    }
+    if (tick_name[0] != '\0')
+    {
+        tick_sym = dlsym(lib, tick_name);
+    }
+
+    uint64_t map_hash = 0;
+    stasis_state_symbol *syms = NULL;
+    uint32_t sym_count = 0;
+    uint32_t total_bytes = 0;
+    if (state_map_path)
+    {
+        if (read_state_map(state_map_path, &map_hash, &syms, &sym_count, &total_bytes) != 0)
+        {
+            dlclose(lib);
+            return 1;
+        }
+    }
+
+    stasis_data_set_dll(lib);
+
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
+
+    if (result == 0 && tick_sym)
+    {
+        stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
+        long long target_us = 1000000LL / (long long)fps;
+        struct timespec ts_last;
+        clock_gettime(CLOCK_MONOTONIC, &ts_last);
+        long long last_us = ts_last.tv_sec * 1000000LL + ts_last.tv_nsec / 1000LL;
+
+        for (;;)
+        {
+            if (swap_file_path && file_exists(swap_file_path))
+            {
+                char new_path[2048];
+                char map_path[2048];
+                map_path[0] = '\0';
+                if (read_swap_file(swap_file_path, new_path, sizeof(new_path), map_path, sizeof(map_path)) == 0)
+                {
+                    unlink(swap_file_path);
+
+                    if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+                    {
+                        uint64_t new_hash = 0;
+                        uint32_t new_count = 0;
+                        uint32_t new_total = 0;
+                        stasis_state_symbol *new_syms = NULL;
+                        if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
+                        {
+                            free_state_map(&syms, &sym_count);
+                            syms = new_syms;
+                            sym_count = new_count;
+                            total_bytes = new_total;
+                            map_hash = new_hash;
+                            strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
+                            state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                            state_map_path = state_map_buf;
+                            fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                            fflush(stderr);
+                        }
+                    }
+
+                    char fixed_path[2048];
+                    const char *load_path = new_path;
+                    if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                    {
+                        unlink(fixed_path);
+                        if (rename(new_path, fixed_path) == 0)
+                        {
+                            load_path = fixed_path;
+                        }
+                    }
+
+                    fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                    fflush(stderr);
+
+                    uint8_t *buffer = NULL;
+                    uint32_t missing_save = 0;
+                    uint32_t missing_restore = 0;
+                    long long save_us = 0;
+                    long long load_us = 0;
+                    long long tick_us = 0;
+                    long long restore_us = 0;
+                    if (state_map_path)
+                    {
+                        buffer = (uint8_t *)malloc(total_bytes);
+                        if (!buffer)
+                        {
+                            fprintf(stderr, "error: out of memory\n");
+                            result = 1;
+                            break;
+                        }
+
+                        struct timespec t0;
+                        struct timespec t1;
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                        {
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        save_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    }
+
+                    struct timespec t0;
+                    struct timespec t1;
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+                    void *new_lib = dlopen(load_path, RTLD_NOW);
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+                    load_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    if (!new_lib)
+                    {
+                        fprintf(stderr, "error: failed to load %s: %s\n", load_path, dlerror());
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+                    void *new_tick_sym = dlsym(new_lib, tick_name);
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+                    tick_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    if (!new_tick_sym)
+                    {
+                        fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
+                        dlclose(new_lib);
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    if (buffer)
+                    {
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
+                        {
+                            dlclose(new_lib);
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        restore_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                        free(buffer);
+                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                        fflush(stderr);
+                        if (missing_save > 0 || missing_restore > 0)
+                        {
+                            fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                            fflush(stderr);
+                        }
+                    }
+                    else
+                    {
+                        fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                        fflush(stderr);
+                    }
+
+                    dlclose(lib);
+                    lib = new_lib;
+                    tick = (stasis_tick_fn)new_tick_sym;
+                    stasis_data_set_dll(new_lib);
+                }
+            }
+
+            stasis_data_poll_all();
+
+            int tick_result = tick();
+            if (tick_result != 0)
+            {
+                result = tick_result == 1 ? 0 : tick_result;
+                break;
+            }
+
+            struct timespec ts_now;
+            clock_gettime(CLOCK_MONOTONIC, &ts_now);
+            long long now_us = ts_now.tv_sec * 1000000LL + ts_now.tv_nsec / 1000LL;
+            long long elapsed_us = now_us - last_us;
+            last_us = now_us;
+
+            long long sleep_us = target_us - elapsed_us;
+            while (sleep_us > 0)
+            {
+                if (swap_file_path && file_exists(swap_file_path))
+                {
+                    break;
+                }
+
+                long long ms = sleep_us / 1000LL;
+                if (ms <= 0)
+                {
+                    ms = 1;
+                }
+                usleep((useconds_t)(ms * 1000LL));
+                sleep_us -= ms * 1000LL;
+            }
+        }
+    }
+
+    if (state_map_path)
+    {
+        free_state_map(&syms, &sym_count);
+    }
     dlclose(lib);
     return result;
 #endif

@@ -2518,8 +2518,9 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var swapFile = Path.Combine(repoRoot, "build", "hotstate", $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
     var swapDir = Path.Combine(repoRoot, "build", "hotstate");
-    var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA.dll");
-    var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB.dll");
+    var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
+    var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA{swapExt}");
+    var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB{swapExt}");
     var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
     var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
     var pid = Environment.ProcessId;

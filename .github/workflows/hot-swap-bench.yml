@@ -90,7 +90,7 @@ jobs:
       - name: Hot swap benchmark
         shell: pwsh
         run: |
-          ./scripts/ci_hot_swap.ps1 -Iterations 5 -Fps 60 -SleepAfterEditMs 6000 -PostEditsMs 25000
+          ./scripts/ci_hot_swap.ps1 -Iterations 5 -Fps 60 -SleepAfterEditMs 6000 -SwapTimeoutMs 60000
 
       - name: Hot swap thresholds (warn>=250ms fail>=500ms)
         shell: pwsh

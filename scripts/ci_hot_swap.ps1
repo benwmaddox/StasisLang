@@ -2,7 +2,7 @@ param(
     [int]$Iterations = 5,
     [int]$Fps = 60,
     [int]$SleepAfterEditMs = 6000,
-    [int]$PostEditsMs = 25000
+    [int]$SwapTimeoutMs = 60000
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +60,8 @@ function Run-HotSwapBench {
         [string]$Name,
         [string]$Exe,
         [string[]]$CompilerArgs,
-        [hashtable]$Env
+        [hashtable]$Env,
+        [string]$SwapOkLog
     )
 
     Stop-Running
@@ -73,13 +74,51 @@ function Run-HotSwapBench {
     $cap = Start-LoggedProcess -Exe $Exe -ProcessArgs $CompilerArgs -OutLog $outLog -ErrLog $errLog -Env $Env
     Start-Sleep -Seconds 2
 
-    for ($i = 0; $i -lt $Iterations; $i++) {
-        if ($cap.Process.HasExited) { throw "$Name compiler exited early (code=$($cap.Process.ExitCode))" }
-        Add-Content -Path "samples/hotstate_tick_watch.stasis" -Value "// ci bench $Name $i"
-        Start-Sleep -Milliseconds $SleepAfterEditMs
+    function Read-TextFileShared {
+        param([string]$Path)
+        $fs = $null
+        $sr = $null
+        try {
+            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8, $true)
+            return $sr.ReadToEnd()
+        }
+        finally {
+            if ($sr) { try { $sr.Dispose() } catch {} }
+            if ($fs) { try { $fs.Dispose() } catch {} }
+        }
     }
 
-    Start-Sleep -Milliseconds $PostEditsMs
+    function Get-SwapOkCount {
+        if (![string]::IsNullOrEmpty($SwapOkLog) -and (Test-Path $SwapOkLog)) {
+            try {
+                $text = Read-TextFileShared -Path $SwapOkLog
+                return ([regex]::Matches($text, "HOTSWAP ok:")).Count
+            } catch {
+                return 0
+            }
+        }
+        return 0
+    }
+
+    function Wait-ForSwapOk {
+        param([int]$PrevCount)
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($SwapTimeoutMs)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $count = Get-SwapOkCount
+            if ($count -gt $PrevCount) { return }
+            Start-Sleep -Milliseconds 50
+        }
+        throw "$Name timed out waiting for HOTSWAP ok: in runner log (prevCount=$PrevCount)"
+    }
+
+    for ($i = 0; $i -lt $Iterations; $i++) {
+        if ($cap.Process.HasExited) { throw "$Name compiler exited early (code=$($cap.Process.ExitCode))" }
+        $prevCount = Get-SwapOkCount
+        Add-Content -Path "samples/hotstate_tick_watch.stasis" -Value "// ci bench $Name $i"
+        Start-Sleep -Milliseconds $SleepAfterEditMs
+        Wait-ForSwapOk -PrevCount $prevCount
+    }
 
     Stop-Running
     try { $cap.Process.Kill() } catch {}
@@ -124,7 +163,8 @@ try {
     if (!(Test-Path $aot)) { $aot = Join-Path $repoRoot "tools/cranelift-aot/target/release/stasis-cranelift-aot" }
     if (!(Test-Path $aot)) { throw "missing stasis-cranelift-aot (cargo build step should produce it)" }
 
-    $cs = Run-HotSwapBench -Name "cranelift" -Exe $csharpExe -CompilerArgs @("run","samples/hotstate_tick_watch.stasis","--watch","--backend","cranelift","--module","hot","--fps",$Fps) -Env @{ "STASIS_CRANELIFT_AOT" = $aot }
+    $swapOkLog = Join-Path $repoRoot "build/hotstate/hotstate_tick_watch.hot.runner.err.log"
+    $cs = Run-HotSwapBench -Name "cranelift" -Exe $csharpExe -CompilerArgs @("run","samples/hotstate_tick_watch.stasis","--watch","--backend","cranelift","--module","hot","--fps",$Fps) -Env @{ "STASIS_CRANELIFT_AOT" = $aot } -SwapOkLog $swapOkLog
 
     Write-Host "logs: craneliftOut=$($cs.outLog) craneliftErr=$($cs.errLog)"
     exit 0
