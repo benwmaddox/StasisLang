@@ -139,7 +139,19 @@ try {
     if (!(Test-Path $selfExe)) { throw "missing build/stasis_selfhost.exe (build step should produce it)" }
 
     $csharpExe = Join-Path $repoRoot "Stasis.Cli\\bin\\Release\\net9.0\\Stasis.Cli.exe"
-    if (!(Test-Path $csharpExe)) { throw "missing $csharpExe (dotnet build step should produce it)" }
+    if (!(Test-Path $csharpExe)) {
+        $csharpExe = Join-Path $repoRoot "Stasis.Cli\\bin\\x64\\Release\\net9.0\\Stasis.Cli.exe"
+    }
+    if (!(Test-Path $csharpExe)) {
+        $candidates =
+            (Get-ChildItem -Recurse -Filter "Stasis.Cli.exe" -Path (Join-Path $repoRoot "Stasis.Cli\\bin") -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "\\\\Release\\\\net9\\.0\\\\Stasis\\.Cli\\.exe$" } |
+                Select-Object -First 1)
+        if ($candidates) {
+            $csharpExe = $candidates.FullName
+        }
+    }
+    if (!(Test-Path $csharpExe)) { throw "missing Stasis.Cli.exe under Stasis.Cli/bin (dotnet build step should produce it)" }
 
     $aot = Join-Path $repoRoot "tools/cranelift-aot/target/release/stasis-cranelift-aot.exe"
     if (!(Test-Path $aot)) { throw "missing $aot (cargo build step should produce it)" }

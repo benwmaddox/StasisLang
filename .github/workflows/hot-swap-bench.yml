@@ -57,12 +57,14 @@ jobs:
       - name: Build self-host compiler exe (via C# compiler)
         shell: pwsh
         run: |
-          $stasisc = Join-Path (Get-Location) "Stasis.Cli\\bin\\Release\\net9.0\\Stasis.Cli.exe"
-          if (!(Test-Path $stasisc)) {
-            Get-ChildItem -Force "Stasis.Cli\\bin\\Release\\net9.0" | Format-Table -AutoSize
-            throw "missing $stasisc"
+          $stasisc = Get-ChildItem -Recurse -Filter "Stasis.Cli.exe" -Path "Stasis.Cli\\bin" |
+            Where-Object { $_.FullName -match "\\\\Release\\\\net9\\.0\\\\Stasis\\.Cli\\.exe$" } |
+            Select-Object -First 1
+          if (!$stasisc) {
+            Get-ChildItem -Recurse -Path "Stasis.Cli\\bin" | Select-Object -First 100 | Format-Table -AutoSize
+            throw "missing Stasis.Cli.exe under Stasis.Cli\\bin"
           }
-          & $stasisc build src/stasis/main.stasis --backend llvm --module stasis --out build/stasis_selfhost.exe --opt-level 3 --lto
+          & $stasisc.FullName build src/stasis/main.stasis --backend llvm --module stasis --out build/stasis_selfhost.exe --opt-level 3 --lto
 
       - name: Hot swap benchmark
         shell: pwsh
