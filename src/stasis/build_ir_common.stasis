@@ -132,6 +132,17 @@ function build_type_is_byte_named(type_idx: i32): bool {
     return span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "string");
 }
 
+function build_type_is_u8(type_idx: i32): bool {
+    if (type_idx < 0 || type_idx >= stasis.type_count) {
+        return false;
+    }
+    let kind: TypeKind = stasis.types[type_idx].kind;
+    if (kind != TypeKind.Named) {
+        return false;
+    }
+    return span_eq(stasis.types[type_idx].file_idx, stasis.types[type_idx].start, stasis.types[type_idx].len, "u8");
+}
+
 function build_type_is_string_named(type_idx: i32): bool {
     if (type_idx < 0 || type_idx >= stasis.type_count) {
         return false;

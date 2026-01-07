@@ -129,6 +129,10 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
     stasis.llvm_block_end_label[0] = exit_label;
     stasis.llvm_block_len = 1;
 
+    if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+        return 1;
+    }
+
     let did_return: i32 = 0;
     let done: i32 = 0;
     for (; done == 0; ) {
@@ -147,6 +151,10 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
         if (k == Tok.RBrace) {
             if (stasis.llvm_block_len <= 0) {
                 build_err_at(file_idx, "unmatched '}' in function body", stasis.tok_start);
+                return 1;
+            }
+
+            if (llvm_scope_pop(file_idx, stasis.tok_start) != 0) {
                 return 1;
             }
 
@@ -171,6 +179,9 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
                         let brace2: Tok = lex_next_kind();
                         if (brace2 != Tok.LBrace) {
                             build_err_at(file_idx, "expected '{' after 'else'", stasis.tok_start);
+                            return 1;
+                        }
+                        if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
                             return 1;
                         }
 
@@ -250,6 +261,9 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
             }
         } else {
             if (k == Tok.LBrace) {
+                if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+                    return 1;
+                }
                 if (stasis.llvm_block_len >= 256) {
                     build_err_at(file_idx, "block nesting too deep (llvm)", stasis.tok_start);
                     return 1;
@@ -264,12 +278,12 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
                         build_err_at(file_idx, "expected variable name", stasis.tok_start);
                         return 1;
                     }
-                    let local_id: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                    let decl_at: i32 = stasis.tok_start;
+                    let local_id: i32 = llvm_find_local_by_decl_at(file_idx, stasis.tok_start, stasis.tok_len, decl_at);
                     if (local_id < 0) {
                         build_err_at(file_idx, "unknown local", stasis.tok_start);
                         return 1;
                     }
-                    stasis.llvm_local_declared[local_id] = 1;
 
                     let next_k: Tok = lex_next_kind();
                     if (next_k == Tok.Colon) {
@@ -321,12 +335,20 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
                                 llvm_emit_store_local(local_id, rhs_id);
                             }
                         }
+                        stasis.llvm_local_declared[local_id] = 1;
+                        if (llvm_scope_declare_local(file_idx, decl_at, local_id) != 0) {
+                            return 1;
+                        }
                     } else {
                         if (next_k != Tok.Semicolon) {
                             build_err_at(file_idx, "expected '=' or ';' after let", stasis.tok_start);
                             return 1;
                         }
                         // No initializer: locals are already 0-initialized in entry.
+                        stasis.llvm_local_declared[local_id] = 1;
+                        if (llvm_scope_declare_local(file_idx, decl_at, local_id) != 0) {
+                            return 1;
+                        }
                     }
                 } else {
                     if (k == Tok.ReturnKeyword) {
@@ -379,6 +401,9 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
                             let brace: Tok = lex_next_kind();
                             if (brace != Tok.LBrace) {
                                 build_err_at(file_idx, "expected '{' after if condition", stasis.tok_start);
+                                return 1;
+                            }
+                            if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
                                 return 1;
                             }
 
@@ -450,6 +475,10 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
                                 let brace3: Tok = lex_next_kind();
                                 if (brace3 != Tok.LBrace) {
                                     build_err_at(file_idx, "expected '{' after for header", stasis.tok_start);
+                                    return 1;
+                                }
+
+                                if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
                                     return 1;
                                 }
 
@@ -552,5 +581,6 @@ function emit_llvm_main_i32(module_name: ascii[]): i32 {
         return 1;
     }
     llvm_emit_sys_runtime_decls_if_needed();
+    llvm_emit_graphics_builtin_decls_if_needed();
     return 0;
 }

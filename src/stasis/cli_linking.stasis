@@ -26,6 +26,29 @@ function ir_needs_graphics_runtime(): bool {
     if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprite")) { return true; }
     if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_draw_sprites_i32")) { return true; }
 
+    // Input snapshot (lives in the graphics runtime).
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_count")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_id")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_is_down")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_went_down")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_went_up")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_x_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_y_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_dx_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_dy_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_x_n")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_y_n")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_dropped_pointers")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_x_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_y_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_w_px")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_h_px")) { return true; }
+
+    // Debug helpers.
+    if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_debug_enable_hash")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_debug_get_frame_hash")) { return true; }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_debug_bake_hash")) { return true; }
+
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_init")) { return true; }
     if (ascii_contains(stasis.ir_out, "call void @stasis_audio_shutdown")) { return true; }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_audio_is_available")) { return true; }

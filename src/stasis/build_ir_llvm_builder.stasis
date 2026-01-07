@@ -24,9 +24,41 @@ function llvm_reset(): void {
     stasis.llvm_place_kind = LlvmValueKind.I32;
     stasis.llvm_place_struct_idx = -1;
     stasis.llvm_block_len = 0;
+    stasis.llvm_scope_sp = 0;
+    stasis.llvm_scope_local_len = 0;
 }
 
-function llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
+function llvm_scope_push(file_idx: i32, at: i32): i32 {
+    if (stasis.llvm_scope_sp >= 256) {
+        build_err_at(file_idx, "scope nesting too deep (llvm)", at);
+        return 1;
+    }
+    stasis.llvm_scope_mark[stasis.llvm_scope_sp] = stasis.llvm_scope_local_len;
+    stasis.llvm_scope_sp = stasis.llvm_scope_sp + 1;
+    return 0;
+}
+
+function llvm_scope_pop(file_idx: i32, at: i32): i32 {
+    if (stasis.llvm_scope_sp <= 0) {
+        build_err_at(file_idx, "internal error: scope underflow (llvm)", at);
+        return 1;
+    }
+    stasis.llvm_scope_sp = stasis.llvm_scope_sp - 1;
+    stasis.llvm_scope_local_len = stasis.llvm_scope_mark[stasis.llvm_scope_sp];
+    return 0;
+}
+
+function llvm_scope_declare_local(file_idx: i32, at: i32, local_id: i32): i32 {
+    if (stasis.llvm_scope_local_len >= 1024) {
+        build_err_at(file_idx, "too many scoped locals (llvm)", at);
+        return 1;
+    }
+    stasis.llvm_scope_local_id[stasis.llvm_scope_local_len] = local_id;
+    stasis.llvm_scope_local_len = stasis.llvm_scope_local_len + 1;
+    return 0;
+}
+
+function llvm_find_local_any(file_idx: i32, name_start: i32, name_len: i32): i32 {
     let i: i32 = 0;
     for (i = 0; i < stasis.llvm_local_count; i = i + 1) {
         if (span_eq_span(file_idx, name_start, name_len, stasis.llvm_local_name_start[i], stasis.llvm_local_name_len[i])) {
@@ -36,13 +68,33 @@ function llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
     return -1;
 }
 
+function llvm_find_local_by_decl_at(file_idx: i32, name_start: i32, name_len: i32, declared_at: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < stasis.llvm_local_count; i = i + 1) {
+        if (stasis.llvm_local_declared_at[i] == declared_at) {
+            if (span_eq_span(file_idx, name_start, name_len, stasis.llvm_local_name_start[i], stasis.llvm_local_name_len[i])) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+function llvm_find_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
+    let found: i32 = -1;
+    let i: i32 = 0;
+    for (i = 0; i < stasis.llvm_scope_local_len; i = i + 1) {
+        let local_id: i32 = stasis.llvm_scope_local_id[i];
+        if (span_eq_span(file_idx, name_start, name_len, stasis.llvm_local_name_start[local_id], stasis.llvm_local_name_len[local_id])) {
+            found = local_id;
+        }
+    }
+    return found;
+}
+
 function llvm_add_local(file_idx: i32, name_start: i32, name_len: i32): i32 {
     if (stasis.llvm_local_count >= 1024) {
         build_err_at(file_idx, "too many locals (llvm)", name_start);
-        return -1;
-    }
-    if (llvm_find_local(file_idx, name_start, name_len) >= 0) {
-        build_err_at(file_idx, "duplicate local name", name_start);
         return -1;
     }
 
@@ -502,13 +554,10 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                         }
 
                         if (has_let != 0) {
-                            let it_local: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
-                            if (it_local < 0) {
-                                it_local = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
-                                if (it_local < 0) { return 1; }
-                                stasis.llvm_local_declared[it_local] = 0;
-                                stasis.llvm_local_declared_at[it_local] = stasis.tok_start;
-                            }
+                            let it_local: i32 = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
+                            if (it_local < 0) { return 1; }
+                            stasis.llvm_local_declared[it_local] = 0;
+                            stasis.llvm_local_declared_at[it_local] = stasis.tok_start;
                             stasis.llvm_local_kind[it_local] = LlvmValueKind.PtrStruct;
                             stasis.llvm_local_struct_idx[it_local] = -1;
                         }
@@ -521,13 +570,10 @@ function llvm_scan_locals_in_body(file_idx: i32, body_start: i32): i32 {
                                 return 1;
                             }
                             if (has_let != 0) {
-                                let idx_local: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
-                                if (idx_local < 0) {
-                                    idx_local = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
-                                    if (idx_local < 0) { return 1; }
-                                    stasis.llvm_local_declared[idx_local] = 0;
-                                    stasis.llvm_local_declared_at[idx_local] = stasis.tok_start;
-                                }
+                                let idx_local: i32 = llvm_add_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                if (idx_local < 0) { return 1; }
+                                stasis.llvm_local_declared[idx_local] = 0;
+                                stasis.llvm_local_declared_at[idx_local] = stasis.tok_start;
                                 stasis.llvm_local_kind[idx_local] = LlvmValueKind.I32;
                                 stasis.llvm_local_struct_idx[idx_local] = -1;
                             }

@@ -238,6 +238,83 @@ test `stasis build emits llvm for locals and assignments`() {
     return ascii_contains(stasis.ir_out, "ret i32 %t");
 }
 
+test `stasis build supports string const initializers`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    path_join(t_path, t_exe_dir, "stasis_build_ir_const_string.stasis.inc");
+
+    ascii_clear(t_tmp);
+    ascii_append(t_tmp, "const MSG: string = ");
+    ascii_append_byte(t_tmp, 34); // '\"'
+    ascii_append(t_tmp, "hello");
+    ascii_append_byte(t_tmp, 34); // '\"'
+    ascii_append(t_tmp, ";");
+    ascii_append_byte(t_tmp, 10);
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  print_string(MSG);");
+    t_append_line(t_tmp, "  return 0;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    let rc: i32 = load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(stasis.ir_out, "@.str")) { return false; }
+    return ascii_contains(stasis.ir_out, "@printf");
+}
+
+test `stasis build inserts numeric casts for f32/i32`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    path_join(t_path, t_exe_dir, "stasis_build_ir_casts.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  let x: f32 = 3;");
+    t_append_line(t_tmp, "  let y: i32 = x;");
+    t_append_line(t_tmp, "  return y;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    let rc: i32 = load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(stasis.ir_out, "sitofp i32")) { return false; }
+    return ascii_contains(stasis.ir_out, "fptosi float");
+}
+
 test `stasis build emits llvm control flow for if`() {
     if (!t_init_exe_dir()) {
         return false;
@@ -710,4 +787,42 @@ test `stasis build emits llvm for sys_argc`() {
 
     if (!ascii_contains(stasis.ir_out, "declare i32 @stasis_sys_argc()")) { return false; }
     return ascii_contains(stasis.ir_out, "call i32 @stasis_sys_argc()");
+}
+
+test `stasis build supports block-scoped local shadowing (llvm)`() {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    path_join(t_path, t_exe_dir, "stasis_build_ir_shadowing_llvm.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function main(): i32 {");
+    t_append_line(t_tmp, "  let x: i32 = 1;");
+    t_append_line(t_tmp, "  if (1) { let x: i32 = 2; }");
+    t_append_line(t_tmp, "  if (1) { let x: i32 = 3; }");
+    t_append_line(t_tmp, "  return x;");
+    t_append_line(t_tmp, "}");
+    if (!t_write_ascii(t_path, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    let rc: i32 = load_graph(t_path);
+    if (rc != 0) {
+        return false;
+    }
+    let errors: i32 = sig_scan_loaded_files();
+    if (errors != 0) {
+        return false;
+    }
+
+    rc = emit_main_return_i32_ir("module", "llvm");
+    if (rc != 0) {
+        return false;
+    }
+
+    if (!ascii_contains(stasis.ir_out, "%l0 = alloca i32")) { return false; }
+    if (!ascii_contains(stasis.ir_out, "%l1 = alloca i32")) { return false; }
+    return ascii_contains(stasis.ir_out, "%l2 = alloca i32");
 }

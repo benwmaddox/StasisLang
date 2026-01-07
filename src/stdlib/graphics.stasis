@@ -25,3 +25,8 @@ function gfx_load_sprite(path: ascii[], max_w: i32, max_h: i32): i32;
 function gfx_poll_reload(handle: i32): bool;
 function gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_degrees: i32, a: i32): void;
 function gfx_draw_sprites_i32(cmds: i32[], sprite_count: i32): void;
+
+function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void;
+
+function gfx_window_width(): i32;
+function gfx_window_height(): i32;

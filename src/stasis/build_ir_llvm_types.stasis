@@ -398,6 +398,7 @@ function llvm_emit_runtime_decls_and_consts(): void {
     // C runtime
     ascii_append(stasis.ir_out, "declare i32 @printf(ptr, ...)\n");
     ascii_append(stasis.ir_out, "declare i64 @time(ptr)\n");
+    ascii_append(stasis.ir_out, "declare void @abort()\n");
 
     // LLVM intrinsics
     ascii_append(stasis.ir_out, "declare float @llvm.sin.f32(float)\n");
@@ -519,5 +520,34 @@ function llvm_emit_sys_runtime_decls_if_needed(): void {
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_sleep_ms")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_sleep_ms(i32)\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_read_char")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_char()\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_read_int")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_int()\n"); }
+    ascii_append_byte(stasis.ir_out, 10);
+}
+
+function llvm_emit_graphics_builtin_decls_if_needed(): void {
+    // Some graphics-runtime helpers are exposed as builtins (not via `function ...;` extern decls),
+    // so we need explicit declares when they are used.
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_count")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_pointer_count()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_id")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_pointer_id(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_is_down")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_pointer_is_down(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_went_down")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_pointer_went_down(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_pointer_went_up")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_pointer_went_up(i32)\n"); }
+
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_x_px")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_x_px(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_y_px")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_y_px(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_dx_px")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_dx_px(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_dy_px")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_dy_px(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_x_n")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_x_n(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call float @stasis_input_pointer_y_n")) { ascii_append(stasis.ir_out, "declare float @stasis_input_pointer_y_n(i32)\n"); }
+
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_dropped_pointers")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_dropped_pointers()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_x_px")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_viewport_x_px()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_y_px")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_viewport_y_px()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_w_px")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_viewport_w_px()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_input_viewport_h_px")) { ascii_append(stasis.ir_out, "declare i32 @stasis_input_viewport_h_px()\n"); }
+
+    if (ascii_contains(stasis.ir_out, "call void @stasis_gfx_debug_enable_hash")) { ascii_append(stasis.ir_out, "declare void @stasis_gfx_debug_enable_hash(i32)\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_debug_get_frame_hash")) { ascii_append(stasis.ir_out, "declare i32 @stasis_gfx_debug_get_frame_hash()\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_gfx_debug_bake_hash")) { ascii_append(stasis.ir_out, "declare i32 @stasis_gfx_debug_bake_hash()\n"); }
+
     ascii_append_byte(stasis.ir_out, 10);
 }

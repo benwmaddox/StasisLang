@@ -293,6 +293,59 @@ function llvm_eval_const_i32(caller_file_idx: i32, const_idx: i32, at: i32): i32
     return v * sign;
 }
 
+function llvm_emit_const_string_ptr_from_const(caller_file_idx: i32, const_idx: i32, at: i32): i32 {
+    if (const_idx < 0 || const_idx >= stasis.const_count) {
+        build_err_at(caller_file_idx, "invalid const reference", at);
+        return -1;
+    }
+
+    let file_idx: i32 = stasis.consts[const_idx].file_idx;
+    let start: i32 = stasis.consts[const_idx].init_start;
+    if (file_idx < 0 || file_idx >= stasis.file_count || start < 0) {
+        build_err_at(caller_file_idx, "const has no initializer", at);
+        return -1;
+    }
+
+    let base: i32 = stasis.files[file_idx].offset + start;
+    if (stasis.pool[base] != 34) { // '"'
+        build_err_at(caller_file_idx, "unsupported const initializer (expected string literal)", at);
+        return -1;
+    }
+
+    // Scan a quoted string literal starting at `start` without using the lexer (safe during codegen).
+    // `tok_len` includes both quotes.
+    let i: i32 = 1;
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        let b: u8 = stasis.pool[base + i];
+        if (b == 0) {
+            done = 1;
+        } else {
+            if (b == 10 || b == 13) { // '\n' or '\r'
+                done = 1;
+            } else {
+                if (b == 92) { // '\\' escape: skip next byte (minimal; lexer enforces validity elsewhere)
+                    i = i + 1;
+                    if (stasis.pool[base + i] == 0) {
+                        done = 1;
+                    } else {
+                        i = i + 1;
+                    }
+                } else {
+                    if (b == 34) { // closing '"'
+                        i = i + 1;
+                        return llvm_emit_utf8_string_lit_ptr(file_idx, start, i);
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+
+    build_err_at(caller_file_idx, "unterminated string const initializer", at);
+    return -1;
+}
+
 function llvm_emit_const_f32_from_const(caller_file_idx: i32, const_idx: i32, at: i32): i32 {
     if (const_idx < 0 || const_idx >= stasis.const_count) {
         build_err_at(caller_file_idx, "invalid const reference", at);

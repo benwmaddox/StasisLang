@@ -379,6 +379,10 @@ struct State {
     llvm_local_kind: LlvmValueKind[1024];
     llvm_local_struct_idx: i32[1024];
     llvm_local_count: i32;
+    llvm_scope_sp: i32;
+    llvm_scope_mark: i32[256];
+    llvm_scope_local_id: i32[1024];
+    llvm_scope_local_len: i32;
     llvm_tmp_id: i32;
     llvm_label_id: i32;
     llvm_bb_terminated: i32;

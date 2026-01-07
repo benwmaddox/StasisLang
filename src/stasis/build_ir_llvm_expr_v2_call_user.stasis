@@ -49,6 +49,16 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
         }
 
         if (build_type_is_f32(p_ty)) {
+            if (stasis.llvm_val_kind[arg_base + pi] == LlvmValueKind.I32) {
+                let cast_id: i32 = llvm_new_tmp();
+                ascii_append(stasis.ir_out, "  ");
+                llvm_append_tmp(cast_id);
+                ascii_append(stasis.ir_out, " = sitofp i32 ");
+                llvm_append_tmp(stasis.expr_op_at[arg_base + pi]);
+                ascii_append(stasis.ir_out, " to float\n");
+                stasis.expr_op_at[arg_base + pi] = cast_id;
+                stasis.llvm_val_kind[arg_base + pi] = LlvmValueKind.F32;
+            }
             if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.F32) {
                 build_err_at(file_idx, "invalid call arg value (expected f32)", stasis.expr_nodes[idx2].at);
                 return -1;
@@ -61,6 +71,16 @@ function llvm_emit_expr_i32_v2_post_call_user(file_idx: i32, idx2: i32, callee_e
                 }
             } else {
             if (build_type_is_i32ish(p_ty) || build_type_is_byte_named(p_ty)) {
+                if (stasis.llvm_val_kind[arg_base + pi] == LlvmValueKind.F32) {
+                    let cast_id2: i32 = llvm_new_tmp();
+                    ascii_append(stasis.ir_out, "  ");
+                    llvm_append_tmp(cast_id2);
+                    ascii_append(stasis.ir_out, " = fptosi float ");
+                    llvm_append_tmp(stasis.expr_op_at[arg_base + pi]);
+                    ascii_append(stasis.ir_out, " to i32\n");
+                    stasis.expr_op_at[arg_base + pi] = cast_id2;
+                    stasis.llvm_val_kind[arg_base + pi] = LlvmValueKind.I32;
+                }
                 if (stasis.llvm_val_kind[arg_base + pi] != LlvmValueKind.I32) {
                     build_err_at(file_idx, "invalid call arg value (expected i32)", stasis.expr_nodes[idx2].at);
                     return -1;

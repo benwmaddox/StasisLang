@@ -109,6 +109,10 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
         }
         }
 
+        if (llvm_find_local_any(file_idx, stasis.params[p_decl].name_start, stasis.params[p_decl].name_len) >= 0) {
+            build_err_at(file_idx, "duplicate parameter name", stasis.params[p_decl].name_start);
+            return 1;
+        }
         let local_id: i32 = llvm_add_local(file_idx, stasis.params[p_decl].name_start, stasis.params[p_decl].name_len);
         if (local_id < 0) {
             return 1;
@@ -260,6 +264,16 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
     stasis.llvm_block_end_label[0] = exit_label;
     stasis.llvm_block_len = 1;
 
+    if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+        return 1;
+    }
+    for (p = 0; p < params_len; p = p + 1) {
+        let p_decl2: i32 = params_off + p;
+        if (llvm_scope_declare_local(file_idx, stasis.params[p_decl2].name_start, p) != 0) {
+            return 1;
+        }
+    }
+
     let did_return: i32 = 0;
     let done: i32 = 0;
     for (; done == 0; ) {
@@ -278,6 +292,10 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
         if (k == Tok.RBrace) {
             if (stasis.llvm_block_len <= 0) {
                 build_err_at(file_idx, "unmatched '}' in function body", stasis.tok_start);
+                return 1;
+            }
+
+            if (llvm_scope_pop(file_idx, stasis.tok_start) != 0) {
                 return 1;
             }
 
@@ -302,6 +320,9 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                         let brace2: Tok = lex_next_kind();
                         if (brace2 != Tok.LBrace) {
                             build_err_at(file_idx, "expected '{' after 'else'", stasis.tok_start);
+                            return 1;
+                        }
+                        if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
                             return 1;
                         }
 
@@ -408,6 +429,9 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
             }
         } else {
             if (k == Tok.LBrace) {
+                if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+                    return 1;
+                }
                 if (stasis.llvm_block_len >= 256) {
                     build_err_at(file_idx, "block nesting too deep (llvm)", stasis.tok_start);
                     return 1;
@@ -422,12 +446,12 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                         build_err_at(file_idx, "expected variable name", stasis.tok_start);
                         return 1;
                     }
-                    let local_id2: i32 = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                    let decl_at: i32 = stasis.tok_start;
+                    let local_id2: i32 = llvm_find_local_by_decl_at(file_idx, stasis.tok_start, stasis.tok_len, decl_at);
                     if (local_id2 < 0) {
                         build_err_at(file_idx, "unknown local", stasis.tok_start);
                         return 1;
                     }
-                    stasis.llvm_local_declared[local_id2] = 1;
 
                     let next_k: Tok = lex_next_kind();
                     if (next_k == Tok.Colon) {
@@ -479,12 +503,20 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                 llvm_emit_store_local(local_id2, rhs_id);
                             }
                         }
+                        stasis.llvm_local_declared[local_id2] = 1;
+                        if (llvm_scope_declare_local(file_idx, decl_at, local_id2) != 0) {
+                            return 1;
+                        }
                     } else {
                         if (next_k != Tok.Semicolon) {
                             build_err_at(file_idx, "expected '=' or ';' after let", stasis.tok_start);
                             return 1;
                         }
                         // No initializer: locals are already 0-initialized in entry.
+                        stasis.llvm_local_declared[local_id2] = 1;
+                        if (llvm_scope_declare_local(file_idx, decl_at, local_id2) != 0) {
+                            return 1;
+                        }
                     }
                 } else {
                     if (k == Tok.ReturnKeyword) {
@@ -564,6 +596,9 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                 build_err_at(file_idx, "expected '{' after if condition", stasis.tok_start);
                                 return 1;
                             }
+                            if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+                                return 1;
+                            }
 
                             if (stasis.llvm_block_len >= 256) {
                                 build_err_at(file_idx, "block nesting too deep (llvm)", stasis.tok_start);
@@ -597,13 +632,19 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
 
                                 let it_start: i32 = stasis.tok_start;
                                 let it_len: i32 = stasis.tok_len;
-                                let it_local: i32 = llvm_find_local(file_idx, it_start, it_len);
+                                let it_local: i32 = -1;
+                                if (has_let != 0) {
+                                    it_local = llvm_find_local_by_decl_at(file_idx, it_start, it_len, it_start);
+                                } else {
+                                    it_local = llvm_find_local(file_idx, it_start, it_len);
+                                }
                                 if (it_local < 0) {
                                     build_err_at(file_idx, "unknown local", it_start);
                                     return 1;
                                 }
 
                                 let idx_local: i32 = -1;
+                                let idx_start: i32 = -1;
                                 let next_fe: Tok = lex_next_kind();
                                 if (next_fe == Tok.Comma) {
                                     let idx_k: Tok = lex_next_kind();
@@ -611,7 +652,12 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                         build_err_at(file_idx, "expected index variable name", stasis.tok_start);
                                         return 1;
                                     }
-                                    idx_local = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                    idx_start = stasis.tok_start;
+                                    if (has_let != 0) {
+                                        idx_local = llvm_find_local_by_decl_at(file_idx, stasis.tok_start, stasis.tok_len, idx_start);
+                                    } else {
+                                        idx_local = llvm_find_local(file_idx, stasis.tok_start, stasis.tok_len);
+                                    }
                                     if (idx_local < 0) {
                                         build_err_at(file_idx, "unknown local", stasis.tok_start);
                                         return 1;
@@ -656,14 +702,7 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                     }
                                 }
 
-                                if (has_let != 0) {
-                                    stasis.llvm_local_declared[it_local] = 1;
-                                    stasis.llvm_local_declared_at[it_local] = it_start;
-                                    if (idx_local >= 0) {
-                                        stasis.llvm_local_declared[idx_local] = 1;
-                                        stasis.llvm_local_declared_at[idx_local] = it_start;
-                                    }
-                                } else {
+                                if (has_let == 0) {
                                     if (stasis.llvm_local_declared[it_local] == 0) {
                                         build_err_at(file_idx, "foreach iterator used before declaration", it_start);
                                         return 1;
@@ -705,6 +744,22 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                 if (brace_fe != Tok.LBrace) {
                                     build_err_at(file_idx, "expected '{' after foreach header", stasis.tok_start);
                                     return 1;
+                                }
+
+                                if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
+                                    return 1;
+                                }
+                                if (has_let != 0) {
+                                    stasis.llvm_local_declared[it_local] = 1;
+                                    if (llvm_scope_declare_local(file_idx, it_start, it_local) != 0) {
+                                        return 1;
+                                    }
+                                    if (idx_local >= 0) {
+                                        stasis.llvm_local_declared[idx_local] = 1;
+                                        if (llvm_scope_declare_local(file_idx, idx_start, idx_local) != 0) {
+                                            return 1;
+                                        }
+                                    }
                                 }
 
                                 llvm_emit_label_def("foreach.body", fe_body_id);
@@ -789,6 +844,10 @@ function emit_llvm_func_i32ish(func_idx: i32): i32 {
                                 let brace3: Tok = lex_next_kind();
                                 if (brace3 != Tok.LBrace) {
                                     build_err_at(file_idx, "expected '{' after for header", stasis.tok_start);
+                                    return 1;
+                                }
+
+                                if (llvm_scope_push(file_idx, stasis.tok_start) != 0) {
                                     return 1;
                                 }
 

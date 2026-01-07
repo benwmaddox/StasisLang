@@ -582,7 +582,27 @@ function expr_parse_after_first(file_idx: i32, first: Tok, terminator: Tok): i32
                             k = lex_next_kind();
                         } else {
                             if (k == Tok.Comma) {
-                            if (stasis.expr_call_len <= 0 || paren_depth != 0) {
+                            if (stasis.expr_call_len <= 0) {
+                                expr_err_at(file_idx, "unexpected ',' in expression", stasis.tok_start);
+                                return -1;
+                            }
+
+                            // Allow commas only at the top-level of the current call argument list.
+                            // Reject commas inside grouping parens within a call, e.g. `foo((1, 2))`.
+                            let comma_ok: i32 = 0;
+                            let stop: i32 = 0;
+                            let scan: i32 = op_len - 1;
+                            for (; scan >= 0 && comma_ok == 0 && stop == 0; scan = scan - 1) {
+                                let barrier: Tok = stasis.parse_stack_kind[scan];
+                                if (barrier == Tok.CallStart) {
+                                    comma_ok = 1;
+                                } else {
+                                    if (barrier == Tok.LParen || barrier == Tok.IndexStart) {
+                                        stop = 1;
+                                    }
+                                }
+                            }
+                            if (comma_ok == 0) {
                                 expr_err_at(file_idx, "unexpected ',' in expression", stasis.tok_start);
                                 return -1;
                             }

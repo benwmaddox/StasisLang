@@ -331,5 +331,6 @@ function emit_llvm_tests_i32(module_name: ascii[]): i32 {
         return 1;
     }
     llvm_emit_sys_runtime_decls_if_needed();
+    llvm_emit_graphics_builtin_decls_if_needed();
     return 0;
 }

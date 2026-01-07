@@ -24,6 +24,17 @@ function llvm_emit_expr_i32(file_idx: i32, root: i32): i32 {
     if (id < 0) {
         return -1;
     }
+    if (stasis.llvm_val_kind[0] == LlvmValueKind.F32) {
+        let cast_id: i32 = llvm_new_tmp();
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_tmp(cast_id);
+        ascii_append(stasis.ir_out, " = fptosi float ");
+        llvm_append_tmp(id);
+        ascii_append(stasis.ir_out, " to i32\n");
+        stasis.expr_op_at[0] = cast_id;
+        stasis.llvm_val_kind[0] = LlvmValueKind.I32;
+        id = cast_id;
+    }
     if (stasis.llvm_val_kind[0] != LlvmValueKind.I32) {
         build_err_at(file_idx, "expected i32 expression", stasis.expr_nodes[root].at);
         return -1;
@@ -35,6 +46,17 @@ function llvm_emit_expr_f32(file_idx: i32, root: i32): i32 {
     let id: i32 = llvm_emit_expr_value(file_idx, root);
     if (id < 0) {
         return -1;
+    }
+    if (stasis.llvm_val_kind[0] == LlvmValueKind.I32) {
+        let cast_id: i32 = llvm_new_tmp();
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_tmp(cast_id);
+        ascii_append(stasis.ir_out, " = sitofp i32 ");
+        llvm_append_tmp(id);
+        ascii_append(stasis.ir_out, " to float\n");
+        stasis.expr_op_at[0] = cast_id;
+        stasis.llvm_val_kind[0] = LlvmValueKind.F32;
+        id = cast_id;
     }
     if (stasis.llvm_val_kind[0] != LlvmValueKind.F32) {
         build_err_at(file_idx, "expected f32 expression", stasis.expr_nodes[root].at);
@@ -159,4 +181,3 @@ function llvm_emit_expr_i32_v2(file_idx: i32, root: i32): i32 {
     }
     return stasis.expr_op_at[0];
 }
-

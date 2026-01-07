@@ -117,6 +117,65 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                 stasis.llvm_val_struct_idx[val_len] = -1;
                 val_len = val_len + 1;
             } else {
+                if (span_eq(file_idx, cname_start, cname_len, "i32_to_u8_checked")) {
+                    handled_intr = 1;
+                    if (argc != 1) {
+                        build_err_at(file_idx, "i32_to_u8_checked expects 1 argument", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.I32) {
+                        build_err_at(file_idx, "i32_to_u8_checked expects i32 value", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+
+                    let in_id2: i32 = stasis.expr_op_at[arg_base];
+                    let is_neg: i32 = llvm_new_tmp();
+                    ascii_append(stasis.ir_out, "  ");
+                    llvm_append_tmp(is_neg);
+                    ascii_append(stasis.ir_out, " = icmp slt i32 ");
+                    llvm_append_tmp(in_id2);
+                    ascii_append(stasis.ir_out, ", 0\n");
+
+                    let is_gt: i32 = llvm_new_tmp();
+                    ascii_append(stasis.ir_out, "  ");
+                    llvm_append_tmp(is_gt);
+                    ascii_append(stasis.ir_out, " = icmp sgt i32 ");
+                    llvm_append_tmp(in_id2);
+                    ascii_append(stasis.ir_out, ", 255\n");
+
+                    let is_bad: i32 = llvm_new_tmp();
+                    ascii_append(stasis.ir_out, "  ");
+                    llvm_append_tmp(is_bad);
+                    ascii_append(stasis.ir_out, " = or i1 ");
+                    llvm_append_tmp(is_neg);
+                    ascii_append(stasis.ir_out, ", ");
+                    llvm_append_tmp(is_gt);
+                    ascii_append(stasis.ir_out, "\n");
+
+                    let abort_id: i32 = llvm_new_label();
+                    let ok_id: i32 = llvm_new_label();
+                    llvm_emit_br_i1(is_bad, "i32tou8.abort", abort_id, "i32tou8.ok", ok_id);
+
+                    llvm_emit_label_def("i32tou8.abort", abort_id);
+                    ascii_append(stasis.ir_out, "  call void @abort()\n");
+                    ascii_append(stasis.ir_out, "  unreachable\n");
+                    stasis.llvm_bb_terminated = 1;
+
+                    llvm_emit_label_def("i32tou8.ok", ok_id);
+
+                    out_id2 = llvm_new_tmp();
+                    ascii_append(stasis.ir_out, "  ");
+                    llvm_append_tmp(out_id2);
+                    ascii_append(stasis.ir_out, " = and i32 ");
+                    llvm_append_tmp(in_id2);
+                    ascii_append(stasis.ir_out, ", 255\n");
+
+                    val_len = arg_base;
+                    stasis.expr_op_at[val_len] = out_id2;
+                    stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                    stasis.llvm_val_struct_idx[val_len] = -1;
+                    val_len = val_len + 1;
+                } else {
                 if (span_eq(file_idx, cname_start, cname_len, "i32_to_f32")) {
                     handled_intr = 1;
                     if (argc != 1) {
@@ -162,9 +221,10 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                         val_len = arg_base;
                         stasis.expr_op_at[val_len] = out_id2;
                         stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
-                        stasis.llvm_val_struct_idx[val_len] = -1;
-                        val_len = val_len + 1;
-                    }
+                         stasis.llvm_val_struct_idx[val_len] = -1;
+                         val_len = val_len + 1;
+                     }
+                 }
                 }
             }
         }
@@ -569,6 +629,228 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                     }
                 }
             }
+        }
+
+        // Builtins backed by the graphics runtime (input snapshot + debug helpers).
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "input_pointer_count")) {
+            handled_intr = 1;
+            if (argc != 0) {
+                build_err_at(file_idx, "input_pointer_count expects 0 arguments", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_ipc: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_ipc);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_input_pointer_count()\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_ipc;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "input_pointer_id")) {
+            handled_intr = 1;
+            if (argc != 1) {
+                build_err_at(file_idx, "input_pointer_id expects 1 argument", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.I32) {
+                build_err_at(file_idx, "input_pointer_id expects i32 argument (idx)", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_ipid: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_ipid);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_input_pointer_id(i32 ");
+            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+            ascii_append(stasis.ir_out, ")\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_ipid;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0
+            && (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_is_down")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_went_down")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_went_up"))) {
+            handled_intr = 1;
+            if (argc != 1) {
+                build_err_at(file_idx, "input_pointer_* expects 1 argument", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.I32) {
+                build_err_at(file_idx, "input_pointer_* expects i32 argument (idx)", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_ipb: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_ipb);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_input_");
+            if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_is_down")) { ascii_append(stasis.ir_out, "pointer_is_down"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_went_down")) { ascii_append(stasis.ir_out, "pointer_went_down"); }
+            else { ascii_append(stasis.ir_out, "pointer_went_up"); } }
+            ascii_append(stasis.ir_out, "(i32 ");
+            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+            ascii_append(stasis.ir_out, ")\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_ipb;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0
+            && (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_x_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_y_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_dx_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_dy_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_x_n")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_pointer_y_n"))) {
+            handled_intr = 1;
+            if (argc != 1) {
+                build_err_at(file_idx, "input_pointer_* expects 1 argument", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.I32) {
+                build_err_at(file_idx, "input_pointer_* expects i32 argument (idx)", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_ipf: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_ipf);
+            ascii_append(stasis.ir_out, " = call float @stasis_input_");
+            if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_x_px")) { ascii_append(stasis.ir_out, "pointer_x_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_y_px")) { ascii_append(stasis.ir_out, "pointer_y_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_dx_px")) { ascii_append(stasis.ir_out, "pointer_dx_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_dy_px")) { ascii_append(stasis.ir_out, "pointer_dy_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_pointer_x_n")) { ascii_append(stasis.ir_out, "pointer_x_n"); }
+            else { ascii_append(stasis.ir_out, "pointer_y_n"); } } } } }
+            ascii_append(stasis.ir_out, "(i32 ");
+            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+            ascii_append(stasis.ir_out, ")\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_ipf;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "input_dropped_pointers")) {
+            handled_intr = 1;
+            if (argc != 0) {
+                build_err_at(file_idx, "input_dropped_pointers expects 0 arguments", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_idp: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_idp);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_input_dropped_pointers()\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_idp;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0
+            && (span_eq(file_idx, cname_start2, cname_len2, "input_viewport_x_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_viewport_y_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_viewport_w_px")
+                || span_eq(file_idx, cname_start2, cname_len2, "input_viewport_h_px"))) {
+            handled_intr = 1;
+            if (argc != 0) {
+                build_err_at(file_idx, "input_viewport_* expects 0 arguments", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_iv: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_iv);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_input_");
+            if (span_eq(file_idx, cname_start2, cname_len2, "input_viewport_x_px")) { ascii_append(stasis.ir_out, "viewport_x_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_viewport_y_px")) { ascii_append(stasis.ir_out, "viewport_y_px"); }
+            else { if (span_eq(file_idx, cname_start2, cname_len2, "input_viewport_w_px")) { ascii_append(stasis.ir_out, "viewport_w_px"); }
+            else { ascii_append(stasis.ir_out, "viewport_h_px"); } } }
+            ascii_append(stasis.ir_out, "()\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_iv;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "gfx_debug_enable_hash")) {
+            handled_intr = 1;
+            if (argc != 1) {
+                build_err_at(file_idx, "gfx_debug_enable_hash expects 1 argument", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.I32) {
+                build_err_at(file_idx, "gfx_debug_enable_hash expects i32 argument (enabled)", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            ascii_append(stasis.ir_out, "  call void @stasis_gfx_debug_enable_hash(i32 ");
+            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+            ascii_append(stasis.ir_out, ")\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = 0;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.Void;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "gfx_debug_get_frame_hash")) {
+            handled_intr = 1;
+            if (argc != 0) {
+                build_err_at(file_idx, "gfx_debug_get_frame_hash expects 0 arguments", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_gh: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_gh);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_gfx_debug_get_frame_hash()\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_gh;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        }
+
+        if (handled_intr == 0 && span_eq(file_idx, cname_start2, cname_len2, "gfx_debug_bake_hash")) {
+            handled_intr = 1;
+            if (argc != 0) {
+                build_err_at(file_idx, "gfx_debug_bake_hash expects 0 arguments", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+
+            let out_id_bh: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(out_id_bh);
+            ascii_append(stasis.ir_out, " = call i32 @stasis_gfx_debug_bake_hash()\n");
+
+            val_len = arg_base;
+            stasis.expr_op_at[val_len] = out_id_bh;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
         }
 
         if (handled_intr == 0) {
