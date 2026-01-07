@@ -247,6 +247,7 @@ function llvm_emit_runtime_decls_and_consts(): void {
     // LLVM intrinsics
     ascii_append(stasis.ir_out, "declare float @llvm.sin.f32(float)\n");
     ascii_append(stasis.ir_out, "declare float @llvm.cos.f32(float)\n");
+    ascii_append(stasis.ir_out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
 
     // System: sys_* builtins
     ascii_append(stasis.ir_out, "declare i32 @stasis_sys_argc()\n");

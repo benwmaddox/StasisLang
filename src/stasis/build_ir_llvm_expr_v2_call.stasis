@@ -13,6 +13,7 @@ import "build_ir_llvm_expr_shared.stasis";
 import "build_ir_llvm_expr_v2_call_user.stasis";
 import "build_ir_llvm_expr_v2_call_stdio.stasis";
 import "build_ir_llvm_expr_v2_call_math.stasis";
+import "build_ir_llvm_expr_v2_call_mem.stasis";
 import "build_ir_llvm_expr_v2_post.stasis";
 import "build_ir_llvm_expr_v2.stasis";
 import "build_ir_llvm_emit_main.stasis";
@@ -66,9 +67,14 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
     let handled_intr: i32 = 0;
     let callee_kind2: ExprKind = stasis.expr_nodes[callee_expr].kind;
     if (callee_kind2 == ExprKind.Name) {
+        let handled_mem: i32 = llvm_try_emit_mem_clear_intrinsic(file_idx, idx2, callee_expr, argc, arg_base);
+        if (handled_mem != -2) {
+            return handled_mem;
+        }
+
         let cname_start: i32 = stasis.expr_nodes[callee_expr].name_start;
         let cname_len: i32 = stasis.expr_nodes[callee_expr].name_len;
-    
+     
         if (span_eq(file_idx, cname_start, cname_len, "u8_to_i32")) {
             handled_intr = 1;
             if (argc != 1) {
