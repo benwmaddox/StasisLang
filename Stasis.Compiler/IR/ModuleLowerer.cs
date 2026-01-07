@@ -1213,6 +1213,7 @@ public sealed class ModuleLowerer
             "sys_file_size",
             "sys_file_mtime_ms",
             "sys_exec",
+            "sys_spawn",
             "sys_sleep_ms",
 
             // Legacy math (to be renamed)
@@ -2578,6 +2579,25 @@ public sealed class ModuleLowerer
 
                         var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_exec.cmd");
                         return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_exec.call");
+                    }
+
+                case "sys_spawn":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_spawn expects (command_line: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_spawn");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_spawn", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_spawn.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_spawn.call");
                     }
 
                 case "sys_sleep_ms":

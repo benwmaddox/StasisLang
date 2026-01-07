@@ -8,6 +8,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 #ifndef STASIS_SYS_MAX_ARGS
@@ -300,6 +301,158 @@ int stasis_sys_exec(const char *command)
         return 1;
     }
     return system(command);
+}
+
+// Spawn a process without invoking a shell.
+// - Accepts a single command line string (the caller is responsible for quoting).
+// - Waits for completion and returns the process exit code.
+// - Does not support shell operators like pipes/redirection.
+int stasis_sys_spawn(const char *command_line)
+{
+    if (!command_line || !*command_line)
+    {
+        return 1;
+    }
+
+#ifdef _WIN32
+    // CreateProcess may mutate the command line buffer.
+    const size_t n = strlen(command_line);
+    char *mutable_cmd = (char *)malloc(n + 1);
+    if (!mutable_cmd)
+    {
+        return 1;
+    }
+    memcpy(mutable_cmd, command_line, n + 1);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+
+    BOOL ok = CreateProcessA(
+        NULL,              // application name (use command line parsing + search)
+        mutable_cmd,       // command line (mutable)
+        NULL,              // process security
+        NULL,              // thread security
+        FALSE,             // inherit handles
+        0,                 // flags
+        NULL,              // environment
+        NULL,              // current directory
+        &si,
+        &pi);
+
+    free(mutable_cmd);
+
+    if (!ok)
+    {
+        // Use 127 as a common "command not found" sentinel (like POSIX shells),
+        // and 1 for other failures. We can't perfectly classify here.
+        DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+        {
+            return 127;
+        }
+        return 1;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (exit_code > 0x7fffffffU)
+    {
+        return 0x7fffffff;
+    }
+    return (int)exit_code;
+#else
+    // Minimal POSIX implementation: fork + execvp by splitting on spaces and honoring quotes.
+    // This avoids shell invocation, but does not support complex quoting/escaping.
+    char *buf = strdup(command_line);
+    if (!buf)
+    {
+        return 1;
+    }
+
+    char *argv[STASIS_SYS_MAX_ARGS];
+    int argc = 0;
+    char *p = buf;
+    while (*p && argc + 1 < STASIS_SYS_MAX_ARGS)
+    {
+        while (*p && sys_is_space(*p))
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+
+        if (*p == '"')
+        {
+            p++;
+            argv[argc++] = p;
+            while (*p && *p != '"')
+            {
+                p++;
+            }
+            if (*p == '"')
+            {
+                *p++ = '\0';
+            }
+        }
+        else
+        {
+            argv[argc++] = p;
+            while (*p && !sys_is_space(*p))
+            {
+                p++;
+            }
+            if (*p)
+            {
+                *p++ = '\0';
+            }
+        }
+    }
+    argv[argc] = NULL;
+
+    if (argc == 0 || !argv[0] || !*argv[0])
+    {
+        free(buf);
+        return 1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        free(buf);
+        return 1;
+    }
+
+    if (pid == 0)
+    {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    free(buf);
+
+    if (WIFEXITED(status))
+    {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status))
+    {
+        return 128 + WTERMSIG(status);
+    }
+    return 1;
+#endif
 }
 
 int stasis_sys_sleep_ms(int ms)

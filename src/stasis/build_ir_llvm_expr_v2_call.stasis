@@ -417,6 +417,30 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                                         stasis.llvm_val_struct_idx[val_len] = -1;
                                         val_len = val_len + 1;
                                     } else {
+                                        if (span_eq(file_idx, cname_start2, cname_len2, "sys_spawn")) {
+                                            handled_intr = 1;
+                                            if (argc != 1) {
+                                                build_err_at(file_idx, "sys_spawn expects 1 argument", stasis.expr_nodes[idx2].at);
+                                                return -1;
+                                            }
+                                            if (stasis.llvm_val_kind[arg_base] != LlvmValueKind.PtrI8) {
+                                                build_err_at(file_idx, "sys_spawn expects pointer argument (command_line)", stasis.expr_nodes[idx2].at);
+                                                return -1;
+                                            }
+    
+                                            let out_id7b: i32 = llvm_new_tmp();
+                                            ascii_append(stasis.ir_out, "  ");
+                                            llvm_append_tmp(out_id7b);
+                                            ascii_append(stasis.ir_out, " = call i32 @stasis_sys_spawn(ptr ");
+                                            llvm_append_tmp(stasis.expr_op_at[arg_base]);
+                                            ascii_append(stasis.ir_out, ")\n");
+    
+                                            val_len = arg_base;
+                                            stasis.expr_op_at[val_len] = out_id7b;
+                                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                            stasis.llvm_val_struct_idx[val_len] = -1;
+                                            val_len = val_len + 1;
+                                        } else {
                                         if (span_eq(file_idx, cname_start2, cname_len2, "sys_sleep_ms")) {
                                             handled_intr = 1;
                                             if (argc != 1) {
@@ -438,10 +462,10 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                                             val_len = arg_base;
                                             stasis.expr_op_at[val_len] = out_id8;
                                             stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
-                                            stasis.llvm_val_struct_idx[val_len] = -1;
-                                            val_len = val_len + 1;
-                                        } else {
-                                            if (span_eq(file_idx, cname_start2, cname_len2, "print_string") || span_eq(file_idx, cname_start2, cname_len2, "print")) {
+                                             stasis.llvm_val_struct_idx[val_len] = -1;
+                                             val_len = val_len + 1;
+                                         } else {
+                                             if (span_eq(file_idx, cname_start2, cname_len2, "print_string") || span_eq(file_idx, cname_start2, cname_len2, "print")) {
                                                 handled_intr = 1;
                                                 if (argc != 1) {
                                                     build_err_at(file_idx, "print_string expects 1 argument", stasis.expr_nodes[idx2].at);
@@ -533,10 +557,11 @@ function llvm_emit_expr_i32_v2_post_call(file_idx: i32, idx2: i32, mode2: i32, v
                                                         stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
                                                         stasis.llvm_val_struct_idx[val_len] = -1;
                                                         val_len = val_len + 1;
-                                                    }
-                                                }
-                                            }
+                                             }
+                                         }
+                                     }
                                         }
+                                    }
                                     }
                                 }
                             }

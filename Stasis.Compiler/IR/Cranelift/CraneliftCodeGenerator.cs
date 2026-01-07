@@ -198,6 +198,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             );
         }
 
+        if (builtins.Contains("sys_spawn"))
+        {
+            builder.DeclareExternal("stasis_sys_spawn", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // command_line
+            );
+        }
+
         if (builtins.Contains("sys_sleep_ms"))
         {
             builder.DeclareExternal("stasis_sys_sleep_ms", CraneliftTypeMapper.ClifType.I32,
@@ -1200,7 +1207,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "print_prompt" or "print_invalid" or "print_clue_error" or "print_solved" or "print_cell"
             or "sys_argc" or "sys_argv"
             or "sys_read_file" or "sys_list_dir" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
-            or "sys_exec" or "sys_sleep_ms"
+            or "sys_exec" or "sys_spawn" or "sys_sleep_ms"
             or "time" or "get_time_ms" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
             or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"

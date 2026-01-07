@@ -515,6 +515,7 @@ function llvm_emit_sys_runtime_decls_if_needed(): void {
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_file_size")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_file_size(ptr)\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_file_mtime_ms")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_file_mtime_ms(ptr)\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_exec")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_exec(ptr)\n"); }
+    if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_spawn")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_spawn(ptr)\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_sleep_ms")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_sleep_ms(i32)\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_read_char")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_char()\n"); }
     if (ascii_contains(stasis.ir_out, "call i32 @stasis_sys_read_int")) { ascii_append(stasis.ir_out, "declare i32 @stasis_sys_read_int()\n"); }

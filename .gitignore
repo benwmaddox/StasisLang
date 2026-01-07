@@ -29,6 +29,7 @@ _ReSharper.Caches/
 *.dylib
 **/stasis_graphics.lib
 runtime/build/
+runtime/build_sys/
 codevcpkg/
 build/hotstate/
 build/aot/

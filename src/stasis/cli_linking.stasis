@@ -44,6 +44,20 @@ function ir_needs_sys_runtime(): bool {
     return ascii_contains(stasis.ir_out, "stasis_sys_");
 }
 
+function cli_spawn_retry(cmd: ascii[]): i32 {
+    // Windows can transiently lock recently-built .exe files. When clang's linker returns LNK1104,
+    // retry briefly to reduce flaky runs (especially during benchmarks that re-run the same file).
+    let attempts: i32 = 0;
+    for (attempts = 0; attempts < 12; attempts = attempts + 1) {
+        let rc: i32 = sys_spawn(cmd);
+        if (rc != 1104) {
+            return rc;
+        }
+        sys_sleep_ms(25);
+    }
+    return 1104;
+}
+
 function append_sys_runtime_link_input(): bool {
     // Prefer a prebuilt sys runtime lib (faster than compiling the C file each time).
     path_join(stasis.scratch_runtime, stasis.scratch_dir, "stasis_sys_static.lib");

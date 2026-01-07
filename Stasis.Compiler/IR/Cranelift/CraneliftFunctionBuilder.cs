@@ -968,6 +968,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_file_size" => true,
             "sys_file_mtime_ms" => true,
             "sys_exec" => true,
+            "sys_spawn" => true,
             "sys_sleep_ms" => true,
             "time" => true,
             "get_time_ms" => true,
@@ -1221,6 +1222,23 @@ public sealed class CraneliftFunctionBuilder
         return call;
     }
 
+    private string LowerSysSpawn(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_spawn", "sys_spawn expects (command_line: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var commandLine))
+        {
+            return EmitInvalidBuiltin("sys_spawn", "sys_spawn expects (command_line: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_spawn({commandLine})");
+        return call;
+    }
+
     private string LowerSysSleepMs(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 1)
@@ -1278,6 +1296,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSysFileMtimeMs(arguments);
             case "sys_exec":
                 return LowerSysExec(arguments);
+            case "sys_spawn":
+                return LowerSysSpawn(arguments);
             case "sys_sleep_ms":
                 return LowerSysSleepMs(arguments);
             case "time":

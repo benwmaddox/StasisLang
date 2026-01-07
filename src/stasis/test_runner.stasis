@@ -245,9 +245,9 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
         ascii_append_byte(stasis.exec_cmd, 34); // '"'
         ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
         ascii_append_byte(stasis.exec_cmd, 34); // '"'
-        let lli_exit: i32 = sys_exec(stasis.exec_cmd);
-        // `system()` returns 9009 on Windows when the command is missing; fall back to clang in that case.
-        if (lli_exit != 9009 && lli_exit != 127) {
+        let lli_exit: i32 = sys_spawn(stasis.exec_cmd);
+        // `sys_spawn` returns 127 when the command is missing; fall back to clang in that case.
+        if (lli_exit != 127) {
             return lli_exit;
         }
     }
@@ -275,7 +275,7 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     ascii_append(stasis.exec_cmd, stasis.scratch_exe);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
 
-    let exit_code: i32 = sys_exec(stasis.exec_cmd);
+    let exit_code: i32 = cli_spawn_retry(stasis.exec_cmd);
     if (exit_code != 0) {
         print_string("error: clang failed (exit=");
         print_int(exit_code);
@@ -287,7 +287,7 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_exe);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
-    return sys_exec(stasis.exec_cmd);
+    return sys_spawn(stasis.exec_cmd);
 }
 
 function test_run_dir(root_dir: ascii[]): i32 {
