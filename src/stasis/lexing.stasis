@@ -269,7 +269,7 @@ function lex_next_kind(): Tok {
     let start: i32 = stasis.lex_pos;
     let b: u8 = lex_current();
 
-    if (is_alpha(b)) {
+    if (is_alpha(b) || u8_to_i32(b) == 95) {
         return lex_identifier_or_keyword();
     }
 
