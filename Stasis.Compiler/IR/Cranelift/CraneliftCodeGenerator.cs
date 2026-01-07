@@ -58,7 +58,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
-            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -550,11 +550,27 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     private static void DeclareExternFunctionsFromSource(
         CraneliftModuleBuilder builder,
         CompilationUnitSyntax compilationUnit,
-        IReadOnlyDictionary<string, Symbol> symbols)
+        IReadOnlyDictionary<string, Symbol> symbols,
+        IReadOnlySet<string> reachableFunctions)
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             if (!func.IsExtern)
+            {
+                continue;
+            }
+
+            // Avoid emitting extern declarations that are never referenced (Windows COFF AOT can
+            // treat declared-but-unused externs as link-time requirements).
+            if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
+
+            // Runtime-backed builtins are declared separately using their mapped symbol names
+            // (e.g., init_window -> stasis_init_window). Declaring the source name would cause
+            // unresolved externals on Windows.
+            if (IsCraneliftBuiltin(func.Name.Text))
             {
                 continue;
             }
