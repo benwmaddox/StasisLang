@@ -1607,11 +1607,27 @@ int main(int argc, char **argv)
 #else
     set_runtime_dir(dll_path);
 
+    int runner_diag = 0;
+    {
+        const char *diag_env = getenv("STASIS_RUNNER_DIAG");
+        runner_diag = diag_env && diag_env[0] == '1';
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s\n", dll_path ? dll_path : "(null)", entry_name ? entry_name : "(null)");
+        fflush(stderr);
+    }
+
     void *lib = dlopen(dll_path, RTLD_NOW);
     if (!lib)
     {
         fprintf(stderr, "error: failed to load %s: %s\n", dll_path, dlerror());
         return 1;
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: dlopen ok\n");
+        fflush(stderr);
     }
 
     void *symbol = dlsym(lib, entry_name);
@@ -1620,6 +1636,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: entrypoint %s not found in %s\n", entry_name, dll_path);
         dlclose(lib);
         return 1;
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: entry symbol ok\n");
+        fflush(stderr);
     }
 
     char tick_name[512];
@@ -1639,6 +1660,11 @@ int main(int argc, char **argv)
     {
         tick_sym = dlsym(lib, tick_name);
     }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: tick_name=%s tick_sym=%s\n", tick_name[0] ? tick_name : "(none)", tick_sym ? "yes" : "no");
+        fflush(stderr);
+    }
 
     uint64_t map_hash = 0;
     stasis_state_symbol *syms = NULL;
@@ -1657,7 +1683,17 @@ int main(int argc, char **argv)
     stasis_try_set_sys_args(lib, argc, argv);
 
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: calling entry\n");
+        fflush(stderr);
+    }
     int result = entry();
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: entry returned=%d\n", result);
+        fflush(stderr);
+    }
 
     if (result == 0 && tick_sym)
     {

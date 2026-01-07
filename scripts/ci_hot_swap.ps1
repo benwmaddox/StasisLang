@@ -261,7 +261,7 @@ try {
     if (!(Test-Path $aot)) { throw "missing stasis-cranelift-aot (cargo build step should produce it)" }
 
     $swapOkLog = Join-Path $repoRoot "build/hotstate/hotstate_tick_watch.hot.runner.err.log"
-    $cs = Run-HotSwapBench -Name "cranelift" -Exe $csharpExe -CompilerArgs @("run","samples/hotstate_tick_watch.stasis","--watch","--backend","cranelift","--module","hot","--fps",$Fps) -Env @{ "STASIS_CRANELIFT_AOT" = $aot } -SwapOkLog $swapOkLog
+    $cs = Run-HotSwapBench -Name "cranelift" -Exe $csharpExe -CompilerArgs @("run","samples/hotstate_tick_watch.stasis","--watch","--backend","cranelift","--module","hot","--fps",$Fps) -Env @{ "STASIS_CRANELIFT_AOT" = $aot; "STASIS_RUNNER_DIAG" = "1" } -SwapOkLog $swapOkLog
 
     Write-Host "logs: craneliftOut=$($cs.outLog) craneliftErr=$($cs.errLog)"
     exit 0
