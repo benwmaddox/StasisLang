@@ -58,6 +58,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -546,6 +547,46 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     }
 
+    private static void DeclareExternFunctionsFromSource(
+        CraneliftModuleBuilder builder,
+        CompilationUnitSyntax compilationUnit,
+        IReadOnlyDictionary<string, Symbol> symbols,
+        IReadOnlySet<string> reachableFunctions)
+    {
+        foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
+        {
+            if (!func.IsExtern)
+            {
+                continue;
+            }
+
+            // Avoid emitting extern declarations that are never referenced (Windows COFF AOT can
+            // treat declared-but-unused externs as link-time requirements).
+            if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
+
+            // Runtime-backed builtins are declared separately using their mapped symbol names
+            // (e.g., init_window -> stasis_init_window). Declaring the source name would cause
+            // unresolved externals on Windows.
+            if (IsCraneliftBuiltin(func.Name.Text))
+            {
+                continue;
+            }
+
+            var returnTypeSymbol = func.ReturnType is null
+                ? new VoidTypeSymbol()
+                : ResolveType(func.ReturnType, symbols);
+            var returnType = NormalizeFunctionType(builder.TypeMapper.Map(returnTypeSymbol));
+            var paramTypes = func.Parameters
+                .Select(p => NormalizeFunctionType(builder.TypeMapper.Map(ResolveType(p.Type, symbols))))
+                .ToArray();
+
+            builder.DeclareExternal(func.Name.Text, returnType, paramTypes);
+        }
+    }
+
     private static void EmitGlobals(
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
@@ -649,6 +690,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
+            if (func.IsExtern || func.Body is null)
             {
                 continue;
             }
@@ -974,6 +1019,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             if (!reachableFunctions.Contains(func.Name.Text))
+            {
+                continue;
+            }
+            if (func.Body is null)
             {
                 continue;
             }
