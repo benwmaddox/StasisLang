@@ -96,6 +96,30 @@ Self-hosting pushes toward:
 - Reduced reliance on platform-specific shell quoting rules.
 - A consistent toolchain invocation model for `build`, `run`, `release`, `test`, and `watch`.
 
+### E) Iteration-speed features that are hard to justify in Stage0
+Once `stasis` is the daily driver, it becomes worth investing in iteration-time features that primarily benefit the compiler itself:
+- Persistent compiler process for `watch` (avoid cold start; keep caches hot).
+- Pre-tokenized / pre-scanned stdlib snapshot (avoid re-reading and re-lexing the same modules every run).
+- On-disk cache keyed by (compiler version, backend, target triple, file content hash) so unchanged modules skip work even across process restarts.
+- A "fast check" mode that stops after signature+statement validation (no IR), with stable, minimal output for tooling.
+
+Stage0 could implement these too, but the self-host compiler benefits more because its internal state is already explicit and can be snapshotted or reused without object-graph complexity.
+
+### F) Compile-time-only metaprogramming (no runtime footprint)
+Self-hosting creates a strong incentive to add metaprogramming that improves authoring and reduces boilerplate, while keeping Stasis' runtime model unchanged.
+
+Candidate directions (all compile-time only):
+- Compile-time evaluation for `const` expressions and `const fn` (bounded, deterministic, no hidden allocation).
+- Compile-time reflection over `struct`/`enum` declarations (field names/types/counts) to generate helpers without handwritten duplication.
+- `@derive`-style generation for common patterns (examples: equality, hashing, debug formatting, binary packing/unpacking, JSON binding stubs) where the result is plain Stasis code or direct IR patterns.
+- Compile-time assertions for layout and ABI (`static_assert(size_of(T) == ...)`, field offsets, alignment), which is especially valuable for SoA lowering and host interop.
+- Compile-time embedding of small data blobs into the output (e.g., shader strings, small lookup tables), gated by size limits and hashed inputs so builds remain deterministic.
+
+The self-host compiler can implement these in a way that fits Stasis guidelines:
+- Deterministic: results depend only on source text and explicit inputs.
+- Bounded: fixed caps and explicit memory use; failures are predictable.
+- Non-invasive: no import expansion; metaprogramming operates on already-loaded modules and produces declarations within the current module.
+
 ## Things Stage0 Still Does Well
 
 Self-hosting is not automatically better at everything. Stage0 remains valuable for:
@@ -111,4 +135,3 @@ The self-host compiler is viable as a long-term direction when it:
 
 The biggest unique advantage is not "rewriting in Stasis" itself, but that Stasis' explicit-memory model
 lets the compiler be predictable, allocation-free, incremental, and easy to benchmark and constrain.
-
