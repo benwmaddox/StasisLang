@@ -465,12 +465,12 @@ Global arrays of struct references become SoA automatically.
 - File = Module.
 - `import "relative/path/to/file.stasis";` adds that file's module to the build (no textual expansion required).
 - Imports introduce modules, and module members are in scope by default after import.
-  - `module_name.symbol` is always allowed for disambiguation/clarity.
+  - No import aliasing.
   - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
-  - Duplicate module names are an error (import aliasing is not supported currently).
-  - If multiple imports introduce the same member name, unqualified references are ambiguous; use `module_name.symbol`.
-- Imports are file-scoped (not transitive): importing a module does not implicitly import that module's imports.
-- Compiled via signature-first pass, then tree shaking.
+  - Module identity is the canonical (normalized) file path; module names are not required to be unique.
+  - If multiple imports introduce the same member name, unqualified references are ambiguous and should produce a diagnostic.
+- Imports are transitive for compilation: the build graph includes the imported file and recursively includes its imports.
+- Compiled via signature-first pass.
 
 ---
 
@@ -480,8 +480,8 @@ Global arrays of struct references become SoA automatically.
 test `enemy takes damage`(): bool {
     let hp: i32;
     hp = 50;
-    hp = hp.-(10);
-    return hp.==(40);
+    hp = hp - 10;
+    return hp == 40;
 }
 ```
 
