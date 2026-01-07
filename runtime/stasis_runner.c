@@ -9,6 +9,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <errno.h>
 #include <unistd.h>
 #endif
 
@@ -17,6 +18,23 @@
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
+
+#ifndef _WIN32
+static void stasis_sleep_us(long long usec)
+{
+    if (usec <= 0)
+    {
+        return;
+    }
+    struct timespec req;
+    req.tv_sec = (time_t)(usec / 1000000LL);
+    req.tv_nsec = (long)((usec % 1000000LL) * 1000LL);
+    while (nanosleep(&req, &req) != 0 && errno == EINTR)
+    {
+        /* retry */
+    }
+}
+#endif
 
 typedef struct stasis_state_symbol
 {
@@ -1815,7 +1833,7 @@ int main(int argc, char **argv)
                 {
                     ms = 1;
                 }
-                usleep((useconds_t)(ms * 1000LL));
+                stasis_sleep_us(ms * 1000LL);
                 sleep_us -= ms * 1000LL;
             }
         }
