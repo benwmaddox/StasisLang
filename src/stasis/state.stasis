@@ -315,7 +315,6 @@ struct State {
     watch_imports_tmp_len: i32;
 
     // Watch hot-swap
-    watch_hot_swap: i32;
     watch_hot_fps: i32;
     watch_hot_runner_pid: i32;
     watch_hot_flip: i32;
@@ -328,6 +327,8 @@ struct State {
     watch_hot_ir_path: ascii[260];
     watch_hot_dll_a: ascii[260];
     watch_hot_dll_b: ascii[260];
+    watch_hot_log_out: ascii[260];
+    watch_hot_log_err: ascii[260];
 
     // Import/source graph
     files: File[300];
