@@ -89,7 +89,11 @@ public sealed class SemanticAnalyzer
         AddSymbol("sys_file_mtime_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("sys_exec", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("sys_spawn", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_spawn_async", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("sys_sleep_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_delete_file", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_flush", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
         // Legacy math functions (to be renamed to math_*)
         AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));

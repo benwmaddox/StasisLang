@@ -205,11 +205,35 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             );
         }
 
+        if (builtins.Contains("sys_spawn_async"))
+        {
+            builder.DeclareExternal("stasis_sys_spawn_async", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // command_line
+            );
+        }
+
         if (builtins.Contains("sys_sleep_ms"))
         {
             builder.DeclareExternal("stasis_sys_sleep_ms", CraneliftTypeMapper.ClifType.I32,
                 CraneliftTypeMapper.ClifType.I32 // ms
             );
+        }
+
+        if (builtins.Contains("sys_delete_file"))
+        {
+            builder.DeclareExternal("stasis_sys_delete_file", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.R64 // path
+            );
+        }
+
+        if (builtins.Contains("sys_time_ms"))
+        {
+            builder.DeclareExternal("stasis_sys_time_ms", CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("sys_flush"))
+        {
+            builder.DeclareExternal("stasis_sys_flush", CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("time"))

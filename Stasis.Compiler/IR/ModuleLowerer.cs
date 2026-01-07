@@ -1214,7 +1214,11 @@ public sealed class ModuleLowerer
             "sys_file_mtime_ms",
             "sys_exec",
             "sys_spawn",
+            "sys_spawn_async",
             "sys_sleep_ms",
+            "sys_delete_file",
+            "sys_time_ms",
+            "sys_flush",
 
             // Legacy math (to be renamed)
             "sin",
@@ -2600,6 +2604,25 @@ public sealed class ModuleLowerer
                         return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_spawn.call");
                     }
 
+                case "sys_spawn_async":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_spawn_async expects (command_line: string).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_spawn_async");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_spawn_async", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_spawn_async.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_spawn_async.call");
+                    }
+
                 case "sys_sleep_ms":
                     {
                         if (args.Count != 1)
@@ -2616,6 +2639,57 @@ public sealed class ModuleLowerer
                             fn = _moduleBuilder.Module.AddFunction("stasis_sys_sleep_ms", fnType);
 
                         return builder.BuildCall2(fnType, fn, new[] { ms }, "sys_sleep_ms.call");
+                    }
+
+                case "sys_delete_file":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_delete_file expects (path: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_delete_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_delete_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_delete_file.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_delete_file.call");
+                    }
+
+                case "sys_time_ms":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_time_ms expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_time_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_time_ms", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_time_ms.call");
+                    }
+
+                case "sys_flush":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_flush expects no arguments.", span);
+                            return ConstI32(1);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_flush");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_flush", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_flush.call");
                     }
                 case "sin":
                 case "cos":

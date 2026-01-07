@@ -969,7 +969,11 @@ public sealed class CraneliftFunctionBuilder
             "sys_file_mtime_ms" => true,
             "sys_exec" => true,
             "sys_spawn" => true,
+            "sys_spawn_async" => true,
             "sys_sleep_ms" => true,
+            "sys_delete_file" => true,
+            "sys_time_ms" => true,
+            "sys_flush" => true,
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
@@ -1239,6 +1243,23 @@ public sealed class CraneliftFunctionBuilder
         return call;
     }
 
+    private string LowerSysSpawnAsync(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_spawn_async", "sys_spawn_async expects (command_line: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var commandLine))
+        {
+            return EmitInvalidBuiltin("sys_spawn_async", "sys_spawn_async expects (command_line: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_spawn_async({commandLine})");
+        return call;
+    }
+
     private string LowerSysSleepMs(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 1)
@@ -1249,6 +1270,47 @@ public sealed class CraneliftFunctionBuilder
         var ms = LowerExpression(arguments[0]);
         var call = NewValue();
         _instructions.AppendLine($"    {call} = call %stasis_sys_sleep_ms({ms})");
+        return call;
+    }
+
+    private string LowerSysDeleteFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_delete_file", "sys_delete_file expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_delete_file", "sys_delete_file expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_delete_file({path})");
+        return call;
+    }
+
+    private string LowerSysTimeMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            return EmitInvalidBuiltin("sys_time_ms", "sys_time_ms expects no arguments.");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_time_ms()");
+        return call;
+    }
+
+    private string LowerSysFlush(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            return EmitInvalidBuiltin("sys_flush", "sys_flush expects no arguments.");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_flush()");
         return call;
     }
 
@@ -1298,8 +1360,16 @@ public sealed class CraneliftFunctionBuilder
                 return LowerSysExec(arguments);
             case "sys_spawn":
                 return LowerSysSpawn(arguments);
+            case "sys_spawn_async":
+                return LowerSysSpawnAsync(arguments);
             case "sys_sleep_ms":
                 return LowerSysSleepMs(arguments);
+            case "sys_delete_file":
+                return LowerSysDeleteFile(arguments);
+            case "sys_time_ms":
+                return LowerSysTimeMs(arguments);
+            case "sys_flush":
+                return LowerSysFlush(arguments);
             case "time":
                 return LowerTime(arguments);
             case "get_time_ms":

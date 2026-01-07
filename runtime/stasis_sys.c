@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #endif
@@ -303,6 +304,52 @@ int stasis_sys_exec(const char *command)
     return system(command);
 }
 
+int stasis_sys_delete_file(const char *path)
+{
+    if (!path || !*path)
+    {
+        return 1;
+    }
+#ifdef _WIN32
+    return DeleteFileA(path) ? 0 : 1;
+#else
+    return unlink(path) == 0 ? 0 : 1;
+#endif
+}
+
+int stasis_sys_time_ms(void)
+{
+#ifdef _WIN32
+    ULONGLONG ms = GetTickCount64();
+    if (ms > 0x7fffffffULL)
+    {
+        return 0x7fffffff;
+    }
+    return (int)ms;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+        return 0;
+    }
+    long long ms = (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+    if (ms > 0x7fffffffLL)
+    {
+        return 0x7fffffff;
+    }
+    if (ms < 0)
+    {
+        return 0;
+    }
+    return (int)ms;
+#endif
+}
+
+int stasis_sys_flush(void)
+{
+    return fflush(NULL) == 0 ? 0 : 1;
+}
+
 // Spawn a process without invoking a shell.
 // - Accepts a single command line string (the caller is responsible for quoting).
 // - Waits for completion and returns the process exit code.
@@ -452,6 +499,133 @@ int stasis_sys_spawn(const char *command_line)
         return 128 + WTERMSIG(status);
     }
     return 1;
+#endif
+}
+
+// Spawn a process without waiting. Returns a pid-like positive integer on success, 0 on failure.
+int stasis_sys_spawn_async(const char *command_line)
+{
+    if (!command_line || !*command_line)
+    {
+        return 0;
+    }
+
+#ifdef _WIN32
+    const size_t n = strlen(command_line);
+    char *mutable_cmd = (char *)malloc(n + 1);
+    if (!mutable_cmd)
+    {
+        return 0;
+    }
+    memcpy(mutable_cmd, command_line, n + 1);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+
+    BOOL ok = CreateProcessA(
+        NULL,
+        mutable_cmd,
+        NULL,
+        NULL,
+        FALSE,
+        0,
+        NULL,
+        NULL,
+        &si,
+        &pi);
+
+    free(mutable_cmd);
+
+    if (!ok)
+    {
+        return 0;
+    }
+
+    DWORD pid = pi.dwProcessId;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (pid == 0 || pid > 0x7fffffffU)
+    {
+        return 0;
+    }
+    return (int)pid;
+#else
+    char *buf = strdup(command_line);
+    if (!buf)
+    {
+        return 0;
+    }
+
+    char *argv[STASIS_SYS_MAX_ARGS];
+    int argc = 0;
+    char *p = buf;
+    while (*p && argc + 1 < STASIS_SYS_MAX_ARGS)
+    {
+        while (*p && sys_is_space(*p))
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+
+        if (*p == '"')
+        {
+            p++;
+            argv[argc++] = p;
+            while (*p && *p != '"')
+            {
+                p++;
+            }
+            if (*p == '"')
+            {
+                *p++ = '\0';
+            }
+        }
+        else
+        {
+            argv[argc++] = p;
+            while (*p && !sys_is_space(*p))
+            {
+                p++;
+            }
+            if (*p)
+            {
+                *p++ = '\0';
+            }
+        }
+    }
+    argv[argc] = NULL;
+
+    if (argc == 0 || !argv[0] || !*argv[0])
+    {
+        free(buf);
+        return 0;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        free(buf);
+        return 0;
+    }
+
+    if (pid == 0)
+    {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    free(buf);
+    if (pid > 0x7fffffff)
+    {
+        return 0;
+    }
+    return (int)pid;
 #endif
 }
 
