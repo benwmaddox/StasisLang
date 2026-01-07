@@ -1384,6 +1384,28 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
     return 1;
 }
 
+static bool LlvmIrUsesSysRuntime(string llPath)
+{
+    try
+    {
+        using var reader = new StreamReader(llPath);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Contains("stasis_sys_", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+    }
+    catch
+    {
+        // Best-effort heuristic: if we can't read the IR, fall back to the existing behavior.
+    }
+
+    return false;
+}
+
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null)
 {
     var effectiveLinkLibraries = PrepareLinkLibraries(linkLibraries, enableGraphics, ref graphicsLibPath);
@@ -3319,7 +3341,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     if (mode == "run" &&
         backend == BackendType.Cranelift &&
         useCraneliftRunner &&
-        OperatingSystem.IsWindows() &&
+        (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
         DetectsTickUsage(File.ReadAllText(fullPath)))
     {
         return WatchCraneliftTickHotSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);

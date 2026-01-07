@@ -7,6 +7,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -24,12 +27,52 @@ static int g_sys_argc = -1;
 static char g_sys_argv[STASIS_SYS_MAX_ARGS][STASIS_SYS_MAX_ARG_BYTES];
 static int g_sys_argv_len[STASIS_SYS_MAX_ARGS];
 
+static void sys_reset_argv(void)
+{
+    g_sys_argc = 0;
+    memset(g_sys_argv, 0, sizeof(g_sys_argv));
+    memset(g_sys_argv_len, 0, sizeof(g_sys_argv_len));
+}
+
+static void sys_push_argv(const char *arg)
+{
+    if (!arg || g_sys_argc < 0 || g_sys_argc >= STASIS_SYS_MAX_ARGS)
+    {
+        return;
+    }
+
+    char *dst = g_sys_argv[g_sys_argc];
+    int cap = STASIS_SYS_MAX_ARG_BYTES;
+    int len = 0;
+    while (arg[len] && len + 1 < cap)
+    {
+        dst[len] = arg[len];
+        len++;
+    }
+    dst[len] = '\0';
+    g_sys_argv_len[g_sys_argc] = len;
+    g_sys_argc++;
+}
+
+void stasis_sys_set_args(int argc, const char *const *argv)
+{
+    sys_reset_argv();
+    if (!argv || argc <= 0)
+    {
+        return;
+    }
+
+    for (int i = 0; i < argc && g_sys_argc < STASIS_SYS_MAX_ARGS; i++)
+    {
+        sys_push_argv(argv[i]);
+    }
+}
+
 static int sys_is_space(char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-#ifdef _WIN32
 static void sys_init_argv(void)
 {
     if (g_sys_argc >= 0)
@@ -37,10 +80,9 @@ static void sys_init_argv(void)
         return;
     }
 
-    g_sys_argc = 0;
-    memset(g_sys_argv, 0, sizeof(g_sys_argv));
-    memset(g_sys_argv_len, 0, sizeof(g_sys_argv_len));
+    sys_reset_argv();
 
+#ifdef _WIN32
     const char *cmd = GetCommandLineA();
     if (!cmd)
     {
@@ -96,17 +138,56 @@ static void sys_init_argv(void)
         g_sys_argv_len[g_sys_argc] = len;
         g_sys_argc++;
     }
-}
+#else
+#if defined(__APPLE__)
+    int argc = 0;
+    char **argv = NULL;
+    if (_NSGetArgc() && _NSGetArgv())
+    {
+        argc = *_NSGetArgc();
+        argv = *_NSGetArgv();
+    }
+    if (argc > 0 && argv)
+    {
+        stasis_sys_set_args(argc, (const char *const *)argv);
+    }
+#elif defined(__linux__)
+    FILE *f = fopen("/proc/self/cmdline", "rb");
+    if (!f)
+    {
+        return;
+    }
+    unsigned char buf[8192];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+    {
+        return;
+    }
+    buf[n] = 0;
+
+    size_t i = 0;
+    while (i < n && g_sys_argc < STASIS_SYS_MAX_ARGS)
+    {
+        size_t start = i;
+        while (i < n && buf[i] != 0)
+        {
+            i++;
+        }
+        if (i > start)
+        {
+            sys_push_argv((const char *)(buf + start));
+        }
+        i++;
+    }
 #endif
+#endif
+}
 
 int stasis_sys_argc(void)
 {
-#ifdef _WIN32
     sys_init_argv();
     return g_sys_argc;
-#else
-    return 0;
-#endif
 }
 
 int stasis_sys_argv(int idx, unsigned char *out, int out_cap)
@@ -118,7 +199,6 @@ int stasis_sys_argv(int idx, unsigned char *out, int out_cap)
 
     out[0] = 0;
 
-#ifdef _WIN32
     sys_init_argv();
     if (idx < 0 || idx >= g_sys_argc)
     {
@@ -140,10 +220,6 @@ int stasis_sys_argv(int idx, unsigned char *out, int out_cap)
     memcpy(out, g_sys_argv[idx], (size_t)copy);
     out[copy] = 0;
     return copy;
-#else
-    (void)idx;
-    return -1;
-#endif
 }
 
 int stasis_sys_read_file(const char *path, unsigned char *out, int out_cap)

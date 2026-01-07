@@ -16,6 +16,7 @@
 
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
+typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 
 typedef struct stasis_state_symbol
 {
@@ -299,13 +300,33 @@ static void stasis_enable_dll_search(const char *exe_path, const char *dll_path)
 static HMODULE stasis_load_program_library(const char *path)
 {
     HMODULE lib = LoadLibraryExA(path,
-                                NULL,
-                                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+                                 NULL,
+                                 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
     if (!lib)
     {
         lib = LoadLibraryA(path);
     }
     return lib;
+}
+#endif
+
+#ifdef _WIN32
+static void stasis_try_set_sys_args(HMODULE lib, int argc, char **argv)
+{
+    FARPROC sym = GetProcAddress(lib, "stasis_sys_set_args");
+    if (sym)
+    {
+        ((stasis_sys_set_args_fn)sym)(argc, (const char *const *)argv);
+    }
+}
+#else
+static void stasis_try_set_sys_args(void *lib, int argc, char **argv)
+{
+    void *sym = dlsym(lib, "stasis_sys_set_args");
+    if (sym)
+    {
+        ((stasis_sys_set_args_fn)sym)(argc, (const char *const *)argv);
+    }
 }
 #endif
 
@@ -1047,6 +1068,7 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            stasis_try_set_sys_args(lib, argc, argv);
             stasis_entry_fn entry = (stasis_entry_fn)symbol;
             int result = entry();
             FreeLibrary(lib);
@@ -1072,6 +1094,7 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            stasis_try_set_sys_args(lib, argc, argv);
             stasis_entry_fn entry = (stasis_entry_fn)symbol;
             int result = entry();
             dlclose(lib);
@@ -1291,6 +1314,7 @@ int main(int argc, char **argv)
         tick_sym = GetProcAddress(lib, tick_name);
     }
 
+    stasis_try_set_sys_args(lib, argc, argv);
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
 
@@ -1457,6 +1481,7 @@ int main(int argc, char **argv)
                             }
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
+                            stasis_try_set_sys_args(lib, argc, argv);
 
                             /* Update DLL handle for data binding system */
                             stasis_data_set_dll(new_lib);
@@ -1611,6 +1636,7 @@ int main(int argc, char **argv)
     }
 
     stasis_data_set_dll(lib);
+    stasis_try_set_sys_args(lib, argc, argv);
 
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
@@ -1756,6 +1782,7 @@ int main(int argc, char **argv)
                     dlclose(lib);
                     lib = new_lib;
                     tick = (stasis_tick_fn)new_tick_sym;
+                    stasis_try_set_sys_args(lib, argc, argv);
                     stasis_data_set_dll(new_lib);
                 }
             }
