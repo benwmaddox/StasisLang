@@ -1702,6 +1702,7 @@ int main(int argc, char **argv)
         struct timespec ts_last;
         clock_gettime(CLOCK_MONOTONIC, &ts_last);
         long long last_us = ts_last.tv_sec * 1000000LL + ts_last.tv_nsec / 1000LL;
+        int tick_diag_count = 0;
 
         for (;;)
         {
@@ -1843,7 +1844,19 @@ int main(int argc, char **argv)
 
             stasis_data_poll_all();
 
+            if (runner_diag && tick_diag_count < 10)
+            {
+                fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
+                fflush(stderr);
+            }
+
             int tick_result = tick();
+            if (runner_diag && tick_diag_count < 10)
+            {
+                fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
+                fflush(stderr);
+                tick_diag_count++;
+            }
             if (tick_result != 0)
             {
                 result = tick_result == 1 ? 0 : tick_result;
