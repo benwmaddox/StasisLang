@@ -145,7 +145,7 @@ try {
     if (!(Test-Path $csharpExe)) {
         $candidates =
             (Get-ChildItem -Recurse -Filter "Stasis.Cli.exe" -Path (Join-Path $repoRoot "Stasis.Cli\\bin") -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match "\\\\Release\\\\net9\\.0\\\\Stasis\\.Cli\\.exe$" } |
+                Where-Object { $_.FullName -like "*\\Release\\net9.0\\Stasis.Cli.exe" } |
                 Select-Object -First 1)
         if ($candidates) {
             $csharpExe = $candidates.FullName
