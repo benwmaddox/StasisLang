@@ -308,6 +308,11 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeFunction(FunctionDeclarationSyntax fn)
     {
+        if (fn.IsExtern || fn.Body is null)
+        {
+            return;
+        }
+
         var scope = new Dictionary<string, Symbol>(StringComparer.Ordinal);
         foreach (var param in fn.Parameters)
         {
