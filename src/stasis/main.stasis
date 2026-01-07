@@ -19,7 +19,7 @@ function usage(): void {
     print_string("  stasis build [--quiet] [--backend cranelift|llvm] [--module <name>] --out <path> [--emit-ir] <entry.stasis>\n");
     print_string("  stasis run [--quiet] [--backend llvm] [--module <name>] <entry.stasis>\n");
     print_string("  stasis release [--quiet] [--module <name>] --out <path> <entry.stasis>\n");
-    print_string("  stasis test [--quiet] [--backend llvm] [--module <name>] <dir>\n");
+    print_string("  stasis test [--quiet] [--backend llvm] [--module <name>] <dir-or-file.stasis>\n");
     print_string("  stasis watch check [--quiet] <entry.stasis>\n");
     print_string("  stasis watch build [--quiet] [--backend cranelift|llvm] [--module <name>] --out <path> [--emit-ir] <entry.stasis>\n");
     print_string("  stasis watch run [--quiet] [--backend llvm] [--module <name>] <entry.stasis>\n");
@@ -703,7 +703,7 @@ function main(): i32 {
             ascii_copy(stasis.scratch_out_dir, ".");
         }
 
-        return test_run_dir(stasis.scratch_out_dir);
+        return test_run_path(stasis.scratch_out_dir);
     }
 
     if (ascii_eq(stasis.cmd, "watch")) {

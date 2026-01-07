@@ -38,6 +38,7 @@ build/*_expanded.stasis
 build/*.stasis
 build/*.stasis.*
 build/*.txt
+build/test_perf_compare.csv
 stasis_sys_static.lib
 build/stasis_sys_static.lib
 

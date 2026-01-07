@@ -307,3 +307,15 @@ function test_run_dir(root_dir: ascii[]): i32 {
     if (failed_files != 0) { return 1; }
     return 0;
 }
+
+function test_run_path(path: ascii[]): i32 {
+    if (ascii_ends_with_lit(path, ".stasis")) {
+        if (stasis.quiet == 0) {
+            print_string("test: ");
+            print_string(path);
+            print_char(10);
+        }
+        return test_run_file(path, 0);
+    }
+    return test_run_dir(path);
+}
