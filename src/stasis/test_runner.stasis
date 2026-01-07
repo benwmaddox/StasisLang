@@ -59,6 +59,7 @@ function test_dirs_reset(root: ascii[]): bool {
     stasis.test_pool_len = 0;
     stasis.test_dirs_sp = 0;
     stasis.test_files_count = 0;
+    stasis.test_run_seq = 0;
 
     let off: i32 = test_pool_add(root);
     if (off < 0) { return false; }
@@ -210,15 +211,18 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     path_dirname(stasis.scratch_dir, stasis.scratch_import);
 
     // Use per-test outputs to avoid transient Windows file-lock collisions when re-linking.
+    let uniq: i32 = stasis.test_run_seq;
+    stasis.test_run_seq = stasis.test_run_seq + 1;
+
     ascii_clear(stasis.scratch_import);
     ascii_append(stasis.scratch_import, "stasis_test_");
-    ir_append_i32(stasis.scratch_import, test_index);
+    ir_append_i32(stasis.scratch_import, uniq);
     ascii_append(stasis.scratch_import, ".ll");
     path_join(stasis.scratch_resolved, stasis.scratch_dir, stasis.scratch_import);
 
     ascii_clear(stasis.scratch_import);
     ascii_append(stasis.scratch_import, "stasis_test_");
-    ir_append_i32(stasis.scratch_import, test_index);
+    ir_append_i32(stasis.scratch_import, uniq);
     ascii_append(stasis.scratch_import, ".exe");
     path_join(stasis.scratch_exe, stasis.scratch_dir, stasis.scratch_import);
 
@@ -249,7 +253,7 @@ function test_run_file(entry_path: ascii[], test_index: i32): i32 {
     }
 
     ascii_clear(stasis.exec_cmd);
-    ascii_append(stasis.exec_cmd, "clang -Wno-override-module ");
+    ascii_append(stasis.exec_cmd, "clang -Wl,/NOLOGO -Wno-override-module ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'

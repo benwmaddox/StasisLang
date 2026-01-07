@@ -109,7 +109,7 @@ function cmd_build(): i32 {
     let needs_sys: bool = ir_needs_sys_runtime();
 
     ascii_clear(stasis.exec_cmd);
-    ascii_append(stasis.exec_cmd, "clang -Wno-override-module ");
+    ascii_append(stasis.exec_cmd, "clang -Wl,/NOLOGO -Wno-override-module ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
@@ -201,7 +201,7 @@ function cmd_run(): i32 {
     }
 
     ascii_clear(stasis.exec_cmd);
-    ascii_append(stasis.exec_cmd, "clang -Wno-override-module ");
+    ascii_append(stasis.exec_cmd, "clang -Wl,/NOLOGO -Wno-override-module ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
@@ -272,7 +272,7 @@ function cmd_release(): i32 {
     let needs_sys: bool = ir_needs_sys_runtime();
 
     ascii_clear(stasis.exec_cmd);
-    ascii_append(stasis.exec_cmd, "clang -Wno-override-module -O3 ");
+    ascii_append(stasis.exec_cmd, "clang -Wl,/NOLOGO -Wno-override-module -O3 ");
     ascii_append_byte(stasis.exec_cmd, 34); // '"'
     ascii_append(stasis.exec_cmd, stasis.scratch_resolved);
     ascii_append_byte(stasis.exec_cmd, 34); // '"'

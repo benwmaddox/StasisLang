@@ -258,6 +258,7 @@ struct State {
     test_files_off: i32[4096];
     test_files_len: i32[4096];
     test_files_count: i32;
+    test_run_seq: i32;
 
     // Resolver scratch (import graph traversal).
     resolve_stack: i32[4096];
