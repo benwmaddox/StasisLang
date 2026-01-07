@@ -57,7 +57,11 @@ jobs:
       - name: Build self-host compiler exe (via C# compiler)
         shell: pwsh
         run: |
-          $stasisc = "Stasis.Cli/bin/Release/net9.0/Stasis.Cli.exe"
+          $stasisc = Join-Path (Get-Location) "Stasis.Cli\\bin\\Release\\net9.0\\Stasis.Cli.exe"
+          if (!(Test-Path $stasisc)) {
+            Get-ChildItem -Force "Stasis.Cli\\bin\\Release\\net9.0" | Format-Table -AutoSize
+            throw "missing $stasisc"
+          }
           & $stasisc build src/stasis/main.stasis --backend llvm --module stasis --out build/stasis_selfhost.exe --opt-level 3 --lto
 
       - name: Hot swap benchmark

@@ -138,7 +138,7 @@ try {
     $selfExe = Join-Path $repoRoot "build/stasis_selfhost.exe"
     if (!(Test-Path $selfExe)) { throw "missing build/stasis_selfhost.exe (build step should produce it)" }
 
-    $csharpExe = Join-Path $repoRoot "Stasis.Cli/bin/Release/net9.0/Stasis.Cli.exe"
+    $csharpExe = Join-Path $repoRoot "Stasis.Cli\\bin\\Release\\net9.0\\Stasis.Cli.exe"
     if (!(Test-Path $csharpExe)) { throw "missing $csharpExe (dotnet build step should produce it)" }
 
     $aot = Join-Path $repoRoot "tools/cranelift-aot/target/release/stasis-cranelift-aot.exe"
