@@ -3435,6 +3435,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return false;
         }
 
+        // Drain stdout for the rest of the session so the runner can't block on its stdout pipe.
+        StartLogPump(runner.StandardOutput, runnerOutLog, cts.Token);
+
         return true;
     }
 
