@@ -13,12 +13,21 @@ set "GAME=samples\brickout_revenge\brickout_revenge.stasis"
 set "MODULE=brick"
 set "FPS=60"
 
+set "CLI_EXE=%ROOT%\build\stasis_release.exe"
+if not exist "%CLI_EXE%" set "CLI_EXE=%ROOT%\Stasis.Cli\bin\%CONFIG%\net9.0\Stasis.Cli.exe"
+
 set "RUNNER_EXE=%ROOT%\runtime\build\bin\%CONFIG%\stasis_runner.exe"
 set "AOT_EXE=%ROOT%\tools\cranelift-aot\target\%CONFIG%\stasis-cranelift-aot.exe"
 
 if not exist "%GAME%" (
   echo error: game not found: %GAME%
   exit /b 1
+)
+
+if not exist "%CLI_EXE%" (
+  echo info: building CLI...
+  dotnet build -c %CONFIG% "%ROOT%\Stasis.sln"
+  if errorlevel 1 exit /b %ERRORLEVEL%
 )
 
 if not exist "%RUNNER_EXE%" (
@@ -42,6 +51,7 @@ set "STASIS_CRANELIFT_RUNNER_SERVER=1"
 set "STASIS_HOTSWAP_KEEP_OLD=1"
 
 echo Root:   %ROOT%
+echo CLI:    %CLI_EXE%
 echo Game:   %GAME%
 echo Module: %MODULE%
 echo FPS:    %FPS%
@@ -50,6 +60,5 @@ echo.
 rem Pass extra CLI args after defaults, e.g.:
 rem   dev_brickout_revenge.bat --fps 30
 rem   dev_brickout_revenge.bat --backend llvm
-call "%ROOT%\stasis.bat" run "%GAME%" --graphics --watch --backend cranelift --module "%MODULE%" --fps "%FPS%" %*
+call "%CLI_EXE%" run "%GAME%" --graphics --watch --backend cranelift --module "%MODULE%" --fps "%FPS%" %*
 exit /b %ERRORLEVEL%
-
