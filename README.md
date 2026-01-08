@@ -55,6 +55,14 @@ Backends:
 - `--backend llvm` runs via `lli` if available, otherwise compiles and links via `clang`.
 - `--backend cranelift` defaults to the native runner for fast warm iteration; pass `--no-cranelift-runner` to produce and run an EXE instead.
 
+### Experimental: Cranelift JIT hot-swap (no DLL load)
+
+The `tick` hot-swap watch loop can use an experimental in-process Cranelift JIT runner (avoids writing/loading a hot-swap DLL each change).
+
+- Build: `cd tools/cranelift-jit-runner && cargo build --release`
+- Enable: set `STASIS_CRANELIFT_JIT_RUNNER=1`
+- Optional: set `STASIS_CRANELIFT_JIT_RUNNER_EXE` to override the runner path.
+
 ## Demos and docs
 
 - Overview: `STASIS_OVERVIEW.md`
