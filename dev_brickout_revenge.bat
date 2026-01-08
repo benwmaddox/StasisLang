@@ -9,17 +9,16 @@ cd /d "%~dp0"
 
 set "ROOT=%CD%"
 set "CONFIG=Release"
-set "GAME=samples\brickout_revenge\brickout_revenge.stasis"
+set "GAME=samples\brickout_revenge\brickout_revenge_v1.stasis"
 set "MODULE=brick"
 set "FPS=60"
 
-set "USE_JIT=1"
+set "USE_JIT=0"
 if /I "%1"=="--no-jit" (
   set "USE_JIT=0"
   shift
 )
 if /I "%1"=="--jit" (
-  rem Kept for backwards compatibility; JIT is now the default.
   set "USE_JIT=1"
   shift
 )
@@ -79,7 +78,7 @@ echo CLI:    %CLI_EXE%
 echo Game:   %GAME%
 echo Module: %MODULE%
 echo FPS:    %FPS%
-if "%USE_JIT%"=="1" echo JIT:    1
+echo JIT:    %USE_JIT%
 echo.
 
 rem Pass extra CLI args after defaults, e.g.:
