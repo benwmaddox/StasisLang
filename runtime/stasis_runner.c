@@ -544,6 +544,27 @@ static int file_exists(const char *path)
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+static int move_file_replace_retry(const char *src, const char *dst, int attempts, int sleep_ms)
+{
+    for (int i = 0; i < attempts; i++)
+    {
+        if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        {
+            return 1;
+        }
+
+        DWORD err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED)
+        {
+            return 0;
+        }
+
+        Sleep((DWORD)sleep_ms);
+    }
+
+    return 0;
+}
+
 static int read_text_file(const char *path, char *out, size_t out_cap)
 {
     FILE *f = fopen(path, "rb");
@@ -994,21 +1015,6 @@ int main(int argc, char **argv)
     const char *data_bind_json = NULL;
     const char *data_bind_meta = NULL;
     int fps = 60;
-#ifdef _WIN32
-    int runner_diag = 0;
-    {
-        const char *diag_env = getenv("STASIS_RUNNER_DIAG");
-        runner_diag = diag_env && diag_env[0] == '1';
-    }
-    int hotswap_use_fixed_path = 1;
-    {
-        const char *v = getenv("STASIS_HOTSWAP_FIXED_PATH");
-        if (v && (strcmp(v, "0") == 0 || _stricmp(v, "false") == 0 || _stricmp(v, "no") == 0))
-        {
-            hotswap_use_fixed_path = 0;
-        }
-    }
-#endif
 
     if (argc >= 2 && strcmp(argv[1], "--server") == 0)
     {
@@ -1393,83 +1399,63 @@ int main(int argc, char **argv)
                                 }
                             }
 
-                             LARGE_INTEGER sw_freq;
-                             LARGE_INTEGER sw_t0;
-                             LARGE_INTEGER sw_t1;
-                             QueryPerformanceFrequency(&sw_freq);
-                             char fixed_path[2048];
-                             const char *load_path = new_path;
-                             HMODULE old_lib = lib;
-                             int wants_fixed_path = 0;
+                            LARGE_INTEGER sw_freq;
+                            LARGE_INTEGER sw_t0;
+                            LARGE_INTEGER sw_t1;
+                            QueryPerformanceFrequency(&sw_freq);
+                            char fixed_path[2048];
+                            const char *load_path = new_path;
+                            HMODULE old_lib = lib;
 
-                             if (hotswap_use_fixed_path)
-                             {
-                                 wants_fixed_path = try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path));
-                             }
+                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                            {
+                                FreeLibrary(old_lib);
+                                old_lib = NULL;
+                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
+                                {
+                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
+                                    load_path = new_path;
+                                }
+                                else
+                                {
+                                    load_path = fixed_path;
+                                }
+                            }
 
-                             uint8_t *buffer = NULL;
-                             uint32_t missing_save = 0;
-                             uint32_t missing_restore = 0;
-                             long long save_us = 0;
-                             long long load_us = 0;
-                             long long tick_us = 0;
-                             long long restore_us = 0;
-                             long long move_us = 0;
-                             if (state_map_path)
-                             {
-                                 buffer = (uint8_t *)malloc(total_bytes);
-                                 if (!buffer)
-                                 {
+                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                            fflush(stderr);
+
+                            uint8_t *buffer = NULL;
+                            uint32_t missing_save = 0;
+                            uint32_t missing_restore = 0;
+                            long long save_us = 0;
+                            long long load_us = 0;
+                            long long tick_us = 0;
+                            long long restore_us = 0;
+                            if (state_map_path)
+                            {
+                                buffer = (uint8_t *)malloc(total_bytes);
+                                if (!buffer)
+                                {
                                     fprintf(stderr, "error: out of memory\n");
-                                     result = 1;
-                                     break;
-                                 }
-                                 QueryPerformanceCounter(&sw_t0);
-                                 if (copy_state_to_buffer(old_lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
-                                 {
-                                     free(buffer);
-                                     result = 1;
-                                     break;
-                                 }
-                                 QueryPerformanceCounter(&sw_t1);
-                                 save_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
-                             }
+                                    result = 1;
+                                    break;
+                                }
+                                QueryPerformanceCounter(&sw_t0);
+                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                                {
+                                    free(buffer);
+                                    result = 1;
+                                    break;
+                                }
+                                QueryPerformanceCounter(&sw_t1);
+                                save_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                            }
 
-                             if (!wants_fixed_path)
-                             {
-                                 /* Unload old DLL before loading the new one to avoid keeping both mapped. */
-                                 FreeLibrary(old_lib);
-                                 old_lib = NULL;
-                             }
-
-                             if (wants_fixed_path)
-                             {
-                                 /* Unload old DLL so we can overwrite the fixed swap path. */
-                                 FreeLibrary(old_lib);
-                                 old_lib = NULL;
-                                 QueryPerformanceCounter(&sw_t0);
-                                 if (!MoveFileExA(new_path, fixed_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
-                                 {
-                                     QueryPerformanceCounter(&sw_t1);
-                                     move_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
-                                     fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
-                                     load_path = new_path;
-                                 }
-                                 else
-                                 {
-                                     QueryPerformanceCounter(&sw_t1);
-                                     move_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
-                                     load_path = fixed_path;
-                                 }
-                             }
- 
-                             fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
-                             fflush(stderr);
-
-                             QueryPerformanceCounter(&sw_t0);
-                             HMODULE new_lib = stasis_load_program_library(load_path);
-                             QueryPerformanceCounter(&sw_t1);
-                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                            QueryPerformanceCounter(&sw_t0);
+                            HMODULE new_lib = stasis_load_program_library(load_path);
+                            QueryPerformanceCounter(&sw_t1);
+                            load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
                             {
                                 DWORD err = GetLastError();
@@ -1511,32 +1497,27 @@ int main(int argc, char **argv)
                                     result = 1;
                                     break;
                                 }
-                                 QueryPerformanceCounter(&sw_t1);
-                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
-                                 free(buffer);
-                                 fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
-                                 fflush(stderr);
-                                 if (runner_diag)
-                                 {
-                                     fprintf(stderr, "HOTSWAP diag: move=%lldus\n", move_us);
-                                     fflush(stderr);
-                                 }
-                                 if (missing_save > 0 || missing_restore > 0)
-                                 {
-                                     fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
-                                     fflush(stderr);
+                                QueryPerformanceCounter(&sw_t1);
+                                restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                                free(buffer);
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                fflush(stderr);
+                                if (missing_save > 0 || missing_restore > 0)
+                                {
+                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                    fflush(stderr);
                                 }
                             }
                             else
                             {
                                 fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
                                 fflush(stderr);
-                             }
+                            }
 
-                             if (old_lib)
-                             {
-                                 FreeLibrary(old_lib);
-                             }
+                            if (old_lib)
+                            {
+                                FreeLibrary(old_lib);
+                            }
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
                             stasis_try_set_sys_args(lib, argc, argv);
