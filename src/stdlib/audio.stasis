@@ -2,6 +2,9 @@
 // Audio/runtime bindings (marker module).
 // Import explicitly: import "src/stdlib/audio.stasis";
 
+extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+extern function audio_shutdown(): void;
+
 extern function audio_is_available(): bool;
 extern function audio_get_sample_rate(): i32;
 extern function audio_get_channels(): i32;

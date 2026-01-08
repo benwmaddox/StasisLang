@@ -1,6 +1,6 @@
 ﻿**updated Stasis grammar and parser notes** incorporating:
 
-- **Assignment via infix `=`** instead of `.=( )`
+- **Assignment via infix `=`**
 - **Pratt parser for all expressions** (assignment is right-associative)
 - **Operator-method calls stay for arithmetic/comparison**
 - **AoS -> SoA semantics represented cleanly**
@@ -44,6 +44,13 @@ TopLevelItem     -> StructDecl
 ```
 ImportDecl       -> "import" StringLiteral ";"
 ```
+
+Parsing note:
+- Imports introduce modules (file = module). The parser records import paths so later passes can build a per-file module table and resolve identifiers against:
+  - local declarations first
+  - then imported module members (in scope by default)
+  - and `ModuleName.symbol` for disambiguation
+  - imports are transitive for compilation (the build graph includes imported files and their imports)
 
 ## 2.1 Struct Declarations
 

@@ -1,0 +1,91 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "expr_eval.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_tests.stasis";
+import "mir_llvm_main.stasis";
+
+function emit_main_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
+    // Store for downstream helpers (LLVM symbol mangling).
+    ascii_copy(stasis.arg_module, module_name);
+
+    let func_idx: i32 = build_find_entry_main();
+    if (func_idx < 0) {
+        build_err_at(0, "missing entry function 'main' in entry file", 0);
+        return 1;
+    }
+
+    let file_idx: i32 = stasis.funcs[func_idx].file_idx;
+    let body_start: i32 = stasis.funcs[func_idx].body_start;
+    if (body_start < 0) {
+        build_err_at(file_idx, "missing function body for 'main'", stasis.funcs[func_idx].name_start);
+        return 1;
+    }
+
+    if (!lex_begin(file_idx)) {
+        build_err_at(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+    stasis.lex_pos = body_start;
+
+    if (ascii_eq(backend, "llvm")) {
+        if (stasis.use_mir != 0) {
+            return emit_llvm_main_i32_mir(module_name);
+        }
+        return emit_llvm_main_i32(module_name);
+    }
+
+    let k: Tok = lex_next_kind();
+    if (k != Tok.LBrace) {
+        build_err_at(file_idx, "expected '{' at start of function body", stasis.tok_start);
+        return 1;
+    }
+
+    k = lex_next_kind();
+    if (k != Tok.ReturnKeyword) {
+        build_err_at(file_idx, "expected 'return' in function body (minimal build only)", stasis.tok_start);
+        return 1;
+    }
+
+    // Parse and const-evaluate a return expression (minimal build only).
+    let root: i32 = expr_parse_until(file_idx, Tok.Semicolon);
+    if (root < 0) {
+        return 1;
+    }
+    let value: i32 = expr_eval_i32_const(root);
+    if (stasis.expr_eval_failed != 0) {
+        return 1;
+    }
+
+    // Expect '}'
+    k = lex_next_kind();
+    if (k != Tok.RBrace) {
+        build_err_at(file_idx, "expected '}' after return statement", stasis.tok_start);
+        return 1;
+    }
+
+    if (ascii_eq(backend, "cranelift")) {
+        emit_clif_main_return_i32(module_name, value);
+        return 0;
+    }
+
+    build_err_at(file_idx, "unsupported backend (expected 'cranelift' or 'llvm')", body_start);
+    return 1;
+}
+
+function emit_tests_return_i32_ir(module_name: ascii[], backend: ascii[]): i32 {
+    // Store for downstream helpers (LLVM symbol mangling).
+    ascii_copy(stasis.arg_module, module_name);
+
+    if (!ascii_eq(backend, "llvm")) {
+        build_err_at(0, "test harness currently supports --backend llvm only", 0);
+        return 1;
+    }
+
+    return emit_llvm_tests_i32(module_name);
+}

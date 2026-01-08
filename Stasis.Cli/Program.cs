@@ -1098,6 +1098,12 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
         args.AddRange(BuildLinkArguments(effectiveLinkLibraries));
     }
 
+    var sysLibPath = FindSysLibrary();
+    if (!string.IsNullOrEmpty(sysLibPath))
+    {
+        args.Add($"\"{sysLibPath}\"");
+    }
+
     if (isDll)
     {
         var exportName = entryName ?? (isTest ? "run_tests" : "main");
@@ -1247,11 +1253,6 @@ static bool CanUseCranelift(bool emitIrOnly)
         return true;
     }
 
-    if (!OperatingSystem.IsWindows())
-    {
-        return false;
-    }
-
     if (!TryFindCraneliftAot(out _))
     {
         return false;
@@ -1328,8 +1329,8 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
         });
     }
 
-    // lli doesn't support external libraries easily, so use clang when graphics is enabled
-    if (!enableGraphics && TryFindTool("lli", out var llvmInterpreter))
+    // lli doesn't support external libraries easily, so use clang when graphics is enabled (or sys runtime is referenced).
+    if (!enableGraphics && !LlvmIrUsesSysRuntime(llPath) && TryFindTool("lli", out var llvmInterpreter))
     {
         return ExecuteWithLlvmInterpreter(llvmInterpreter, mode, llPath, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
     }
@@ -1381,6 +1382,28 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 
     Console.Error.WriteLine("error: neither lli nor clang found. Install LLVM or add to PATH.");
     return 1;
+}
+
+static bool LlvmIrUsesSysRuntime(string llPath)
+{
+    try
+    {
+        using var reader = new StreamReader(llPath);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Contains("stasis_sys_", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+    }
+    catch
+    {
+        // Best-effort heuristic: if we can't read the IR, fall back to the existing behavior.
+    }
+
+    return false;
 }
 
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null)
@@ -1471,6 +1494,12 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     if (effectiveLinkLibraries is { Count: > 0 })
     {
         args.AddRange(BuildLinkArguments(effectiveLinkLibraries));
+    }
+
+    var sysLibPath = FindSysLibrary();
+    if (!string.IsNullOrEmpty(sysLibPath))
+    {
+        args.Add($"\"{sysLibPath}\"");
     }
 
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -2231,6 +2260,38 @@ static string? FindGraphicsLibrary(bool preferShared = false)
     return FindFirstCandidate(searchPaths, fallbackCandidates);
 }
 
+static string? FindSysLibrary()
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_SYS_LIB");
+    if (!string.IsNullOrEmpty(env) && File.Exists(env))
+    {
+        return env;
+    }
+
+    var searchPaths = new List<string>();
+
+    // Check relative to the CLI executable
+    var exeDir = AppContext.BaseDirectory;
+    searchPaths.Add(exeDir);
+    searchPaths.Add(Path.Combine(exeDir, "runtime"));
+
+    // Prefer workspace runtime outputs before falling back to cwd root
+    var cwd = Directory.GetCurrentDirectory();
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Release"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build", "Debug"));
+    searchPaths.Add(Path.Combine(cwd, "runtime", "build"));
+    searchPaths.Add(Path.Combine(cwd, "runtime"));
+    searchPaths.Add(Path.Combine(cwd, "build"));
+    searchPaths.Add(cwd);
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        return FindFirstCandidate(searchPaths, new[] { "stasis_sys_static.lib" });
+    }
+
+    return FindFirstCandidate(searchPaths, new[] { "libstasis_sys_static.a" });
+}
+
 static string? FindFirstCandidate(IEnumerable<string> searchPaths, IEnumerable<string> candidates)
 {
     foreach (var dir in searchPaths)
@@ -2470,24 +2531,44 @@ static string GetObjectFileExtension()
 
 static string GetCompilerCacheSalt()
 {
-    var assembly = typeof(Program).Assembly;
-    var version = assembly.GetName().Version?.ToString() ?? "unknown";
-    var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+    var cliAssembly = typeof(Program).Assembly;
+    var compilerAssembly = typeof(SemanticAnalyzer).Assembly;
+    var version = cliAssembly.GetName().Version?.ToString() ?? "unknown";
+    var informationalVersion = cliAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+
+    var cliStamp = GetAssemblyCacheStamp(cliAssembly);
+    var compilerStamp = GetAssemblyCacheStamp(compilerAssembly);
+
+    // dotnet run => ProcessPath is typically 'dotnet.exe' and doesn't change on rebuild; prefer the loaded assemblies.
+    // AOT / single-file => Assembly.Location may be empty; fall back to ProcessPath/BaseDirectory.
     var exePath = Environment.ProcessPath;
     if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
     {
         var lastWriteTicks = File.GetLastWriteTimeUtc(exePath).Ticks;
-        return $"{version}:{informationalVersion}:{lastWriteTicks}";
+        return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}:{lastWriteTicks}";
     }
 
     var baseDir = AppContext.BaseDirectory;
     if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
     {
         var lastWriteTicks = Directory.GetLastWriteTimeUtc(baseDir).Ticks;
-        return $"{version}:{informationalVersion}:{lastWriteTicks}";
+        return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}:{lastWriteTicks}";
     }
 
-    return $"{version}:{informationalVersion}";
+    return $"{version}:{informationalVersion}:{cliStamp}:{compilerStamp}";
+}
+
+static string GetAssemblyCacheStamp(Assembly assembly)
+{
+    var mvid = assembly.ManifestModule.ModuleVersionId.ToString("N");
+    var location = assembly.Location;
+    if (!string.IsNullOrEmpty(location) && File.Exists(location))
+    {
+        var lastWriteTicks = File.GetLastWriteTimeUtc(location).Ticks;
+        return $"{mvid}:{lastWriteTicks}";
+    }
+
+    return mvid;
 }
 
 static int RunCraneliftAot(string aotTool, string clifPath, string objPath, string moduleName, string? optLevel, out long? spawnMs, out long compileMs)
@@ -2712,8 +2793,11 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var swapFile = Path.Combine(repoRoot, "build", "hotstate", $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
     var swapDir = Path.Combine(repoRoot, "build", "hotstate");
-    var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA.dll");
-    var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB.dll");
+    var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
+    var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA{swapExt}");
+    var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB{swapExt}");
+    var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
+    var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
     var pid = Environment.ProcessId;
     var hotClifPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap.clif");
     var hotObjPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.{pid}.hotswap{GetObjectFileExtension()}");
@@ -2730,6 +2814,50 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         // ignore
     }
 
+    static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+                while (!token.IsCancellationRequested)
+                {
+                    var line = reader.ReadLine();
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    onLine?.Invoke(line);
+                    writer.WriteLine(line);
+                }
+            }
+            catch
+            {
+                // Best-effort logging.
+            }
+        }, token);
+    }
+
+    static int WaitForRunnerHotSwapOkCount(Func<int> getOkCount, int prevOkCount, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (getOkCount() > prevOkCount)
+            {
+                return (int)sw.ElapsedMilliseconds;
+            }
+
+            Thread.Sleep(1);
+        }
+
+        return -1;
+    }
+
     using var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) =>
     {
@@ -2739,6 +2867,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
     string? activeDll = null;
     Process? runner = null;
+    var runnerHotSwapOkCount = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
     {
@@ -2884,10 +3013,30 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     FileName = runnerPath,
                     Arguments = runnerArgs,
                     UseShellExecute = false,
-                    WorkingDirectory = repoRoot
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
                 };
                 psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
                 var spawnSw = Stopwatch.StartNew();
+
+                try
+                {
+                    if (File.Exists(runnerOutLog))
+                    {
+                        File.Delete(runnerOutLog);
+                    }
+                    if (File.Exists(runnerErrLog))
+                    {
+                        File.Delete(runnerErrLog);
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+
                 runner = Process.Start(psi);
                 spawnSw.Stop();
                 runnerSpawnMs = spawnSw.ElapsedMilliseconds;
@@ -2896,18 +3045,40 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     Console.Error.WriteLine("error: failed to start runner.");
                     return 1;
                 }
+
+                StartLogPump(runner.StandardOutput, runnerOutLog, cts.Token);
+                StartLogPump(
+                    runner.StandardError,
+                    runnerErrLog,
+                    cts.Token,
+                    line =>
+                    {
+                        if (line.Contains("HOTSWAP ok:", StringComparison.Ordinal))
+                        {
+                            Interlocked.Increment(ref runnerHotSwapOkCount);
+                        }
+                    });
+
                 swTotal.Stop();
                 timingLine =
                     $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite=0 runnerSpawn={runnerSpawnMs} total={swTotal.ElapsedMilliseconds}";
                 return 0;
             }
 
+            var prevOkCount = Volatile.Read(ref runnerHotSwapOkCount);
             var swapText = hotDll + "\n" + plan.MapPath;
             File.WriteAllText(swapFile, swapText, Encoding.ASCII);
             swapWriteMs = phase.ElapsedMilliseconds;
             swTotal.Stop();
             timingLine =
                 $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} swapWrite={swapWriteMs} total={swTotal.ElapsedMilliseconds}";
+
+            var swapLatencyMs =
+                WaitForRunnerHotSwapOkCount(
+                    () => Volatile.Read(ref runnerHotSwapOkCount),
+                    prevOkCount,
+                    timeoutMs: 20000);
+            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
             return 0;
         }
         finally
@@ -3170,7 +3341,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     if (mode == "run" &&
         backend == BackendType.Cranelift &&
         useCraneliftRunner &&
-        OperatingSystem.IsWindows() &&
+        (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
         DetectsTickUsage(File.ReadAllText(fullPath)))
     {
         return WatchCraneliftTickHotSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);

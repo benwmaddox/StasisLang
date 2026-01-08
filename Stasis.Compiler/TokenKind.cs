@@ -8,6 +8,7 @@ public enum TokenKind
     // Identifiers & literals
     Identifier,
     IntegerLiteral,
+    U8Literal,
     FloatLiteral,
     StringLiteral,
     BacktickLiteral,

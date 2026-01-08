@@ -1,0 +1,920 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "imports.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+
+const SYM_CAP: i32 = 20000;
+const SYM_POOL_CAP: i32 = 200000;
+const SIG_ERR_PRINT_CAP: i32 = 16;
+
+const TYPE_CAP: i32 = 50000;
+const STRUCT_CAP: i32 = 2000;
+const FIELD_CAP: i32 = 50000;
+const ENUM_CAP: i32 = 2000;
+const ENUM_MEMBER_CAP: i32 = 50000;
+const GLOBAL_CAP: i32 = 20000;
+const CONST_CAP: i32 = 20000;
+const FUNC_CAP: i32 = 20000;
+const PARAM_CAP: i32 = 50000;
+
+function sig_print_tok_text(): void {
+    let i: i32 = 0;
+    for (i = 0; i < stasis.tok_len; i = i + 1) {
+        let b: u8 = stasis.pool[stasis.lex_base + stasis.tok_start + i];
+        print_char(u8_to_i32(b));
+    }
+}
+
+function sig_print_err_at(file_idx: i32, msg: ascii[], at: i32): void {
+    if (stasis.quiet != 0) {
+        return;
+    }
+    if (SIG_ERR_PRINT_CAP > 0 && stasis.lex_error_printed >= SIG_ERR_PRINT_CAP) {
+        return;
+    }
+
+    print_string("error: ");
+    print_string(msg);
+    print_string(": ");
+    print_file_loc(file_idx, at);
+    print_char(10);
+    stasis.lex_error_printed = stasis.lex_error_printed + 1;
+}
+
+function sig_print_dup_err(file_idx: i32): void {
+    if (stasis.quiet != 0) {
+        return;
+    }
+    if (SIG_ERR_PRINT_CAP > 0 && stasis.lex_error_printed >= SIG_ERR_PRINT_CAP) {
+        return;
+    }
+
+    print_string("error: duplicate top-level symbol '");
+    sig_print_tok_text();
+    print_string("': ");
+    print_file_loc(file_idx, stasis.tok_start);
+    print_char(10);
+    stasis.lex_error_printed = stasis.lex_error_printed + 1;
+}
+
+function sig_err_here(file_idx: i32, msg: ascii[]): void {
+    stasis.sig_errors = stasis.sig_errors + 1;
+    sig_print_err_at(file_idx, msg, stasis.tok_start);
+}
+
+function sig_sym_eq_tok(sym_idx: i32): bool {
+    if (sym_idx < 0 || sym_idx >= stasis.sym_count) {
+        return false;
+    }
+    let len: i32 = stasis.syms[sym_idx].name_len;
+    if (len != stasis.tok_len) {
+        return false;
+    }
+
+    let off: i32 = stasis.syms[sym_idx].name_off;
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        if (stasis.sym_pool[off + i] != stasis.pool[stasis.lex_base + stasis.tok_start + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sig_add_sym(file_idx: i32, kind: SymKind, is_exported: i32): bool {
+    if (stasis.sym_count >= SYM_CAP) {
+        sig_print_err_at(file_idx, "exceeded symbol capacity", stasis.tok_start);
+        return false;
+    }
+    if (stasis.sym_pool_len + stasis.tok_len + 1 > SYM_POOL_CAP) {
+        sig_print_err_at(file_idx, "exceeded symbol name pool capacity", stasis.tok_start);
+        return false;
+    }
+
+    let start: i32 = stasis.files[file_idx].syms_off;
+    let n: i32 = stasis.files[file_idx].syms_len;
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        if (sig_sym_eq_tok(start + i)) {
+            sig_print_dup_err(file_idx);
+            return false;
+        }
+    }
+
+    let name_off: i32 = stasis.sym_pool_len;
+    for (i = 0; i < stasis.tok_len; i = i + 1) {
+        stasis.sym_pool[name_off + i] = stasis.pool[stasis.lex_base + stasis.tok_start + i];
+    }
+    stasis.sym_pool[name_off + stasis.tok_len] = 0;
+    stasis.sym_pool_len = stasis.sym_pool_len + stasis.tok_len + 1;
+
+    let idx: i32 = stasis.sym_count;
+    stasis.sym_count = stasis.sym_count + 1;
+    stasis.files[file_idx].syms_len = stasis.files[file_idx].syms_len + 1;
+
+    stasis.syms[idx].kind = kind;
+    stasis.syms[idx].file_idx = file_idx;
+    stasis.syms[idx].name_off = name_off;
+    stasis.syms[idx].name_len = stasis.tok_len;
+    stasis.syms[idx].name_at = stasis.tok_start;
+    stasis.syms[idx].is_exported = is_exported;
+    return true;
+}
+
+function sig_advance(): void {
+    stasis.sig_kind = lex_next_kind();
+}
+
+function sig_add_type_named(file_idx: i32, start: i32, len: i32): i32 {
+    if (stasis.type_count >= TYPE_CAP) {
+        sig_err_here(file_idx, "exceeded type capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.type_count;
+    stasis.type_count = stasis.type_count + 1;
+
+    stasis.types[idx].kind = TypeKind.Named;
+    stasis.types[idx].file_idx = file_idx;
+    stasis.types[idx].start = start;
+    stasis.types[idx].len = len;
+    stasis.types[idx].elem = -1;
+    stasis.types[idx].size = 0;
+    return idx;
+}
+
+function sig_add_type_array(file_idx: i32, elem: i32, size: i32): i32 {
+    if (stasis.type_count >= TYPE_CAP) {
+        sig_err_here(file_idx, "exceeded type capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.type_count;
+    stasis.type_count = stasis.type_count + 1;
+
+    stasis.types[idx].kind = TypeKind.Array;
+    stasis.types[idx].file_idx = file_idx;
+    stasis.types[idx].start = 0;
+    stasis.types[idx].len = 0;
+    stasis.types[idx].elem = elem;
+    stasis.types[idx].size = size;
+    return idx;
+}
+
+function sig_add_param(file_idx: i32, name_start: i32, name_len: i32, type_idx: i32): i32 {
+    if (stasis.param_count >= PARAM_CAP) {
+        sig_err_here(file_idx, "exceeded parameter capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.param_count;
+    stasis.param_count = stasis.param_count + 1;
+
+    stasis.params[idx].file_idx = file_idx;
+    stasis.params[idx].name_start = name_start;
+    stasis.params[idx].name_len = name_len;
+    stasis.params[idx].type_idx = type_idx;
+    return idx;
+}
+
+function sig_add_func_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, is_test: i32): i32 {
+    if (stasis.func_count >= FUNC_CAP) {
+        sig_err_here(file_idx, "exceeded function capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.func_count;
+    stasis.func_count = stasis.func_count + 1;
+
+    stasis.funcs[idx].file_idx = file_idx;
+    stasis.funcs[idx].name_start = name_start;
+    stasis.funcs[idx].name_len = name_len;
+    stasis.funcs[idx].sym_idx = sym_idx;
+    stasis.funcs[idx].params_off = 0;
+    stasis.funcs[idx].params_len = 0;
+    stasis.funcs[idx].ret_type_idx = -1;
+    stasis.funcs[idx].body_start = -1;
+    stasis.funcs[idx].is_test = is_test;
+    return idx;
+}
+
+function sig_add_global_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, has_init: i32, init_start: i32): i32 {
+    if (stasis.global_count >= GLOBAL_CAP) {
+        sig_err_here(file_idx, "exceeded global capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.global_count;
+    stasis.global_count = stasis.global_count + 1;
+
+    stasis.globals[idx].file_idx = file_idx;
+    stasis.globals[idx].name_start = name_start;
+    stasis.globals[idx].name_len = name_len;
+    stasis.globals[idx].sym_idx = sym_idx;
+    stasis.globals[idx].type_idx = type_idx;
+    stasis.globals[idx].has_init = has_init;
+    stasis.globals[idx].init_start = init_start;
+    return idx;
+}
+
+function sig_add_const_decl(file_idx: i32, name_start: i32, name_len: i32, sym_idx: i32, type_idx: i32, init_start: i32): i32 {
+    if (stasis.const_count >= CONST_CAP) {
+        sig_err_here(file_idx, "exceeded const capacity");
+        return -1;
+    }
+    let idx: i32 = stasis.const_count;
+    stasis.const_count = stasis.const_count + 1;
+
+    stasis.consts[idx].file_idx = file_idx;
+    stasis.consts[idx].name_start = name_start;
+    stasis.consts[idx].name_len = name_len;
+    stasis.consts[idx].sym_idx = sym_idx;
+    stasis.consts[idx].type_idx = type_idx;
+    stasis.consts[idx].init_start = init_start;
+    return idx;
+}
+
+function sig_parse_i32_from_tok(file_idx: i32): i32 {
+    let v: i32 = 0;
+    let len: i32 = stasis.tok_len;
+    let has_u8_suffix: i32 = 0;
+    if (len >= 2) {
+        let b0: u8 = stasis.pool[stasis.lex_base + stasis.tok_start + len - 2];
+        let b1: u8 = stasis.pool[stasis.lex_base + stasis.tok_start + len - 1];
+        if (b0 == 117 && b1 == 56) {
+            has_u8_suffix = 1;
+            len = len - 2;
+        }
+    }
+    if (len <= 0) {
+        sig_err_here(file_idx, "expected integer literal");
+        return 0;
+    }
+    let i: i32 = 0;
+    for (i = 0; i < len; i = i + 1) {
+        let b: u8 = stasis.pool[stasis.lex_base + stasis.tok_start + i];
+        if (!ascii_is_digit(b)) {
+            sig_err_here(file_idx, "expected integer literal");
+            return 0;
+        }
+        v = v * 10 + ascii_to_digit(b);
+    }
+    if (has_u8_suffix != 0 && (v < 0 || v > 255)) {
+        sig_err_here(file_idx, "u8 literal out of range (0..255)");
+        return 0;
+    }
+    return v;
+}
+
+function sig_parse_type(file_idx: i32): i32 {
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected type name");
+        return -1;
+    }
+
+    let type_idx: i32 = sig_add_type_named(file_idx, stasis.tok_start, stasis.tok_len);
+    sig_advance();
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.LBracket) {
+            sig_advance();
+            let size: i32 = 0;
+
+            // Slice type: `Type[]` (modeled as Array with size=0).
+            if (stasis.sig_kind == Tok.RBracket) {
+                sig_advance();
+            } else {
+                if (stasis.sig_kind != Tok.IntegerLiteral && stasis.sig_kind != Tok.U8Literal) {
+                    sig_err_here(file_idx, "expected array size or ']'");
+                }
+                if (stasis.sig_kind == Tok.IntegerLiteral || stasis.sig_kind == Tok.U8Literal) {
+                    size = sig_parse_i32_from_tok(file_idx);
+                    sig_advance();
+                }
+                if (stasis.sig_kind != Tok.RBracket) {
+                    sig_err_here(file_idx, "expected ']'");
+                } else {
+                    sig_advance();
+                }
+            }
+
+            if (type_idx >= 0) {
+                type_idx = sig_add_type_array(file_idx, type_idx, size);
+            }
+        } else {
+            done = 1;
+        }
+    }
+
+    return type_idx;
+}
+
+function sig_skip_block(file_idx: i32): void {
+    if (stasis.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{'");
+        return;
+    }
+
+    let depth: i32 = 1;
+    sig_advance();
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof in block");
+            return;
+        }
+        if (stasis.sig_kind == Tok.LBrace) {
+            depth = depth + 1;
+        } else {
+            if (stasis.sig_kind == Tok.RBrace) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    sig_advance();
+                    return;
+                }
+            }
+        }
+        sig_advance();
+    }
+}
+
+function sig_skip_until_semicolon(file_idx: i32): void {
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.Semicolon) {
+            sig_advance();
+            return;
+        }
+        if (stasis.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof; expected ';'");
+            return;
+        }
+        sig_advance();
+    }
+}
+
+function sig_skip_to_field_end(file_idx: i32): void {
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.Semicolon) {
+            sig_advance();
+            return;
+        }
+        if (stasis.sig_kind == Tok.RBrace) {
+            return;
+        }
+        if (stasis.sig_kind == Tok.Eof) {
+            sig_err_here(file_idx, "unexpected eof; expected field terminator");
+            return;
+        }
+        sig_advance();
+    }
+}
+
+function sig_parse_struct_decl(file_idx: i32): void {
+    // struct
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected struct name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+    if (!sig_add_sym(file_idx, SymKind.Struct, 0)) {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+    sig_advance();
+
+    if (stasis.struct_count >= STRUCT_CAP) {
+        sig_err_here(file_idx, "exceeded struct capacity");
+        return;
+    }
+
+    let struct_idx: i32 = stasis.struct_count;
+    stasis.struct_count = stasis.struct_count + 1;
+    stasis.structs[struct_idx].file_idx = file_idx;
+    stasis.structs[struct_idx].name_start = name_start;
+    stasis.structs[struct_idx].name_len = name_len;
+    stasis.structs[struct_idx].fields_off = stasis.field_count;
+    stasis.structs[struct_idx].fields_len = 0;
+
+    if (stasis.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{' to start struct body");
+        return;
+    }
+    sig_advance();
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.RBrace) {
+            sig_advance();
+            done = 1;
+        } else {
+            if (stasis.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in struct body");
+                done = 1;
+            } else {
+                if (stasis.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected struct field name");
+                    sig_skip_to_field_end(file_idx);
+                } else {
+                    let field_name_start: i32 = stasis.tok_start;
+                    let field_name_len: i32 = stasis.tok_len;
+                    sig_advance();
+                    if (stasis.sig_kind != Tok.Colon) {
+                        sig_err_here(file_idx, "expected ':' after field name");
+                        sig_skip_to_field_end(file_idx);
+                    } else {
+                        sig_advance();
+                        let type_idx: i32 = sig_parse_type(file_idx);
+                        if (stasis.sig_kind != Tok.Semicolon) {
+                            sig_err_here(file_idx, "expected ';' after struct field");
+                            sig_skip_to_field_end(file_idx);
+                        } else {
+                            sig_advance();
+                        }
+
+                        if (stasis.field_count >= FIELD_CAP) {
+                            sig_err_here(file_idx, "exceeded struct field capacity");
+                            done = 1;
+                        } else {
+                            let fidx: i32 = stasis.field_count;
+                            stasis.field_count = stasis.field_count + 1;
+                            stasis.fields[fidx].file_idx = file_idx;
+                            stasis.fields[fidx].name_start = field_name_start;
+                            stasis.fields[fidx].name_len = field_name_len;
+                            stasis.fields[fidx].type_idx = type_idx;
+                            stasis.structs[struct_idx].fields_len = stasis.structs[struct_idx].fields_len + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function sig_parse_enum_decl(file_idx: i32): void {
+    // enum
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected enum name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+    if (!sig_add_sym(file_idx, SymKind.Enum, 0)) {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+    sig_advance();
+
+    if (stasis.enum_count >= ENUM_CAP) {
+        sig_err_here(file_idx, "exceeded enum capacity");
+        return;
+    }
+
+    let enum_idx: i32 = stasis.enum_count;
+    stasis.enum_count = stasis.enum_count + 1;
+    stasis.enums[enum_idx].file_idx = file_idx;
+    stasis.enums[enum_idx].name_start = name_start;
+    stasis.enums[enum_idx].name_len = name_len;
+    stasis.enums[enum_idx].members_off = stasis.enum_member_count;
+    stasis.enums[enum_idx].members_len = 0;
+
+    if (stasis.sig_kind != Tok.LBrace) {
+        sig_err_here(file_idx, "expected '{' to start enum body");
+        return;
+    }
+    sig_advance();
+
+    let next_value: i32 = 0;
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.RBrace) {
+            sig_advance();
+            done = 1;
+        } else {
+            if (stasis.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in enum body");
+                done = 1;
+            } else {
+                if (stasis.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected enum member name");
+                    sig_advance();
+                } else {
+                    let m_name_start: i32 = stasis.tok_start;
+                    let m_name_len: i32 = stasis.tok_len;
+                    sig_advance();
+
+                    let has_value: i32 = 0;
+                    let value: i32 = 0;
+                    if (stasis.sig_kind == Tok.Equal) {
+                        sig_advance();
+                        if (stasis.sig_kind != Tok.IntegerLiteral && stasis.sig_kind != Tok.U8Literal) {
+                            sig_err_here(file_idx, "expected enum member value");
+                        } else {
+                            has_value = 1;
+                            value = sig_parse_i32_from_tok(file_idx);
+                            sig_advance();
+                        }
+                    }
+
+                    if (has_value == 0) {
+                        value = next_value;
+                    }
+                    next_value = value + 1;
+
+                    if (stasis.enum_member_count >= ENUM_MEMBER_CAP) {
+                        sig_err_here(file_idx, "exceeded enum member capacity");
+                        done = 1;
+                    } else {
+                        let midx: i32 = stasis.enum_member_count;
+                        stasis.enum_member_count = stasis.enum_member_count + 1;
+                        stasis.enum_members[midx].file_idx = file_idx;
+                        stasis.enum_members[midx].name_start = m_name_start;
+                        stasis.enum_members[midx].name_len = m_name_len;
+                        stasis.enum_members[midx].has_value = has_value;
+                        stasis.enum_members[midx].value = value;
+                        stasis.enums[enum_idx].members_len = stasis.enums[enum_idx].members_len + 1;
+                    }
+
+                    if (stasis.sig_kind == Tok.Comma) {
+                        sig_advance();
+                    }
+                }
+            }
+        }
+    }
+}
+
+function sig_parse_param_list(file_idx: i32): i32 {
+    let params_before: i32 = stasis.param_count;
+
+    if (stasis.sig_kind != Tok.LParen) {
+        sig_err_here(file_idx, "expected '('");
+        return 0;
+    }
+    sig_advance();
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.RParen) {
+            sig_advance();
+            done = 1;
+        } else {
+            if (stasis.sig_kind == Tok.Eof) {
+                sig_err_here(file_idx, "unexpected eof in parameter list");
+                done = 1;
+            } else {
+                if (stasis.sig_kind != Tok.Identifier) {
+                    sig_err_here(file_idx, "expected parameter name");
+                    sig_advance();
+                } else {
+                    let name_start: i32 = stasis.tok_start;
+                    let name_len: i32 = stasis.tok_len;
+                    sig_advance();
+
+                    let type_idx: i32 = -1;
+                    if (stasis.sig_kind != Tok.Colon) {
+                        sig_err_here(file_idx, "expected ':' after parameter name");
+                    } else {
+                        sig_advance();
+                        type_idx = sig_parse_type(file_idx);
+                    }
+
+                    sig_add_param(file_idx, name_start, name_len, type_idx);
+
+                    if (stasis.sig_kind == Tok.Comma) {
+                        sig_advance();
+                        if (stasis.sig_kind == Tok.RParen) {
+                            sig_advance();
+                            done = 1;
+                        }
+                    } else {
+                        if (stasis.sig_kind == Tok.RParen) {
+                            sig_advance();
+                            done = 1;
+                        } else {
+                            sig_err_here(file_idx, "expected ',' or ')' in parameter list");
+                            sig_advance();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return stasis.param_count - params_before;
+}
+
+function sig_parse_function_decl(file_idx: i32, is_exported: i32): void {
+    // function
+    sig_advance();
+
+    // attributes
+    let done_attrs: i32 = 0;
+    for (; done_attrs == 0; ) {
+        if (stasis.sig_kind == Tok.At) {
+            sig_advance();
+            if (stasis.sig_kind != Tok.Identifier) {
+                sig_err_here(file_idx, "expected attribute name after '@'");
+                done_attrs = 1;
+            } else {
+                sig_advance();
+            }
+        } else {
+            done_attrs = 1;
+        }
+    }
+
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected function name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sig_add_sym(file_idx, SymKind.Function, is_exported)) {
+        sym_idx = stasis.sym_count - 1;
+    } else {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+
+    let func_idx: i32 = sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 0);
+    sig_advance();
+
+    let params_off: i32 = stasis.param_count;
+    let params_len: i32 = sig_parse_param_list(file_idx);
+    if (func_idx >= 0) {
+        stasis.funcs[func_idx].params_off = params_off;
+        stasis.funcs[func_idx].params_len = params_len;
+    }
+
+    let ret_type_idx: i32 = -1;
+    if (stasis.sig_kind == Tok.Colon) {
+        sig_advance();
+        ret_type_idx = sig_parse_type(file_idx);
+    }
+    if (func_idx >= 0) {
+        stasis.funcs[func_idx].ret_type_idx = ret_type_idx;
+    }
+
+    if (stasis.sig_kind == Tok.LBrace) {
+        if (func_idx >= 0) {
+            stasis.funcs[func_idx].body_start = stasis.tok_start;
+        }
+        sig_skip_block(file_idx);
+        return;
+    }
+
+    // Extern function declaration: `function name(params): type;`
+    if (stasis.sig_kind == Tok.Semicolon) {
+        sig_advance();
+        return;
+    }
+
+    sig_err_here(file_idx, "expected '{' or ';' after function signature");
+    sig_skip_until_semicolon(file_idx);
+}
+
+function sig_parse_test_decl(file_idx: i32): void {
+    // test
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Identifier && stasis.sig_kind != Tok.BacktickLiteral) {
+        sig_err_here(file_idx, "expected test name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sig_add_sym(file_idx, SymKind.Test, 0)) {
+        sym_idx = stasis.sym_count - 1;
+    } else {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+
+    let func_idx: i32 = sig_add_func_decl(file_idx, name_start, name_len, sym_idx, 1);
+    sig_advance();
+
+    let params_off: i32 = stasis.param_count;
+    let params_len: i32 = sig_parse_param_list(file_idx);
+    if (func_idx >= 0) {
+        stasis.funcs[func_idx].params_off = params_off;
+        stasis.funcs[func_idx].params_len = params_len;
+    }
+
+    let ret_type_idx: i32 = -1;
+    if (stasis.sig_kind == Tok.Colon) {
+        sig_advance();
+        ret_type_idx = sig_parse_type(file_idx);
+    }
+    if (func_idx >= 0) {
+        stasis.funcs[func_idx].ret_type_idx = ret_type_idx;
+    }
+
+    if (stasis.sig_kind == Tok.LBrace) {
+        if (func_idx >= 0) {
+            stasis.funcs[func_idx].body_start = stasis.tok_start;
+        }
+    }
+    sig_skip_block(file_idx);
+}
+
+function sig_parse_global_decl(file_idx: i32): void {
+    // global
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected global name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sig_add_sym(file_idx, SymKind.Global, 0)) {
+        sym_idx = stasis.sym_count - 1;
+    } else {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Colon) {
+        sig_err_here(file_idx, "expected ':' after global name");
+        return;
+    }
+    sig_advance();
+    let type_idx: i32 = sig_parse_type(file_idx);
+
+    let has_init: i32 = 0;
+    let init_start: i32 = -1;
+
+    if (stasis.sig_kind == Tok.Equal) {
+        has_init = 1;
+        sig_advance();
+        init_start = stasis.tok_start;
+        sig_skip_until_semicolon(file_idx);
+    } else {
+        if (stasis.sig_kind != Tok.Semicolon) {
+            sig_err_here(file_idx, "expected ';' after global");
+            sig_skip_until_semicolon(file_idx);
+        } else {
+            sig_advance();
+        }
+    }
+
+    sig_add_global_decl(file_idx, name_start, name_len, sym_idx, type_idx, has_init, init_start);
+}
+
+function sig_parse_const_decl(file_idx: i32): void {
+    // const
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Identifier) {
+        sig_err_here(file_idx, "expected const name");
+        return;
+    }
+
+    let name_start: i32 = stasis.tok_start;
+    let name_len: i32 = stasis.tok_len;
+
+    let sym_idx: i32 = -1;
+    if (sig_add_sym(file_idx, SymKind.Const, 0)) {
+        sym_idx = stasis.sym_count - 1;
+    } else {
+        stasis.sig_errors = stasis.sig_errors + 1;
+    }
+    sig_advance();
+
+    if (stasis.sig_kind != Tok.Colon) {
+        sig_err_here(file_idx, "expected ':' after const name");
+        return;
+    }
+    sig_advance();
+    let type_idx: i32 = sig_parse_type(file_idx);
+
+    if (stasis.sig_kind != Tok.Equal) {
+        sig_err_here(file_idx, "expected '=' after const type");
+        sig_skip_until_semicolon(file_idx);
+        sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, -1);
+        return;
+    }
+
+    sig_advance();
+    let init_start: i32 = stasis.tok_start;
+    sig_skip_until_semicolon(file_idx);
+    sig_add_const_decl(file_idx, name_start, name_len, sym_idx, type_idx, init_start);
+}
+
+function sig_scan_file(file_idx: i32): i32 {
+    stasis.files[file_idx].syms_off = stasis.sym_count;
+    stasis.files[file_idx].syms_len = 0;
+
+    if (!lex_begin(file_idx)) {
+        sig_print_err_at(file_idx, "failed to start lexer", 0);
+        return 1;
+    }
+
+    // Avoid duplicate lexer diagnostics when `check` has already lexed these files.
+    stasis.lex_quiet = 1;
+    stasis.lex_error_printed = 0;
+
+    let export_pending: i32 = 0;
+
+    let errors_before: i32 = stasis.sig_errors;
+    stasis.sig_kind = lex_next_kind();
+
+    let done: i32 = 0;
+    for (; done == 0; ) {
+        if (stasis.sig_kind == Tok.Eof) {
+            done = 1;
+        } else {
+            if (export_pending != 0 && stasis.sig_kind != Tok.FunctionKeyword) {
+                sig_err_here(file_idx, "expected 'function' after 'export'");
+                export_pending = 0;
+            }
+
+            if (stasis.sig_kind == Tok.ImportKeyword) {
+                export_pending = 0;
+                // import "path" [;]
+                sig_advance();
+                if (stasis.sig_kind != Tok.StringLiteral) {
+                    sig_err_here(file_idx, "expected import path string literal");
+                } else {
+                    sig_advance();
+                }
+                if (stasis.sig_kind == Tok.Semicolon) {
+                    sig_advance();
+                }
+            } else {
+                if (stasis.sig_kind == Tok.ExportKeyword) {
+                    export_pending = 1;
+                    sig_advance();
+                } else {
+                    if (stasis.sig_kind == Tok.StructKeyword) {
+                        export_pending = 0;
+                        sig_parse_struct_decl(file_idx);
+                    } else {
+                        if (stasis.sig_kind == Tok.EnumKeyword) {
+                            export_pending = 0;
+                            sig_parse_enum_decl(file_idx);
+                        } else {
+                            if (stasis.sig_kind == Tok.GlobalKeyword) {
+                                export_pending = 0;
+                                sig_parse_global_decl(file_idx);
+                            } else {
+                                if (stasis.sig_kind == Tok.ConstKeyword) {
+                                    export_pending = 0;
+                                    sig_parse_const_decl(file_idx);
+                                } else {
+                                    if (stasis.sig_kind == Tok.FunctionKeyword) {
+                                        sig_parse_function_decl(file_idx, export_pending);
+                                        export_pending = 0;
+                                    } else {
+                                        if (stasis.sig_kind == Tok.TestKeyword) {
+                                            export_pending = 0;
+                                            sig_parse_test_decl(file_idx);
+                                        } else {
+                                            export_pending = 0;
+                                            sig_advance();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return stasis.sig_errors - errors_before;
+}
+
+function sig_scan_loaded_files(): i32 {
+    stasis.sym_pool_len = 0;
+    stasis.sym_count = 0;
+    stasis.sig_errors = 0;
+    stasis.type_count = 0;
+    stasis.struct_count = 0;
+    stasis.field_count = 0;
+    stasis.enum_count = 0;
+    stasis.enum_member_count = 0;
+    stasis.global_count = 0;
+    stasis.const_count = 0;
+    stasis.func_count = 0;
+    stasis.param_count = 0;
+
+    let i: i32 = 0;
+    for (i = 0; i < stasis.file_count; i = i + 1) {
+        sig_scan_file(i);
+    }
+    return stasis.sig_errors;
+}

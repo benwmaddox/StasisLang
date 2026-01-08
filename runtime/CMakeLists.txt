@@ -4,6 +4,7 @@ project(stasis_graphics C)
 option(STASIS_GRAPHICS_BUILD_SHARED "Build the graphics runtime as a DLL" ON)
 option(STASIS_GRAPHICS_BUILD_STATIC "Build the graphics runtime as a static library" ON)
 option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ON)
+option(STASIS_BUILD_SYS "Build the sys runtime (file/argv/exec)" ON)
 
 # Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
 set(STASIS_GRAPHICS_SDL_ONLY_DEFAULT OFF)
@@ -17,13 +18,16 @@ if (MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-# Find SDL2 (via vcpkg or system)
-find_package(SDL2 CONFIG REQUIRED)
+# Find graphics deps only when building graphics targets.
+if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC)
+    # Find SDL2 (via vcpkg or system)
+    find_package(SDL2 CONFIG REQUIRED)
 
-if(NOT STASIS_GRAPHICS_SDL_ONLY)
-    # Find OpenGL and GLEW (desktop backend)
-    find_package(OpenGL REQUIRED)
-    find_package(GLEW REQUIRED)
+    if(NOT STASIS_GRAPHICS_SDL_ONLY)
+        # Find OpenGL and GLEW (desktop backend)
+        find_package(OpenGL REQUIRED)
+        find_package(GLEW REQUIRED)
+    endif()
 endif()
 
 function(configure_stasis_target target is_static)
@@ -89,6 +93,18 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
     )
     install(TARGETS stasis_graphics_static
         ARCHIVE DESTINATION lib
+    )
+endif()
+
+if(STASIS_BUILD_SYS)
+    add_library(stasis_sys_static STATIC stasis_sys.c)
+    if(WIN32)
+        target_compile_definitions(stasis_sys_static PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    set_target_properties(stasis_sys_static PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
+        ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
+        ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
     )
 endif()
 

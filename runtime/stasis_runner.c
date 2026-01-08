@@ -3,11 +3,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <errno.h>
 #include <unistd.h>
 #endif
 
@@ -15,6 +17,24 @@
 
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
+typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
+
+#ifndef _WIN32
+static void stasis_sleep_us(long long usec)
+{
+    if (usec <= 0)
+    {
+        return;
+    }
+    struct timespec req;
+    req.tv_sec = (time_t)(usec / 1000000LL);
+    req.tv_nsec = (long)((usec % 1000000LL) * 1000LL);
+    while (nanosleep(&req, &req) != 0 && errno == EINTR)
+    {
+        /* retry */
+    }
+}
+#endif
 
 typedef struct stasis_state_symbol
 {
@@ -100,6 +120,233 @@ static void set_runtime_dir(const char *dll_path)
     chdir(dir_buffer);
 #endif
 }
+
+#ifdef _WIN32
+static int file_exists(const char *path);
+
+typedef BOOL(WINAPI *stasis_SetDefaultDllDirectoriesFn)(DWORD);
+typedef DLL_DIRECTORY_COOKIE(WINAPI *stasis_AddDllDirectoryFn)(PCWSTR);
+
+static int stasis_path_dirname(const char *path, char *out, size_t out_cap)
+{
+    size_t len = strlen(path);
+    if (len == 0 || len + 1 > out_cap)
+    {
+        return 1;
+    }
+
+    memcpy(out, path, len + 1);
+
+    char *slash = strrchr(out, '\\');
+    char *fslash = strrchr(out, '/');
+    char *sep = slash > fslash ? slash : fslash;
+    if (!sep)
+    {
+        return 1;
+    }
+
+    *sep = '\0';
+    return out[0] == '\0' ? 1 : 0;
+}
+
+static int stasis_add_dll_directory_utf8(stasis_AddDllDirectoryFn add_dir, const char *utf8_path)
+{
+    wchar_t wide[1024];
+    int got = MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wide, (int)(sizeof(wide) / sizeof(wide[0])));
+    if (got == 0)
+    {
+        got = MultiByteToWideChar(CP_ACP, 0, utf8_path, -1, wide, (int)(sizeof(wide) / sizeof(wide[0])));
+        if (got == 0)
+        {
+            return 1;
+        }
+    }
+
+    return add_dir(wide) ? 0 : 1;
+}
+
+static void stasis_try_add_relative_runtime_dir(const char *base_dir, const char *rel, char *out_dir, size_t out_cap)
+{
+    if (out_dir[0] != '\0')
+    {
+        return;
+    }
+
+    char probe_dir[1024];
+    char probe_dll[1024];
+    probe_dir[0] = '\0';
+    probe_dll[0] = '\0';
+
+    size_t base_len = strlen(base_dir);
+    size_t rel_len = strlen(rel);
+    if (base_len + 1 + rel_len + 1 >= sizeof(probe_dir))
+    {
+        return;
+    }
+
+    memcpy(probe_dir, base_dir, base_len);
+    probe_dir[base_len] = '\\';
+    memcpy(probe_dir + base_len + 1, rel, rel_len);
+    probe_dir[base_len + 1 + rel_len] = '\0';
+
+    size_t dir_len = strlen(probe_dir);
+    const char *dll_name = "stasis_graphics.dll";
+    size_t dll_len = strlen(dll_name);
+    if (dir_len + 1 + dll_len + 1 >= sizeof(probe_dll))
+    {
+        return;
+    }
+
+    memcpy(probe_dll, probe_dir, dir_len);
+    probe_dll[dir_len] = '\\';
+    memcpy(probe_dll + dir_len + 1, dll_name, dll_len);
+    probe_dll[dir_len + 1 + dll_len] = '\0';
+
+    if (file_exists(probe_dll))
+    {
+        strncpy(out_dir, probe_dir, out_cap - 1);
+        out_dir[out_cap - 1] = '\0';
+    }
+}
+
+static void stasis_setup_runtime_dirs(const char *exe_path, const char *dll_path, char *out_runtime_dir, size_t out_cap)
+{
+    out_runtime_dir[0] = '\0';
+
+    char exe_dir[1024];
+    exe_dir[0] = '\0';
+    if (exe_path && stasis_path_dirname(exe_path, exe_dir, sizeof(exe_dir)) == 0)
+    {
+        char probe[1024];
+        probe[0] = '\0';
+
+        size_t dir_len = strlen(exe_dir);
+        const char *dll_name = "stasis_graphics.dll";
+        size_t dll_len = strlen(dll_name);
+        if (dir_len + 1 + dll_len + 1 < sizeof(probe))
+        {
+            memcpy(probe, exe_dir, dir_len);
+            probe[dir_len] = '\\';
+            memcpy(probe + dir_len + 1, dll_name, dll_len);
+            probe[dir_len + 1 + dll_len] = '\0';
+            if (file_exists(probe))
+            {
+                strncpy(out_runtime_dir, exe_dir, out_cap - 1);
+                out_runtime_dir[out_cap - 1] = '\0';
+                return;
+            }
+        }
+
+        /* Common layouts when the runner is copied to repo root or build/. */
+        stasis_try_add_relative_runtime_dir(exe_dir, "runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
+        stasis_try_add_relative_runtime_dir(exe_dir, "..\\runtime\\build\\bin\\Release", out_runtime_dir, out_cap);
+    }
+
+    (void)dll_path;
+}
+
+static void stasis_enable_dll_search(const char *exe_path, const char *dll_path)
+{
+    char dll_dir[1024];
+    dll_dir[0] = '\0';
+    if (dll_path)
+    {
+        (void)stasis_path_dirname(dll_path, dll_dir, sizeof(dll_dir));
+    }
+
+    char runtime_dir[1024];
+    stasis_setup_runtime_dirs(exe_path, dll_path, runtime_dir, sizeof(runtime_dir));
+
+    if (dll_dir[0] != '\0')
+    {
+        /* Keep program-relative file IO working as before. */
+        SetCurrentDirectoryA(dll_dir);
+    }
+
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    stasis_SetDefaultDllDirectoriesFn set_default = NULL;
+    stasis_AddDllDirectoryFn add_dir = NULL;
+    if (k32)
+    {
+        set_default = (stasis_SetDefaultDllDirectoriesFn)GetProcAddress(k32, "SetDefaultDllDirectories");
+        add_dir = (stasis_AddDllDirectoryFn)GetProcAddress(k32, "AddDllDirectory");
+    }
+
+    if (set_default && add_dir)
+    {
+        set_default(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        if (dll_dir[0] != '\0')
+        {
+            (void)stasis_add_dll_directory_utf8(add_dir, dll_dir);
+        }
+        if (runtime_dir[0] != '\0')
+        {
+            (void)stasis_add_dll_directory_utf8(add_dir, runtime_dir);
+        }
+    }
+    else
+    {
+        /* Fallback: app directory is still searched; add program DLL directory as well. */
+        if (dll_dir[0] != '\0')
+        {
+            SetDllDirectoryA(dll_dir);
+        }
+    }
+
+    /* Optional preload: keep runtime DLLs resident across swaps. */
+    if (runtime_dir[0] != '\0')
+    {
+        char gfx_path[1024];
+        gfx_path[0] = '\0';
+        size_t dir_len = strlen(runtime_dir);
+        const char *dll_name = "stasis_graphics.dll";
+        size_t dll_len = strlen(dll_name);
+        if (dir_len + 1 + dll_len + 1 < sizeof(gfx_path))
+        {
+            memcpy(gfx_path, runtime_dir, dir_len);
+            gfx_path[dir_len] = '\\';
+            memcpy(gfx_path + dir_len + 1, dll_name, dll_len);
+            gfx_path[dir_len + 1 + dll_len] = '\0';
+            if (file_exists(gfx_path))
+            {
+                (void)LoadLibraryA(gfx_path);
+            }
+        }
+    }
+}
+
+static HMODULE stasis_load_program_library(const char *path)
+{
+    HMODULE lib = LoadLibraryExA(path,
+                                 NULL,
+                                 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    if (!lib)
+    {
+        lib = LoadLibraryA(path);
+    }
+    return lib;
+}
+#endif
+
+#ifdef _WIN32
+static void stasis_try_set_sys_args(HMODULE lib, int argc, char **argv)
+{
+    FARPROC sym = GetProcAddress(lib, "stasis_sys_set_args");
+    if (sym)
+    {
+        ((stasis_sys_set_args_fn)sym)(argc, (const char *const *)argv);
+    }
+}
+#else
+static void stasis_try_set_sys_args(void *lib, int argc, char **argv)
+{
+    void *sym = dlsym(lib, "stasis_sys_set_args");
+    if (sym)
+    {
+        ((stasis_sys_set_args_fn)sym)(argc, (const char *const *)argv);
+    }
+}
+#endif
 
 static int read_state_map(const char *path, uint64_t *out_hash, stasis_state_symbol **out_syms, uint32_t *out_count, uint32_t *out_total)
 {
@@ -295,6 +542,27 @@ static int file_exists(const char *path)
 {
     DWORD attr = GetFileAttributesA(path);
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static int move_file_replace_retry(const char *src, const char *dst, int attempts, int sleep_ms)
+{
+    for (int i = 0; i < attempts; i++)
+    {
+        if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        {
+            return 1;
+        }
+
+        DWORD err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED)
+        {
+            return 0;
+        }
+
+        Sleep((DWORD)sleep_ms);
+    }
+
+    return 0;
 }
 
 static int read_text_file(const char *path, char *out, size_t out_cap)
@@ -553,6 +821,178 @@ static DWORD WINAPI hot_exit_thread(LPVOID user_data)
         Sleep(10);
     }
 }
+#else
+static int file_exists(const char *path)
+{
+    if (!path || path[0] == '\0')
+    {
+        return 0;
+    }
+
+    return access(path, F_OK) == 0;
+}
+
+static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char *map_out, size_t map_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return 1;
+    }
+
+    if (!fgets(dll_out, (int)dll_cap, f))
+    {
+        fclose(f);
+        return 1;
+    }
+    if (dll_out[0] == '\0')
+    {
+        fclose(f);
+        return 1;
+    }
+
+    size_t dll_len = strlen(dll_out);
+    while (dll_len > 0 && (dll_out[dll_len - 1] == '\n' || dll_out[dll_len - 1] == '\r' || dll_out[dll_len - 1] == ' ' || dll_out[dll_len - 1] == '\t'))
+    {
+        dll_out[--dll_len] = '\0';
+    }
+    size_t start = 0;
+    while (dll_out[start] == ' ' || dll_out[start] == '\t')
+    {
+        start++;
+    }
+    if (start > 0)
+    {
+        memmove(dll_out, dll_out + start, strlen(dll_out + start) + 1);
+    }
+
+    if (map_out && map_cap > 0)
+    {
+        map_out[0] = '\0';
+        if (fgets(map_out, (int)map_cap, f))
+        {
+            size_t map_len = strlen(map_out);
+            while (map_len > 0 && (map_out[map_len - 1] == '\n' || map_out[map_len - 1] == '\r' || map_out[map_len - 1] == ' ' || map_out[map_len - 1] == '\t'))
+            {
+                map_out[--map_len] = '\0';
+            }
+            size_t map_start = 0;
+            while (map_out[map_start] == ' ' || map_out[map_start] == '\t')
+            {
+                map_start++;
+            }
+            if (map_start > 0)
+            {
+                memmove(map_out, map_out + map_start, strlen(map_out + map_start) + 1);
+            }
+        }
+    }
+
+    fclose(f);
+    return dll_out[0] == '\0' ? 1 : 0;
+}
+
+static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
+{
+    if (!syms || !*syms || !sym_count)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < *sym_count; i++)
+    {
+        free((*syms)[i].name);
+    }
+    free(*syms);
+    *syms = NULL;
+    *sym_count = 0;
+}
+
+static int copy_state_to_buffer(void *lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        void *addr = dlsym(lib, syms[i].name);
+        if (!addr)
+        {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                memset(buffer + syms[i].offset, 0, syms[i].size);
+                continue;
+            }
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy(buffer + syms[i].offset, (void *)addr, syms[i].size);
+    }
+    return 0;
+}
+
+static int copy_state_from_buffer(void *lib, stasis_state_symbol *syms, uint32_t sym_count, const uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
+{
+    (void)total_bytes;
+    for (uint32_t i = 0; i < sym_count; i++)
+    {
+        void *addr = dlsym(lib, syms[i].name);
+        if (!addr)
+        {
+            if (allow_missing)
+            {
+                if (missing_count)
+                {
+                    (*missing_count)++;
+                }
+                continue;
+            }
+            fprintf(stderr, "error: state symbol not exported: %s\n", syms[i].name);
+            return 1;
+        }
+        memcpy((void *)addr, buffer + syms[i].offset, syms[i].size);
+    }
+    return 0;
+}
+
+static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap)
+{
+    const char *suffix_a = ".swapA.so";
+    const char *suffix_b = ".swapB.so";
+    const char *fixed = ".swap.so";
+    size_t len = strlen(input);
+    size_t a_len = strlen(suffix_a);
+    size_t b_len = strlen(suffix_b);
+
+    if (len >= a_len && strcmp(input + len - a_len, suffix_a) == 0)
+    {
+        size_t base_len = len - a_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    if (len >= b_len && strcmp(input + len - b_len, suffix_b) == 0)
+    {
+        size_t base_len = len - b_len;
+        size_t fixed_len = strlen(fixed);
+        if (base_len + fixed_len + 1 > out_cap)
+        {
+            return 0;
+        }
+        memcpy(out, input, base_len);
+        memcpy(out + base_len, fixed, fixed_len + 1);
+        return 1;
+    }
+
+    return 0;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -640,10 +1080,13 @@ int main(int argc, char **argv)
             req_dll_path[dll_len] = '\0';
             req_entry_name[entry_len] = '\0';
 
+#ifndef _WIN32
             set_runtime_dir(req_dll_path);
+#endif
 
 #ifdef _WIN32
-            HMODULE lib = LoadLibraryA(req_dll_path);
+            stasis_enable_dll_search(argv[0], req_dll_path);
+            HMODULE lib = stasis_load_program_library(req_dll_path);
             if (!lib)
             {
                 fprintf(stderr, "ERR failed to load\n");
@@ -664,6 +1107,7 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            stasis_try_set_sys_args(lib, argc, argv);
             stasis_entry_fn entry = (stasis_entry_fn)symbol;
             int result = entry();
             FreeLibrary(lib);
@@ -689,6 +1133,7 @@ int main(int argc, char **argv)
                 continue;
             }
 
+            stasis_try_set_sys_args(lib, argc, argv);
             stasis_entry_fn entry = (stasis_entry_fn)symbol;
             int result = entry();
             dlclose(lib);
@@ -765,13 +1210,26 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef _WIN32
     set_runtime_dir(dll_path);
+#endif
 
 #ifdef _WIN32
-    HMODULE lib = LoadLibraryA(dll_path);
+    stasis_enable_dll_search(argv[0], dll_path);
+    HMODULE lib = stasis_load_program_library(dll_path);
     if (!lib)
     {
-        fprintf(stderr, "error: failed to load %s\n", dll_path);
+        DWORD err = GetLastError();
+        char msg[512];
+        msg[0] = '\0';
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL,
+                       err,
+                       0,
+                       msg,
+                       (DWORD)sizeof(msg),
+                       NULL);
+        fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", dll_path, err, msg);
         return 1;
     }
 
@@ -895,6 +1353,7 @@ int main(int argc, char **argv)
         tick_sym = GetProcAddress(lib, tick_name);
     }
 
+    stasis_try_set_sys_args(lib, argc, argv);
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
 
@@ -936,6 +1395,7 @@ int main(int argc, char **argv)
                                     state_map_buf[sizeof(state_map_buf) - 1] = '\0';
                                     state_map_path = state_map_buf;
                                     fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                    fflush(stderr);
                                 }
                             }
 
@@ -951,7 +1411,7 @@ int main(int argc, char **argv)
                             {
                                 FreeLibrary(old_lib);
                                 old_lib = NULL;
-                                if (!MoveFileExA(new_path, fixed_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
                                 {
                                     fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
                                     load_path = new_path;
@@ -963,6 +1423,7 @@ int main(int argc, char **argv)
                             }
 
                             fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                            fflush(stderr);
 
                             uint8_t *buffer = NULL;
                             uint32_t missing_save = 0;
@@ -992,12 +1453,22 @@ int main(int argc, char **argv)
                             }
 
                             QueryPerformanceCounter(&sw_t0);
-                            HMODULE new_lib = LoadLibraryA(load_path);
+                            HMODULE new_lib = stasis_load_program_library(load_path);
                             QueryPerformanceCounter(&sw_t1);
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
                             {
-                                fprintf(stderr, "error: failed to load %s\n", load_path);
+                                DWORD err = GetLastError();
+                                char msg[512];
+                                msg[0] = '\0';
+                                FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                               NULL,
+                                               err,
+                                               0,
+                                               msg,
+                                               (DWORD)sizeof(msg),
+                                               NULL);
+                                fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", load_path, err, msg);
                                 free(buffer);
                                 result = 1;
                                 break;
@@ -1030,14 +1501,17 @@ int main(int argc, char **argv)
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
                                 fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                fflush(stderr);
                                 if (missing_save > 0 || missing_restore > 0)
                                 {
                                     fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                    fflush(stderr);
                                 }
                             }
                             else
                             {
                                 fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                                fflush(stderr);
                             }
 
                             if (old_lib)
@@ -1046,6 +1520,7 @@ int main(int argc, char **argv)
                             }
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
+                            stasis_try_set_sys_args(lib, argc, argv);
 
                             /* Update DLL handle for data binding system */
                             stasis_data_set_dll(new_lib);
@@ -1151,11 +1626,29 @@ int main(int argc, char **argv)
     FreeLibrary(lib);
     return result;
 #else
+    set_runtime_dir(dll_path);
+
+    int runner_diag = 0;
+    {
+        const char *diag_env = getenv("STASIS_RUNNER_DIAG");
+        runner_diag = diag_env && diag_env[0] == '1';
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s\n", dll_path ? dll_path : "(null)", entry_name ? entry_name : "(null)");
+        fflush(stderr);
+    }
+
     void *lib = dlopen(dll_path, RTLD_NOW);
     if (!lib)
     {
         fprintf(stderr, "error: failed to load %s: %s\n", dll_path, dlerror());
         return 1;
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: dlopen ok\n");
+        fflush(stderr);
     }
 
     void *symbol = dlsym(lib, entry_name);
@@ -1165,9 +1658,261 @@ int main(int argc, char **argv)
         dlclose(lib);
         return 1;
     }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: entry symbol ok\n");
+        fflush(stderr);
+    }
+
+    char tick_name[512];
+    tick_name[0] = '\0';
+    void *tick_sym = NULL;
+    size_t entry_len = strlen(entry_name);
+    if (entry_len >= 4 && strcmp(entry_name + entry_len - 4, "main") == 0)
+    {
+        size_t prefix_len = entry_len - 4;
+        if (prefix_len + 4 < sizeof(tick_name))
+        {
+            memcpy(tick_name, entry_name, prefix_len);
+            memcpy(tick_name + prefix_len, "tick", 5);
+        }
+    }
+    if (tick_name[0] != '\0')
+    {
+        tick_sym = dlsym(lib, tick_name);
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: tick_name=%s tick_sym=%s\n", tick_name[0] ? tick_name : "(none)", tick_sym ? "yes" : "no");
+        fflush(stderr);
+    }
+
+    uint64_t map_hash = 0;
+    stasis_state_symbol *syms = NULL;
+    uint32_t sym_count = 0;
+    uint32_t total_bytes = 0;
+    if (state_map_path)
+    {
+        if (read_state_map(state_map_path, &map_hash, &syms, &sym_count, &total_bytes) != 0)
+        {
+            dlclose(lib);
+            return 1;
+        }
+    }
+
+    stasis_data_set_dll(lib);
+    stasis_try_set_sys_args(lib, argc, argv);
 
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: calling entry\n");
+        fflush(stderr);
+    }
     int result = entry();
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: entry returned=%d\n", result);
+        fflush(stderr);
+    }
+
+    if (result == 0 && tick_sym)
+    {
+        stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
+        long long target_us = 1000000LL / (long long)fps;
+        struct timespec ts_last;
+        clock_gettime(CLOCK_MONOTONIC, &ts_last);
+        long long last_us = ts_last.tv_sec * 1000000LL + ts_last.tv_nsec / 1000LL;
+        int tick_diag_count = 0;
+
+        for (;;)
+        {
+            if (swap_file_path && file_exists(swap_file_path))
+            {
+                char new_path[2048];
+                char map_path[2048];
+                map_path[0] = '\0';
+                if (read_swap_file(swap_file_path, new_path, sizeof(new_path), map_path, sizeof(map_path)) == 0)
+                {
+                    unlink(swap_file_path);
+
+                    if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+                    {
+                        uint64_t new_hash = 0;
+                        uint32_t new_count = 0;
+                        uint32_t new_total = 0;
+                        stasis_state_symbol *new_syms = NULL;
+                        if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
+                        {
+                            free_state_map(&syms, &sym_count);
+                            syms = new_syms;
+                            sym_count = new_count;
+                            total_bytes = new_total;
+                            map_hash = new_hash;
+                            strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
+                            state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                            state_map_path = state_map_buf;
+                            fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                            fflush(stderr);
+                        }
+                    }
+
+                    char fixed_path[2048];
+                    const char *load_path = new_path;
+                    if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                    {
+                        unlink(fixed_path);
+                        if (rename(new_path, fixed_path) == 0)
+                        {
+                            load_path = fixed_path;
+                        }
+                    }
+
+                    fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                    fflush(stderr);
+
+                    uint8_t *buffer = NULL;
+                    uint32_t missing_save = 0;
+                    uint32_t missing_restore = 0;
+                    long long save_us = 0;
+                    long long load_us = 0;
+                    long long tick_us = 0;
+                    long long restore_us = 0;
+                    if (state_map_path)
+                    {
+                        buffer = (uint8_t *)malloc(total_bytes);
+                        if (!buffer)
+                        {
+                            fprintf(stderr, "error: out of memory\n");
+                            result = 1;
+                            break;
+                        }
+
+                        struct timespec t0;
+                        struct timespec t1;
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                        {
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        save_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    }
+
+                    struct timespec t0;
+                    struct timespec t1;
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+                    void *new_lib = dlopen(load_path, RTLD_NOW);
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+                    load_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    if (!new_lib)
+                    {
+                        fprintf(stderr, "error: failed to load %s: %s\n", load_path, dlerror());
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+                    void *new_tick_sym = dlsym(new_lib, tick_name);
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+                    tick_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                    if (!new_tick_sym)
+                    {
+                        fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
+                        dlclose(new_lib);
+                        free(buffer);
+                        result = 1;
+                        break;
+                    }
+
+                    if (buffer)
+                    {
+                        clock_gettime(CLOCK_MONOTONIC, &t0);
+                        if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
+                        {
+                            dlclose(new_lib);
+                            free(buffer);
+                            result = 1;
+                            break;
+                        }
+                        clock_gettime(CLOCK_MONOTONIC, &t1);
+                        restore_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                        free(buffer);
+                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                        fflush(stderr);
+                        if (missing_save > 0 || missing_restore > 0)
+                        {
+                            fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                            fflush(stderr);
+                        }
+                    }
+                    else
+                    {
+                        fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                        fflush(stderr);
+                    }
+
+                    dlclose(lib);
+                    lib = new_lib;
+                    tick = (stasis_tick_fn)new_tick_sym;
+                    stasis_try_set_sys_args(lib, argc, argv);
+                    stasis_data_set_dll(new_lib);
+                }
+            }
+
+            stasis_data_poll_all();
+
+            if (runner_diag && tick_diag_count < 10)
+            {
+                fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
+                fflush(stderr);
+            }
+
+            int tick_result = tick();
+            if (runner_diag && tick_diag_count < 10)
+            {
+                fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
+                fflush(stderr);
+                tick_diag_count++;
+            }
+            if (tick_result != 0)
+            {
+                result = tick_result == 1 ? 0 : tick_result;
+                break;
+            }
+
+            struct timespec ts_now;
+            clock_gettime(CLOCK_MONOTONIC, &ts_now);
+            long long now_us = ts_now.tv_sec * 1000000LL + ts_now.tv_nsec / 1000LL;
+            long long elapsed_us = now_us - last_us;
+            last_us = now_us;
+
+            long long sleep_us = target_us - elapsed_us;
+            while (sleep_us > 0)
+            {
+                if (swap_file_path && file_exists(swap_file_path))
+                {
+                    break;
+                }
+
+                long long ms = sleep_us / 1000LL;
+                if (ms <= 0)
+                {
+                    ms = 1;
+                }
+                stasis_sleep_us(ms * 1000LL);
+                sleep_us -= ms * 1000LL;
+            }
+        }
+    }
+
+    if (state_map_path)
+    {
+        free_state_map(&syms, &sym_count);
+    }
     dlclose(lib);
     return result;
 #endif

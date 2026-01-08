@@ -465,7 +465,7 @@ public sealed class CraneliftFunctionBuilder
         var val = NewValue();
         var literalText = lit.Literal.Text;
 
-        if (lit.Literal.Kind == TokenKind.IntegerLiteral)
+        if (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal)
         {
             _instructions.AppendLine($"    {val} = iconst.i32 {literalText}");
         }
@@ -972,6 +972,21 @@ public sealed class CraneliftFunctionBuilder
             "print_cell" => true,
             "read_int" => true,
             "read_char" => true,
+            "sys_argc" => true,
+            "sys_argv" => true,
+            "sys_read_file" => true,
+            "sys_list_dir" => true,
+            "sys_write_file" => true,
+            "sys_file_exists" => true,
+            "sys_file_size" => true,
+            "sys_file_mtime_ms" => true,
+            "sys_exec" => true,
+            "sys_spawn" => true,
+            "sys_spawn_async" => true,
+            "sys_sleep_ms" => true,
+            "sys_delete_file" => true,
+            "sys_time_ms" => true,
+            "sys_flush" => true,
             "time" => true,
             "get_time_ms" => true,
             "sleep_ms" => true,
@@ -1071,6 +1086,246 @@ public sealed class CraneliftFunctionBuilder
         };
     }
 
+    private string LowerSysArgv(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_argv", "sys_argv expects (idx: i32, out: string, out_cap: i32).");
+        }
+
+        var idx = LowerExpression(arguments[0]);
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_argv", "sys_argv expects (idx: i32, out: string, out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_argv({idx}, {outPtr}, {cap})");
+        return result;
+    }
+
+    private string LowerSysReadFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_read_file", "sys_read_file expects (path: string, out: u8[], out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_read_file({path}, {outPtr}, {cap})");
+        return result;
+    }
+
+    private string LowerSysListDir(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var outPtr))
+        {
+            return EmitInvalidBuiltin("sys_list_dir", "sys_list_dir expects (path: string, out: u8[], out_cap: i32).");
+        }
+        var cap = LowerExpression(arguments[2]);
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_sys_list_dir({path}, {outPtr}, {cap})");
+        return result;
+    }
+
+    private string LowerSysWriteFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 3)
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+        if (!TryLowerArrayPointer(arguments[1], out var dataPtr))
+        {
+            return EmitInvalidBuiltin("sys_write_file", "sys_write_file expects (path: string, data: u8[], len: i32).");
+        }
+        var len = LowerExpression(arguments[2]);
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_write_file({path}, {dataPtr}, {len})");
+        return call;
+    }
+
+    private string LowerSysFileExists(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_exists", "sys_file_exists expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_exists", "sys_file_exists expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_exists({path})");
+        return call;
+    }
+
+    private string LowerSysFileSize(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_size", "sys_file_size expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_size", "sys_file_size expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_size({path})");
+        return call;
+    }
+
+    private string LowerSysFileMtimeMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_file_mtime_ms", "sys_file_mtime_ms expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_file_mtime_ms", "sys_file_mtime_ms expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_file_mtime_ms({path})");
+        return call;
+    }
+
+    private string LowerSysExec(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_exec", "sys_exec expects (command: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var command))
+        {
+            return EmitInvalidBuiltin("sys_exec", "sys_exec expects (command: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_exec({command})");
+        return call;
+    }
+
+    private string LowerSysSpawn(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_spawn", "sys_spawn expects (command_line: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var commandLine))
+        {
+            return EmitInvalidBuiltin("sys_spawn", "sys_spawn expects (command_line: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_spawn({commandLine})");
+        return call;
+    }
+
+    private string LowerSysSpawnAsync(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_spawn_async", "sys_spawn_async expects (command_line: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var commandLine))
+        {
+            return EmitInvalidBuiltin("sys_spawn_async", "sys_spawn_async expects (command_line: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_spawn_async({commandLine})");
+        return call;
+    }
+
+    private string LowerSysSleepMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_sleep_ms", "sys_sleep_ms expects (ms: i32).");
+        }
+
+        var ms = LowerExpression(arguments[0]);
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_sleep_ms({ms})");
+        return call;
+    }
+
+    private string LowerSysDeleteFile(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 1)
+        {
+            return EmitInvalidBuiltin("sys_delete_file", "sys_delete_file expects (path: string).");
+        }
+
+        if (!TryGetStringArg(arguments[0], out var path))
+        {
+            return EmitInvalidBuiltin("sys_delete_file", "sys_delete_file expects (path: string).");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_delete_file({path})");
+        return call;
+    }
+
+    private string LowerSysTimeMs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            return EmitInvalidBuiltin("sys_time_ms", "sys_time_ms expects no arguments.");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_time_ms()");
+        return call;
+    }
+
+    private string LowerSysFlush(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            return EmitInvalidBuiltin("sys_flush", "sys_flush expects no arguments.");
+        }
+
+        var call = NewValue();
+        _instructions.AppendLine($"    {call} = call %stasis_sys_flush()");
+        return call;
+    }
     private bool IsExternFunction(string name) =>
         _functions.TryGetValue(name, out var func) && func.IsExtern;
 
@@ -1100,6 +1355,36 @@ public sealed class CraneliftFunctionBuilder
                 return LowerReadInt(arguments);
             case "read_char":
                 return LowerReadChar(arguments);
+            case "sys_argc":
+                return LowerExternalCallValue("stasis_sys_argc", "sys_argc expects no arguments.", arguments, 0);
+            case "sys_argv":
+                return LowerSysArgv(arguments);
+            case "sys_read_file":
+                return LowerSysReadFile(arguments);
+            case "sys_list_dir":
+                return LowerSysListDir(arguments);
+            case "sys_write_file":
+                return LowerSysWriteFile(arguments);
+            case "sys_file_exists":
+                return LowerSysFileExists(arguments);
+            case "sys_file_size":
+                return LowerSysFileSize(arguments);
+            case "sys_file_mtime_ms":
+                return LowerSysFileMtimeMs(arguments);
+            case "sys_exec":
+                return LowerSysExec(arguments);
+            case "sys_spawn":
+                return LowerSysSpawn(arguments);
+            case "sys_spawn_async":
+                return LowerSysSpawnAsync(arguments);
+            case "sys_sleep_ms":
+                return LowerSysSleepMs(arguments);
+            case "sys_delete_file":
+                return LowerSysDeleteFile(arguments);
+            case "sys_time_ms":
+                return LowerSysTimeMs(arguments);
+            case "sys_flush":
+                return LowerSysFlush(arguments);
             case "time":
                 return LowerTime(arguments);
             case "get_time_ms":
@@ -1369,8 +1654,10 @@ public sealed class CraneliftFunctionBuilder
             return err;
         }
 
-        // Get the string value to print (pointer)
-        var value = LowerExpression(arguments[0]);
+        if (!TryGetStringArg(arguments[0], out var value))
+        {
+            return EmitInvalidBuiltin("print_string", "print_string expects (value: string).");
+        }
 
         // Get format string "%s"
         var formatGlobalName = GetOrCreateFormatString("%s");
@@ -2767,7 +3054,19 @@ public sealed class CraneliftFunctionBuilder
 
     private bool TryGetStringArg(ExpressionSyntax argument, out string ptr)
     {
-        return TryLowerArrayPointer(argument, out ptr);
+        if (TryLowerArrayPointer(argument, out ptr, reportErrors: false))
+        {
+            return true;
+        }
+
+        if (argument is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+        {
+            ptr = LowerExpression(argument);
+            return true;
+        }
+
+        ptr = string.Empty;
+        return false;
     }
 
     private bool TryGetStringPair(IReadOnlyList<ExpressionSyntax> arguments, string name, out string ptrA, out string ptrB)
@@ -2852,13 +3151,11 @@ public sealed class CraneliftFunctionBuilder
         }
 
         if (expr is MemberAccessExpressionSyntax member &&
-            TryResolveArrayMember(member, out var arrayName))
+            TryResolveArrayMember(member, out var arrayName, out var memberArrayType))
         {
             ptr = NewValue();
             _instructions.AppendLine($"    {ptr} = global_value {arrayName}");
-            if (_symbols.TryGetValue(arrayName, out var symbol) &&
-                symbol.Type is ArrayTypeSymbol arrayType &&
-                IsStringBuffer(arrayType, out var headerSize))
+            if (IsStringBuffer(memberArrayType, out var headerSize))
             {
                 var payload = NewValue();
                 var headerOffset = ConstI64(headerSize);
@@ -2885,9 +3182,10 @@ public sealed class CraneliftFunctionBuilder
         return false;
     }
 
-    private bool TryResolveArrayMember(MemberAccessExpressionSyntax member, out string arrayName)
+    private bool TryResolveArrayMember(MemberAccessExpressionSyntax member, out string arrayName, out ArrayTypeSymbol arrayType)
     {
         arrayName = string.Empty;
+        arrayType = new ArrayTypeSymbol(new NamedTypeSymbol("unknown"), -1);
         if (!TryResolveMemberBase(member.Receiver, out var baseName, out var baseType))
         {
             return false;
@@ -2899,11 +3197,16 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == member.Member.Text);
-        if (field?.Type is not ArrayTypeSyntax)
+        if (field?.Type is not ArrayTypeSyntax arraySyntax)
         {
             return false;
         }
 
+        if (ResolveType(arraySyntax) is not ArrayTypeSymbol arrayTypeSymbol)
+        {
+            return false;
+        }
+        arrayType = arrayTypeSymbol;
         arrayName = $"{baseName}__{member.Member.Text}";
         return true;
     }
@@ -3044,7 +3347,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (expr is LiteralExpressionSyntax lit)
         {
-            if (lit.Literal.Kind == TokenKind.IntegerLiteral &&
+            if ((lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
                 (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
                 long.TryParse(lit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
             {
@@ -3066,7 +3369,7 @@ public sealed class CraneliftFunctionBuilder
         if (expr is UnaryExpressionSyntax unary &&
             unary.OperatorToken.Kind == TokenKind.Minus &&
             unary.Operand is LiteralExpressionSyntax innerLit &&
-            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
             (IsIntegerType(targetPrim) || IsByteLikeType(targetPrim)) &&
             long.TryParse(innerLit.Literal.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var innerParsed))
         {
@@ -3181,13 +3484,11 @@ public sealed class CraneliftFunctionBuilder
         {
             return LowerArrayElementFieldAccess(arrayAccess, member.Member.Text);
         }
-        else if (TryResolveArrayMember(member, out var arrayName))
+        else if (TryResolveArrayMember(member, out var arrayName, out var memberArrayType))
         {
             var addr = NewValue();
             _instructions.AppendLine($"    {addr} = global_value {arrayName}");
-            if (_symbols.TryGetValue(arrayName, out var symbol) &&
-                symbol.Type is ArrayTypeSymbol arrayType &&
-                IsStringBuffer(arrayType, out var headerSize))
+            if (IsStringBuffer(memberArrayType, out var headerSize))
             {
                 var payload = NewValue();
                 var headerOffset = ConstI64(headerSize);
@@ -3370,6 +3671,19 @@ public sealed class CraneliftFunctionBuilder
 
         var baseAddr = NewValue();
         _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+
+        if (ResolveType(arrayType) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
+        {
+            var payloadBase = NewValue();
+            var headerOffset = ConstI64(headerSize);
+            _instructions.AppendLine($"    {payloadBase} = iadd {baseAddr}, {headerOffset}");
+            var addr = EmitByteAddress(payloadBase, index);
+            var value = NewValue();
+            _instructions.AppendLine($"    {value} = load.i8 {addr}");
+            var byteResult = NewValue();
+            _instructions.AppendLine($"    {byteResult} = uextend.i32 {value}");
+            return byteResult;
+        }
 
         var elemSize = GetTypeSize(clifElemType);
         var elemSizeVal = NewValue();
@@ -3596,6 +3910,21 @@ public sealed class CraneliftFunctionBuilder
         if (field?.Type is not ArrayTypeSyntax arrayType)
         {
             _instructions.AppendLine($"    ; error: not an array field");
+            return;
+        }
+
+        if (ResolveType(field.Type) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
+        {
+            var byteIndex = LowerExpression(indexExpr);
+            var byteBaseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+            var byteBaseAddr = NewValue();
+            _instructions.AppendLine($"    {byteBaseAddr} = global_value {byteBaseName}");
+            var payloadBase = NewValue();
+            var headerOffset = ConstI64(headerSize);
+            _instructions.AppendLine($"    {payloadBase} = iadd {byteBaseAddr}, {headerOffset}");
+            var addr = EmitByteAddress(payloadBase, byteIndex);
+            value = ReduceI32ToSmallInt(value, CraneliftTypeMapper.ClifType.I8);
+            _instructions.AppendLine($"    store {value}, {addr}");
             return;
         }
 
@@ -4208,6 +4537,7 @@ public sealed class CraneliftFunctionBuilder
             LiteralExpressionSyntax lit => lit.Literal.Kind switch
             {
                 TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                 TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                 TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                 TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),

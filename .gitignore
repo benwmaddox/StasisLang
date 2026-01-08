@@ -29,9 +29,23 @@ _ReSharper.Caches/
 *.dylib
 **/stasis_graphics.lib
 runtime/build/
+runtime/build_sys/
 codevcpkg/
 build/hotstate/
 build/aot/
+build/*.clif
+build/*.ll
+build/*_expanded.stasis
+build/*.stasis
+build/*.stasis.*
+build/*.txt
+build/*.log
+build/test_perf_compare.csv
+build/sample_test_compare.csv
+build/test_perf_compare_optimized.csv
+build/sample_test_compare_optimized.csv
+stasis_sys_static.lib
+build/stasis_sys_static.lib
 
 # Android local build outputs
 android/out/

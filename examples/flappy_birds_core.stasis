@@ -1,5 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/game.stasis";
+import "../src/stdlib/game_collision.stasis";
 
 const BIRD_X: f32 = 20.0;
 const BIRD_W: f32 = 8.0;

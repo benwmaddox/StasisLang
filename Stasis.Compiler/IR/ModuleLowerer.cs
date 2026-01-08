@@ -311,7 +311,7 @@ public sealed class ModuleLowerer
         {
             return lit.Literal.Kind switch
             {
-                TokenKind.IntegerLiteral => int.TryParse(lit.Literal.Text, out var i)
+                TokenKind.IntegerLiteral or TokenKind.U8Literal => int.TryParse(lit.Literal.Text, out var i)
                     ? LLVMValueRef.CreateConstInt(targetType, (ulong)i, true)
                     : default,
                 TokenKind.FloatLiteral => double.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)
@@ -1203,6 +1203,23 @@ public sealed class ModuleLowerer
             "read_char",
             "read_int",
 
+            // System: sys_* (argv, file I/O, process execution)
+            "sys_argc",
+            "sys_argv",
+            "sys_read_file",
+            "sys_list_dir",
+            "sys_write_file",
+            "sys_file_exists",
+            "sys_file_size",
+            "sys_file_mtime_ms",
+            "sys_exec",
+            "sys_spawn",
+            "sys_spawn_async",
+            "sys_sleep_ms",
+            "sys_delete_file",
+            "sys_time_ms",
+            "sys_flush",
+
             // Legacy math (to be renamed)
             "sin",
             "cos",
@@ -1621,7 +1638,7 @@ public sealed class ModuleLowerer
         {
             switch (lit.Literal.Kind)
             {
-                case TokenKind.IntegerLiteral when int.TryParse(lit.Literal.Text, out var ival):
+                case TokenKind.IntegerLiteral or TokenKind.U8Literal when int.TryParse(lit.Literal.Text, out var ival):
                     return ConstI32(ival);
                 case TokenKind.FloatLiteral when float.TryParse(lit.Literal.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var fval):
                     return LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("f32")), fval);
@@ -1649,7 +1666,7 @@ public sealed class ModuleLowerer
 
             long value;
             if (expr is LiteralExpressionSyntax lit &&
-                lit.Literal.Kind == TokenKind.IntegerLiteral &&
+                (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
                 long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
             {
                 value = parsed;
@@ -1657,7 +1674,7 @@ public sealed class ModuleLowerer
             else if (expr is UnaryExpressionSyntax unary &&
                      unary.OperatorToken.Kind == TokenKind.Minus &&
                      unary.Operand is LiteralExpressionSyntax innerLit &&
-                     innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+                     (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
                      long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
             {
                 value = -innerParsed;
@@ -1986,17 +2003,19 @@ public sealed class ModuleLowerer
 
                         builder.PositionAtEnd(trueBlock);
                         var trueVal = ConstI32(1);
+                        var trueIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(falseBlock);
                         var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
                         var rhsVal = BuildBoolResult(builder, rhsBool);
+                        var falseIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(mergeBlock);
                         var phi = builder.BuildPhi(LLVMTypeRef.Int32, "or.result");
-                        phi.AddIncoming(new[] { trueVal }, new[] { trueBlock }, 1u);
-                        phi.AddIncoming(new[] { rhsVal }, new[] { falseBlock }, 1u);
+                        phi.AddIncoming(new[] { trueVal }, new[] { trueIncoming }, 1u);
+                        phi.AddIncoming(new[] { rhsVal }, new[] { falseIncoming }, 1u);
                         return phi;
                     }
                 case TokenKind.AmpAmp:
@@ -2011,16 +2030,18 @@ public sealed class ModuleLowerer
                         builder.PositionAtEnd(trueBlock);
                         var rhsBool = AsBoolean(builder, LowerExpression(builder, bin.Right, locals));
                         var rhsVal = BuildBoolResult(builder, rhsBool);
+                        var trueIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(falseBlock);
                         var falseVal = ConstI32(0);
+                        var falseIncoming = builder.InsertBlock;
                         builder.BuildBr(mergeBlock);
 
                         builder.PositionAtEnd(mergeBlock);
                         var phi = builder.BuildPhi(LLVMTypeRef.Int32, "and.result");
-                        phi.AddIncoming(new[] { rhsVal }, new[] { trueBlock }, 1u);
-                        phi.AddIncoming(new[] { falseVal }, new[] { falseBlock }, 1u);
+                        phi.AddIncoming(new[] { rhsVal }, new[] { trueIncoming }, 1u);
+                        phi.AddIncoming(new[] { falseVal }, new[] { falseIncoming }, 1u);
                         return phi;
                     }
                 default:
@@ -2116,6 +2137,31 @@ public sealed class ModuleLowerer
             if (expr is IdentifierExpressionSyntax id && locals.TryGetValue(id.Identifier.Text, out var binding) && binding.IsArrayDescriptor)
             {
                 return builder.BuildLoad2(layout.DescriptorType, binding.Value, $"{id.Identifier.Text}.desc");
+            }
+
+            if (expr is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+            {
+                if (layout.IsStructArray)
+                {
+                    AddDiagnostic("String literal array arguments are only supported for primitive byte arrays.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+
+                var elemType = _moduleBuilder.TypeMapper.Map(arrayType.ElementType);
+                if (elemType.Kind != LLVMTypeKind.LLVMIntegerTypeKind || elemType.IntWidth != 8)
+                {
+                    AddDiagnostic("String literal array arguments require element type u8.", expr.Span);
+                    return LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                }
+
+                var text = UnescapeString(lit.Literal.Text);
+                var ptr = EmitUtf8Literal(builder, text);
+                var lenVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)(Encoding.UTF8.GetByteCount(text) + 1), true);
+
+                var desc = LLVMValueRef.CreateConstNull(layout.DescriptorType);
+                desc = builder.BuildInsertValue(desc, ptr, 0, "lit.ptr");
+                desc = builder.BuildInsertValue(desc, lenVal, 1, "lit.len");
+                return desc;
             }
 
             string? baseName = null;
@@ -2329,6 +2375,340 @@ public sealed class ModuleLowerer
                     return EmitReadChar(builder);
                 case "read_int":
                     return EmitReadInt(builder);
+
+                // ============================================================
+                // System: sys_* (argv, file I/O, process execution)
+                // ============================================================
+
+                case "sys_argc":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_argc expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_argc");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_argc", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_argc.call");
+                    }
+
+                case "sys_argv":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_argv expects (idx: i32, out: string, out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var idx = LowerExpression(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_argv requires an output string buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_argv");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_argv", fnType);
+
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_argv.out");
+                        return builder.BuildCall2(fnType, fn, new[] { idx, outCast, outCap }, "sys_argv.call");
+                    }
+
+                case "sys_read_file":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_read_file expects (path: string, out: u8[], out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_read_file requires an output buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_read_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_read_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.path");
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_read_file.out");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, outCast, outCap }, "sys_read_file.call");
+                    }
+
+                case "sys_list_dir":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_list_dir expects (path: string, out: u8[], out_cap: i32).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var outPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (outPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_list_dir requires an output buffer.", span);
+                            return ConstI32(-1);
+                        }
+                        var outCap = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_list_dir");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_list_dir", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_list_dir.path");
+                        var outCast = builder.BuildBitCast(outPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_list_dir.out");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, outCast, outCap }, "sys_list_dir.call");
+                    }
+
+                case "sys_write_file":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("sys_write_file expects (path: string, data: u8[], len: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var dataPtr = LowerCStringPointer(builder, args[1], locals);
+                        if (dataPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_write_file requires a byte buffer.", span);
+                            return ConstI32(0);
+                        }
+                        var len = LowerExpression(builder, args[2], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_write_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_write_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_write_file.path");
+                        var dataCast = builder.BuildBitCast(dataPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_write_file.data");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast, dataCast, len }, "sys_write_file.call");
+                    }
+
+                case "sys_file_exists":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_exists expects (path: string).", span);
+                            return ConstI32(0);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_exists");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_exists", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_exists.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_exists.call");
+                    }
+
+                case "sys_file_size":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_size expects (path: string).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_size");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_size", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_size.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_size.call");
+                    }
+
+                case "sys_file_mtime_ms":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_file_mtime_ms expects (path: string).", span);
+                            return ConstI32(-1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_file_mtime_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_file_mtime_ms", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_file_mtime_ms.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_file_mtime_ms.call");
+                    }
+
+                case "sys_exec":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_exec expects (command: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_exec");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_exec", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_exec.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_exec.call");
+                    }
+
+                case "sys_spawn":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_spawn expects (command_line: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_spawn");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_spawn", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_spawn.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_spawn.call");
+                    }
+
+                case "sys_spawn_async":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_spawn_async expects (command_line: string).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmd = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_spawn_async");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_spawn_async", fnType);
+
+                        var cmdCast = builder.BuildBitCast(cmd, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_spawn_async.cmd");
+                        return builder.BuildCall2(fnType, fn, new[] { cmdCast }, "sys_spawn_async.call");
+                    }
+
+                case "sys_sleep_ms":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_sleep_ms expects (ms: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var ms = LowerExpression(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_sleep_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.Int32 }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_sleep_ms", fnType);
+
+                        return builder.BuildCall2(fnType, fn, new[] { ms }, "sys_sleep_ms.call");
+                    }
+
+                case "sys_delete_file":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("sys_delete_file expects (path: string).", span);
+                            return ConstI32(1);
+                        }
+
+                        var path = LowerCStringPointer(builder, args[0], locals);
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_delete_file");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32,
+                            new[] { LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0) }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_delete_file", fnType);
+
+                        var pathCast = builder.BuildBitCast(path, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_delete_file.path");
+                        return builder.BuildCall2(fnType, fn, new[] { pathCast }, "sys_delete_file.call");
+                    }
+
+                case "sys_time_ms":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_time_ms expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_time_ms");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_time_ms", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_time_ms.call");
+                    }
+
+                case "sys_flush":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("sys_flush expects no arguments.", span);
+                            return ConstI32(1);
+                        }
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_flush");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_flush", fnType);
+
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_flush.call");
+                    }
                 case "sin":
                 case "cos":
                 case "sin_fast":
@@ -4842,6 +5222,18 @@ public sealed class ModuleLowerer
                         var global = _moduleBuilder.Module.GetNamedGlobal(baseName);
                         if (global.Handle != IntPtr.Zero)
                         {
+                            if (elemTypeSymbol is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
+                            {
+                                var headerSize = HeaderSizeFor(prim.PrimitiveName);
+                                var count = (int)ParseArrayLength(arrayTypeSyntax.SizeToken?.Text ?? string.Empty);
+                                var backingBytes = Math.Max(1, count + headerSize);
+                                var backingArrayType = LLVMTypeRef.CreateArray(LLVMTypeRef.Int8, (uint)backingBytes);
+                                var payloadPtr = builder.BuildGEP2(backingArrayType, global, new[] { ConstI32(0), ConstI32(headerSize) }, "payload");
+                                ptr = builder.BuildGEP2(LLVMTypeRef.Int8, payloadPtr, new[] { index }, "elemaddr");
+                                elemType = LLVMTypeRef.Int8;
+                                return true;
+                            }
+
                             var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
                             var casted = builder.BuildBitCast(global, elemPtrType, "elembase");
                             ptr = builder.BuildGEP2(elemType, casted, new[] { index }, "elemaddr");

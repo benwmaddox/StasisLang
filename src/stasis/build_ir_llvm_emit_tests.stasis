@@ -1,0 +1,336 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "expr_eval.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2_post.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function llvm_is_backtick_span(file_idx: i32, start: i32, len: i32): bool {
+    if (file_idx < 0 || file_idx >= stasis.file_count) { return false; }
+    if (len < 2) { return false; }
+    let base: i32 = stasis.files[file_idx].offset;
+    return stasis.pool[base + start] == 96 && stasis.pool[base + start + len - 1] == 96;
+}
+
+function llvm_emit_cstring_global_from_span(name_prefix: ascii[], id: i32, file_idx: i32, start: i32, len: i32): i32 {
+    if (file_idx < 0 || file_idx >= stasis.file_count) {
+        return 1;
+    }
+
+    let s: i32 = start;
+    let n: i32 = len;
+    if (llvm_is_backtick_span(file_idx, start, len)) {
+        s = start + 1;
+        n = len - 2;
+        if (n < 0) { n = 0; }
+    }
+
+    ascii_append_byte(stasis.ir_out, 64); // '@'
+    ascii_append(stasis.ir_out, name_prefix);
+    ir_append_i32(stasis.ir_out, id);
+    ascii_append(stasis.ir_out, " = private unnamed_addr constant [");
+    ir_append_i32(stasis.ir_out, n + 1);
+    ascii_append(stasis.ir_out, " x i8] c");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+
+    let base: i32 = stasis.files[file_idx].offset;
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        llvm_append_cstring_byte(stasis.ir_out, u8_to_i32(stasis.pool[base + s + i]));
+    }
+    llvm_append_cstring_byte(stasis.ir_out, 0);
+
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, ", align 1\n");
+    return 0;
+}
+
+function llvm_emit_cstring_global_lit(name: ascii[], bytes: ascii[]): void {
+    let n: i32 = ascii_len(bytes);
+    ascii_append_byte(stasis.ir_out, 64); // '@'
+    ascii_append(stasis.ir_out, name);
+    ascii_append(stasis.ir_out, " = private unnamed_addr constant [");
+    ir_append_i32(stasis.ir_out, n + 1);
+    ascii_append(stasis.ir_out, " x i8] c");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        llvm_append_cstring_byte(stasis.ir_out, u8_to_i32(bytes[i]));
+    }
+    llvm_append_cstring_byte(stasis.ir_out, 0);
+
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, ", align 1\n");
+}
+
+function llvm_emit_printf_s(ptr_id: i32): void {
+    let fmt_ptr: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(fmt_ptr);
+    ascii_append(stasis.ir_out, " = getelementptr inbounds [3 x i8], ptr @.stasis_fmt_s, i32 0, i32 0\n");
+
+    let out_id: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(out_id);
+    ascii_append(stasis.ir_out, " = call i32 (ptr, ...) @printf(ptr ");
+    llvm_append_tmp(fmt_ptr);
+    ascii_append(stasis.ir_out, ", ptr ");
+    llvm_append_tmp(ptr_id);
+    ascii_append(stasis.ir_out, ")\n");
+}
+
+function emit_llvm_tests_i32(module_name: ascii[]): i32 {
+    llvm_reset();
+    stasis.llvm_str_count = 0;
+
+    ascii_clear(stasis.ir_out);
+    ascii_append(stasis.ir_out, "; ModuleID = '");
+    ascii_append(stasis.ir_out, module_name);
+    ascii_append(stasis.ir_out, "'\n");
+    ascii_append(stasis.ir_out, "source_filename = ");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, module_name);
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append_byte(stasis.ir_out, 10);
+    ascii_append(stasis.ir_out, "target triple = ");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, "x86_64-pc-windows-msvc");
+    ascii_append_byte(stasis.ir_out, 34); // '"'
+    ascii_append(stasis.ir_out, "\n\n");
+
+    llvm_emit_runtime_decls_and_consts();
+
+    if (llvm_emit_struct_type_defs() != 0) { return 1; }
+    if (llvm_emit_global_defs() != 0) { return 1; }
+
+    // Test name globals.
+    let test_count: i32 = 0;
+    let i: i32 = 0;
+    for (i = 0; i < stasis.func_count; i = i + 1) {
+        if (stasis.funcs[i].is_test != 0) {
+            if (llvm_emit_cstring_global_from_span(".stasis_test_name", test_count, stasis.funcs[i].file_idx, stasis.funcs[i].name_start, stasis.funcs[i].name_len) != 0) {
+                return 1;
+            }
+            test_count = test_count + 1;
+        }
+    }
+
+    llvm_emit_cstring_global_lit(".stasis_test_prefix", "test ");
+    llvm_emit_cstring_global_lit(".stasis_test_mid", " ... ");
+    llvm_emit_cstring_global_lit(".stasis_test_ok", " ok\n");
+    llvm_emit_cstring_global_lit(".stasis_test_fail", " FAIL\n");
+    ascii_append_byte(stasis.ir_out, 10);
+
+    // Main harness.
+    ascii_append(stasis.ir_out, "define i32 @main() {\n");
+    ascii_append(stasis.ir_out, "entry:\n");
+    ascii_append(stasis.ir_out, "  %fail_slot = alloca i32, align 4\n");
+    ascii_append(stasis.ir_out, "  store i32 0, ptr %fail_slot, align 4\n");
+
+    // Pointers to fixed strings.
+    let prefix_ptr: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(prefix_ptr);
+    ascii_append(stasis.ir_out, " = getelementptr inbounds [6 x i8], ptr @.stasis_test_prefix, i32 0, i32 0\n");
+
+    let mid_ptr: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(mid_ptr);
+    ascii_append(stasis.ir_out, " = getelementptr inbounds [6 x i8], ptr @.stasis_test_mid, i32 0, i32 0\n");
+
+    let ok_ptr: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(ok_ptr);
+    ascii_append(stasis.ir_out, " = getelementptr inbounds [5 x i8], ptr @.stasis_test_ok, i32 0, i32 0\n");
+
+    let fail_ptr: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(fail_ptr);
+    ascii_append(stasis.ir_out, " = getelementptr inbounds [7 x i8], ptr @.stasis_test_fail, i32 0, i32 0\n");
+
+    let ti: i32 = 0;
+    let test_id: i32 = 0;
+    for (ti = 0; ti < stasis.func_count; ti = ti + 1) {
+        if (stasis.funcs[ti].is_test != 0) {
+
+        // Require zero-parameter tests for now.
+        if (stasis.funcs[ti].params_len != 0) {
+            build_err_at(stasis.funcs[ti].file_idx, "test functions must take no parameters (self-host bring-up)", stasis.funcs[ti].name_start);
+            return 1;
+        }
+
+        // Print: "test " + name + " ... "
+        llvm_emit_printf_s(prefix_ptr);
+
+        let name_ptr: i32 = llvm_new_tmp();
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_tmp(name_ptr);
+        ascii_append(stasis.ir_out, " = getelementptr inbounds [");
+
+        let s: i32 = stasis.funcs[ti].name_start;
+        let n: i32 = stasis.funcs[ti].name_len;
+        if (llvm_is_backtick_span(stasis.funcs[ti].file_idx, s, n)) {
+            n = n - 2;
+            if (n < 0) { n = 0; }
+        }
+        ir_append_i32(stasis.ir_out, n + 1);
+        ascii_append(stasis.ir_out, " x i8], ptr @.stasis_test_name");
+        ir_append_i32(stasis.ir_out, test_id);
+        ascii_append(stasis.ir_out, ", i32 0, i32 0\n");
+
+        llvm_emit_printf_s(name_ptr);
+        llvm_emit_printf_s(mid_ptr);
+
+        // Call test.
+        let ret_ty: i32 = stasis.funcs[ti].ret_type_idx;
+        let is_void: i32 = 0;
+        if (ret_ty < 0) {
+            // Bring-up: tests default to i32 when no return type is written.
+            is_void = 0;
+        } else {
+        if (build_type_is_void(ret_ty)) {
+            is_void = 1;
+        } else {
+            if (build_type_is_f32(ret_ty)) {
+                build_err_at(stasis.funcs[ti].file_idx, "test functions may not return f32 (self-host bring-up)", stasis.funcs[ti].name_start);
+                return 1;
+            }
+        }
+        }
+
+        let pass_cond: i32 = -1;
+        if (is_void != 0) {
+            ascii_append(stasis.ir_out, "  call void @");
+            llvm_append_func_ir_name(ti);
+            ascii_append(stasis.ir_out, "()\n");
+            pass_cond = llvm_emit_const_i32(1);
+            // Convert i32 temp to i1 by comparing to 0 (cheap).
+            let cond_void_i1: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(cond_void_i1);
+            ascii_append(stasis.ir_out, " = icmp ne i32 ");
+            llvm_append_tmp(pass_cond);
+            ascii_append(stasis.ir_out, ", 0\n");
+            pass_cond = cond_void_i1;
+        } else {
+            let r: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(r);
+            ascii_append(stasis.ir_out, " = call i32 @");
+            llvm_append_func_ir_name(ti);
+            ascii_append(stasis.ir_out, "()\n");
+
+            let cond_ret_i1: i32 = llvm_new_tmp();
+            ascii_append(stasis.ir_out, "  ");
+            llvm_append_tmp(cond_ret_i1);
+            ascii_append(stasis.ir_out, " = icmp ne i32 ");
+            llvm_append_tmp(r);
+            ascii_append(stasis.ir_out, ", 0\n");
+            pass_cond = cond_ret_i1;
+        }
+
+        let then_id: i32 = llvm_new_label();
+        let else_id: i32 = llvm_new_label();
+        let cont_id: i32 = llvm_new_label();
+        llvm_emit_br_i1(pass_cond, "test_then_", then_id, "test_else_", else_id);
+
+        llvm_emit_label_def("test_then_", then_id);
+        llvm_emit_printf_s(ok_ptr);
+        llvm_emit_br("test_cont_", cont_id);
+
+        llvm_emit_label_def("test_else_", else_id);
+        llvm_emit_printf_s(fail_ptr);
+        let cur: i32 = llvm_new_tmp();
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_tmp(cur);
+        ascii_append(stasis.ir_out, " = load i32, ptr %fail_slot, align 4\n");
+        let next: i32 = llvm_new_tmp();
+        ascii_append(stasis.ir_out, "  ");
+        llvm_append_tmp(next);
+        ascii_append(stasis.ir_out, " = add i32 ");
+        llvm_append_tmp(cur);
+        ascii_append(stasis.ir_out, ", 1\n");
+        ascii_append(stasis.ir_out, "  store i32 ");
+        llvm_append_tmp(next);
+        ascii_append(stasis.ir_out, ", ptr %fail_slot, align 4\n");
+        llvm_emit_br("test_cont_", cont_id);
+
+        llvm_emit_label_def("test_cont_", cont_id);
+
+        test_id = test_id + 1;
+        }
+    }
+
+    let fail_out: i32 = llvm_new_tmp();
+    ascii_append(stasis.ir_out, "  ");
+    llvm_append_tmp(fail_out);
+    ascii_append(stasis.ir_out, " = load i32, ptr %fail_slot, align 4\n");
+    ascii_append(stasis.ir_out, "  ret i32 ");
+    llvm_append_tmp(fail_out);
+    ascii_append(stasis.ir_out, "\n}\n\n");
+
+    // Emit supported non-extern functions (including tests) except user main.
+    let f: i32 = 0;
+    for (f = 0; f < stasis.func_count; f = f + 1) {
+        if (stasis.funcs[f].body_start >= 0) {
+            let is_user_main: i32 = 0;
+            if (stasis.funcs[f].file_idx == 0) {
+                if (span_eq(stasis.funcs[f].file_idx, stasis.funcs[f].name_start, stasis.funcs[f].name_len, "main")) {
+                    is_user_main = 1;
+                }
+            }
+
+            if (is_user_main == 0) {
+
+        let ok_sig: i32 = 1;
+        let ret_ty2: i32 = stasis.funcs[f].ret_type_idx;
+        if (ret_ty2 >= 0 && !build_type_is_i32ish(ret_ty2) && !build_type_is_byte_named(ret_ty2) && !build_type_is_void(ret_ty2) && !build_type_is_f32(ret_ty2)) {
+            ok_sig = 0;
+        }
+        let pi: i32 = 0;
+        for (pi = 0; pi < stasis.funcs[f].params_len && ok_sig != 0; pi = pi + 1) {
+            let p_decl: i32 = stasis.funcs[f].params_off + pi;
+            if (p_decl < 0 || p_decl >= stasis.param_count) { ok_sig = 0; }
+            else {
+                let p_ty: i32 = stasis.params[p_decl].type_idx;
+                if (p_ty < 0 || p_ty >= stasis.type_count) { ok_sig = 0; }
+                else {
+                    if (!build_type_is_i32ish(p_ty) && !build_type_is_byte_named(p_ty) && !build_type_is_f32(p_ty)) {
+                        let pk: TypeKind = stasis.types[p_ty].kind;
+                        if (pk != TypeKind.Array) { ok_sig = 0; }
+                        else {
+                            let elem: i32 = stasis.types[p_ty].elem;
+                            if (!build_type_is_i32ish(elem) && !build_type_is_byte_named(elem) && !build_type_is_f32(elem)) { ok_sig = 0; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (ok_sig != 0) {
+            let rc2: i32 = emit_llvm_func_i32ish(f);
+            if (rc2 != 0) { return rc2; }
+        }
+            }
+        }
+    }
+
+    if (llvm_emit_string_literal_globals() != 0) {
+        return 1;
+    }
+    llvm_emit_sys_runtime_decls_if_needed();
+    llvm_emit_graphics_builtin_decls_if_needed();
+    return 0;
+}

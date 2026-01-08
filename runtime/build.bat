@@ -103,6 +103,26 @@ if /I "%STASIS_OVERWRITE_CHECKED_IN_RUNTIME_LIBS%"=="1" (
         copy "%CD%\\Release\\stasis_graphics_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
     )
 )
+echo Copying sys runtime lib to repo root and build/ for auto-discovery...
+if exist "%CD%\\Release\\stasis_sys_static.lib" (
+    if /I "%STASIS_OVERWRITE_CHECKED_IN_RUNTIME_LIBS%"=="1" (
+        copy /Y "%CD%\\Release\\stasis_sys_static.lib" "%CD%\\..\\.." >NUL 2>&1
+        if not exist "%CD%\\..\\..\\build" (
+            mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+        )
+        copy /Y "%CD%\\Release\\stasis_sys_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
+    ) else (
+        if not exist "%CD%\\..\\..\\stasis_sys_static.lib" (
+            copy "%CD%\\Release\\stasis_sys_static.lib" "%CD%\\..\\.." >NUL 2>&1
+        )
+        if not exist "%CD%\\..\\..\\build" (
+            mkdir "%CD%\\..\\..\\build" >NUL 2>&1
+        )
+        if not exist "%CD%\\..\\..\\build\\stasis_sys_static.lib" (
+            copy "%CD%\\Release\\stasis_sys_static.lib" "%CD%\\..\\..\\build" >NUL 2>&1
+        )
+    )
+)
 echo.
 echo To run Asteroids demo with static runtime:
 echo   cd ..\..
