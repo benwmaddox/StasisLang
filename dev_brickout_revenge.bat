@@ -13,11 +13,18 @@ set "GAME=samples\brickout_revenge\brickout_revenge.stasis"
 set "MODULE=brick"
 set "FPS=60"
 
+set "USE_JIT=0"
+if /I "%1"=="--jit" (
+  set "USE_JIT=1"
+  shift
+)
+
 set "CLI_EXE=%ROOT%\build\stasis_release.exe"
 if not exist "%CLI_EXE%" set "CLI_EXE=%ROOT%\Stasis.Cli\bin\%CONFIG%\net9.0\Stasis.Cli.exe"
 
 set "RUNNER_EXE=%ROOT%\runtime\build\bin\%CONFIG%\stasis_runner.exe"
 set "AOT_EXE=%ROOT%\tools\cranelift-aot\target\%CONFIG%\stasis-cranelift-aot.exe"
+set "JIT_RUNNER_EXE=%ROOT%\tools\cranelift-jit-runner\target\%CONFIG%\stasis-cranelift-jit-runner.exe"
 
 if not exist "%GAME%" (
   echo error: game not found: %GAME%
@@ -50,14 +57,28 @@ set "STASIS_CRANELIFT_AOT_SERVER=1"
 set "STASIS_CRANELIFT_RUNNER_SERVER=1"
 set "STASIS_HOTSWAP_KEEP_OLD=1"
 
+if "%USE_JIT%"=="1" (
+  if not exist "%JIT_RUNNER_EXE%" (
+    echo info: building cranelift jit runner...
+    pushd "%ROOT%\tools\cranelift-jit-runner" >nul
+    cargo build --release
+    if errorlevel 1 (popd >nul & exit /b %ERRORLEVEL%)
+    popd >nul
+  )
+  set "STASIS_CRANELIFT_JIT_RUNNER=1"
+  set "STASIS_CRANELIFT_JIT_RUNNER_EXE=%JIT_RUNNER_EXE%"
+)
+
 echo Root:   %ROOT%
 echo CLI:    %CLI_EXE%
 echo Game:   %GAME%
 echo Module: %MODULE%
 echo FPS:    %FPS%
+if "%USE_JIT%"=="1" echo JIT:    1
 echo.
 
 rem Pass extra CLI args after defaults, e.g.:
+rem   dev_brickout_revenge.bat --jit
 rem   dev_brickout_revenge.bat --fps 30
 rem   dev_brickout_revenge.bat --backend llvm
 call "%CLI_EXE%" run "%GAME%" --graphics --watch --backend cranelift --module "%MODULE%" --fps "%FPS%" %*
