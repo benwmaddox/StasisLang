@@ -13,8 +13,13 @@ set "GAME=samples\brickout_revenge\brickout_revenge.stasis"
 set "MODULE=brick"
 set "FPS=60"
 
-set "USE_JIT=0"
+set "USE_JIT=1"
+if /I "%1"=="--no-jit" (
+  set "USE_JIT=0"
+  shift
+)
 if /I "%1"=="--jit" (
+  rem Kept for backwards compatibility; JIT is now the default.
   set "USE_JIT=1"
   shift
 )
@@ -78,7 +83,7 @@ if "%USE_JIT%"=="1" echo JIT:    1
 echo.
 
 rem Pass extra CLI args after defaults, e.g.:
-rem   dev_brickout_revenge.bat --jit
+rem   dev_brickout_revenge.bat --no-jit
 rem   dev_brickout_revenge.bat --fps 30
 rem   dev_brickout_revenge.bat --backend llvm
 call "%CLI_EXE%" run "%GAME%" --graphics --watch --backend cranelift --module "%MODULE%" --fps "%FPS%" %*
