@@ -44,6 +44,18 @@ If found, it:
 - Adds that directory to DLL search (Windows).
 - Preloads `stasis_graphics.dll` once at startup (best-effort).
 
+## Swap DLL naming
+
+The compiler/watch loop writes hot-swap artifacts as stable A/B paths:
+
+- `*.swapA.dll` and `*.swapB.dll` (or `*.swapA.so` / `*.swapB.so`)
+
+Before loading, the runner attempts to move/rename the requested A/B file to a fixed name:
+
+- `*.swap.dll` (or `*.swap.so`)
+
+This keeps the loaded module path stable even though the compiler alternates the A/B output file it writes. The runner prints `HOTSWAP loading: <path>` so you can confirm whether the fixed swap path is being used.
+
 ## Current timings (self-host)
 
 On `samples/hotstate_tick_watch.stasis` (module `hot`), one edit-triggered swap produced:

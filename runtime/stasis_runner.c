@@ -544,6 +544,27 @@ static int file_exists(const char *path)
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+static int move_file_replace_retry(const char *src, const char *dst, int attempts, int sleep_ms)
+{
+    for (int i = 0; i < attempts; i++)
+    {
+        if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        {
+            return 1;
+        }
+
+        DWORD err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED)
+        {
+            return 0;
+        }
+
+        Sleep((DWORD)sleep_ms);
+    }
+
+    return 0;
+}
+
 static int read_text_file(const char *path, char *out, size_t out_cap)
 {
     FILE *f = fopen(path, "rb");
@@ -1390,7 +1411,7 @@ int main(int argc, char **argv)
                             {
                                 FreeLibrary(old_lib);
                                 old_lib = NULL;
-                                if (!MoveFileExA(new_path, fixed_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
                                 {
                                     fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
                                     load_path = new_path;
