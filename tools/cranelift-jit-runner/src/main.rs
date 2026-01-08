@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,15 @@ enum Request
     Quit,
 }
 
+struct CompiledSwap
+{
+    swap_gen: u64,
+    started_at: Instant,
+    compiled_at: Instant,
+    compile_us: u64,
+    result: Result<JitInstance>,
+}
+
 fn run_server(fps: u32) -> Result<()>
 {
     let mut stdout = io::stdout();
@@ -130,6 +140,11 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let target_dt = if fps == 0 { Duration::from_millis(16) } else { Duration::from_secs_f64(1.0 / (fps as f64)) };
     let mut last = Instant::now();
 
+    let swap_gen_counter = AtomicU64::new(0);
+    let (compiled_tx, compiled_rx) = mpsc::channel::<CompiledSwap>();
+    let mut latest_requested_gen = 0u64;
+    let mut latest_ready: Option<CompiledSwap> = None;
+
     loop
     {
         while let Ok(req) = rx.try_recv()
@@ -138,34 +153,27 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             {
                 Request::Swap { clif } =>
                 {
-                    let t0 = Instant::now();
-                    let (missing_save, save_bytes) = instance.save_state();
-                    let save_us = t0.elapsed().as_micros() as u64;
+                    // Compile in the background so ticks continue running.
+                    // Swap is applied between ticks once compilation completes.
+                    let next_gen = swap_gen_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    latest_requested_gen = next_gen;
 
-                    let t1 = Instant::now();
-                    let mut new_instance = JitInstance::compile(&instance.module_name, &instance.entry_name, &instance.tick_name, &clif)
-                        .context("failed to compile swapped CLIF")?;
-                    let compile_us = t1.elapsed().as_micros() as u64;
+                    let module_name = instance.module_name.clone();
+                    let entry_name = instance.entry_name.clone();
+                    let tick_name = instance.tick_name.clone();
+                    let tx = compiled_tx.clone();
+                    let started_at = Instant::now();
 
-                    let t2 = Instant::now();
-                    let missing_restore = new_instance.restore_state(save_bytes);
-                    let restore_us = t2.elapsed().as_micros() as u64;
+                    thread::spawn(move || {
+                        let t0 = Instant::now();
+                        let result = JitInstance::compile(&module_name, &entry_name, &tick_name, &clif)
+                            .with_context(|| format!("failed to compile swapped CLIF (gen={next_gen})"));
+                        let compiled_at = Instant::now();
+                        let compile_us = t0.elapsed().as_micros() as u64;
+                        let _ = tx.send(CompiledSwap { swap_gen: next_gen, started_at, compiled_at, compile_us, result });
+                    });
 
-                    let bytes: usize = new_instance.state_globals.iter().map(|(_, sz)| *sz).sum();
-                    let symbols = new_instance.state_globals.len();
-                    eprintln!(
-                        "HOTSWAP ok: save={}us load={}us tick=0us restore={}us bytes={} symbols={}",
-                        save_us, compile_us, restore_us, bytes, symbols
-                    );
-                    if missing_save > 0 || missing_restore > 0
-                    {
-                        eprintln!(
-                            "HOTSWAP warning: state layout changed (missing save={} restore={}); consider restarting to resync state.",
-                            missing_save, missing_restore
-                        );
-                    }
-
-                    *instance = new_instance;
+                    // Immediate ack: queued.
                     writeln!(stdout, "OK")?;
                     stdout.flush()?;
                 }
@@ -179,6 +187,65 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                 {
                     writeln!(stdout, "ERR already initialized")?;
                     stdout.flush()?;
+                }
+            }
+        }
+
+        // Drain any completed compilations; keep only the latest generation.
+        while let Ok(done) = compiled_rx.try_recv()
+        {
+            if done.swap_gen < latest_requested_gen
+            {
+                continue;
+            }
+            latest_ready = Some(done);
+        }
+
+        // Apply swap if the newest compilation is ready. Do this between ticks.
+        if let Some(done) = latest_ready.take()
+        {
+            if done.swap_gen == latest_requested_gen
+            {
+                match done.result
+                {
+                    Ok(mut new_instance) =>
+                    {
+                        let t_save = Instant::now();
+                        let (missing_save, save_bytes) = instance.save_state();
+                        let save_us = t_save.elapsed().as_micros() as u64;
+
+                        let t_restore = Instant::now();
+                        let missing_restore = new_instance.restore_state(save_bytes);
+                        let restore_us = t_restore.elapsed().as_micros() as u64;
+
+                        let bytes: usize = new_instance.state_globals.iter().map(|(_, sz)| *sz).sum();
+                        let symbols = new_instance.state_globals.len();
+
+                        // Report compile time as "load" to match existing timing parsers.
+                        eprintln!(
+                            "HOTSWAP ok: save={}us load={}us tick=0us restore={}us bytes={} symbols={}",
+                            save_us, done.compile_us, restore_us, bytes, symbols
+                        );
+                        eprintln!(
+                            "HOTSWAP diag: gen={} compile={}us",
+                            done.swap_gen,
+                            done.compile_us
+                        );
+
+                        if missing_save > 0 || missing_restore > 0
+                        {
+                            eprintln!(
+                                "HOTSWAP warning: state layout changed (missing save={} restore={}); consider restarting to resync state.",
+                                missing_save, missing_restore
+                            );
+                        }
+
+                        *instance = new_instance;
+                    }
+                    Err(err) =>
+                    {
+                        eprintln!("HOTSWAP error: compile failed: {err:#}");
+                    }
                 }
             }
         }
@@ -295,7 +362,7 @@ struct JitInstance
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
     state_globals: Vec<(String, usize)>,
-    data_ptrs: HashMap<String, *mut u8>,
+    data_ptrs: HashMap<String, usize>,
 }
 
 impl JitInstance
@@ -379,7 +446,7 @@ impl JitInstance
         for (name, id) in &data_ids
         {
             let ptr = module.get_finalized_data(*id);
-            data_ptrs.insert(name.clone(), ptr.0 as *mut u8);
+            data_ptrs.insert(name.clone(), ptr.0 as usize);
         }
 
         let entry_id = *function_ids.get(entry_name).with_context(|| format!("missing entry function {entry_name}"))?;
@@ -411,7 +478,7 @@ impl JitInstance
                 continue;
             };
             unsafe {
-                let slice = std::slice::from_raw_parts(*ptr as *const u8, *size);
+                let slice = std::slice::from_raw_parts((*ptr) as *const u8, *size);
                 out.insert(name.clone(), slice.to_vec());
             }
         }
@@ -437,7 +504,7 @@ impl JitInstance
                 continue;
             }
             unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), *ptr, *size);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*ptr) as *mut u8, *size);
             }
         }
         missing
