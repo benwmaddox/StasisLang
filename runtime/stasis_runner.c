@@ -1404,26 +1404,9 @@ int main(int argc, char **argv)
                             LARGE_INTEGER sw_t1;
                             QueryPerformanceFrequency(&sw_freq);
                             char fixed_path[2048];
+                            fixed_path[0] = '\0';
                             const char *load_path = new_path;
                             HMODULE old_lib = lib;
-
-                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
-                            {
-                                FreeLibrary(old_lib);
-                                old_lib = NULL;
-                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
-                                {
-                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
-                                    load_path = new_path;
-                                }
-                                else
-                                {
-                                    load_path = fixed_path;
-                                }
-                            }
-
-                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
-                            fflush(stderr);
 
                             uint8_t *buffer = NULL;
                             uint32_t missing_save = 0;
@@ -1442,7 +1425,7 @@ int main(int argc, char **argv)
                                     break;
                                 }
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                                if (copy_state_to_buffer(old_lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
                                 {
                                     free(buffer);
                                     result = 1;
@@ -1451,6 +1434,25 @@ int main(int argc, char **argv)
                                 QueryPerformanceCounter(&sw_t1);
                                 save_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             }
+
+                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
+                            {
+                                /* Old DLL may have been loaded from the fixed path; unload before replacing. */
+                                FreeLibrary(old_lib);
+                                old_lib = NULL;
+                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
+                                {
+                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
+                                    load_path = new_path;
+                                }
+                                else
+                                {
+                                    load_path = fixed_path;
+                                }
+                            }
+
+                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                            fflush(stderr);
 
                             QueryPerformanceCounter(&sw_t0);
                             HMODULE new_lib = stasis_load_program_library(load_path);
