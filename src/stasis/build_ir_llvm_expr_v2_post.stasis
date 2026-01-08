@@ -1,0 +1,705 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "lexing.stasis";
+import "diagnostics.stasis";
+import "expr_parse.stasis";
+import "emit_ir.stasis";
+import "build_ir_common.stasis";
+import "build_ir_llvm_strings.stasis";
+import "build_ir_llvm_resolve.stasis";
+import "build_ir_llvm_types.stasis";
+import "build_ir_llvm_builder.stasis";
+import "build_ir_llvm_expr_shared.stasis";
+import "build_ir_llvm_expr_v2_call.stasis";
+import "build_ir_llvm_expr_v2.stasis";
+import "build_ir_llvm_emit_main.stasis";
+import "build_ir_llvm_emit_func.stasis";
+
+function llvm_emit_expr_i32_v2_post(file_idx: i32, idx2: i32, mode2: i32, val_len: i32): i32 {
+    if (val_len >= 4096) {
+        build_err_at(file_idx, "expression too complex (value stack)", stasis.expr_nodes[idx2].at);
+        return -1;
+    }
+    
+    let kind2: ExprKind = stasis.expr_nodes[idx2].kind;
+    if (kind2 == ExprKind.IntLiteral || kind2 == ExprKind.BoolLiteral) {
+        if (mode2 != 0) {
+            build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+            return -1;
+        }
+        stasis.expr_op_at[val_len] = llvm_emit_const_i32(stasis.expr_nodes[idx2].value);
+        stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+        stasis.llvm_val_struct_idx[val_len] = -1;
+        val_len = val_len + 1;
+    } else {
+        if (kind2 == ExprKind.FloatLiteral) {
+            if (mode2 != 0) {
+                build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            stasis.expr_op_at[val_len] = llvm_emit_const_f32_from_span(file_idx, stasis.expr_nodes[idx2].name_start, stasis.expr_nodes[idx2].name_len);
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        } else {
+        if (kind2 == ExprKind.StringLiteral) {
+            if (mode2 != 0) {
+                build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                return -1;
+            }
+            let ptr_id: i32 = llvm_emit_utf8_string_lit_ptr(file_idx, stasis.expr_nodes[idx2].name_start, stasis.expr_nodes[idx2].name_len);
+            if (ptr_id < 0) {
+                return -1;
+            }
+            stasis.expr_op_at[val_len] = ptr_id;
+            stasis.llvm_val_kind[val_len] = LlvmValueKind.PtrI8;
+            stasis.llvm_val_struct_idx[val_len] = -1;
+            val_len = val_len + 1;
+        } else {
+        if (kind2 == ExprKind.Call) {
+            return llvm_emit_expr_i32_v2_post_call(file_idx, idx2, mode2, val_len);
+        } else {
+            if (kind2 == ExprKind.Name) {
+                let name_start: i32 = stasis.expr_nodes[idx2].name_start;
+                let name_len: i32 = stasis.expr_nodes[idx2].name_len;
+
+                if (mode2 != 0 && span_eq(file_idx, name_start, name_len, "_")) {
+                    // Discard assignment target: `_ = expr;` evaluates `expr` and ignores the result.
+                    stasis.expr_op_at[val_len] = 0;
+                    stasis.llvm_val_kind[val_len] = LlvmValueKind.Void;
+                    stasis.llvm_val_struct_idx[val_len] = -1;
+                    return val_len + 1;
+                }
+     
+                let local_id: i32 = llvm_find_local(file_idx, name_start, name_len);
+                if (local_id >= 0) {
+                    if (stasis.llvm_local_declared[local_id] == 0) {
+                        build_err_at(file_idx, "local used before declaration", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    let lkind: LlvmValueKind = stasis.llvm_local_kind[local_id];
+                    if (lkind == LlvmValueKind.I32) {
+                        if (mode2 == 0) {
+                            stasis.expr_op_at[val_len] = llvm_emit_load_local(local_id);
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
+                            stasis.expr_op_at[val_len] = llvm_emit_gep0_local_i32(local_id);
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        }
+                    } else {
+                        if (lkind == LlvmValueKind.F32) {
+                            let ptr_id_f32_local: i32 = llvm_emit_gep0_local_f32(local_id);
+                            if (mode2 == 0) {
+                                stasis.expr_op_at[val_len] = llvm_emit_load_f32_from_ptr(ptr_id_f32_local);
+                                stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                                stasis.expr_op_at[val_len] = ptr_id_f32_local;
+                                stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            }
+                        } else {
+                        if (lkind == LlvmValueKind.PtrI8 || lkind == LlvmValueKind.PtrI32 || lkind == LlvmValueKind.PtrF32 || lkind == LlvmValueKind.PtrStruct) {
+                            if (mode2 != 0) {
+                                build_err_at(file_idx, "unsupported assignment target", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            stasis.expr_op_at[val_len] = llvm_emit_load_ptr_from_local(local_id);
+                            stasis.llvm_val_kind[val_len] = lkind;
+                            if (lkind == LlvmValueKind.PtrStruct) {
+                                stasis.llvm_val_struct_idx[val_len] = stasis.llvm_local_struct_idx[local_id];
+                            } else {
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                            }
+                            val_len = val_len + 1;
+                        } else {
+                            build_err_at(file_idx, "unsupported local kind (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        }
+                    }
+                } else {
+                    let c: i32 = llvm_try_resolve_unqualified_const(file_idx, name_start, name_len, stasis.expr_nodes[idx2].at);
+                    if (c >= 0) {
+                        if (mode2 != 0) {
+                            build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        let c_ty: i32 = stasis.consts[c].type_idx;
+                        if (build_type_is_i32ish(c_ty) || build_type_is_u8(c_ty)) {
+                            let v: i32 = llvm_eval_const_i32(file_idx, c, stasis.expr_nodes[idx2].at);
+                            if (stasis.expr_eval_failed != 0) {
+                                return -1;
+                            }
+                            stasis.expr_op_at[val_len] = llvm_emit_const_i32(v);
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                        } else {
+                            if (build_type_is_f32(c_ty)) {
+                                let fv: i32 = llvm_emit_const_f32_from_const(file_idx, c, stasis.expr_nodes[idx2].at);
+                                if (fv < 0) { return -1; }
+                                stasis.expr_op_at[val_len] = fv;
+                                stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                                if (build_type_is_string_named(c_ty)) {
+                                    let sptr: i32 = llvm_emit_const_string_ptr_from_const(file_idx, c, stasis.expr_nodes[idx2].at);
+                                    if (sptr < 0) { return -1; }
+                                    stasis.expr_op_at[val_len] = sptr;
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.PtrI8;
+                                    stasis.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    build_err_at(file_idx, "unsupported const type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                            }
+                        }
+                    } else {
+                        if (c == -2) {
+                            return -1;
+                        }
+
+                        let e: i32 = llvm_try_resolve_unqualified_enum(file_idx, name_start, name_len, stasis.expr_nodes[idx2].at);
+                        if (e >= 0) {
+                            if (mode2 != 0) {
+                                build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            stasis.expr_op_at[val_len] = 0;
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.EnumType;
+                            stasis.llvm_val_struct_idx[val_len] = e;
+                            val_len = val_len + 1;
+                        } else {
+                            if (e == -2) {
+                                return -1;
+                            }
+                            let g: i32 = llvm_resolve_unqualified_global(file_idx, name_start, name_len, stasis.expr_nodes[idx2].at);
+                            if (g < 0) {
+                                return -1;
+                            }
+      
+                    let ty: i32 = stasis.globals[g].type_idx;
+                    if (ty < 0 || ty >= stasis.type_count) {
+                        build_err_at(file_idx, "invalid global type", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+    
+                        let tkind: TypeKind = stasis.types[ty].kind;
+                        if (tkind == TypeKind.Named) {
+                            if (build_type_is_i32ish(ty)) {
+                            let ptr_id_global: i32 = llvm_emit_gep0_global(g, ty);
+                            if (ptr_id_global < 0) {
+                                build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+
+                            if (mode2 == 0) {
+                                stasis.expr_op_at[val_len] = llvm_emit_load_i32_from_ptr(ptr_id_global);
+                                stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                                stasis.expr_op_at[val_len] = ptr_id_global;
+                                stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            }
+                        } else {
+                            if (build_type_is_f32(ty)) {
+                                let ptr_id_f32: i32 = llvm_emit_gep0_global(g, ty);
+                                if (ptr_id_f32 < 0) {
+                                    build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+
+                                if (mode2 == 0) {
+                                    stasis.expr_op_at[val_len] = llvm_emit_load_f32_from_ptr(ptr_id_f32);
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                    stasis.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    stasis.expr_op_at[val_len] = ptr_id_f32;
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                    stasis.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                }
+                            } else {
+                                if (build_type_is_byte_named(ty)) {
+                                    let ptr_id2: i32 = llvm_emit_gep0_global(g, ty);
+                                    if (ptr_id2 < 0) {
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+    
+                                    if (mode2 == 0) {
+                                        stasis.expr_op_at[val_len] = llvm_emit_load_i8_zext_from_ptr(ptr_id2);
+                                        stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        stasis.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    } else {
+                                        stasis.expr_op_at[val_len] = ptr_id2;
+                                        stasis.llvm_val_kind[val_len] = LlvmValueKind.I8;
+                                        stasis.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    }
+                                } else {
+                                    let si: i32 = build_find_struct_decl_for_type(ty);
+                                    if (si < 0) {
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+    
+                                    let ptr_id3: i32 = llvm_emit_gep0_global(g, ty);
+                                    if (ptr_id3 < 0) {
+                                        build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+    
+                                    stasis.expr_op_at[val_len] = ptr_id3;
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.PtrStruct;
+                                    stasis.llvm_val_struct_idx[val_len] = si;
+                                    val_len = val_len + 1;
+                                }
+                            }
+                        }
+                    } else {
+                        if (tkind == TypeKind.Array) {
+                            if (stasis.types[ty].size == 0) {
+                                build_err_at(file_idx, "slice globals not yet supported (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let array_ptr: i32 = llvm_emit_gep0_global(g, ty);
+                            if (array_ptr < 0) {
+                                build_err_at(file_idx, "unsupported global array type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let data_ptr: i32 = llvm_decay_fixed_array_ptr(file_idx, stasis.expr_nodes[idx2].at, array_ptr, ty);
+                            if (data_ptr < 0) {
+                                return -1;
+                            }
+    
+                            stasis.expr_op_at[val_len] = data_ptr;
+                            stasis.llvm_val_kind[val_len] = stasis.llvm_place_kind;
+                            stasis.llvm_val_struct_idx[val_len] = stasis.llvm_place_struct_idx;
+                            val_len = val_len + 1;
+                        } else {
+                            build_err_at(file_idx, "unsupported global type (llvm bring-up)", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+                        }
+                }
+            }
+        } else {
+            if (kind2 == ExprKind.Member) {
+                    if (val_len < 1) {
+                        build_err_at(file_idx, "invalid member expression", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+    
+                    let base_id: i32 = stasis.expr_op_at[val_len - 1];
+                    let base_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
+                    let base_si: i32 = stasis.llvm_val_struct_idx[val_len - 1];
+                    val_len = val_len - 1;
+
+                    // Fixed array length: `some_array.length`
+                    if (mode2 == 0 && span_eq(file_idx, stasis.expr_nodes[idx2].name_start, stasis.expr_nodes[idx2].name_len, "length")) {
+                        let len2: i32 = llvm_try_resolve_fixed_array_len_from_expr(file_idx, stasis.expr_nodes[idx2].left);
+                        if (len2 >= 0) {
+                            stasis.expr_op_at[val_len] = llvm_emit_const_i32(len2);
+                            stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                            stasis.llvm_val_struct_idx[val_len] = -1;
+                            val_len = val_len + 1;
+                            return val_len;
+                        }
+                    }
+      
+                    if (base_kind == LlvmValueKind.EnumType) {
+                        if (mode2 != 0) {
+                            build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        let enum_member_abs_idx: i32 = llvm_find_enum_member(file_idx, stasis.expr_nodes[idx2].name_start, stasis.expr_nodes[idx2].name_len, base_si);
+                        if (enum_member_abs_idx < 0) {
+                            build_err_at(file_idx, "unknown enum member", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        stasis.expr_op_at[val_len] = llvm_emit_const_i32(stasis.enum_members[enum_member_abs_idx].value);
+                        stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                        stasis.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    } else {
+                        let out_idm: i32 = llvm_emit_member_value_or_place(file_idx, idx2, mode2, base_id, base_kind, base_si);
+                        if (out_idm < 0) {
+                            return -1;
+                        }
+     
+                        stasis.expr_op_at[val_len] = out_idm;
+                        stasis.llvm_val_kind[val_len] = stasis.llvm_place_kind;
+                        stasis.llvm_val_struct_idx[val_len] = stasis.llvm_place_struct_idx;
+                        val_len = val_len + 1;
+                    }
+        } else {
+            if (kind2 == ExprKind.Index) {
+                        if (val_len < 2) {
+                            build_err_at(file_idx, "invalid index expression", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+    
+                        let index_id: i32 = stasis.expr_op_at[val_len - 1];
+                        let index_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
+                        let base_id2: i32 = stasis.expr_op_at[val_len - 2];
+                        let base_kind2: LlvmValueKind = stasis.llvm_val_kind[val_len - 2];
+                        let base_si2: i32 = stasis.llvm_val_struct_idx[val_len - 2];
+                        val_len = val_len - 2;
+    
+                        let out_idi: i32 = llvm_emit_index_value_or_place(file_idx, idx2, mode2, base_id2, base_kind2, base_si2, index_id, index_kind);
+                        if (out_idi < 0) {
+                            return -1;
+                        }
+    
+                        stasis.expr_op_at[val_len] = out_idi;
+                        stasis.llvm_val_kind[val_len] = stasis.llvm_place_kind;
+                        stasis.llvm_val_struct_idx[val_len] = stasis.llvm_place_struct_idx;
+                        val_len = val_len + 1;
+                    } else {
+                if (kind2 == ExprKind.Unary) {
+                    if (mode2 != 0) {
+                        build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    if (val_len < 1) {
+                        build_err_at(file_idx, "invalid expression", stasis.expr_nodes[idx2].at);
+                        return -1;
+                    }
+                    let op: Tok = stasis.expr_nodes[idx2].op;
+                    let v_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
+                    let v_id: i32 = stasis.expr_op_at[val_len - 1];
+                    val_len = val_len - 1;
+    
+                    let out_id: i32 = -1;
+                    let out_kind: LlvmValueKind = LlvmValueKind.I32;
+                    if (op == Tok.UnaryMinus) {
+                        if (v_kind == LlvmValueKind.I32) {
+                            let zero_id: i32 = llvm_emit_const_i32(0);
+                            out_id = llvm_new_tmp();
+                            ascii_append(stasis.ir_out, "  ");
+                            llvm_append_tmp(out_id);
+                            ascii_append(stasis.ir_out, " = sub i32 ");
+                            llvm_append_tmp(zero_id);
+                            ascii_append(stasis.ir_out, ", ");
+                            llvm_append_tmp(v_id);
+                            ascii_append(stasis.ir_out, "\n");
+                            out_kind = LlvmValueKind.I32;
+                        } else {
+                            if (v_kind == LlvmValueKind.F32) {
+                                out_id = llvm_new_tmp();
+                                ascii_append(stasis.ir_out, "  ");
+                                llvm_append_tmp(out_id);
+                                ascii_append(stasis.ir_out, " = fsub float 0.0, ");
+                                llvm_append_tmp(v_id);
+                                ascii_append(stasis.ir_out, "\n");
+                                out_kind = LlvmValueKind.F32;
+                            } else {
+                                build_err_at(file_idx, "invalid unary operand", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                        }
+                    } else {
+                        if (op == Tok.Bang) {
+                            if (v_kind != LlvmValueKind.I32) {
+                                build_err_at(file_idx, "invalid unary operand (expected i32)", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            let zero_id2: i32 = llvm_emit_const_i32(0);
+                            out_id = llvm_emit_icmp_to_i32("eq", v_id, zero_id2);
+                            out_kind = LlvmValueKind.I32;
+                        } else {
+                            build_err_at(file_idx, "unsupported unary operator", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+    
+                    stasis.expr_op_at[val_len] = out_id;
+                    stasis.llvm_val_kind[val_len] = out_kind;
+                    stasis.llvm_val_struct_idx[val_len] = -1;
+                    val_len = val_len + 1;
+                } else {
+                    if (kind2 == ExprKind.Binary) {
+                        if (mode2 != 0) {
+                            build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        if (val_len < 2) {
+                            build_err_at(file_idx, "invalid expression", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                        let b_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
+                        let a_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 2];
+                        if (a_kind != b_kind) {
+                            build_err_at(file_idx, "invalid binary operand (type mismatch)", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+    
+                        let b_id: i32 = stasis.expr_op_at[val_len - 1];
+                        let a_id: i32 = stasis.expr_op_at[val_len - 2];
+                        val_len = val_len - 2;
+    
+                        let op2: Tok = stasis.expr_nodes[idx2].op;
+                        let out2: i32 = -1;
+                        let out_kind2: LlvmValueKind = LlvmValueKind.I32;
+    
+                        if (a_kind == LlvmValueKind.I32) {
+                            if (op2 == Tok.Plus || op2 == Tok.Minus || op2 == Tok.Star || op2 == Tok.Slash || op2 == Tok.Percent) {
+                                out2 = llvm_new_tmp();
+                                ascii_append(stasis.ir_out, "  ");
+                                llvm_append_tmp(out2);
+                                ascii_append(stasis.ir_out, " = ");
+                                if (op2 == Tok.Plus) { ascii_append(stasis.ir_out, "add"); }
+                                if (op2 == Tok.Minus) { ascii_append(stasis.ir_out, "sub"); }
+                                if (op2 == Tok.Star) { ascii_append(stasis.ir_out, "mul"); }
+                                if (op2 == Tok.Slash) { ascii_append(stasis.ir_out, "sdiv"); }
+                                if (op2 == Tok.Percent) { ascii_append(stasis.ir_out, "srem"); }
+                                ascii_append(stasis.ir_out, " i32 ");
+                                llvm_append_tmp(a_id);
+                                ascii_append(stasis.ir_out, ", ");
+                                llvm_append_tmp(b_id);
+                                ascii_append(stasis.ir_out, "\n");
+                                out_kind2 = LlvmValueKind.I32;
+                            } else {
+                                // Comparisons + logical.
+                                let handled_cmp: i32 = 0;
+                                if (op2 == Tok.EqualEqual) { out2 = llvm_emit_icmp_to_i32("eq", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.BangEqual) { out2 = llvm_emit_icmp_to_i32("ne", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.Less) { out2 = llvm_emit_icmp_to_i32("slt", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.LessEqual) { out2 = llvm_emit_icmp_to_i32("sle", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.Greater) { out2 = llvm_emit_icmp_to_i32("sgt", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.GreaterEqual) { out2 = llvm_emit_icmp_to_i32("sge", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.AmpAmp) { out2 = llvm_emit_logic_to_i32("and", a_id, b_id); handled_cmp = 1; }
+                                if (op2 == Tok.PipePipe) { out2 = llvm_emit_logic_to_i32("or", a_id, b_id); handled_cmp = 1; }
+    
+                                if (handled_cmp == 0) {
+                                    build_err_at(file_idx, "unsupported operator", stasis.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                                out_kind2 = LlvmValueKind.I32;
+                            }
+                        } else {
+                            if (a_kind == LlvmValueKind.F32) {
+                                if (op2 == Tok.Plus || op2 == Tok.Minus || op2 == Tok.Star || op2 == Tok.Slash || op2 == Tok.Percent) {
+                                    out2 = llvm_new_tmp();
+                                    ascii_append(stasis.ir_out, "  ");
+                                    llvm_append_tmp(out2);
+                                    ascii_append(stasis.ir_out, " = ");
+                                    if (op2 == Tok.Plus) { ascii_append(stasis.ir_out, "fadd"); }
+                                    if (op2 == Tok.Minus) { ascii_append(stasis.ir_out, "fsub"); }
+                                    if (op2 == Tok.Star) { ascii_append(stasis.ir_out, "fmul"); }
+                                    if (op2 == Tok.Slash) { ascii_append(stasis.ir_out, "fdiv"); }
+                                    if (op2 == Tok.Percent) { ascii_append(stasis.ir_out, "frem"); }
+                                    ascii_append(stasis.ir_out, " float ");
+                                    llvm_append_tmp(a_id);
+                                    ascii_append(stasis.ir_out, ", ");
+                                    llvm_append_tmp(b_id);
+                                    ascii_append(stasis.ir_out, "\n");
+                                    out_kind2 = LlvmValueKind.F32;
+                                } else {
+                                    let handled_fcmp: i32 = 0;
+                                    if (op2 == Tok.EqualEqual) { out2 = llvm_emit_fcmp_to_i32("oeq", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.BangEqual) { out2 = llvm_emit_fcmp_to_i32("one", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.Less) { out2 = llvm_emit_fcmp_to_i32("olt", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.LessEqual) { out2 = llvm_emit_fcmp_to_i32("ole", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.Greater) { out2 = llvm_emit_fcmp_to_i32("ogt", a_id, b_id); handled_fcmp = 1; }
+                                    if (op2 == Tok.GreaterEqual) { out2 = llvm_emit_fcmp_to_i32("oge", a_id, b_id); handled_fcmp = 1; }
+    
+                                    if (handled_fcmp == 0) {
+                                        build_err_at(file_idx, "unsupported operator (float)", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+                                    out_kind2 = LlvmValueKind.I32;
+                                }
+                            } else {
+                                build_err_at(file_idx, "invalid binary operand type", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                        }
+    
+                        stasis.expr_op_at[val_len] = out2;
+                        stasis.llvm_val_kind[val_len] = out_kind2;
+                        stasis.llvm_val_struct_idx[val_len] = -1;
+                        val_len = val_len + 1;
+                    } else {
+                        if (kind2 == ExprKind.Assign) {
+                            if (mode2 != 0) {
+                                build_err_at(file_idx, "invalid assignment target", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+                            if (val_len < 2) {
+                                build_err_at(file_idx, "invalid assignment expression", stasis.expr_nodes[idx2].at);
+                                return -1;
+                            }
+    
+                            let rhs_id: i32 = stasis.expr_op_at[val_len - 1];
+                            let rhs_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 1];
+                            let lhs_ptr: i32 = stasis.expr_op_at[val_len - 2];
+                            let lhs_kind: LlvmValueKind = stasis.llvm_val_kind[val_len - 2];
+                            val_len = val_len - 2;
+     
+                            let aop: Tok = stasis.expr_nodes[idx2].op;
+                            if (lhs_kind == LlvmValueKind.Void) {
+                                if (aop != Tok.Equal) {
+                                    build_err_at(file_idx, "unsupported discard assignment operator", stasis.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                                stasis.expr_op_at[val_len] = rhs_id;
+                                stasis.llvm_val_kind[val_len] = rhs_kind;
+                                stasis.llvm_val_struct_idx[val_len] = -1;
+                                val_len = val_len + 1;
+                            } else {
+                            if (lhs_kind == LlvmValueKind.I32) {
+                                if (rhs_kind != LlvmValueKind.I32) {
+                                    build_err_at(file_idx, "invalid assignment rhs (expected i32)", stasis.expr_nodes[idx2].at);
+                                    return -1;
+                                }
+                                if (aop == Tok.Equal) {
+                                    llvm_emit_store_i32_to_ptr(lhs_ptr, rhs_id);
+                                    stasis.expr_op_at[val_len] = rhs_id;
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                    stasis.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                } else {
+                                    let old_id: i32 = llvm_emit_load_i32_from_ptr(lhs_ptr);
+                                    let new_id: i32 = llvm_new_tmp();
+    
+                                    ascii_append(stasis.ir_out, "  ");
+                                    llvm_append_tmp(new_id);
+                                    ascii_append(stasis.ir_out, " = ");
+                                    if (aop == Tok.PlusEqual) { ascii_append(stasis.ir_out, "add"); }
+                                    if (aop == Tok.MinusEqual) { ascii_append(stasis.ir_out, "sub"); }
+                                    if (aop == Tok.StarEqual) { ascii_append(stasis.ir_out, "mul"); }
+                                    if (aop == Tok.SlashEqual) { ascii_append(stasis.ir_out, "sdiv"); }
+                                    if (aop == Tok.PercentEqual) { ascii_append(stasis.ir_out, "srem"); }
+                                    ascii_append(stasis.ir_out, " i32 ");
+                                    llvm_append_tmp(old_id);
+                                    ascii_append(stasis.ir_out, ", ");
+                                    llvm_append_tmp(rhs_id);
+                                    ascii_append(stasis.ir_out, "\n");
+    
+                                    llvm_emit_store_i32_to_ptr(lhs_ptr, new_id);
+                                    stasis.expr_op_at[val_len] = new_id;
+                                    stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                    stasis.llvm_val_struct_idx[val_len] = -1;
+                                    val_len = val_len + 1;
+                                }
+                            } else {
+                                if (lhs_kind == LlvmValueKind.I8) {
+                                    if (rhs_kind != LlvmValueKind.I32) {
+                                        build_err_at(file_idx, "invalid assignment rhs (expected i32)", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+                                    if (aop == Tok.Equal) {
+                                        llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, rhs_id);
+                                        stasis.expr_op_at[val_len] = rhs_id;
+                                        stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        stasis.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    } else {
+                                        let old_id2: i32 = llvm_emit_load_i8_zext_from_ptr(lhs_ptr);
+                                        let new_id2: i32 = llvm_new_tmp();
+    
+                                        ascii_append(stasis.ir_out, "  ");
+                                        llvm_append_tmp(new_id2);
+                                        ascii_append(stasis.ir_out, " = ");
+                                        if (aop == Tok.PlusEqual) { ascii_append(stasis.ir_out, "add"); }
+                                        if (aop == Tok.MinusEqual) { ascii_append(stasis.ir_out, "sub"); }
+                                        if (aop == Tok.StarEqual) { ascii_append(stasis.ir_out, "mul"); }
+                                        if (aop == Tok.SlashEqual) { ascii_append(stasis.ir_out, "sdiv"); }
+                                        if (aop == Tok.PercentEqual) { ascii_append(stasis.ir_out, "srem"); }
+                                        ascii_append(stasis.ir_out, " i32 ");
+                                        llvm_append_tmp(old_id2);
+                                        ascii_append(stasis.ir_out, ", ");
+                                        llvm_append_tmp(rhs_id);
+                                        ascii_append(stasis.ir_out, "\n");
+    
+                                        llvm_emit_store_i8_trunc_to_ptr(lhs_ptr, new_id2);
+                                        stasis.expr_op_at[val_len] = new_id2;
+                                        stasis.llvm_val_kind[val_len] = LlvmValueKind.I32;
+                                        stasis.llvm_val_struct_idx[val_len] = -1;
+                                        val_len = val_len + 1;
+                                    }
+                                } else {
+                                    if (lhs_kind == LlvmValueKind.F32) {
+                                        if (rhs_kind != LlvmValueKind.F32) {
+                                            build_err_at(file_idx, "invalid assignment rhs (expected f32)", stasis.expr_nodes[idx2].at);
+                                            return -1;
+                                        }
+
+                                        if (aop == Tok.Equal) {
+                                            llvm_emit_store_f32_to_ptr(lhs_ptr, rhs_id);
+                                            stasis.expr_op_at[val_len] = rhs_id;
+                                            stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                            stasis.llvm_val_struct_idx[val_len] = -1;
+                                            val_len = val_len + 1;
+                                        } else {
+                                            let old_f: i32 = llvm_emit_load_f32_from_ptr(lhs_ptr);
+                                            let new_f: i32 = llvm_new_tmp();
+
+                                            ascii_append(stasis.ir_out, "  ");
+                                            llvm_append_tmp(new_f);
+                                            ascii_append(stasis.ir_out, " = ");
+                                            if (aop == Tok.PlusEqual) { ascii_append(stasis.ir_out, "fadd"); } else {
+                                                if (aop == Tok.MinusEqual) { ascii_append(stasis.ir_out, "fsub"); } else {
+                                                    if (aop == Tok.StarEqual) { ascii_append(stasis.ir_out, "fmul"); } else {
+                                                        if (aop == Tok.SlashEqual) { ascii_append(stasis.ir_out, "fdiv"); } else {
+                                                            if (aop == Tok.PercentEqual) { ascii_append(stasis.ir_out, "frem"); } else {
+                                                            build_err_at(file_idx, "unsupported assignment operator (f32)", stasis.expr_nodes[idx2].at);
+                                                            return -1;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            ascii_append(stasis.ir_out, " float ");
+                                            llvm_append_tmp(old_f);
+                                            ascii_append(stasis.ir_out, ", ");
+                                            llvm_append_tmp(rhs_id);
+                                            ascii_append(stasis.ir_out, "\n");
+
+                                            llvm_emit_store_f32_to_ptr(lhs_ptr, new_f);
+                                            stasis.expr_op_at[val_len] = new_f;
+                                            stasis.llvm_val_kind[val_len] = LlvmValueKind.F32;
+                                            stasis.llvm_val_struct_idx[val_len] = -1;
+                                            val_len = val_len + 1;
+                                        }
+                                    } else {
+                                        build_err_at(file_idx, "unsupported assignment target", stasis.expr_nodes[idx2].at);
+                                        return -1;
+                                    }
+                                }
+                            }
+                            }
+                        } else {
+                            build_err_at(file_idx, "unsupported expression", stasis.expr_nodes[idx2].at);
+                            return -1;
+                        }
+                    }
+                }
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+    return val_len;
+}

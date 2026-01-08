@@ -78,6 +78,23 @@ public sealed class SemanticAnalyzer
         AddSymbol("read_char", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
         AddSymbol("read_int", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
 
+        // System functions (sys_*): standalone CLI support (argv, file I/O, process execution).
+        AddSymbol("sys_argc", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_argv", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_read_file", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_list_dir", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_write_file", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("sys_file_exists", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
+        AddSymbol("sys_file_size", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_file_mtime_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_exec", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_spawn", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_spawn_async", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_sleep_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_delete_file", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+        AddSymbol("sys_flush", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+
         // Legacy math functions (to be renamed to math_*)
         AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
         AddSymbol("cos", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
@@ -1008,6 +1025,7 @@ public sealed class SemanticAnalyzer
                 return lit.Literal.Kind switch
                 {
                     TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                    TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                     TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                     TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
                     TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
@@ -1232,7 +1250,7 @@ public sealed class SemanticAnalyzer
     private static bool TryGetIntegerLiteralValue(ExpressionSyntax expr, out long value)
     {
         if (expr is LiteralExpressionSyntax lit &&
-            lit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (lit.Literal.Kind == TokenKind.IntegerLiteral || lit.Literal.Kind == TokenKind.U8Literal) &&
             long.TryParse(lit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
         {
             value = parsed;
@@ -1242,7 +1260,7 @@ public sealed class SemanticAnalyzer
         if (expr is UnaryExpressionSyntax unary &&
             unary.OperatorToken.Kind == TokenKind.Minus &&
             unary.Operand is LiteralExpressionSyntax innerLit &&
-            innerLit.Literal.Kind == TokenKind.IntegerLiteral &&
+            (innerLit.Literal.Kind == TokenKind.IntegerLiteral || innerLit.Literal.Kind == TokenKind.U8Literal) &&
             long.TryParse(innerLit.Literal.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var innerParsed))
         {
             value = -innerParsed;

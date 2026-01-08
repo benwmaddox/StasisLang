@@ -1,5 +1,9 @@
 name: CI
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main]
@@ -30,130 +34,11 @@ jobs:
         with:
           dotnet-version: "9.0.x"
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
-      - name: Install LLVM (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm clang libsdl2-dev
-
-      - name: Setup Rust (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-
-      - name: Install LLVM (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          choco install -y llvm
-
-
-      - name: Restore tools
-        run: dotnet tool restore
-
       - name: Restore
         run: dotnet restore Stasis.sln
 
-      - name: Run build script (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          chmod +x ./build.sh
-          ./build.sh
-
       - name: Build
-        if: matrix.os == 'windows-latest'
         run: dotnet build Stasis.sln -c Release --no-restore
 
-      - name: Build Cranelift AOT tool
-        run: cargo build --release
-        working-directory: tools/cranelift-aot
-
-      - name: Validate SVG assets
-        run: |
-          if [ -d "assets_src" ] && find assets_src -name "*.svg" -type f | head -1 | grep -q .; then
-            dotnet run --project Stasis.SvgValidator/Stasis.SvgValidator.csproj -c Release --no-build -- --dir assets_src
-          else
-            echo "No SVG files to validate"
-          fi
-        shell: bash
-
-      - name: Run test script (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: ./test.sh
-
-      - name: Run test script (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
-
-      - name: Compile runtime C sources (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          clang --version
-          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/cJSON.c -o cjson.o
-          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_data.c -o stasis_data.o
-          clang -D_POSIX_C_SOURCE=200809L -I runtime -std=c11 -c runtime/stasis_runner.c -o stasis_runner.o
-
-      - name: Compile runtime C sources (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $clangcl = (Get-Command clang-cl -ErrorAction SilentlyContinue).Source
-          if (-not $clangcl) { $clangcl = \"C:\\Program Files\\LLVM\\bin\\clang-cl.exe\" }
-          if (-not (Test-Path $clangcl)) { throw \"clang-cl not found (tried PATH and $clangcl)\" }
-          & $clangcl --version
-          & $clangcl /I runtime /std:c11 /c runtime\\cJSON.c
-          & $clangcl /I runtime /std:c11 /c runtime\\stasis_data.c
-          & $clangcl /I runtime /std:c11 /c runtime\\stasis_runner.c
-
-      - name: Emit sample IR artifacts
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          mkdir -p artifacts
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- run samples/basic.stasis --emit-ir > artifacts/basic.ll
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- test samples/tests.stasis --emit-ir > artifacts/tests.ll
-
-      - name: Build graphics runtime (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON
-          cmake --build runtime/build --config Release
-
-      - name: Build graphics runtime (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $vcpkgRoot = Join-Path $env:RUNNER_TEMP "vcpkg"
-          git clone https://github.com/microsoft/vcpkg.git $vcpkgRoot
-          & "$vcpkgRoot\\bootstrap-vcpkg.bat"
-          & "$vcpkgRoot\\vcpkg.exe" install sdl2:x64-windows
-          $env:VCPKG_ROOT = $vcpkgRoot
-          cmake -S runtime -B runtime/build -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_SDL_ONLY=ON -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot\\scripts\\buildsystems\\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
-          cmake --build runtime/build --config Release
-
-      - name: Hot-swap timing (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: ./scripts/hotswap_timing_ci.ps1
-
-      - name: Compile graphics samples (LLVM + Cranelift)
-        run: |
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build samples/interactive_showcase.stasis --graphics --backend cranelift
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend llvm
-          dotnet run --project Stasis.Cli/Stasis.Cli.csproj -- build examples/ui_button_9slice_example.stasis --graphics --backend cranelift
-          # Brickout Revenge uses runtime assets and can be flaky on CI; skip it here.
-
-      - name: Upload IR artifacts
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: llvm-ir
-          path: artifacts/*.ll

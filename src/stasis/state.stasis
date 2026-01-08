@@ -1,0 +1,487 @@
+// Self-hosted compiler state.
+//
+// Stasis convention: prefer a single global struct that owns all static memory
+// needed by the program. This keeps memory layout deterministic and makes it
+// easy to reason about limits.
+
+// Token kinds (mirrors Stage0 TokenKind ordering, plus a few Stage1-only tokens).
+enum Tok {
+    Eof = 0,
+    Unknown = 1,
+
+    Identifier = 2,
+    IntegerLiteral = 3,
+    U8Literal = 4,
+    FloatLiteral = 5,
+    StringLiteral = 6,
+    BacktickLiteral = 7,
+    TrueKeyword = 8,
+    FalseKeyword = 9,
+
+    StructKeyword = 10,
+    EnumKeyword = 11,
+    GlobalKeyword = 12,
+    ConstKeyword = 13,
+    FunctionKeyword = 14,
+    ExportKeyword = 15,
+    TestKeyword = 16,
+    ReturnKeyword = 17,
+    LetKeyword = 18,
+    IfKeyword = 19,
+    ElseKeyword = 20,
+    ForKeyword = 21,
+    ForeachKeyword = 22,
+    InKeyword = 23,
+
+    Dot = 24,
+    Plus = 25,
+    Minus = 26,
+    Star = 27,
+    Slash = 28,
+    Percent = 29,
+    PlusEqual = 30,
+    MinusEqual = 31,
+    StarEqual = 32,
+    SlashEqual = 33,
+    PercentEqual = 34,
+    AmpAmp = 35,
+    PipePipe = 36,
+    Less = 37,
+    LessEqual = 38,
+    Greater = 39,
+    GreaterEqual = 40,
+    Equal = 41,
+    EqualEqual = 42,
+    BangEqual = 43,
+    Colon = 44,
+    Bang = 45,
+    At = 46,
+
+    LParen = 47,
+    RParen = 48,
+    LBrace = 49,
+    RBrace = 50,
+    LBracket = 51,
+    RBracket = 52,
+    Comma = 53,
+    Semicolon = 54,
+
+    ImportKeyword = 55,
+
+    // Internal/pseudo tokens (not emitted by the lexer).
+    UnaryMinus = 56,
+    CallStart = 57,
+    IndexStart = 58
+}
+
+enum SymKind {
+    Struct = 1,
+    Enum = 2,
+    Global = 3,
+    Const = 4,
+    Function = 5,
+    Test = 6
+}
+
+struct Sym {
+    kind: SymKind;
+    file_idx: i32;
+    name_off: i32;
+    name_len: i32;
+    name_at: i32;
+    is_exported: i32;
+}
+
+enum TypeKind {
+    Named = 1,
+    Array = 2
+}
+
+struct Type {
+    kind: TypeKind;
+    file_idx: i32;
+    start: i32;
+    len: i32;
+    elem: i32;
+    size: i32;
+}
+
+struct StructDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    fields_off: i32;
+    fields_len: i32;
+}
+
+struct StructField {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    type_idx: i32;
+}
+
+struct EnumDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    members_off: i32;
+    members_len: i32;
+}
+
+struct EnumMember {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    has_value: i32;
+    value: i32;
+}
+
+struct ParamDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    type_idx: i32;
+}
+
+struct FuncDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    sym_idx: i32;
+    params_off: i32;
+    params_len: i32;
+    ret_type_idx: i32;
+    body_start: i32;
+    is_test: i32;
+}
+
+struct GlobalDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    sym_idx: i32;
+    type_idx: i32;
+    has_init: i32;
+    init_start: i32;
+}
+
+struct ConstDecl {
+    file_idx: i32;
+    name_start: i32;
+    name_len: i32;
+    sym_idx: i32;
+    type_idx: i32;
+    init_start: i32;
+}
+
+struct File {
+    path_off: i32;
+    path_len: i32;
+    mod_off: i32;
+    mod_len: i32;
+    imports_off: i32;
+    imports_len: i32;
+    syms_off: i32;
+    syms_len: i32;
+    offset: i32;
+    len: i32;
+    mtime_ms: i32;
+}
+
+enum ExprKind {
+    IntLiteral = 1,
+    BoolLiteral = 2,
+    Name = 3,
+    Unary = 4,
+    Binary = 5,
+    Assign = 6,
+    Call = 7,
+    Member = 8,
+    Index = 9,
+    StringLiteral = 10,
+    FloatLiteral = 11
+}
+
+struct ExprNode {
+    kind: ExprKind;
+    file_idx: i32;
+    at: i32;
+    op: Tok;
+    left: i32;
+    right: i32;
+    value: i32;
+    name_start: i32;
+    name_len: i32;
+}
+
+enum LlvmBlockKind {
+    Plain = 1,
+    IfThen = 2,
+    IfElse = 3,
+    ForBody = 4,
+    ForeachBody = 5,
+    Function = 6
+}
+
+enum LlvmValueKind {
+    I32 = 1,
+    I8 = 2,
+    PtrI8 = 3,
+    PtrI32 = 4,
+    PtrStruct = 5,
+    Void = 6,
+    EnumType = 7,
+    F32 = 8,
+    PtrF32 = 9
+}
+
+enum MirValKind {
+    I32 = 1,
+    F32 = 2,
+    Ptr = 3,
+    Void = 4
+}
+
+enum MirInstKind {
+    // Values
+    ConstI32 = 1,
+    ConstF32 = 2,
+    AddI32 = 3,
+    SubI32 = 4,
+    MulI32 = 5,
+    DivI32 = 6,
+    RemI32 = 7,
+    NegI32 = 8,
+    NotI32 = 9,
+    IcmpI32 = 10,
+    LoadLocalI32 = 11,
+
+    // Side effects / control
+    StoreLocalI32 = 20,
+    RetI32 = 21,
+
+    // Control flow
+    Label = 30,
+    Br = 31,
+    BrCondI32 = 32
+}
+
+struct MirInst {
+    kind: MirInstKind;
+    at: i32;
+    result_kind: MirValKind;
+    a: i32;
+    b: i32;
+    c: i32;
+    imm_i32: i32;
+    imm_tok: Tok;
+}
+
+struct State {
+    // CLI scratch
+    cmd: ascii[64];
+    subcmd: ascii[64];
+    arg_entry: ascii[260];
+    arg_out: ascii[260];
+    arg_backend: ascii[16];
+    arg_module: ascii[96];
+    emit_ir: i32;
+    use_mir: i32;
+    llvm_emit_native_main: i32;
+    ir_out: ascii[33554432];
+    exec_cmd: ascii[4096];
+
+    // Test runner (directory traversal + file list)
+    test_dir_out: u8[1048577];
+    test_pool: u8[2097152];
+    test_pool_len: i32;
+    test_dirs_off: i32[2048];
+    test_dirs_len: i32[2048];
+    test_dirs_sp: i32;
+    test_files_off: i32[4096];
+    test_files_len: i32[4096];
+    test_files_count: i32;
+    test_run_seq: i32;
+
+    // Resolver scratch (import graph traversal).
+    resolve_stack: i32[4096];
+    resolve_seen_epoch: i32[4096];
+    resolve_epoch: i32;
+    resolve_sp: i32;
+
+    // Watch mode scratch (incremental file reload).
+    watch_imports_tmp: i32[1024];
+    watch_imports_tmp_len: i32;
+
+    // Watch hot-swap
+    watch_hot_fps: i32;
+    watch_hot_runner_pid: i32;
+    watch_hot_flip: i32;
+    watch_hot_ms_emit: i32;
+    watch_hot_ms_link: i32;
+    watch_hot_ms_swap_write: i32;
+    watch_hot_ms_total: i32;
+    watch_hot_runner_path: ascii[260];
+    watch_hot_swap_file: ascii[260];
+    watch_hot_ir_path: ascii[260];
+    watch_hot_dll_a: ascii[260];
+    watch_hot_dll_b: ascii[260];
+    watch_hot_log_out: ascii[260];
+    watch_hot_log_err: ascii[260];
+
+    // Import/source graph
+    files: File[300];
+    file_count: i32;
+
+    // Source bytes pool. Sized to allow MAX_FILES (300) at MAX_FILE_BYTES (1 MiB) each, plus slack.
+    pool: u8[335544320];
+    pool_len: i32;
+
+    path_pool: u8[90000];
+    path_pool_len: i32;
+
+    mod_pool: u8[20000];
+    mod_pool_len: i32;
+
+    imports: i32[90000];
+    imports_len: i32;
+
+    read: u8[1048577];
+
+    scratch_import: ascii[260];
+    scratch_dir: ascii[260];
+    scratch_resolved: ascii[260];
+    scratch_runtime: ascii[260];
+    scratch_graphics: ascii[260];
+    scratch_graphics_dll: ascii[260];
+    scratch_exe: ascii[260];
+    scratch_watch_path: ascii[260];
+    scratch_out_dir: ascii[260];
+    scratch_mod: ascii[96];
+
+    path_norm_seg_starts: i32[96];
+
+    quiet: i32;
+
+    // Lexer (streaming)
+    lex_file_idx: i32;
+    lex_base: i32;
+    lex_len: i32;
+    lex_pos: i32;
+    lex_error_count: i32;
+    lex_error_printed: i32;
+    lex_quiet: i32;
+    lex_path: ascii[260];
+    tok_start: i32;
+    tok_len: i32;
+
+    // Parser (currently: balance check)
+    parse_stack_kind: Tok[4096];
+    parse_stack_start: i32[4096];
+    parse_stack_len: i32;
+    parse_path: ascii[260];
+    parse_quiet: i32;
+
+    // Expression parsing scratch (per-expression; reused across passes).
+    expr_nodes: ExprNode[16384];
+    expr_count: i32;
+    expr_call_args: i32[32768];
+    expr_call_args_len: i32;
+    expr_call_tmp_args: i32[32768];
+    expr_call_tmp_args_len: i32;
+    expr_call_callee: i32[4096];
+    expr_call_arg_off: i32[4096];
+    expr_call_arg_len: i32[4096];
+    expr_call_val_base: i32[4096];
+    expr_call_len: i32;
+    expr_index_base: i32[4096];
+    expr_index_val_base: i32[4096];
+    expr_index_at: i32[4096];
+    expr_index_len: i32;
+    expr_op_at: i32[4096];
+    expr_eval_failed: i32;
+
+    // Signature scan (top-level declarations)
+    sym_pool: u8[200000];
+    sym_pool_len: i32;
+    syms: Sym[20000];
+    sym_count: i32;
+    sig_kind: Tok;
+    sig_errors: i32;
+
+    // Types + decls (parsed from source)
+    types: Type[50000];
+    type_count: i32;
+
+    structs: StructDecl[2000];
+    struct_count: i32;
+    fields: StructField[50000];
+    field_count: i32;
+
+    enums: EnumDecl[2000];
+    enum_count: i32;
+    enum_members: EnumMember[50000];
+    enum_member_count: i32;
+
+    globals: GlobalDecl[20000];
+    global_count: i32;
+    consts: ConstDecl[20000];
+    const_count: i32;
+
+    funcs: FuncDecl[20000];
+    func_count: i32;
+    params: ParamDecl[50000];
+    param_count: i32;
+    sig_path: ascii[260];
+
+    // LLVM codegen scratch (minimal bring-up; grows over time).
+    llvm_local_name_start: i32[1024];
+    llvm_local_name_len: i32[1024];
+    llvm_local_declared: i32[1024];
+    llvm_local_declared_at: i32[1024];
+    llvm_local_kind: LlvmValueKind[1024];
+    llvm_local_struct_idx: i32[1024];
+    llvm_local_count: i32;
+    llvm_scope_sp: i32;
+    llvm_scope_mark: i32[256];
+    llvm_scope_local_id: i32[1024];
+    llvm_scope_local_len: i32;
+    llvm_tmp_id: i32;
+    llvm_label_id: i32;
+    llvm_bb_terminated: i32;
+    llvm_place_stack: i32[4096];
+    llvm_place_len: i32;
+    llvm_place_kind: LlvmValueKind;
+    llvm_place_struct_idx: i32;
+    llvm_val_kind: LlvmValueKind[4096];
+    llvm_val_struct_idx: i32[4096];
+    llvm_block_kind: LlvmBlockKind[256];
+    llvm_block_end_label: i32[256];
+    llvm_block_else_label: i32[256];
+    llvm_block_cond_label: i32[256];
+    llvm_block_step_label: i32[256];
+    llvm_block_has_step: i32[256];
+    llvm_block_step_start: i32[256];
+    llvm_block_step_file_idx: i32[256];
+    llvm_block_foreach_index_local: i32[256];
+    llvm_block_foreach_idx_phi_tmp: i32[256];
+    llvm_block_foreach_idx_next_tmp: i32[256];
+    llvm_block_len: i32;
+
+    // LLVM module-level scratch (string literals).
+    llvm_str_file_idx: i32[4096];
+    llvm_str_tok_start: i32[4096];
+    llvm_str_tok_len: i32[4096];
+    llvm_str_total_bytes: i32[4096];
+    llvm_str_byte_len: i32[4096];
+    llvm_str_char_len: i32[4096];
+    llvm_str_count: i32;
+
+    // MIR scratch (per-function; grows over time).
+    mir_insts: MirInst[131072];
+    mir_inst_count: i32;
+    mir_value_llvm_tmp: i32[131072];
+}
+
+global stasis: State;

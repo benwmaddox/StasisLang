@@ -229,11 +229,14 @@ public sealed class Lexer
     private void LexNumber(int start)
     {
         bool hasDot = false;
+        bool hasU8Suffix = false;
+        var digitsEnd = start;
         while (!IsAtEnd())
         {
             if (char.IsDigit(Current))
             {
                 Advance();
+                digitsEnd = _position;
                 continue;
             }
 
@@ -242,15 +245,29 @@ public sealed class Lexer
                 hasDot = true;
                 Advance(); // consume '.'
                 Advance(); // consume digit after '.'
+                digitsEnd = _position;
                 continue;
             }
 
             break;
         }
 
-        var text = _text[start.._position];
-        var kind = hasDot ? TokenKind.FloatLiteral : TokenKind.IntegerLiteral;
-        AddToken(kind, text, _position - start);
+        if (!hasDot && !IsAtEnd() && Current == 'u' && Peek == '8')
+        {
+            var afterIndex = _position + 2;
+            var after = afterIndex < _text.Length ? _text[afterIndex] : '\0';
+            if (after == '\0' || !(char.IsLetterOrDigit(after) || after == '_'))
+            {
+                hasU8Suffix = true;
+                Advance(); // 'u'
+                Advance(); // '8'
+            }
+        }
+
+        var rawLen = _position - start;
+        var digitsText = _text[start..digitsEnd];
+        var kind = hasDot ? TokenKind.FloatLiteral : hasU8Suffix ? TokenKind.U8Literal : TokenKind.IntegerLiteral;
+        AddToken(kind, digitsText, rawLen);
     }
 
     private void LexString(int start)

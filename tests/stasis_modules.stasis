@@ -1,0 +1,120 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stasis/imports.stasis";
+import "../src/stasis/signatures.stasis";
+import "../src/stasis/modules.stasis";
+
+global t_argv0: ascii[260];
+global t_exe_dir: ascii[260];
+
+global t_path_entry: ascii[260];
+global t_path_entry_shadow: ascii[260];
+global t_path_mod1: ascii[260];
+global t_path_mod2: ascii[260];
+
+global t_tmp: ascii[4096];
+
+function t_init_exe_dir(): bool {
+    let n: i32 = sys_argv(0, t_argv0, 260);
+    if (n <= 0) {
+        return false;
+    }
+    ascii_set_len(t_argv0, n);
+    path_dirname(t_exe_dir, t_argv0);
+    return !ascii_is_empty(t_exe_dir);
+}
+
+function t_append_line(buf: ascii[], text: ascii[]): void {
+    ascii_append(buf, text);
+    ascii_append_byte(buf, 10);
+}
+
+function t_append_import_line(buf: ascii[], rel_path: ascii[]): void {
+    ascii_append(buf, "import ");
+    ascii_append_byte(buf, 34); // '"'
+    ascii_append(buf, rel_path);
+    ascii_append_byte(buf, 34); // '"'
+    ascii_append_byte(buf, 59); // ';'
+    ascii_append_byte(buf, 10);
+}
+
+function t_write_ascii(path: ascii[], text: ascii[]): bool {
+    return sys_write_file(path, text, ascii_len(text));
+}
+
+function t_write_module_pair(): bool {
+    if (!t_init_exe_dir()) {
+        return false;
+    }
+
+    path_join(t_path_mod1, t_exe_dir, "stasis_mod1.stasis.inc");
+    path_join(t_path_mod2, t_exe_dir, "stasis_mod2.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(): i32 { return 0; }");
+    if (!t_write_ascii(t_path_mod1, t_tmp)) {
+        return false;
+    }
+
+    ascii_clear(t_tmp);
+    t_append_line(t_tmp, "function f(): i32 { return 1; }");
+    if (!t_write_ascii(t_path_mod2, t_tmp)) {
+        return false;
+    }
+
+    return true;
+}
+
+test `stasis import collision scan detects conflicts`() {
+    if (!t_write_module_pair()) {
+        return false;
+    }
+
+    path_join(t_path_entry, t_exe_dir, "stasis_entry_collision.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_import_line(t_tmp, "stasis_mod1.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod2.stasis.inc");
+    if (!t_write_ascii(t_path_entry, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    let rc: i32 = load_graph(t_path_entry);
+    if (rc != 0) {
+        return false;
+    }
+    let sig_errors: i32 = sig_scan_loaded_files();
+    if (sig_errors != 0) {
+        return false;
+    }
+    let collisions: i32 = check_import_member_collisions();
+    return collisions == 1;
+}
+
+test `stasis import collision scan ignores shadowed names`() {
+    if (!t_write_module_pair()) {
+        return false;
+    }
+
+    path_join(t_path_entry_shadow, t_exe_dir, "stasis_entry_shadow.stasis.inc");
+
+    ascii_clear(t_tmp);
+    t_append_import_line(t_tmp, "stasis_mod1.stasis.inc");
+    t_append_import_line(t_tmp, "stasis_mod2.stasis.inc");
+    t_append_line(t_tmp, "function f(): i32 { return 2; }");
+    if (!t_write_ascii(t_path_entry_shadow, t_tmp)) {
+        return false;
+    }
+
+    stasis.quiet = 1;
+    let rc: i32 = load_graph(t_path_entry_shadow);
+    if (rc != 0) {
+        return false;
+    }
+    let sig_errors: i32 = sig_scan_loaded_files();
+    if (sig_errors != 0) {
+        return false;
+    }
+    let collisions: i32 = check_import_member_collisions();
+    return collisions == 0;
+}

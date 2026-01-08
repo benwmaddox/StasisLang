@@ -1,0 +1,47 @@
+import "../stdlib/stdlib.stasis";
+import "state.stasis";
+import "imports.stasis";
+import "parsing.stasis";
+import "signatures.stasis";
+import "stmt_parse.stasis";
+import "modules.stasis";
+
+function check_loaded_files(): i32 {
+    stasis.parse_quiet = stasis.quiet;
+    let lex_errors: i32 = 0;
+    let parse_errors: i32 = 0;
+    let sig_errors: i32 = 0;
+    let stmt_errors: i32 = 0;
+    let import_collisions: i32 = 0;
+
+    let i: i32 = 0;
+    for (i = 0; i < stasis.file_count; i = i + 1) {
+        parse_errors = parse_errors + parse_balance_file(i);
+        lex_errors = lex_errors + stasis.lex_error_count;
+    }
+
+    sig_errors = sig_scan_loaded_files();
+    stmt_errors = stmt_parse_loaded_files();
+    import_collisions = check_import_member_collisions();
+
+    print_string("check: files=");
+    print_int(stasis.file_count);
+    print_string(" lex_errors=");
+    print_int(lex_errors);
+    print_string(" parse_errors=");
+    print_int(parse_errors);
+    print_string(" sig_errors=");
+    print_int(sig_errors);
+    print_string(" stmt_errors=");
+    print_int(stmt_errors);
+    print_string(" import_collisions=");
+    print_int(import_collisions);
+    print_char(10);
+
+    if (lex_errors != 0) { return 1; }
+    if (parse_errors != 0) { return 1; }
+    if (sig_errors != 0) { return 1; }
+    if (stmt_errors != 0) { return 1; }
+    return 0;
+}
+
