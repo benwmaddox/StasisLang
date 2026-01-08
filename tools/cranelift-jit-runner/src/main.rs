@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use cranelift_codegen::ir::{AbiParam, Signature};
+use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_codegen::isa::CallConv;
@@ -218,13 +218,25 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         let missing_restore = new_instance.restore_state(save_bytes);
                         let restore_us = t_restore.elapsed().as_micros() as u64;
 
+                        let mut swap_us = 0u64;
+                        if let Some(swap_fn) = new_instance.swap_fn
+                        {
+                            let t_swap = Instant::now();
+                            let rc = unsafe { swap_fn() };
+                            swap_us = t_swap.elapsed().as_micros() as u64;
+                            if rc != 0
+                            {
+                                return Ok(());
+                            }
+                        }
+
                         let bytes: usize = new_instance.state_globals.iter().map(|(_, sz)| *sz).sum();
                         let symbols = new_instance.state_globals.len();
 
                         // Report compile time as "load" to match existing timing parsers.
                         eprintln!(
-                            "HOTSWAP ok: save={}us load={}us tick=0us restore={}us bytes={} symbols={}",
-                            save_us, done.compile_us, restore_us, bytes, symbols
+                            "HOTSWAP ok: save={}us load={}us tick=0us restore={}us swap={}us bytes={} symbols={}",
+                            save_us, done.compile_us, restore_us, swap_us, bytes, symbols
                         );
                         eprintln!(
                             "HOTSWAP diag: gen={} compile={}us",
@@ -361,6 +373,7 @@ struct JitInstance
     module: JITModule,
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
+    swap_fn: Option<extern "C" fn() -> i32>,
     state_globals: Vec<(String, usize)>,
     data_ptrs: HashMap<String, usize>,
 }
@@ -369,6 +382,11 @@ impl JitInstance
 {
     fn compile(module_name: &str, entry_name: &str, tick_name: &str, clif: &str) -> Result<Self>
     {
+        fn is_tick_like(sig: &Signature) -> bool
+        {
+            sig.params.is_empty() && sig.returns.len() == 1 && sig.returns[0].value_type == types::I32
+        }
+
         let triple = Triple::host();
         let flags = build_flags("speed", &triple)?;
         let isa = cranelift_native::builder()
@@ -384,6 +402,8 @@ impl JitInstance
         let mut module = JITModule::new(jit_builder);
 
         let parsed = parse_stasis_clif(clif, default_cc).context("failed to parse stasis CLIF")?;
+        let swap_name = format!("{module_name}__swap");
+        let swap_sig_ok = parsed.functions.iter().any(|f| f.name == swap_name && is_tick_like(&f.signature));
 
         let mut data_ptrs = HashMap::new();
         let mut state_globals = Vec::new();
@@ -454,6 +474,17 @@ impl JitInstance
 
         let entry_ptr = module.get_finalized_function(entry_id);
         let tick_ptr = module.get_finalized_function(tick_id);
+        let swap_fn = if swap_sig_ok
+        {
+            function_ids
+                .get(&swap_name)
+                .map(|id| module.get_finalized_function(*id))
+                .map(|ptr| unsafe { std::mem::transmute(ptr) })
+        }
+        else
+        {
+            None
+        };
 
         Ok(JitInstance {
             module_name: module_name.to_string(),
@@ -462,6 +493,7 @@ impl JitInstance
             module,
             entry_fn: unsafe { std::mem::transmute(entry_ptr) },
             tick_fn: unsafe { std::mem::transmute(tick_ptr) },
+            swap_fn,
             state_globals,
             data_ptrs,
         })

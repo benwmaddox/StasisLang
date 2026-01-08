@@ -1336,6 +1336,8 @@ int main(int argc, char **argv)
     /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
     char tick_name[512];
     tick_name[0] = '\0';
+    char swap_name[512];
+    swap_name[0] = '\0';
     const char *sep = strstr(entry_name, "__");
     if (sep)
     {
@@ -1344,6 +1346,11 @@ int main(int argc, char **argv)
         {
             memcpy(tick_name, entry_name, prefix_len);
             memcpy(tick_name + prefix_len, "tick", 5);
+        }
+        if (prefix_len + 4 < sizeof(swap_name))
+        {
+            memcpy(swap_name, entry_name, prefix_len);
+            memcpy(swap_name + prefix_len, "swap", 5);
         }
     }
 
@@ -1432,6 +1439,7 @@ int main(int argc, char **argv)
                             long long load_us = 0;
                             long long tick_us = 0;
                             long long restore_us = 0;
+                            long long swap_us = 0;
                             if (state_map_path)
                             {
                                 buffer = (uint8_t *)malloc(total_bytes);
@@ -1500,18 +1508,6 @@ int main(int argc, char **argv)
                                 QueryPerformanceCounter(&sw_t1);
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
-                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
-                                fflush(stderr);
-                                if (missing_save > 0 || missing_restore > 0)
-                                {
-                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
-                                    fflush(stderr);
-                                }
-                            }
-                            else
-                            {
-                                fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
-                                fflush(stderr);
                             }
 
                             if (old_lib)
@@ -1524,6 +1520,40 @@ int main(int argc, char **argv)
 
                             /* Update DLL handle for data binding system */
                             stasis_data_set_dll(new_lib);
+
+                            if (swap_name[0] != '\0')
+                            {
+                                FARPROC swap_sym = GetProcAddress(new_lib, swap_name);
+                                if (swap_sym)
+                                {
+                                    stasis_tick_fn swap_fn = (stasis_tick_fn)swap_sym;
+                                    QueryPerformanceCounter(&sw_t0);
+                                    int swap_result = swap_fn();
+                                    QueryPerformanceCounter(&sw_t1);
+                                    swap_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                                    if (swap_result != 0)
+                                    {
+                                        result = swap_result == 1 ? 0 : swap_result;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (state_map_path)
+                            {
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus swap=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, swap_us, total_bytes, sym_count);
+                                fflush(stderr);
+                                if (missing_save > 0 || missing_restore > 0)
+                                {
+                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                    fflush(stderr);
+                                }
+                            }
+                            else
+                            {
+                                fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus swap=%lldus\n", load_us, tick_us, swap_us);
+                                fflush(stderr);
+                            }
                         }
                     }
 
@@ -1666,6 +1696,8 @@ int main(int argc, char **argv)
 
     char tick_name[512];
     tick_name[0] = '\0';
+    char swap_name[512];
+    swap_name[0] = '\0';
     void *tick_sym = NULL;
     size_t entry_len = strlen(entry_name);
     if (entry_len >= 4 && strcmp(entry_name + entry_len - 4, "main") == 0)
@@ -1675,6 +1707,11 @@ int main(int argc, char **argv)
         {
             memcpy(tick_name, entry_name, prefix_len);
             memcpy(tick_name + prefix_len, "tick", 5);
+        }
+        if (prefix_len + 4 < sizeof(swap_name))
+        {
+            memcpy(swap_name, entry_name, prefix_len);
+            memcpy(swap_name + prefix_len, "swap", 5);
         }
     }
     if (tick_name[0] != '\0')
@@ -1778,6 +1815,7 @@ int main(int argc, char **argv)
                     long long load_us = 0;
                     long long tick_us = 0;
                     long long restore_us = 0;
+                    long long swap_us = 0;
                     if (state_map_path)
                     {
                         buffer = (uint8_t *)malloc(total_bytes);
@@ -1841,7 +1879,35 @@ int main(int argc, char **argv)
                         clock_gettime(CLOCK_MONOTONIC, &t1);
                         restore_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                         free(buffer);
-                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                    }
+
+                    dlclose(lib);
+                    lib = new_lib;
+                    tick = (stasis_tick_fn)new_tick_sym;
+                    stasis_try_set_sys_args(lib, argc, argv);
+                    stasis_data_set_dll(new_lib);
+
+                    if (swap_name[0] != '\0')
+                    {
+                        void *swap_sym = dlsym(new_lib, swap_name);
+                        if (swap_sym)
+                        {
+                            stasis_tick_fn swap_fn = (stasis_tick_fn)swap_sym;
+                            clock_gettime(CLOCK_MONOTONIC, &t0);
+                            int swap_result = swap_fn();
+                            clock_gettime(CLOCK_MONOTONIC, &t1);
+                            swap_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+                            if (swap_result != 0)
+                            {
+                                result = swap_result == 1 ? 0 : swap_result;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (state_map_path)
+                    {
+                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus swap=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, swap_us, total_bytes, sym_count);
                         fflush(stderr);
                         if (missing_save > 0 || missing_restore > 0)
                         {
@@ -1851,15 +1917,9 @@ int main(int argc, char **argv)
                     }
                     else
                     {
-                        fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                        fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus swap=%lldus\n", load_us, tick_us, swap_us);
                         fflush(stderr);
                     }
-
-                    dlclose(lib);
-                    lib = new_lib;
-                    tick = (stasis_tick_fn)new_tick_sym;
-                    stasis_try_set_sys_args(lib, argc, argv);
-                    stasis_data_set_dll(new_lib);
                 }
             }
 

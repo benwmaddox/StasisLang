@@ -13,3 +13,8 @@ function tick(): i32 {
     return 0;
 }
 
+function swap(): i32 {
+    print_string("swap\n");
+    return 0;
+}
+

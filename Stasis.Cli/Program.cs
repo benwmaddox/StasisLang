@@ -3033,7 +3033,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             }
             phase.Restart();
 
-            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
+            var hotSwapExports = new List<string> { $"{moduleName}__main", $"{moduleName}__tick" };
+            if (ContainsTopLevelFunction(parse.CompilationUnit, "swap"))
+            {
+                hotSwapExports.Add($"{moduleName}__swap");
+            }
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, hotSwapExports, excludeSpriteFields: false, out var plan))
             {
                 return 1;
             }
