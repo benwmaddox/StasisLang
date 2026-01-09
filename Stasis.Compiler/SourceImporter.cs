@@ -40,7 +40,7 @@ public static class SourceImporter
             {
                 var lineLength = index - lineStart;
                 var line = source.Substring(lineStart, lineLength).TrimEnd('\r');
-                if (TryParseImport(line, out var importPath))
+                if (TryParseImportLine(line, out var importPath))
                 {
                     var baseDir = Path.GetDirectoryName(fullPath) ?? string.Empty;
                     var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
@@ -91,7 +91,7 @@ public static class SourceImporter
         }
     }
 
-    private static bool TryParseImport(string line, out string path)
+    public static bool TryParseImportLine(string line, out string path)
     {
         path = string.Empty;
         var trimmed = line.Trim();

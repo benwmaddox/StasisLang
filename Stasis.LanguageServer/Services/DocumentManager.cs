@@ -155,7 +155,7 @@ public class DocumentManager
                 var lineText = source.Substring(lineStart, lineLength);
                 var trimmedLine = lineText.TrimEnd('\r');
 
-                if (TryParseImportLine(trimmedLine, out var importPath))
+                if (SourceImporter.TryParseImportLine(trimmedLine, out var importPath))
                 {
                     var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
 
@@ -248,7 +248,7 @@ public class DocumentManager
                 var trimmedLine = lineText.TrimEnd('\r');
                 var hasCarriageReturn = lineText.EndsWith('\r');
 
-                if (TryParseImportLine(trimmedLine, out _))
+                if (SourceImporter.TryParseImportLine(trimmedLine, out _))
                 {
                     sb.Append(' ', trimmedLine.Length);
                     if (hasCarriageReturn)
@@ -273,33 +273,6 @@ public class DocumentManager
         }
 
         return sb.ToString();
-    }
-
-    private static bool TryParseImportLine(string line, out string importPath)
-    {
-        importPath = string.Empty;
-
-        var trimmed = line.Trim();
-        if (!trimmed.StartsWith("import", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        var remainder = trimmed.Substring("import".Length).TrimStart();
-        if (remainder.Length < 2 || remainder[0] != '"')
-        {
-            return false;
-        }
-
-        var endQuote = remainder.IndexOf('"', 1);
-        if (endQuote < 0)
-        {
-            return false;
-        }
-
-        importPath = remainder.Substring(1, endQuote - 1);
-        var tail = remainder.Substring(endQuote + 1).Trim();
-        return tail.Length == 0 || tail == ";";
     }
 
     public IReadOnlyList<DocumentState> GetAllDocuments()
