@@ -15,6 +15,11 @@ pushd runtime
 call build.bat
 if errorlevel 1 (
   popd
+  echo.
+  echo Runtime build failed.
+  echo - Ensure CMake, vcpkg, and VS Build Tools are installed ^(see README.md^).
+  echo - If runtime/build was configured with a different generator, set STASIS_CLEAN_RUNTIME_BUILD=1.
+  echo - To skip runtime build ^(no graphics^), set STASIS_SKIP_RUNTIME=1.
   exit /b 1
 )
 popd
