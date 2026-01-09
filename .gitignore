@@ -32,6 +32,10 @@ runtime/build/
 codevcpkg/
 build/hotstate/
 build/aot/
+build/wasm/
+
+# WASM prototype outputs
+examples/wasm/**/*.wasm
 
 # Android local build outputs
 android/out/

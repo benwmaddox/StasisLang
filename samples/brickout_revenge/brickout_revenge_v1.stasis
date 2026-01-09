@@ -367,6 +367,77 @@ function apply_config_live(): void {
     }
 }
 
+function ensure_config_loaded(): void {
+    if (state.config.magic == 1337) {
+        return;
+    }
+
+    // Fallback defaults for hosts that don't provide JSON data binding (e.g. WASM prototype).
+    state.config.magic = 1337;
+
+    state.config.screen.w = 600;
+    state.config.screen.h = 1200;
+
+    state.config.grid.origin_x = 50.0;
+    state.config.grid.margin_bottom = 50.0;
+    state.config.grid.spacing = 5.0;
+
+    state.config.brick.width = 60.0;
+    state.config.brick.height = 20.0;
+
+    state.config.paddle.y = 30.0;
+    state.config.paddle.width = 100.0;
+    state.config.paddle.height = 10.0;
+    state.config.paddle.speed = 400.0;
+
+    state.config.ball.radius = 6.0;
+    state.config.ball.spawn_jitter_x = 30.0;
+    state.config.ball.clamp_margin_x = 100.0;
+    state.config.ball.vx_rand = 100.0;
+    state.config.ball.speed_min_base = 150.0;
+    state.config.ball.speed_min_per_wave = 10.0;
+    state.config.ball.speed_max_base = 250.0;
+    state.config.ball.speed_max_per_wave = 12.0;
+    state.config.ball.damage_base = 1;
+    state.config.ball.damage_wave_div = 4;
+    state.config.ball.hp_base = 20;
+    state.config.ball.hp_wave_div = 2;
+    state.config.ball.hp_scale = 10;
+
+    state.config.wave.start_wave = 1;
+    state.config.wave.start_max_balls_wave = 5;
+    state.config.wave.max_balls_wave_add = 2;
+    state.config.wave.start_spawn_balls = 90;
+
+    state.config.timing.ball_spawn_cd_ms = 1000;
+    state.config.timing.end_phase_restart_ms = 3000;
+
+    state.config.fx.jiggle_threshold = 10;
+    state.config.fx.jiggle_degrees = 5.0;
+    state.config.fx.paddle_aim_degrees = 15.0;
+    state.config.fx.paddle_bounce_vx_scale = 200.0;
+
+    state.config.tower_basic.range = 140.0;
+    state.config.tower_basic.cooldown_ms = 220;
+    state.config.tower_basic.damage = 1;
+    state.config.tower_basic.shot_fx_ms = 90;
+
+    state.config.tower_armored.range = 160.0;
+    state.config.tower_armored.cooldown_ms = 320;
+    state.config.tower_armored.damage = 2;
+    state.config.tower_armored.shot_fx_ms = 90;
+
+    state.config.tower_reflector.range = 190.0;
+    state.config.tower_reflector.cooldown_ms = 180;
+    state.config.tower_reflector.damage = 1;
+    state.config.tower_reflector.shot_fx_ms = 90;
+
+    state.config.score.ball_kill = 1;
+    state.config.score.brick_kill = 10;
+
+    print_string("warning: config.json not bound; using fallback defaults\n");
+}
+
 function sfx_reset(): void {
     let i: i32 = 0;
     for (i = 0; i < SFX_MAX_VOICES; i = i + 1) {
@@ -2197,13 +2268,7 @@ function draw_drag_preview(): void {
 }
 
 function main(): i32 {
-    // Require JSON data binding: this sample expects to be run under the native runner so
-    // `samples/brickout_revenge/data/config.json` is applied to `state.config` before main().
-    if (state.config.magic != 1337) {
-        print_string("error: brickout config.json not bound (expected state.config.magic == 1337)\n");
-        print_string("run: .\\stasis.bat run samples/brickout_revenge/brickout_revenge.stasis --backend cranelift --graphics\n");
-        return 1;
-    }
+    ensure_config_loaded();
 
     print_string("Brickout config loaded (magic=1337)\n");
     print_string("screen.w=");
@@ -2253,7 +2318,8 @@ function main(): i32 {
     state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == 0) {
-        seed_rng(time());
+        // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
+        seed_rng(get_time_ms());
         init_game(true);
         setup_default_bricks();
         start_wave();

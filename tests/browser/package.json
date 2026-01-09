@@ -1,0 +1,11 @@
+{
+  "name": "stasis-browser-tests",
+  "private": true,
+  "version": "0.0.0",
+  "devDependencies": {
+    "@playwright/test": "1.57.0"
+  },
+  "scripts": {
+    "test": "playwright test"
+  }
+}
