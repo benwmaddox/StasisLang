@@ -17,6 +17,53 @@ namespace Stasis.LanguageServer.Tests;
 public sealed class LspCompletionTests
 {
     [Fact]
+    public async Task CompletesImportedStructMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_lsp_import_completion_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "types.stasis");
+            File.WriteAllText(importedPath, string.Join("\n", new[]
+            {
+                "struct Foo {",
+                "    a: i32;",
+                "    b: i32;",
+                "}"
+            }));
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var document = string.Join("\n", new[]
+            {
+                "import \"types.stasis\";",
+                "",
+                "global foo: Foo;",
+                "",
+                "function main(): i32 {",
+                "    foo.",
+                "    return 0;",
+                "}"
+            });
+
+            var uri = new Uri(entryPath).AbsoluteUri;
+            var position = GetPositionAfter(document, "foo.");
+
+            await using var harness = await LspTestHarness.StartAsync(cts.Token);
+            await harness.InitializeAsync(cts.Token);
+            await harness.DidOpenAsync(uri, document, cts.Token);
+
+            var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+            Assert.Contains("a", labels);
+            Assert.Contains("b", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CompletesGlobalStructMembersAfterDot()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
