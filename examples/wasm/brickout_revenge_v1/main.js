@@ -5,6 +5,12 @@ const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const logEl = document.getElementById("log");
 const startBtn = document.getElementById("start");
 
+window.__stasisWasmHost = {
+  started: false,
+  tickCount: 0,
+  lastTickResult: 0,
+};
+
 function log(line) {
   console.log(line);
   logEl.textContent += line + "\n";
@@ -362,6 +368,8 @@ async function start() {
     return;
   }
 
+  window.__stasisWasmHost.started = true;
+
   const tickHz = 60;
   const tickMs = 1000 / tickHz;
   let last = performance.now();
@@ -376,6 +384,8 @@ async function start() {
     while (acc >= tickMs && steps < 5) {
       snapPointers();
       const t = exports.tick() | 0;
+      window.__stasisWasmHost.tickCount++;
+      window.__stasisWasmHost.lastTickResult = t;
       clearPointerEdges();
       quitRequested = false;
       if (t !== 0) {
