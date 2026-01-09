@@ -5,6 +5,20 @@ call "%~dp0..\env.bat"
 
 echo Building Stasis Graphics Runtime Library (static+shared)...
 
+:: Allow skipping runtime build for environments without native toolchain/vcpkg.
+if /I "%STASIS_SKIP_RUNTIME%"=="1" (
+    echo NOTE: STASIS_SKIP_RUNTIME=1 set; skipping runtime build.
+    exit /b 0
+)
+
+:: Preflight checks for common failure modes.
+where cmake >nul 2>nul
+if errorlevel 1 (
+    echo Error: cmake not found in PATH.
+    echo Install CMake and ensure it is available on PATH, or set STASIS_SKIP_RUNTIME=1.
+    exit /b 1
+)
+
 :: Check for vcpkg - try common locations
 if not defined VCPKG_ROOT (
     if exist "C:\code\vcpkg\vcpkg.exe" (
@@ -27,17 +41,51 @@ if "%VCPKG_TRIPLET%"=="" (
 :: Install SDL2 + GLEW for the chosen triplet
 echo Checking for SDL2/GLEW with triplet %VCPKG_TRIPLET%...
 %VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% glew:%VCPKG_TRIPLET% --recurse
+if %ERRORLEVEL% neq 0 (
+    echo Error: vcpkg install failed.
+    exit /b 1
+)
+
+:: Default generator: Visual Studio 2022. Override via STASIS_CMAKE_GENERATOR (e.g. "Ninja").
+if "%STASIS_CMAKE_GENERATOR%"=="" (
+    set "STASIS_CMAKE_GENERATOR=Visual Studio 17 2022"
+)
 
 :: Create build directory
+if /I "%STASIS_CLEAN_RUNTIME_BUILD%"=="1" (
+    if exist build (
+        echo Cleaning runtime build directory...
+        rmdir /s /q build
+    )
+)
 if not exist build mkdir build
 cd build
 
+:: If there's an existing cache with a different generator, configure will fail. Emit a helpful hint.
+if exist CMakeCache.txt (
+    for /f "tokens=2 delims==" %%G in ('findstr /b /c:"CMAKE_GENERATOR:INTERNAL=" CMakeCache.txt 2^>nul') do (
+        set "CACHE_GEN=%%G"
+    )
+    if defined CACHE_GEN (
+        if not "%CACHE_GEN%"=="" if /I not "%CACHE_GEN%"=="%STASIS_CMAKE_GENERATOR%" (
+            echo NOTE: runtime/build was configured with generator "%CACHE_GEN%".
+            echo NOTE: current generator is "%STASIS_CMAKE_GENERATOR%".
+            echo NOTE: Delete runtime/build or set STASIS_CLEAN_RUNTIME_BUILD=1 to reconfigure.
+        )
+    )
+)
+
 :: Configure with CMake
 echo Configuring...
-cmake .. -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
+if /I "%STASIS_CMAKE_GENERATOR%"=="Ninja" (
+    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
+) else (
+    cmake .. -G "%STASIS_CMAKE_GENERATOR%" -A x64 -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% -DSTASIS_GRAPHICS_BUILD_STATIC=ON -DSTASIS_GRAPHICS_BUILD_SHARED=ON
+)
 
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed.
+    echo Hint: if this is a generator mismatch, delete runtime\\build or set STASIS_CLEAN_RUNTIME_BUILD=1.
     exit /b 1
 )
 
