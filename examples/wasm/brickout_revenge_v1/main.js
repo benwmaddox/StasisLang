@@ -20,10 +20,11 @@ function resizeCanvas(w, h) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function readCString(memU8, ptr) {
+function readCString(memU8, ptr, cap = 4096) {
   ptr = ptr >>> 0;
   let s = "";
-  for (let i = ptr; i < memU8.length; i++) {
+  const end = Math.min(memU8.length, ptr + cap);
+  for (let i = ptr; i < end; i++) {
     const b = memU8[i];
     if (b === 0) break;
     s += String.fromCharCode(b);
@@ -34,6 +35,36 @@ function readCString(memU8, ptr) {
 function i32ToSigned(x) {
   x = x | 0;
   return x;
+}
+
+function scorePrintableAscii(s) {
+  let score = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 9 || c === 10 || c === 13) score += 1;
+    else if (c >= 32 && c <= 126) score += 2;
+    else score -= 5;
+  }
+  return score;
+}
+
+function readMaybeStasisString(memU8, ptr) {
+  const candidates = [
+    readCString(memU8, ptr, 4096),
+    readCString(memU8, (ptr + 4) | 0, 4096), // ascii[N] payload
+    readCString(memU8, (ptr + 8) | 0, 4096), // utf8[N] payload
+  ];
+  let best = candidates[0];
+  let bestScore = scorePrintableAscii(best);
+  for (let i = 1; i < candidates.length; i++) {
+    const s = candidates[i];
+    const sc = scorePrintableAscii(s);
+    if (sc > bestScore) {
+      bestScore = sc;
+      best = s;
+    }
+  }
+  return best;
 }
 
 async function start() {
@@ -53,6 +84,104 @@ async function start() {
   let canvasW = 600;
   let canvasH = 1200;
   resizeCanvas(canvasW, canvasH);
+
+  const pointerState = new Map(); // pointerId -> { id, x, y, down, wentDown, wentUp }
+  let pointerSnapshot = [];
+
+  function snapPointers() {
+    const arr = [];
+    for (const p of pointerState.values()) {
+      if (p.down || p.wentDown || p.wentUp) arr.push(p);
+    }
+    arr.sort((a, b) => a.id - b.id);
+    pointerSnapshot = arr;
+  }
+
+  function clearPointerEdges() {
+    for (const p of pointerState.values()) {
+      p.wentDown = false;
+      p.wentUp = false;
+    }
+    for (const [id, p] of pointerState.entries()) {
+      if (!p.down) pointerState.delete(id);
+    }
+  }
+
+  function canvasToGamePx(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+    const x = ((clientX - rect.left) / rect.width) * canvasW;
+    const y = ((clientY - rect.top) / rect.height) * canvasH;
+    return { x, y };
+  }
+
+  canvas.tabIndex = 0;
+  canvas.style.touchAction = "none";
+
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.focus();
+    const pos = canvasToGamePx(e.clientX, e.clientY);
+    const id = e.pointerId | 0;
+    let p = pointerState.get(id);
+    if (!p) {
+      p = { id, x: pos.x, y: pos.y, down: true, wentDown: true, wentUp: false };
+      pointerState.set(id, p);
+    } else {
+      p.x = pos.x;
+      p.y = pos.y;
+      p.down = true;
+      p.wentDown = true;
+    }
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    e.preventDefault();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    const id = e.pointerId | 0;
+    const p = pointerState.get(id);
+    if (!p) return;
+    const pos = canvasToGamePx(e.clientX, e.clientY);
+    p.x = pos.x;
+    p.y = pos.y;
+    e.preventDefault();
+  });
+
+  function pointerUpLike(e) {
+    const id = e.pointerId | 0;
+    const p = pointerState.get(id);
+    if (!p) return;
+    const pos = canvasToGamePx(e.clientX, e.clientY);
+    p.x = pos.x;
+    p.y = pos.y;
+    p.down = false;
+    p.wentUp = true;
+    e.preventDefault();
+  }
+
+  canvas.addEventListener("pointerup", pointerUpLike);
+  canvas.addEventListener("pointercancel", pointerUpLike);
+
+  let escapeDown = false;
+  let quitRequested = false;
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Escape") {
+      escapeDown = true;
+      quitRequested = true;
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "Escape") {
+      escapeDown = false;
+      e.preventDefault();
+    }
+  });
 
   function getSpriteHandleForPath(path) {
     const existing = sprites.get(path);
@@ -149,16 +278,45 @@ async function start() {
       stasis_input_viewport_w_px: () => canvasW | 0,
       stasis_input_viewport_h_px: () => canvasH | 0,
 
-      stasis_input_pointer_count: () => 0,
-      stasis_input_pointer_id: (_index) => 0,
-      stasis_input_pointer_went_down: (_index) => 0,
-      stasis_input_pointer_went_up: (_index) => 0,
-      stasis_input_pointer_is_down: (_index) => 0,
-      stasis_input_pointer_x_px: (_index) => 0.0,
-      stasis_input_pointer_y_px: (_index) => 0.0,
+      stasis_input_pointer_count: () => pointerSnapshot.length | 0,
+      stasis_input_pointer_id: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0;
+        return pointerSnapshot[index].id | 0;
+      },
+      stasis_input_pointer_went_down: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0;
+        return pointerSnapshot[index].wentDown ? 1 : 0;
+      },
+      stasis_input_pointer_went_up: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0;
+        return pointerSnapshot[index].wentUp ? 1 : 0;
+      },
+      stasis_input_pointer_is_down: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0;
+        return pointerSnapshot[index].down ? 1 : 0;
+      },
+      stasis_input_pointer_x_px: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0.0;
+        return +pointerSnapshot[index].x;
+      },
+      stasis_input_pointer_y_px: (index) => {
+        index = index | 0;
+        if (index < 0 || index >= pointerSnapshot.length) return 0.0;
+        return +pointerSnapshot[index].y;
+      },
 
-      stasis_should_quit: () => 0,
-      stasis_is_key_down: (_scancode) => 0,
+      stasis_should_quit: () => (quitRequested ? 1 : 0),
+      stasis_is_key_down: (scancode) => {
+        scancode = scancode | 0;
+        // SDL scancode 41 is Escape.
+        if (scancode === 41) return escapeDown ? 1 : 0;
+        return 0;
+      },
 
       stasis_get_time_ms: () => (performance.now() | 0),
 
@@ -168,16 +326,20 @@ async function start() {
       stasis_audio_push_f32_interleaved: (_samplesPtr, _frames) => 0,
 
       printf: (fmtPtr, arg0) => {
-        const fmt = readCString(memU8, fmtPtr);
+        const fmt = readMaybeStasisString(memU8, fmtPtr);
         const arg = arg0 | 0;
+
         let out = fmt;
         if (fmt.includes("%s")) {
-          out = fmt.replace("%s", readCString(memU8, arg));
+          out = fmt.replace("%s", readMaybeStasisString(memU8, arg));
         } else if (fmt.includes("%d") || fmt.includes("%i")) {
           out = fmt.replace(/%[di]/, String(i32ToSigned(arg)));
         } else if (fmt.includes("%c")) {
           out = fmt.replace("%c", String.fromCharCode(arg & 0xff));
+        } else if (fmt.includes("%%")) {
+          out = fmt.replace("%%", "%");
         }
+
         out = out.replace(/\r?\n$/, "");
         if (out.length > 0) log(out);
         return 0;
@@ -212,7 +374,10 @@ async function start() {
 
     let steps = 0;
     while (acc >= tickMs && steps < 5) {
+      snapPointers();
       const t = exports.tick() | 0;
+      clearPointerEdges();
+      quitRequested = false;
       if (t !== 0) {
         log(`tick() -> ${t} (stop)`);
         startBtn.disabled = false;
@@ -235,4 +400,3 @@ startBtn.addEventListener("click", () => {
     startBtn.disabled = false;
   });
 });
-
