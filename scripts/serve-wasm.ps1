@@ -1,5 +1,5 @@
 param(
-  [string]$Root = ".",
+  [string]$Root = (Join-Path $PSScriptRoot ".."),
   [int]$Port = 5173
 )
 
@@ -21,6 +21,7 @@ const path = require('path');
 
 const root = process.argv[1];
 const port = Number(process.argv[2]);
+const rootResolved = path.resolve(root);
 
 function contentType(p) {
   if (p.endsWith('.html')) return 'text/html; charset=utf-8';
@@ -34,9 +35,11 @@ function contentType(p) {
 
 const server = http.createServer((req, res) => {
   let urlPath = req.url.split('?')[0];
-  if (urlPath === '/') urlPath = '/index.html';
-  const fsPath = path.join(root, urlPath);
-  if (!fsPath.startsWith(root)) {
+  try { urlPath = decodeURIComponent(urlPath); } catch { /* ignore */ }
+  if (urlPath.endsWith('/')) urlPath += 'index.html';
+
+  const fsPath = path.resolve(path.join(rootResolved, '.' + urlPath));
+  if (!fsPath.startsWith(rootResolved)) {
     res.writeHead(403); res.end('forbidden'); return;
   }
   fs.readFile(fsPath, (err, data) => {
