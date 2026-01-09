@@ -7,6 +7,7 @@ using Stasis.Compiler.Semantic;
 using Stasis.LanguageServer.Models;
 using Stasis.LanguageServer.Services;
 using Stasis.Compiler.Syntax;
+using CompilerSymbolKind = Stasis.Compiler.Semantic.SymbolKind;
 
 public class CompletionHandler : CompletionHandlerBase
 {
@@ -22,7 +23,7 @@ public class CompletionHandler : CompletionHandlerBase
         var uri = request.TextDocument.Uri.ToString();
         var doc = _documentManager.GetDocument(uri);
 
-        if (doc?.ParseResult == null || doc.SymbolIndex == null)
+        if (doc?.ParseResult == null)
         {
             await Console.Error.WriteLineAsync($"[completion] {uri} missing parse/symbol data");
             return new CompletionList();
@@ -32,6 +33,7 @@ public class CompletionHandler : CompletionHandlerBase
         var lineOffset = lineSpan.Start + Math.Min(request.Position.Character, lineSpan.Text.Length);
         var offset = lineOffset;
         var triggerChar = request.Context?.TriggerCharacter;
+
         if (!TryGetMemberAccessReceiverChainFromLinePrefix(lineSpan.Text, request.Position.Character, out var receiverChain) &&
             !TryGetMemberAccessReceiverChain(doc.Content, offset, out receiverChain))
         {
@@ -41,11 +43,16 @@ public class CompletionHandler : CompletionHandlerBase
             }
             else
             {
-                var posInfo = $"{request.Position.Line}:{request.Position.Character}";
-                var snippet = GetSnippet(doc.Content, offset, 40);
-                await Console.Error.WriteLineAsync($"[completion] {uri} no member access at offset {offset} (len {doc.Content.Length}, pos {posInfo}, trigger {triggerChar ?? "null"}, lines {lineSpan.LineCount}) :: {snippet} :: line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
-                return new CompletionList();
+                // Not a member access completion; fall back to global identifier completions.
+                var fallbackItems = GetGlobalCompletions(doc, offset);
+                return new CompletionList(fallbackItems);
             }
+        }
+
+        if (doc.SymbolIndex == null)
+        {
+            await Console.Error.WriteLineAsync($"[completion] {uri} missing symbol index");
+            return new CompletionList();
         }
 
         var receiverTypeName = ResolveReceiverTypeName(receiverChain, doc, offset);
@@ -105,6 +112,138 @@ public class CompletionHandler : CompletionHandlerBase
         }
 
         return Array.Empty<CompletionItem>();
+    }
+
+    private static IReadOnlyList<CompletionItem> GetGlobalCompletions(DocumentState doc, int cursorOffset)
+    {
+        var prefix = GetIdentifierPrefix(doc.Content, cursorOffset);
+        if (string.IsNullOrEmpty(prefix))
+        {
+            return Array.Empty<CompletionItem>();
+        }
+
+        var items = new List<CompletionItem>(128);
+
+        if (doc.SemanticResult?.Symbols is { Count: > 0 } symbols)
+        {
+            foreach (var (name, sym) in symbols)
+            {
+                if (!IsGoodGlobalCompletionName(name, prefix))
+                {
+                    continue;
+                }
+
+                if (IsBuiltinTypeName(name))
+                {
+                    continue;
+                }
+
+                var kind = sym.Kind switch
+                {
+                    CompilerSymbolKind.Function => CompletionItemKind.Function,
+                    CompilerSymbolKind.Global => CompletionItemKind.Variable,
+                    CompilerSymbolKind.Const => CompletionItemKind.Constant,
+                    CompilerSymbolKind.Struct => CompletionItemKind.Struct,
+                    CompilerSymbolKind.Enum => CompletionItemKind.Enum,
+                    _ => CompletionItemKind.Text
+                };
+
+                items.Add(new CompletionItem
+                {
+                    Label = name,
+                    Kind = kind,
+                    InsertText = name
+                });
+            }
+        }
+
+        // Parse-tree fallback: if semantic isn't available, still offer types and globals defined in this file.
+        var fallbackUnit = doc.ExpandedParseResult?.CompilationUnit ?? doc.ParseResult?.CompilationUnit;
+        if (items.Count == 0 && fallbackUnit is { } compilationUnit)
+        {
+            foreach (var decl in compilationUnit.Declarations)
+            {
+                var name = decl switch
+                {
+                    StructDeclarationSyntax s => s.Name.Text,
+                    EnumDeclarationSyntax e => e.Name.Text,
+                    GlobalDeclarationSyntax g => g.Name.Text,
+                    ConstDeclarationSyntax c => c.Name.Text,
+                    FunctionDeclarationSyntax f => f.Name.Text,
+                    _ => null
+                };
+
+                if (name == null || !IsGoodGlobalCompletionName(name, prefix) || IsBuiltinTypeName(name))
+                {
+                    continue;
+                }
+
+                items.Add(new CompletionItem
+                {
+                    Label = name,
+                    Kind = decl switch
+                    {
+                        StructDeclarationSyntax => CompletionItemKind.Struct,
+                        EnumDeclarationSyntax => CompletionItemKind.Enum,
+                        GlobalDeclarationSyntax => CompletionItemKind.Variable,
+                        ConstDeclarationSyntax => CompletionItemKind.Constant,
+                        FunctionDeclarationSyntax => CompletionItemKind.Function,
+                        _ => CompletionItemKind.Text
+                    },
+                    InsertText = name
+                });
+            }
+        }
+
+        return items
+            .OrderBy(i => i.Label, StringComparer.Ordinal)
+            .Take(200)
+            .ToArray();
+    }
+
+    private static bool IsGoodGlobalCompletionName(string name, string prefix)
+    {
+        if (name.Length < prefix.Length)
+        {
+            return false;
+        }
+
+        if (name.Contains('.', StringComparison.Ordinal))
+        {
+            // Enum members are resolved via member access completion (State.Idle).
+            return false;
+        }
+
+        return name.StartsWith(prefix, StringComparison.Ordinal);
+    }
+
+    private static bool IsBuiltinTypeName(string name) =>
+        name is "u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool" or "string" or "utf8" or "ascii" or "void";
+
+    private static string GetIdentifierPrefix(string content, int cursorOffset)
+    {
+        if (cursorOffset < 0)
+        {
+            cursorOffset = 0;
+        }
+        if (cursorOffset > content.Length)
+        {
+            cursorOffset = content.Length;
+        }
+
+        var i = cursorOffset - 1;
+        while (i >= 0 && IsIdentifierChar(content[i]))
+        {
+            i--;
+        }
+
+        var start = i + 1;
+        if (start < 0 || start > cursorOffset)
+        {
+            return string.Empty;
+        }
+
+        return content.Substring(start, cursorOffset - start);
     }
 
     private static string? ResolveReceiverTypeName(IReadOnlyList<string> receiverChain, DocumentState doc, int cursorOffset)

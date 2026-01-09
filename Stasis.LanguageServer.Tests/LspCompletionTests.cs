@@ -17,6 +17,49 @@ namespace Stasis.LanguageServer.Tests;
 public sealed class LspCompletionTests
 {
     [Fact]
+    public async Task CompletesImportedFunctionNames()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_lsp_import_fn_completion_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "helpers.stasis");
+            File.WriteAllText(importedPath, string.Join("\n", new[]
+            {
+                "function helper_add(a: i32, b: i32): i32 {",
+                "    return a + b;",
+                "}"
+            }));
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var document = string.Join("\n", new[]
+            {
+                "import \"helpers.stasis\";",
+                "",
+                "function main(): i32 {",
+                "    let x: i32 = helper",
+                "    return x;",
+                "}"
+            });
+
+            var uri = new Uri(entryPath).AbsoluteUri;
+            var position = GetPositionAfter(document, "helper");
+
+            await using var harness = await LspTestHarness.StartAsync(cts.Token);
+            await harness.InitializeAsync(cts.Token);
+            await harness.DidOpenAsync(uri, document, cts.Token);
+
+            var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+            Assert.Contains("helper_add", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CompletesImportedStructMembersAfterDot()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));

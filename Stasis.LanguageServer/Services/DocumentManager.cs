@@ -52,6 +52,7 @@ public class DocumentManager
 
         var expandedLex = Lexer.Lex(expanded);
         var expandedParse = Parser.Parse(expanded);
+        doc.ExpandedParseResult = expandedParse;
         doc.SymbolIndex = SymbolIndex.Build(expandedParse.CompilationUnit);
 
         // Semantic Analysis
