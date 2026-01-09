@@ -31,6 +31,8 @@ import "../../src/stdlib/audio.stasis";
 // - input_viewport_h_px() -> i32
 // - is_key_down(scancode: i32) -> bool
 
+
+
 // Pool sizes (compile-time; keep in sync with the array sizes below)
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
@@ -75,8 +77,8 @@ const PI: f32 = 3.14159;
 
 // Tunable parameters (loaded from JSON via runner data binding in dev)
 struct BrickoutScreenConfig {
-    w: i32;
-    h: i32;
+    width: i32;
+    height: i32;
 }
 
 struct BrickoutGridConfig {
@@ -470,6 +472,7 @@ function sync_screen_size(): void {
     state.runtime_screen.h = h;
 }
 
+
 function update_layout(): void {
     let vx: f32 = i32_to_f32(input_viewport_x_px());
     let vy: f32 = i32_to_f32(input_viewport_y_px());
@@ -484,8 +487,8 @@ function update_layout(): void {
     state.layout.viewport_w = vw;
     state.layout.viewport_h = vh;
 
-    let base_w: f32 = i32_to_f32(state.config.screen.w);
-    let base_h: f32 = i32_to_f32(state.config.screen.h);
+    let base_w: f32 = i32_to_f32(state.config.screen.width);
+    let base_h: f32 = i32_to_f32(state.config.screen.height);
     if (base_w < 1.0 || base_h < 1.0) {
         base_w = 800.0;
         base_h = 600.0;
@@ -622,7 +625,7 @@ function grid_to_world_x(gx: i32): f32 {
 function grid_to_world_y(gy: i32): f32 {
     let gyf: f32 = i32_to_f32(gy);
     // Place bricks starting near the bottom and stack upward with the same spacing.
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sh: f32 = i32_to_f32(state.config.screen.height);
     return sh - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
 }
 
@@ -643,7 +646,7 @@ function world_to_grid_x(wx: f32): i32 {
 }
 
 function world_to_grid_y(wy: f32): i32 {
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sh: f32 = i32_to_f32(state.config.screen.height);
     let base_y: f32 = sh - state.config.grid.margin_bottom - state.config.brick.height;
     let cell_h: f32 = state.config.brick.height + state.config.grid.spacing;
     if (cell_h <= 0.0) { return -1; }
@@ -733,7 +736,7 @@ function init_game(reset_progress: bool): void {
     }
 
     // Init paddle
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = i32_to_f32(state.config.screen.width);
     state.paddle.x = sw / 2.0;
     state.paddle.y = state.config.paddle.y;
     state.paddle.width = state.config.paddle.width;
@@ -906,7 +909,7 @@ function update_brick_attacks(delta_ms: i32): void {
 
 // Spawn a ball near the paddle, heading downward
 function spawn_ball(): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = i32_to_f32(state.config.screen.width);
     foreach (let ball in state.balls) {
         if (!ball.active) {
             ball.active = true;
@@ -961,8 +964,8 @@ function count_active_balls(): i32 {
 
 // Physics update
 function update_balls(dt: f32): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sw: f32 = i32_to_f32(state.config.screen.width);
+    let sh: f32 = i32_to_f32(state.config.screen.height);
     foreach (let ball in state.balls) {
         if (ball.active) {
             // Move ball
@@ -1046,7 +1049,7 @@ function update_paddle(dt: f32): void {
 
     // Clamp paddle to screen
     let half_w: f32 = state.paddle.width / 2.0;
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = i32_to_f32(state.config.screen.width);
     state.paddle.x = clamp_f32(state.paddle.x, half_w, sw - half_w);
 }
 
@@ -1970,8 +1973,8 @@ function draw_ui_panels(): void {
 }
 
 function draw_ui(): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sw: f32 = i32_to_f32(state.config.screen.width);
+    let sh: f32 = i32_to_f32(state.config.screen.height);
     let s: f32 = state.layout.play_scale;
 
     // Score in top-left
@@ -2210,13 +2213,13 @@ function main(): i32 {
     }
 
     print_string("Brickout config loaded (magic=1337)\n");
-    print_string("screen.w=");
-    print_int(state.config.screen.w);
-    print_string(" screen.h=");
-    print_int(state.config.screen.h);
+    print_string("screen.width=");
+    print_int(state.config.screen.width);
+    print_string(" screen.height=");
+    print_int(state.config.screen.height);
     print_string("\n");
 
-    let init_ok: bool = init_window(state.config.screen.w, state.config.screen.h, "Brickout Revenge");
+    let init_ok: bool = init_window(state.config.screen.width, state.config.screen.height, "Brickout Revenge");
     if (!init_ok) {
         return 1;
     }
@@ -2236,8 +2239,8 @@ function main(): i32 {
     state.layout.viewport_h = i32_to_f32(state.runtime_screen.h);
     state.layout.play_x = 0.0;
     state.layout.play_y = 0.0;
-    state.layout.play_w = i32_to_f32(state.config.screen.w);
-    state.layout.play_h = i32_to_f32(state.config.screen.h);
+    state.layout.play_w = i32_to_f32(state.config.screen.width);
+    state.layout.play_h = i32_to_f32(state.config.screen.height);
     state.layout.play_scale = 1.0;
     state.layout.ui_x = 0.0;
     state.layout.ui_y = 0.0;

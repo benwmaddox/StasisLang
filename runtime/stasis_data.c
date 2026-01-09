@@ -494,10 +494,32 @@ void stasis_data_init(void) {
 #ifdef _WIN32
 void stasis_data_set_dll(HMODULE dll) {
     g_current_dll = dll;
+    /* After hot-swap, addresses change even if the JSON file did not. Re-apply bindings. */
+    if (g_current_dll)
+    {
+        for (int i = 0; i < MAX_DATA_BINDINGS; i++)
+        {
+            if (g_bindings[i].active)
+            {
+                (void)apply_data_file(&g_bindings[i]);
+            }
+        }
+    }
 }
 #else
 void stasis_data_set_dll(void* dll) {
     g_current_dll = dll;
+    /* After hot-swap, addresses change even if the JSON file did not. Re-apply bindings. */
+    if (g_current_dll)
+    {
+        for (int i = 0; i < MAX_DATA_BINDINGS; i++)
+        {
+            if (g_bindings[i].active)
+            {
+                (void)apply_data_file(&g_bindings[i]);
+            }
+        }
+    }
 }
 #endif
 
