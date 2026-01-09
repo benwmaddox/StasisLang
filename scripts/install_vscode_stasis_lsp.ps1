@@ -1,7 +1,8 @@
 param(
   [string]$Runtime = "win-x64",
   [string]$Configuration = "Release",
-  [switch]$Force
+  [switch]$Force,
+  [switch]$SkipInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +66,11 @@ try {
   & $npx.Path @("@vscode/vsce", "package", "--out", $vsixPath)
   if ($LASTEXITCODE -ne 0) {
     throw "VSIX packaging failed."
+  }
+
+  if ($SkipInstall) {
+    Write-Host "Built VSIX: $vsixPath"
+    return
   }
 
   $installArgs = @("--install-extension", $vsixPath)
