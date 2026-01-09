@@ -42,6 +42,12 @@ public static class Reachability
                 queue.Enqueue("tick");
             }
 
+            // Hot-swap hook: if a program defines `swap`, treat it as an entrypoint so it can be invoked after a DLL swap.
+            if (functions.ContainsKey("swap"))
+            {
+                queue.Enqueue("swap");
+            }
+
             foreach (var export in functions.Values.Where(fn => fn.IsExported))
             {
                 queue.Enqueue(export.Name.Text);

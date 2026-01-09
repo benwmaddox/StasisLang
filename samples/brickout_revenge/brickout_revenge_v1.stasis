@@ -613,6 +613,24 @@ function point_in_rect(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32): bo
     return true;
 }
 
+function rect_fully_in_level(x: f32, y: f32, w: f32, h: f32): bool {
+    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sh: f32 = i32_to_f32(state.config.screen.h);
+    if (x < 0.0) { return false; }
+    if (y < 0.0) { return false; }
+    if (x + w > sw) { return false; }
+    if (y + h > sh) { return false; }
+    return true;
+}
+
+function brick_fully_in_level(gx: i32, gy: i32): bool {
+    let x: f32 = grid_to_world_x(gx);
+    let y: f32 = grid_to_world_y(gy);
+    let w: f32 = state.config.brick.width;
+    let h: f32 = state.config.brick.height;
+    return rect_fully_in_level(x, y, w, h);
+}
+
 // Grid helpers - bricks are placed on a grid in the lower portion
 function grid_to_world_x(gx: i32): f32 {
     let gxf: f32 = i32_to_f32(gx);
@@ -675,6 +693,7 @@ function find_free_brick_slot(): i32 {
 
 function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
     if (!grid_in_bounds(gx, gy)) { return false; }
+    if (!brick_fully_in_level(gx, gy)) { return false; }
     if (grid_is_occupied(gx, gy)) { return false; }
     let slot: i32 = find_free_brick_slot();
     if (slot < 0) { return false; }
@@ -784,46 +803,18 @@ function init_game(reset_progress: bool): void {
 
 function setup_default_bricks(): void {
     // Stress test: Fill the bottom of the screen with bricks
-    let brick_idx: i32 = 0;
     let row: i32 = 0;
     let col: i32 = 0;
 
     // Fill grid rows/cols for the starting layout.
     for (row = 0; row < GRID_ROWS; row = row + 1) {
         for (col = 0; col < GRID_COLS; col = col + 1) {
-            if (brick_idx < MAX_BRICKS) {
-                state.bricks[brick_idx].active = true;
-                state.bricks[brick_idx].x = grid_to_world_x(col);
-                state.bricks[brick_idx].y = grid_to_world_y(row);
-                state.bricks[brick_idx].grid_x = col;
-                state.bricks[brick_idx].grid_y = row;
-                state.bricks[brick_idx].attack_cd_ms = 0;
-                state.bricks[brick_idx].shot_fx_ms = 0;
-
-                // Mix brick types for variety
-                let type_selector: i32 = (row + col) % 3;
-
-                // Stress test: bricks have 10-30 HP
-                let brick_hp: i32 = 10 + (next_rand() % 21);
-
-                if (type_selector == 0) {
-                    state.bricks[brick_idx].brick_type = BrickType.Basic;
-                    state.bricks[brick_idx].hp = brick_hp;
-                    state.bricks[brick_idx].max_hp = brick_hp;
-                }
-                if (type_selector == 1) {
-                    state.bricks[brick_idx].brick_type = BrickType.Armored;
-                    state.bricks[brick_idx].hp = brick_hp;
-                    state.bricks[brick_idx].max_hp = brick_hp;
-                }
-                if (type_selector == 2) {
-                    state.bricks[brick_idx].brick_type = BrickType.Reflector;
-                    state.bricks[brick_idx].hp = brick_hp;
-                    state.bricks[brick_idx].max_hp = brick_hp;
-                }
-
-                brick_idx = brick_idx + 1;
-            }
+            // Mix brick types for variety
+            let type_selector: i32 = (row + col) % 3;
+            let brick_type: BrickType = BrickType.Basic;
+            if (type_selector == 1) { brick_type = BrickType.Armored; }
+            if (type_selector == 2) { brick_type = BrickType.Reflector; }
+            place_brick_at_grid(col, row, brick_type);
         }
     }
 }
@@ -2040,6 +2031,11 @@ function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
 
     let in_play: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
     let valid: bool = in_play && grid_in_bounds(state.drag_grid_x, state.drag_grid_y);
+    if (valid) {
+        if (!brick_fully_in_level(state.drag_grid_x, state.drag_grid_y)) {
+            valid = false;
+        }
+    }
     if (valid) {
         if (grid_is_occupied(state.drag_grid_x, state.drag_grid_y)) {
             valid = false;

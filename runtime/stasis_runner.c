@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -400,6 +401,53 @@ static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
     free(*syms);
     *syms = NULL;
     *sym_count = 0;
+}
+
+static uint64_t stasis_epoch_ms(void)
+{
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    /* 100ns ticks since 1601-01-01 -> ms since 1970-01-01 */
+    const uint64_t EPOCH_DIFFERENCE_100NS = 116444736000000000ULL;
+    if (uli.QuadPart < EPOCH_DIFFERENCE_100NS)
+    {
+        return 0;
+    }
+    return (uli.QuadPart - EPOCH_DIFFERENCE_100NS) / 10000ULL;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000ULL);
+#endif
+}
+
+static void stasis_format_local_time(char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0)
+    {
+        return;
+    }
+
+#ifdef _WIN32
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    _snprintf_s(out, out_cap, _TRUNCATE, "%04u-%02u-%02u %02u:%02u:%02u.%03u",
+                (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
+                (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
+                (unsigned)st.wMilliseconds);
+#else
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    strftime(out, out_cap, "%Y-%m-%d %H:%M:%S", &tm_now);
+#endif
 }
 
 static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
@@ -878,6 +926,8 @@ int main(int argc, char **argv)
     /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
     char tick_name[512];
     tick_name[0] = '\0';
+    char swap_name[512];
+    swap_name[0] = '\0';
     const char *sep = strstr(entry_name, "__");
     if (sep)
     {
@@ -886,6 +936,11 @@ int main(int argc, char **argv)
         {
             memcpy(tick_name, entry_name, prefix_len);
             memcpy(tick_name + prefix_len, "tick", 5);
+        }
+        if (prefix_len + 4 < sizeof(swap_name))
+        {
+            memcpy(swap_name, entry_name, prefix_len);
+            memcpy(swap_name + prefix_len, "swap", 5);
         }
     }
 
@@ -903,16 +958,24 @@ int main(int argc, char **argv)
         stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
-        long long target_us = 1000000LL / (long long)fps;
+        LONGLONG tick_step = freq.QuadPart / (LONGLONG)fps;
+        if (tick_step < 1)
+        {
+            tick_step = 1;
+        }
 
-        LARGE_INTEGER last;
-        QueryPerformanceCounter(&last);
+        LARGE_INTEGER next;
+        QueryPerformanceCounter(&next);
 
         for (;;)
         {
             /* Swap between ticks if requested. */
                     if (swap_file_path && file_exists(swap_file_path))
                     {
+                        LARGE_INTEGER swap_latency_t0;
+                        LARGE_INTEGER swap_latency_t1;
+                        QueryPerformanceCounter(&swap_latency_t0);
+
                         char new_path[2048];
                         char map_path[2048];
                         map_path[0] = '\0';
@@ -1016,6 +1079,12 @@ int main(int argc, char **argv)
                                 break;
                             }
 
+                            FARPROC new_swap_sym = NULL;
+                            if (swap_name[0] != '\0')
+                            {
+                                new_swap_sym = GetProcAddress(new_lib, swap_name);
+                            }
+
                             if (buffer)
                             {
                                 QueryPerformanceCounter(&sw_t0);
@@ -1049,6 +1118,26 @@ int main(int argc, char **argv)
 
                             /* Update DLL handle for data binding system */
                             stasis_data_set_dll(new_lib);
+
+                            /* Optional post-swap hook: call `<module>__swap` once after each swap. */
+                            if (new_swap_sym)
+                            {
+                                int (*swap_fn)(void) = (int (*)(void))new_swap_sym;
+                                int swap_result = swap_fn();
+                                if (swap_result != 0)
+                                {
+                                    result = swap_result == 1 ? 0 : swap_result;
+                                    break;
+                                }
+                            }
+
+                            QueryPerformanceCounter(&swap_latency_t1);
+                            long long swap_latency_us = (swap_latency_t1.QuadPart - swap_latency_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
+                            long long swap_latency_ms = (swap_latency_us + 500LL) / 1000LL;
+                            char local_time[64];
+                            stasis_format_local_time(local_time, sizeof(local_time));
+                            uint64_t epoch_ms = stasis_epoch_ms();
+                            fprintf(stderr, "[%" PRIu64 ", %s]: HOTSWAP %lld ms\n", epoch_ms, local_time, swap_latency_ms);
                         }
                     }
 
@@ -1062,30 +1151,34 @@ int main(int argc, char **argv)
                 break;
             }
 
-            LARGE_INTEGER now;
-            QueryPerformanceCounter(&now);
-            long long elapsed_us = (now.QuadPart - last.QuadPart) * 1000000LL / freq.QuadPart;
-            last = now;
+            next.QuadPart += tick_step;
 
-            long long sleep_us = target_us - elapsed_us;
-            while (sleep_us > 0)
+            for (;;)
             {
                 /* Break host sleep if a swap is pending. */
                 if (swap_file_path && file_exists(swap_file_path))
                 {
                     break;
                 }
-                DWORD ms = (DWORD)(sleep_us / 1000LL);
-                if (ms == 0)
+
+                LARGE_INTEGER now;
+                QueryPerformanceCounter(&now);
+                LONGLONG remaining = next.QuadPart - now.QuadPart;
+                if (remaining <= 0)
                 {
-                    ms = 1;
+                    break;
                 }
-                if (ms > 5)
+
+                /* Sleep most of the remaining time, then yield/spin to land closer to the target. */
+                DWORD ms = (DWORD)((remaining * 1000LL) / freq.QuadPart);
+                if (ms > 1)
                 {
-                    ms = 5;
+                    Sleep(ms - 1);
                 }
-                Sleep(ms);
-                sleep_us -= (long long)ms * 1000LL;
+                else
+                {
+                    SwitchToThread();
+                }
             }
         }
     }

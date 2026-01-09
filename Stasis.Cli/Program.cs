@@ -2838,12 +2838,25 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             }
             phase.Restart();
 
-            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
+            var exports = new List<string> { $"{moduleName}__main", $"{moduleName}__tick" };
+            if (sema.Symbols.TryGetValue("swap", out var swapSymbol) &&
+                swapSymbol.Kind == SymbolKind.Function)
+            {
+                exports.Add($"{moduleName}__swap");
+            }
+            var exported = exports.ToArray();
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, exported, excludeSpriteFields: false, out var plan))
             {
                 return 1;
             }
             planMs = phase.ElapsedMilliseconds;
             phase.Restart();
+
+            DataBindingPlan? dataBindingPlan = null;
+            if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, exported, out dataBindingPlan))
+            {
+                return 1;
+            }
 
             var linkArgs = BuildClangArgsForObject(hotObjPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, linkLibraries, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
             if (OperatingSystem.IsWindows())
@@ -2872,11 +2885,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 var entry = $"{moduleName}__main";
                 var runnerArgs = $"\"{hotDll}\" {entry} --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
 
-                var dataFile = FindDataBindingJson(sourcePath, repoRoot);
-                if (!string.IsNullOrEmpty(dataFile))
+                if (dataBindingPlan is not null)
                 {
-                    runnerArgs += $" --data-bind \"{dataFile}\" \"{plan.StructMetaPath}\"";
-                    Console.WriteLine($"Data binding: {dataFile}");
+                    runnerArgs += $" --data-bind \"{dataBindingPlan.JsonPath}\" \"{dataBindingPlan.StructMetaPath}\"";
+                    Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
                 }
 
                 var psi = new ProcessStartInfo
@@ -3074,7 +3086,10 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     var hotExitPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 
     // Emit map/exports/metadata only when missing to keep hot-reload fast.
-    var structMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.struct-meta.json");
+    var structMetaFileName = excludeSpriteFields
+        ? $"{baseName}.{moduleName}.databind.struct-meta.json"
+        : $"{baseName}.{moduleName}.struct-meta.json";
+    var structMetaPath = Path.Combine(hotDir, structMetaFileName);
     if (!File.Exists(mapPath) || !File.Exists(defPath) || !File.Exists(structMetaPath))
     {
         var map = new StringBuilder();
