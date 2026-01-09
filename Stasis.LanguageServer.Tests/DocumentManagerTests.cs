@@ -2,6 +2,7 @@ namespace Stasis.LanguageServer.Tests;
 
 using Stasis.LanguageServer.Services;
 using Xunit;
+using System.IO;
 
 public class DocumentManagerTests
 {
@@ -163,5 +164,76 @@ public class DocumentManagerTests
 
         // Assert
         Assert.Equal(2, all.Count);
+    }
+
+    [Fact]
+    public void UpdateDocument_IncludesImportedStructsInSymbolIndex()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_lsp_imports_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "types.stasis");
+            File.WriteAllText(importedPath, string.Join("\n", new[]
+            {
+                "struct Foo {",
+                "    a: i32;",
+                "    b: i32;",
+                "}"
+            }));
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var content = string.Join("\n", new[]
+            {
+                "import \"types.stasis\";",
+                "",
+                "global foo: Foo;",
+                "",
+                "function main(): i32 {",
+                "    foo.a = 1;",
+                "    return 0;",
+                "}"
+            });
+
+            var uri = new Uri(entryPath).AbsoluteUri;
+            var manager = new DocumentManager();
+            manager.GetOrCreateDocument(uri, "");
+            manager.UpdateDocument(uri, content, 1);
+            var doc = manager.GetDocument(uri);
+
+            Assert.NotNull(doc);
+            Assert.NotNull(doc!.SymbolIndex);
+            var foo = doc.SymbolIndex!.GetStruct("Foo");
+            Assert.NotNull(foo);
+            Assert.Contains(foo!.Fields, f => f.Name == "a");
+            Assert.Contains(foo.Fields, f => f.Name == "b");
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UpdateDocument_ReportsMissingImportsAsDiagnostics()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_lsp_import_missing_");
+        try
+        {
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var content = "import \"does_not_exist.stasis\";\nfunction main(): i32 { return 0; }";
+            var uri = new Uri(entryPath).AbsoluteUri;
+
+            var manager = new DocumentManager();
+            manager.GetOrCreateDocument(uri, "");
+            manager.UpdateDocument(uri, content, 1);
+            var doc = manager.GetDocument(uri);
+
+            Assert.NotNull(doc);
+            Assert.Contains(doc!.AllDiagnostics, d => d.Message.Contains("Import not found", StringComparison.Ordinal));
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
     }
 }
