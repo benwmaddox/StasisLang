@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stasis - Brickout Revenge v1 (WASM prototype)</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0b0d14;
+        color: #e9eefc;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      }
+      #wrap {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100%;
+      }
+      header {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.02);
+      }
+      header .title {
+        font-weight: 600;
+      }
+      header button {
+        padding: 8px 10px;
+        background: #2b64ff;
+        border: 0;
+        border-radius: 6px;
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      header button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      header .note {
+        opacity: 0.8;
+        font-size: 12px;
+      }
+      #content {
+        display: grid;
+        grid-template-columns: 1fr 340px;
+        gap: 12px;
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      #canvasWrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        background: #090b12;
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      #log {
+        white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.4;
+        padding: 10px;
+        border-radius: 10px;
+        background: rgba(255,255,255,0.03);
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset;
+        overflow: auto;
+      }
+      @media (max-width: 900px) {
+        #content { grid-template-columns: 1fr; }
+        #log { height: 220px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <header>
+        <div class="title">Brickout Revenge v1 (WASM prototype)</div>
+        <button id="start">Start</button>
+        <div class="note">Prototype: wasm32 via LLVM IR; JS host shims for graphics/input (pointer), no audio.</div>
+      </header>
+      <div id="content">
+        <div id="canvasWrap">
+          <canvas id="canvas"></canvas>
+        </div>
+        <div id="log"></div>
+      </div>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
