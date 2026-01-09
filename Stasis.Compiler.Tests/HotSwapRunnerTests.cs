@@ -13,6 +13,25 @@ namespace Stasis.Compiler.Tests;
 public sealed class HotSwapRunnerTests
 {
     [Fact]
+    public void Reachability_includes_swap_entrypoint_when_defined()
+    {
+        var source = """
+            struct S { x: i32; }
+            global state: S;
+
+            function main(): i32 { return 0; }
+            function tick(): i32 { return 0; }
+            function swap(): i32 { return 0; }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var reachable = Stasis.Compiler.IR.Reachability.CollectReachableFunctions(parse.CompilationUnit, includeTests: false, allowFallback: false);
+        Assert.Contains("swap", reachable);
+    }
+
+    [Fact]
     public void Runner_ticks_at_60_fps()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
