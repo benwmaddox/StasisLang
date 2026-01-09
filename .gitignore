@@ -46,6 +46,10 @@ build/test_perf_compare_optimized.csv
 build/sample_test_compare_optimized.csv
 stasis_sys_static.lib
 build/stasis_sys_static.lib
+build/wasm/
+
+# WASM prototype outputs
+examples/wasm/**/*.wasm
 
 # Android local build outputs
 android/out/
