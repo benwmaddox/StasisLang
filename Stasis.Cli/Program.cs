@@ -2838,7 +2838,13 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             }
             phase.Restart();
 
-            var exported = new[] { $"{moduleName}__main", $"{moduleName}__tick" };
+            var exports = new List<string> { $"{moduleName}__main", $"{moduleName}__tick" };
+            if (sema.Symbols.TryGetValue("swap", out var swapSymbol) &&
+                swapSymbol.Kind == SymbolKind.Function)
+            {
+                exports.Add($"{moduleName}__swap");
+            }
+            var exported = exports.ToArray();
             if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, exported, excludeSpriteFields: false, out var plan))
             {
                 return 1;
