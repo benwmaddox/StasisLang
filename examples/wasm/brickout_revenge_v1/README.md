@@ -2,7 +2,7 @@
 
 This is a minimal prototype to compile and run `samples/brickout_revenge/brickout_revenge_v1.stasis` in a browser via `wasm32`.
 
-Status: proof-of-concept host shims (Canvas2D, pointer input, no audio).
+Status: proof-of-concept host shims (Canvas2D, pointer input, virtual resolution scaling, no audio).
 
 ## Build
 

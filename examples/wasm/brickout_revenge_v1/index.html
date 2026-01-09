@@ -53,12 +53,17 @@
         padding: 12px;
         box-sizing: border-box;
       }
-      canvas {
-        width: 100%;
-        height: 100%;
+      #canvasWrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
         border-radius: 10px;
         background: #090b12;
         box-shadow: 0 0 0 1px rgba(255,255,255,0.06) inset;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
       }
       #log {
         white-space: pre-wrap;
@@ -85,7 +90,9 @@
         <div class="note">Prototype: wasm32 via LLVM IR; JS host shims for graphics/input (pointer), no audio.</div>
       </header>
       <div id="content">
-        <canvas id="canvas"></canvas>
+        <div id="canvasWrap">
+          <canvas id="canvas"></canvas>
+        </div>
         <div id="log"></div>
       </div>
     </div>

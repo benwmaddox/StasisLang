@@ -1,6 +1,7 @@
 const wasmPath = "./brickout_revenge_v1.wasm";
 
 const canvas = document.getElementById("canvas");
+const canvasWrap = document.getElementById("canvasWrap");
 const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const logEl = document.getElementById("log");
 const startBtn = document.getElementById("start");
@@ -9,6 +10,11 @@ window.__stasisWasmHost = {
   started: false,
   tickCount: 0,
   lastTickResult: 0,
+  virtualW: 0,
+  virtualH: 0,
+  displayW: 0,
+  displayH: 0,
+  scale: 1,
 };
 
 function log(line) {
@@ -17,13 +23,37 @@ function log(line) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function resizeCanvas(w, h) {
+function updateCanvasLayout(virtualW, virtualH, onResize) {
+  const rect = canvasWrap.getBoundingClientRect();
+  const availW = rect.width;
+  const availH = rect.height;
+
+  if (availW <= 0 || availH <= 0 || virtualW <= 0 || virtualH <= 0) return;
+
+  const fitScale = Math.max(0.05, Math.min(availW / virtualW, availH / virtualH));
+  const displayW = Math.max(1, Math.floor(virtualW * fitScale));
+  const displayH = Math.max(1, Math.floor(virtualH * fitScale));
+
   const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-  canvas.width = Math.max(1, Math.floor(w * dpr));
-  canvas.height = Math.max(1, Math.floor(h * dpr));
-  canvas.style.width = `${w}px`;
-  canvas.style.height = `${h}px`;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  canvas.width = Math.max(1, Math.floor(displayW * dpr));
+  canvas.height = Math.max(1, Math.floor(displayH * dpr));
+  canvas.style.width = `${displayW}px`;
+  canvas.style.height = `${displayH}px`;
+  ctx.setTransform(dpr * fitScale, 0, 0, dpr * fitScale, 0, 0);
+
+  const changed =
+    window.__stasisWasmHost.displayW !== displayW ||
+    window.__stasisWasmHost.displayH !== displayH ||
+    window.__stasisWasmHost.virtualW !== virtualW ||
+    window.__stasisWasmHost.virtualH !== virtualH;
+
+  window.__stasisWasmHost.virtualW = virtualW;
+  window.__stasisWasmHost.virtualH = virtualH;
+  window.__stasisWasmHost.displayW = displayW;
+  window.__stasisWasmHost.displayH = displayH;
+  window.__stasisWasmHost.scale = fitScale;
+
+  if (changed && typeof onResize === "function") onResize();
 }
 
 function readCString(memU8, ptr, cap = 4096) {
@@ -87,9 +117,28 @@ async function start() {
   let nextSpriteId = 1;
 
   let resizedFlag = 1;
-  let canvasW = 600;
-  let canvasH = 1200;
-  resizeCanvas(canvasW, canvasH);
+  let virtualW = 600;
+  let virtualH = 1200;
+  updateCanvasLayout(virtualW, virtualH, () => {
+    resizedFlag = 1;
+  });
+
+  const resizeObserver = new ResizeObserver(() => {
+    updateCanvasLayout(virtualW, virtualH, () => {
+      resizedFlag = 1;
+    });
+  });
+  resizeObserver.observe(canvasWrap);
+  window.addEventListener("resize", () => {
+    updateCanvasLayout(virtualW, virtualH, () => {
+      resizedFlag = 1;
+    });
+  });
+  window.addEventListener("orientationchange", () => {
+    updateCanvasLayout(virtualW, virtualH, () => {
+      resizedFlag = 1;
+    });
+  });
 
   const pointerState = new Map(); // pointerId -> { id, x, y, down, wentDown, wentUp }
   let pointerSnapshot = [];
@@ -116,8 +165,8 @@ async function start() {
   function canvasToGamePx(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
-    const x = ((clientX - rect.left) / rect.width) * canvasW;
-    const y = ((clientY - rect.top) / rect.height) * canvasH;
+    const x = ((clientX - rect.left) / rect.width) * virtualW;
+    const y = ((clientY - rect.top) / rect.height) * virtualH;
     return { x, y };
   }
 
@@ -209,13 +258,14 @@ async function start() {
       cosf: (x) => Math.cos(x),
 
       stasis_init_window: (w, h, titlePtr) => {
-        canvasW = w | 0;
-        canvasH = h | 0;
-        resizedFlag = 1;
-        resizeCanvas(canvasW, canvasH);
+        virtualW = w | 0;
+        virtualH = h | 0;
+        updateCanvasLayout(virtualW, virtualH, () => {
+          resizedFlag = 1;
+        });
         const title = memU8 ? readCString(memU8, titlePtr) : "Stasis";
         document.title = title;
-        log(`init_window(${canvasW}x${canvasH}, "${title}")`);
+        log(`init_window(${virtualW}x${virtualH}, "${title}")`);
         return 1;
       },
 
@@ -233,7 +283,7 @@ async function start() {
         const bb = Math.max(0, Math.min(255, Math.floor(b * 255)));
         const aa = Math.max(0, Math.min(1, a));
         ctx.fillStyle = `rgba(${rr},${gg},${bb},${aa})`;
-        ctx.fillRect(0, 0, canvasW, canvasH);
+        ctx.fillRect(0, 0, virtualW, virtualH);
       },
 
       stasis_draw_line: (x1, y1, x2, y2, r, g, b, a) => {
@@ -271,8 +321,8 @@ async function start() {
 
       stasis_gfx_poll_reload: (_handle) => 0,
 
-      stasis_gfx_window_width: () => canvasW | 0,
-      stasis_gfx_window_height: () => canvasH | 0,
+      stasis_gfx_window_width: () => virtualW | 0,
+      stasis_gfx_window_height: () => virtualH | 0,
       stasis_gfx_window_resized: () => {
         const v = resizedFlag;
         resizedFlag = 0;
@@ -281,8 +331,8 @@ async function start() {
 
       stasis_input_viewport_x_px: () => 0,
       stasis_input_viewport_y_px: () => 0,
-      stasis_input_viewport_w_px: () => canvasW | 0,
-      stasis_input_viewport_h_px: () => canvasH | 0,
+      stasis_input_viewport_w_px: () => virtualW | 0,
+      stasis_input_viewport_h_px: () => virtualH | 0,
 
       stasis_input_pointer_count: () => pointerSnapshot.length | 0,
       stasis_input_pointer_id: (index) => {
