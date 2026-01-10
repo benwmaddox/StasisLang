@@ -98,6 +98,40 @@ public class HoverHandlerTests
     }
 
     [Fact]
+    public async Task HandleAsync_PrefersLocalWhenShadowingGlobal()
+    {
+        var manager = new DocumentManager();
+        var handler = new HoverHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+                      function main(): void {
+                          let print: i32;
+                          print = 1;
+                      }
+                      """;
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("print = 1", StringComparison.Ordinal);
+        Assert.True(offset >= 0, "Test content should contain print assignment.");
+        var pos = TextPositionConverter.OffsetToPosition(content, offset);
+
+        var request = new HoverParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = pos
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        Assert.NotNull(result);
+        var markdown = GetHoverMarkdown(result!);
+        Assert.NotNull(markdown);
+        Assert.Contains("(local variable)", markdown!, StringComparison.Ordinal);
+        Assert.Contains("print: i32", markdown!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HandleAsync_ReturnsHoverForNestedStructField()
     {
         var manager = new DocumentManager();

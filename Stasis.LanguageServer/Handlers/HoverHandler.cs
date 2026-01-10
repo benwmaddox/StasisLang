@@ -55,15 +55,17 @@ public class HoverHandler : HoverHandlerBase
         if (identifierChain.Count == 1)
         {
             var name = identifierChain[0];
+
+            // Prefer in-scope locals/parameters over globals/builtins when names collide.
+            if (TryResolveLocalOrDeclarationSymbol(doc.ParseResult!.CompilationUnit!, cursorOffset, name, out var kindLabel, out var typeText))
+            {
+                return CreateHover(FormatLocalSymbolInfo(kindLabel, name, typeText));
+            }
+
             if (doc.SemanticResult?.Symbols is not null &&
                 doc.SemanticResult.Symbols.TryGetValue(name, out var symbol))
             {
                 return CreateHover(FormatSymbolInfo(symbol));
-            }
-
-            if (TryResolveLocalOrDeclarationSymbol(doc.ParseResult!.CompilationUnit!, cursorOffset, name, out var kindLabel, out var typeText))
-            {
-                return CreateHover(FormatLocalSymbolInfo(kindLabel, name, typeText));
             }
 
             return null;
@@ -85,21 +87,19 @@ public class HoverHandler : HoverHandlerBase
             }
         }
 
+        // Prefer in-scope locals/parameters over globals/builtins when names collide.
         string? receiverTypeName = null;
-
-        if (doc.SemanticResult?.Symbols is not null &&
-            doc.SemanticResult.Symbols.TryGetValue(baseName, out var receiverSymbol))
+        if (TryResolveLocalOrDeclarationSymbol(doc.ParseResult!.CompilationUnit!, cursorOffset, baseName, out _, out var receiverTypeText) &&
+            !string.IsNullOrEmpty(receiverTypeText))
         {
-            receiverTypeName = receiverSymbol.Type is NamedTypeSymbol named ? named.TypeName : null;
+            receiverTypeName = ExtractNamedTypeName(receiverTypeText);
         }
 
         if (string.IsNullOrEmpty(receiverTypeName) &&
-            TryResolveLocalOrDeclarationSymbol(doc.ParseResult!.CompilationUnit!, cursorOffset, baseName, out _, out var receiverTypeText))
+            doc.SemanticResult?.Symbols is not null &&
+            doc.SemanticResult.Symbols.TryGetValue(baseName, out var receiverSymbol))
         {
-            if (!string.IsNullOrEmpty(receiverTypeText))
-            {
-                receiverTypeName = ExtractNamedTypeName(receiverTypeText);
-            }
+            receiverTypeName = receiverSymbol.Type is NamedTypeSymbol named ? named.TypeName : null;
         }
 
         if (string.IsNullOrEmpty(receiverTypeName))
