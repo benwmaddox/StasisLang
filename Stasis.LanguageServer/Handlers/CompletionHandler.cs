@@ -255,6 +255,13 @@ public class CompletionHandler : CompletionHandlerBase
 
         var baseName = receiverChain[0];
 
+        // Prefer in-scope locals/parameters over globals (including imported globals) when semantic info is unavailable.
+        if (TryResolveLocalTypeName(doc.ParseResult?.CompilationUnit, cursorOffset, baseName, out var localTypeName))
+        {
+            return ResolveMemberChain(localTypeName, receiverChain, doc.SymbolIndex);
+        }
+
+        // Enum member completion (State.Idle). Keep after locals so a local named "State" can still win.
         if (doc.SymbolIndex?.IsEnum(baseName) == true)
         {
             return baseName;
@@ -271,13 +278,32 @@ public class CompletionHandler : CompletionHandlerBase
             }, receiverChain, doc.SymbolIndex);
         }
 
-        if (doc.ParseResult?.CompilationUnit is not { } compilationUnit)
+        // Parse-tree fallback for globals/consts when semantic info is unavailable.
+        // Prefer the import-expanded parse (it has the full declaration set) and fall back to the local parse.
+        var globalsUnit = doc.ExpandedParseResult?.CompilationUnit ?? doc.ParseResult?.CompilationUnit;
+        var localsUnit = doc.ParseResult?.CompilationUnit;
+
+        if (globalsUnit is null)
         {
             return null;
         }
 
-        // Parse-tree fallback for globals/consts when semantic info is unavailable.
-        foreach (var decl in compilationUnit.Declarations)
+        // Prefer globals/consts declared in the current file over imported declarations when names collide.
+        if (localsUnit is not null)
+        {
+            foreach (var decl in localsUnit.Declarations)
+            {
+                switch (decl)
+                {
+                    case GlobalDeclarationSyntax global when string.Equals(global.Name.Text, baseName, StringComparison.Ordinal):
+                        return ResolveMemberChain(GetNamedTypeName(global.Type), receiverChain, doc.SymbolIndex);
+                    case ConstDeclarationSyntax constant when string.Equals(constant.Name.Text, baseName, StringComparison.Ordinal):
+                        return ResolveMemberChain(GetNamedTypeName(constant.Type), receiverChain, doc.SymbolIndex);
+                }
+            }
+        }
+
+        foreach (var decl in globalsUnit.Declarations)
         {
             switch (decl)
             {
@@ -288,17 +314,33 @@ public class CompletionHandler : CompletionHandlerBase
             }
         }
 
-        // Local lookup inside the enclosing function/test (parameters + let bindings).
+        return null;
+    }
+
+    private static bool TryResolveLocalTypeName(
+        CompilationUnitSyntax? compilationUnit,
+        int cursorOffset,
+        string baseName,
+        out string? localTypeName)
+    {
+        localTypeName = null;
+
+        if (compilationUnit is null)
+        {
+            return false;
+        }
+
         if (!TryGetEnclosingCallable(compilationUnit, cursorOffset, out var parameters, out var body))
         {
-            return null;
+            return false;
         }
 
         foreach (var parameter in parameters)
         {
             if (string.Equals(parameter.Name.Text, baseName, StringComparison.Ordinal))
             {
-                return ResolveMemberChain(GetNamedTypeName(parameter.Type), receiverChain, doc.SymbolIndex);
+                localTypeName = GetNamedTypeName(parameter.Type);
+                return !string.IsNullOrEmpty(localTypeName);
             }
         }
 
@@ -321,8 +363,8 @@ public class CompletionHandler : CompletionHandlerBase
             }
         }
 
-        var localTypeName = best?.Type is null ? null : GetNamedTypeName(best.Type);
-        return ResolveMemberChain(localTypeName, receiverChain, doc.SymbolIndex);
+        localTypeName = best?.Type is null ? null : GetNamedTypeName(best.Type);
+        return !string.IsNullOrEmpty(localTypeName);
     }
 
     private static bool TryGetEnclosingCallable(
