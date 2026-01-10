@@ -1,8 +1,5 @@
-.vscode/**
-.vscode-test/**
-src/**
-**/*.ts
-**/*.map
-*.vsix
-npm-debug.log*
-package-lock.json
+# Keep the extension package small: the language server does not use LLVM at runtime.
+server/libLLVM.dll
+server/libLLVM.so
+server/libLLVM.dylib
+
