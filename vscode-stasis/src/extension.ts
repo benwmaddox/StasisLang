@@ -5,6 +5,7 @@ import {
   LanguageClientOptions,
   ServerOptions,
   TransportKind,
+  Trace,
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
@@ -85,12 +86,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         };
         return next(fullEvent);
       },
+      provideCompletionItem: async (document, position, context, token, next) => {
+        output.appendLine(
+          `[completion:req] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""} kind=${context.triggerKind}`
+        );
+        const result = await next(document, position, context, token);
+        const count = Array.isArray(result)
+          ? result.length
+          : result && typeof result === "object" && "items" in result
+          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ((result as any).items?.length ?? 0)
+          : 0;
+        output.appendLine(`[completion:res] count=${count}`);
+        return result;
+      },
     },
   };
 
   output.appendLine(`Starting Stasis LSP: ${server.command} ${server.args.join(" ")}`.trim());
 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
+  void client.setTrace(Trace.Verbose);
   void client.start();
   context.subscriptions.push({
     dispose: () => {
