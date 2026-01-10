@@ -11,6 +11,7 @@ import {
 
 let client: LanguageClient | undefined;
 let clientStart: Promise<void> | undefined;
+let sawLspCompletionRequest = false;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -85,6 +86,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     traceOutputChannel: output,
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
+        sawLspCompletionRequest = true;
         output.appendLine(
           `[completion:req] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""} kind=${context.triggerKind}`
         );
@@ -121,13 +123,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         output.appendLine("[client:init] missing initializeResult");
       }
 
-      const hasLspCompletion = !!client!.initializeResult?.capabilities?.completionProvider;
+      // Some servers (including OmniSharp.Extensions-based) may register completion dynamically
+      // after initialize, which means initializeResult.capabilities.completionProvider can be null
+      // even though completions work. Delay fallback registration until we're confident the client
+      // didn't register an LSP-backed completion provider.
+      output.appendLine("[completion:provider] checking server completion support...");
+      await delay(2000);
+      const hasLspCompletion = sawLspCompletionRequest || !!client!.initializeResult?.capabilities?.completionProvider;
       if (hasLspCompletion) {
-        output.appendLine("[completion:provider] using server completionProvider");
+        output.appendLine("[completion:provider] using LSP completion");
         return;
       }
 
-      output.appendLine("[completion:provider] server missing completionProvider; enabling fallback provider");
+      output.appendLine("[completion:provider] enabling fallback completion provider");
 
       // As a pragmatic fallback, register a VS Code completion provider that forwards to the LSP request directly.
       fallbackCompletionProvider = vscode.languages.registerCompletionItemProvider(
