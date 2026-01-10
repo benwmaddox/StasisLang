@@ -110,6 +110,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output.appendLine(`[client:state] ${e.oldState} -> ${e.newState}`);
   });
 
+  // Dot-trigger completion shim:
+  // Some server/client capability combinations end up with completionProvider triggerCharacters not being honored,
+  // so '.' does not trigger completion automatically. Register a small provider for '.' that:
+  // 1) syncs full document text (range=null) to avoid stale server content
+  // 2) forwards a completion request to the language server
+  const dotCompletionShim = vscode.languages.registerCompletionItemProvider(
+    { scheme: "file", language: "stasis" },
+    {
+      provideCompletionItems: async (document, position, token, context) => {
+        if (context.triggerCharacter !== ".") return undefined;
+        if (!client || !clientStart) return undefined;
+
+        try {
+          await withTimeout(clientStart, 10_000);
+        } catch (err) {
+          output.appendLine(`[completion:dot] client not started: ${(err as Error)?.message ?? String(err)}`);
+          return undefined;
+        }
+
+        // Ensure server has the latest document content before requesting completion at '.'.
+        try {
+          const fullText = document.getText();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await client.sendNotification("textDocument/didChange" as any, {
+            textDocument: {
+              uri: document.uri.toString(),
+              version: document.version ?? 1,
+            },
+            contentChanges: [{ text: fullText }],
+          });
+          await delay(1);
+        } catch (err) {
+          output.appendLine(`[completion:dot] failed to sync: ${(err as Error)?.message ?? String(err)}`);
+        }
+
+        const params = {
+          textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+          position: client.code2ProtocolConverter.asPosition(position),
+          context: {
+            triggerKind: CompletionTriggerKind.TriggerCharacter,
+            triggerCharacter: ".",
+          },
+        };
+
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const result: any = await client.sendRequest("textDocument/completion", params, token);
+          return result;
+        } catch (err) {
+          output.appendLine(`[completion:dot] request failed: ${(err as Error)?.message ?? String(err)}`);
+          return undefined;
+        }
+      },
+    },
+    "."
+  );
+  context.subscriptions.push(dotCompletionShim);
+
   void (async () => {
     try {
       await withTimeout(clientStart!, 10_000);
