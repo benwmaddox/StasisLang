@@ -356,6 +356,130 @@ function main() {
     }
 
     [Fact]
+    public async Task HandleAsync_PrefersLocalOverImportedGlobal_WhenSemanticUnavailable()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_completion_shadow_local_import_global_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "globals.stasis");
+            File.WriteAllText(importedPath, """
+struct ImportedState {
+  imported_only: i32;
+}
+
+global state: ImportedState;
+""");
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var content = """
+import "globals.stasis";
+
+struct LocalState {
+  local_only: i32;
+}
+
+function main() {
+  let state: LocalState;
+  state.
+}
+""";
+
+            var docId = new TextDocumentIdentifier { Uri = new Uri(entryPath) };
+            var uri = docId.Uri.ToString();
+
+            manager.GetOrCreateDocument(uri, content);
+            manager.UpdateDocument(uri, content, 1);
+
+            // Force fallback path (semantic analysis unavailable) but keep parse/index data.
+            var doc = manager.GetDocument(uri);
+            Assert.NotNull(doc);
+            doc!.SemanticResult = null;
+
+            var dotOffset = content.IndexOf("state.", StringComparison.Ordinal) + "state.".Length;
+
+            var request = new CompletionParams
+            {
+                TextDocument = docId,
+                Position = PositionAt(content, dotOffset)
+            };
+
+            var result = await handler.Handle(request, CancellationToken.None);
+            var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+            Assert.Contains("local_only", labels);
+            Assert.DoesNotContain("imported_only", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task HandleAsync_PrefersCurrentFileGlobalOverImportedGlobal_WhenSemanticUnavailable()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_completion_shadow_global_import_global_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "globals.stasis");
+            File.WriteAllText(importedPath, """
+struct ImportedState {
+  imported_only: i32;
+}
+
+global state: ImportedState;
+""");
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var content = """
+import "globals.stasis";
+
+struct LocalState {
+  local_only: i32;
+}
+
+global state: LocalState;
+
+function main() {
+  state.
+}
+""";
+
+            var docId = new TextDocumentIdentifier { Uri = new Uri(entryPath) };
+            var uri = docId.Uri.ToString();
+
+            manager.GetOrCreateDocument(uri, content);
+            manager.UpdateDocument(uri, content, 1);
+
+            var doc = manager.GetDocument(uri);
+            Assert.NotNull(doc);
+            doc!.SemanticResult = null;
+
+            var dotOffset = content.IndexOf("state.", StringComparison.Ordinal) + "state.".Length;
+
+            var request = new CompletionParams
+            {
+                TextDocument = docId,
+                Position = PositionAt(content, dotOffset)
+            };
+
+            var result = await handler.Handle(request, CancellationToken.None);
+            var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+            Assert.Contains("local_only", labels);
+            Assert.DoesNotContain("imported_only", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task HandleCompletionItemAsync_ReturnsItemUnmodified()
     {
         // Arrange
