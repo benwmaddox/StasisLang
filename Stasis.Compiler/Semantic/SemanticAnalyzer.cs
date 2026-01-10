@@ -546,7 +546,17 @@ public sealed class SemanticAnalyzer
                     }
                 }
                 // Not an enum member access - regular struct field access
-                AnalyzeExpression(m.Receiver, scope);
+                // Analyze the root receiver expression once (avoids duplicate member-chain diagnostics on nested accesses).
+                var rootReceiver = m.Receiver;
+                while (rootReceiver is MemberAccessExpressionSyntax ma)
+                {
+                    rootReceiver = ma.Receiver;
+                }
+
+                AnalyzeExpression(rootReceiver, scope);
+
+                // Validate struct member chains and report unknown fields.
+                _ = ResolveMemberAccessType(m, scope);
                 break;
             case ArrayAccessExpressionSyntax a:
                 AnalyzeExpression(a.Receiver, scope);
@@ -1124,11 +1134,11 @@ public sealed class SemanticAnalyzer
 
     private TypeSymbol? ResolveMemberAccessType(MemberAccessExpressionSyntax member, IReadOnlyDictionary<string, Symbol> scope)
     {
-        var chain = new List<string>();
+        var chain = new List<(string Name, SourceSpan Span)>();
         ExpressionSyntax current = member;
         while (current is MemberAccessExpressionSyntax m)
         {
-            chain.Add(m.Member.Text);
+            chain.Add((m.Member.Text, m.Member.Span));
             current = m.Receiver;
         }
 
@@ -1146,22 +1156,46 @@ public sealed class SemanticAnalyzer
         var currentType = rootSym.Type;
         chain.Reverse();
 
-        foreach (var memberName in chain)
+        foreach (var (memberName, memberSpan) in chain)
         {
+            if (currentType is ArrayTypeSymbol arrType)
+            {
+                // Built-in array properties.
+                if (string.Equals(memberName, "length", StringComparison.Ordinal))
+                {
+                    currentType = BuiltInTypes["i32"];
+                    continue;
+                }
+
+                _diagnostics.Add(new Diagnostic(
+                    $"Cannot access field '{memberName}' on array type '{FormatType(arrType)}'. Index with '[i]' first.",
+                    memberSpan));
+                return null;
+            }
+
             if (currentType is not NamedTypeSymbol named)
             {
+                _diagnostics.Add(new Diagnostic(
+                    $"Cannot access field '{memberName}' on type '{FormatType(currentType ?? new PrimitiveTypeSymbol("unknown"))}'.",
+                    memberSpan));
                 return null;
             }
 
             if (!_structs.TryGetValue(named.TypeName, out var structDecl))
             {
                 // Not a struct type (could be an enum or unknown)
+                _diagnostics.Add(new Diagnostic(
+                    $"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'.",
+                    memberSpan));
                 return null;
             }
 
             var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, memberName, StringComparison.Ordinal));
             if (field is null)
             {
+                _diagnostics.Add(new Diagnostic(
+                    $"Struct '{named.TypeName}' does not have a field named '{memberName}'.",
+                    memberSpan));
                 return null;
             }
 

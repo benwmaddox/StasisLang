@@ -236,4 +236,30 @@ public class DocumentManagerTests
             tempDir.Delete(recursive: true);
         }
     }
+
+    [Fact]
+    public void UpdateDocument_ReportsUnknownStructFieldAccess_AsDiagnostic()
+    {
+        var manager = new DocumentManager();
+        var uri = "file:///test.stasis";
+        var content = """
+struct S {
+  x: i32;
+}
+
+global s: S;
+
+function main(): i32 {
+  s.nope;
+  return 0;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, "");
+        manager.UpdateDocument(uri, content, 1);
+        var doc = manager.GetDocument(uri);
+
+        Assert.NotNull(doc);
+        Assert.Contains(doc!.AllDiagnostics, d => d.Message.Contains("does not have a field named 'nope'", StringComparison.Ordinal));
+    }
 }
