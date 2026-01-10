@@ -56,20 +56,24 @@ public class CompletionHandler : CompletionHandlerBase
             return new CompletionList();
         }
 
-        var receiverTypeName = ResolveReceiverTypeName(receiverChain, doc, offset);
+        var memberPrefix = string.Empty;
+        var (receiverChainForType, effectiveOffset) =
+            GetMemberPrefixAndReceiverChain(lineSpan.Text, lineSpan.Start, request.Position.Character, receiverChain, out memberPrefix);
+
+        var receiverTypeName = ResolveReceiverTypeName(receiverChainForType, doc, effectiveOffset);
         if (string.IsNullOrEmpty(receiverTypeName))
         {
             var posInfoFail = $"{request.Position.Line}:{request.Position.Character}";
             await Console.Error.WriteLineAsync(
-                $"[completion] {uri} unresolved chain {string.Join(".", receiverChain)} pos {posInfoFail} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
+                $"[completion] {uri} unresolved chain {string.Join(".", receiverChainForType)} pos {posInfoFail} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
             return new CompletionList();
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var items = GetMemberCompletions(receiverTypeName, doc.SymbolIndex);
+        var items = GetMemberCompletions(receiverTypeName, doc.SymbolIndex, memberPrefix);
         var preview = string.Join(", ", items.Take(10).Select(i => i.Label));
         var posInfoOk = $"{request.Position.Line}:{request.Position.Character}";
-        await Console.Error.WriteLineAsync($"[completion] {uri} {string.Join(".", receiverChain)} -> {receiverTypeName} ({items.Count}) [{preview}] pos {posInfoOk} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
+        await Console.Error.WriteLineAsync($"[completion] {uri} {string.Join(".", receiverChainForType)} -> {receiverTypeName} ({items.Count}) [{preview}] pos {posInfoOk} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
         return new CompletionList(items);
     }
 
@@ -88,11 +92,12 @@ public class CompletionHandler : CompletionHandlerBase
         };
     }
 
-    private static IReadOnlyList<CompletionItem> GetMemberCompletions(string receiverTypeName, SymbolIndex index)
+    private static IReadOnlyList<CompletionItem> GetMemberCompletions(string receiverTypeName, SymbolIndex index, string memberPrefix)
     {
         if (index.GetEnum(receiverTypeName) is { } enumSymbol)
         {
             return enumSymbol.Members
+                .Where(m => string.IsNullOrEmpty(memberPrefix) || m.StartsWith(memberPrefix, StringComparison.Ordinal))
                 .Select(m => new CompletionItem
                 {
                     Label = m,
@@ -106,6 +111,7 @@ public class CompletionHandler : CompletionHandlerBase
         if (index.GetStruct(receiverTypeName) is { } structSymbol)
         {
             return structSymbol.Fields
+                .Where(f => string.IsNullOrEmpty(memberPrefix) || f.Name.StartsWith(memberPrefix, StringComparison.Ordinal))
                 .Select(f => new CompletionItem
                 {
                     Label = f.Name,
@@ -117,6 +123,40 @@ public class CompletionHandler : CompletionHandlerBase
         }
 
         return Array.Empty<CompletionItem>();
+    }
+
+    private static (IReadOnlyList<string> ReceiverChain, int EffectiveOffset) GetMemberPrefixAndReceiverChain(
+        string lineText,
+        int lineStartOffset,
+        int character,
+        IReadOnlyList<string> parsedChain,
+        out string memberPrefix)
+    {
+        memberPrefix = string.Empty;
+
+        if (parsedChain.Count == 0)
+        {
+            return (parsedChain, lineStartOffset);
+        }
+
+        // If the cursor is after a partial identifier (e.g. `state.config.ba`), treat the last segment as the prefix
+        // and resolve the receiver type from the chain excluding that last segment.
+        var endIndex = Math.Min(character, lineText.Length) - 1;
+        while (endIndex >= 0 && char.IsWhiteSpace(lineText[endIndex]))
+        {
+            endIndex--;
+        }
+
+        if (endIndex >= 0 && lineText[endIndex] != '.')
+        {
+            if (parsedChain.Count >= 2)
+            {
+                memberPrefix = parsedChain[^1];
+                return (parsedChain.Take(parsedChain.Count - 1).ToArray(), lineStartOffset + endIndex);
+            }
+        }
+
+        return (parsedChain, lineStartOffset + Math.Max(0, endIndex));
     }
 
     private static IReadOnlyList<CompletionItem> GetGlobalCompletions(DocumentState doc, int cursorOffset, CompletionContext? context)

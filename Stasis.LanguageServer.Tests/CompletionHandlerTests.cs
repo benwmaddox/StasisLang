@@ -657,4 +657,48 @@ function main(): i32 {
 
         Assert.DoesNotContain("global", labels);
     }
+
+    [Fact]
+    public async Task HandleAsync_FiltersMemberCompletions_ByPartialMemberPrefix()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct B {
+  foo: i32;
+  bar: i32;
+}
+
+struct A {
+  b: B;
+  baz: i32;
+}
+
+global a: A;
+
+function main(): i32 {
+  a.b.ba
+  return 0;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("a.b.ba", StringComparison.Ordinal) + "a.b.ba".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("bar", labels);
+        Assert.DoesNotContain("foo", labels);
+    }
 }
