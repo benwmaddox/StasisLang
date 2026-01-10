@@ -262,4 +262,32 @@ function main(): i32 {
         Assert.NotNull(doc);
         Assert.Contains(doc!.AllDiagnostics, d => d.Message.Contains("does not have a field named 'nope'", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void UpdateDocument_ReportsUnknownStructFieldAccess_EvenWhenParseHasErrors()
+    {
+        var manager = new DocumentManager();
+        var uri = "file:///test.stasis";
+        var content = """
+struct S {
+  x: i32;
+}
+
+global s: S;
+
+function main(): i32 {
+  s.nope;
+  let broken: = 1;
+  return 0;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, "");
+        manager.UpdateDocument(uri, content, 1);
+        var doc = manager.GetDocument(uri);
+
+        Assert.NotNull(doc);
+        Assert.Null(doc!.SemanticResult);
+        Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("does not have a field named 'nope'", StringComparison.Ordinal));
+    }
 }

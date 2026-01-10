@@ -77,6 +77,27 @@ public class DocumentManager
             allDiags.AddRange(lexResult.Diagnostics);
             allDiags.AddRange(parseResult.Diagnostics);
             allDiags.AddRange(FilterAndRemapDiagnostics(uri, doc.Content, compilerDiagnostics, importSegments, expanded));
+
+            // When the expanded parse has errors we normally skip semantic analysis, but we still want
+            // high-signal diagnostics like "unknown struct field" while editing.
+            try
+            {
+                var semanticAnalyzer = new SemanticAnalyzer();
+                var semanticResult = semanticAnalyzer.Analyze(expandedParse.CompilationUnit);
+                var memberAccessDiags = semanticResult.Diagnostics
+                    .Where(d =>
+                        d.Message.Contains("does not have a field named", StringComparison.Ordinal) ||
+                        d.Message.Contains("Cannot access field", StringComparison.Ordinal) ||
+                        d.Message.Contains("is not a struct; cannot access field", StringComparison.Ordinal))
+                    .ToArray();
+
+                allDiags.AddRange(FilterAndRemapDiagnostics(uri, doc.Content, memberAccessDiags, importSegments, expanded));
+            }
+            catch
+            {
+                // Ignore: best-effort diagnostics only in this path.
+            }
+
             doc.AllDiagnostics = allDiags;
             doc.SemanticResult = null;
         }
