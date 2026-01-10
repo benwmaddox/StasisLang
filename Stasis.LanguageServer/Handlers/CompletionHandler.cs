@@ -35,6 +35,12 @@ public class CompletionHandler : CompletionHandlerBase
         var offset = lineOffset;
         var triggerChar = request.Context?.TriggerCharacter;
 
+        if (TryGetTypeCompletionPrefix(lineSpan.Text, request.Position.Character, out var typePrefix))
+        {
+            var typeItems = GetTypeCompletions(doc, typePrefix);
+            return new CompletionList(typeItems);
+        }
+
         if (!TryGetMemberAccessReceiverChainFromLinePrefix(lineSpan.Text, request.Position.Character, out var receiverChain) &&
             !TryGetMemberAccessReceiverChain(doc.Content, offset, out receiverChain))
         {
@@ -256,6 +262,60 @@ public class CompletionHandler : CompletionHandlerBase
             .ToArray();
     }
 
+    private static IReadOnlyList<CompletionItem> GetTypeCompletions(DocumentState doc, string prefix)
+    {
+        var items = new List<CompletionItem>(128);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string name, CompletionItemKind kind)
+        {
+            if (!string.IsNullOrEmpty(prefix) && !name.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (!seen.Add(name))
+            {
+                return;
+            }
+
+            items.Add(new CompletionItem
+            {
+                Label = name,
+                Kind = kind,
+                InsertText = name
+            });
+        }
+
+        var builtinTypes = new[] { "u8", "u16", "u32", "i32", "f32", "f64", "bool", "string", "utf8", "ascii", "void" };
+        foreach (var typeName in builtinTypes)
+        {
+            Add(typeName, CompletionItemKind.Keyword);
+        }
+
+        var unit = doc.ExpandedParseResult?.CompilationUnit ?? doc.ParseResult?.CompilationUnit;
+        if (unit is not null)
+        {
+            foreach (var decl in unit.Declarations)
+            {
+                switch (decl)
+                {
+                    case StructDeclarationSyntax s:
+                        Add(s.Name.Text, CompletionItemKind.Struct);
+                        break;
+                    case EnumDeclarationSyntax e:
+                        Add(e.Name.Text, CompletionItemKind.Enum);
+                        break;
+                }
+            }
+        }
+
+        return items
+            .OrderBy(i => i.Label, StringComparer.Ordinal)
+            .Take(200)
+            .ToArray();
+    }
+
     private static void AddKeywordCompletions(List<CompletionItem> items, string prefix)
     {
         var keywords = new[]
@@ -303,6 +363,66 @@ public class CompletionHandler : CompletionHandlerBase
 
     private static bool IsBuiltinTypeName(string name) =>
         name is "u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool" or "string" or "utf8" or "ascii" or "void";
+
+    private static bool TryGetTypeCompletionPrefix(string lineText, int character, out string prefix)
+    {
+        prefix = string.Empty;
+        if (string.IsNullOrEmpty(lineText))
+        {
+            return false;
+        }
+
+        var end = Math.Min(character, lineText.Length);
+
+        // Trim whitespace before cursor.
+        var i = end;
+        while (i > 0 && char.IsWhiteSpace(lineText[i - 1]))
+        {
+            i--;
+        }
+
+        // Capture a partially-typed identifier as the prefix.
+        var identEnd = i;
+        var identStart = identEnd;
+        while (identStart > 0 && IsIdentifierChar(lineText[identStart - 1]))
+        {
+            identStart--;
+        }
+
+        prefix = lineText.Substring(identStart, identEnd - identStart);
+
+        // Skip whitespace between prefix and ':'.
+        var j = identStart;
+        while (j > 0 && char.IsWhiteSpace(lineText[j - 1]))
+        {
+            j--;
+        }
+
+        if (j == 0 || lineText[j - 1] != ':')
+        {
+            return false;
+        }
+
+        // Ensure the ':' is plausibly a type annotation delimiter (e.g. `x: Type`, `fn(): Type`).
+        var k = j - 1;
+        while (k > 0 && char.IsWhiteSpace(lineText[k - 1]))
+        {
+            k--;
+        }
+
+        if (k == 0)
+        {
+            return false;
+        }
+
+        var beforeColon = lineText[k - 1];
+        if (beforeColon != ')' && !IsIdentifierChar(beforeColon))
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     private static string GetIdentifierPrefix(string content, int cursorOffset)
     {

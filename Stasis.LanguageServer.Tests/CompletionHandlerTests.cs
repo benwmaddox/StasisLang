@@ -733,4 +733,133 @@ function main(): i32 {
         Assert.Contains("bar", labels);
         Assert.DoesNotContain("foo", labels);
     }
+
+    [Fact]
+    public async Task HandleAsync_OffersTypeNames_InStructFieldTypePosition_WhenInvoked()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct Foo { x: i32; }
+
+struct S {
+  b: Foo;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("b: Foo", StringComparison.Ordinal) + "b: ".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("Foo", labels);
+        Assert.Contains("i32", labels);
+        Assert.DoesNotContain("global", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersTypeNames_InFunctionReturnTypePosition_WhenInvoked()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct Foo { x: i32; }
+
+function main(): i32 { return 0; }
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("main(): i32", StringComparison.Ordinal) + "main(): ".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("Foo", labels);
+        Assert.Contains("i32", labels);
+        Assert.DoesNotContain("function", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_FiltersTypeNames_ByPrefix_InTypePosition()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct Foo { x: i32; }
+
+function main(): i32 { return 0; }
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("main(): i32", StringComparison.Ordinal) + "main(): i".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("i32", labels);
+        Assert.DoesNotContain("bool", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ReturnsEmpty_WhenMemberChainIsInvalid()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct B { x: i32; }
+struct A { b: B; }
+global a: A;
+
+function main(): i32 {
+  a.b.b.
+  return 0;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("a.b.b.", StringComparison.Ordinal) + "a.b.b.".Length;
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        Assert.Empty(result.Items ?? new Container<CompletionItem>());
+    }
 }
