@@ -93,7 +93,7 @@ public class DidChangeTextDocumentDiagnosticsHandler : DidChangeTextDocumentHand
 
     /// <summary>
     /// Applies text document changes to the current content.
-    /// For now, uses full document replacement strategy (simpler for Phase 1).
+    /// LSP Positions are UTF-16 code units; apply changes against the .NET string (also UTF-16).
     /// </summary>
     private static string ApplyChanges(string currentContent, IEnumerable<TextDocumentContentChangeEvent> changes)
     {

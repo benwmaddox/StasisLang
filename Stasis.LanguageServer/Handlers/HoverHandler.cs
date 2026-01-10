@@ -21,6 +21,7 @@ public class HoverHandler : HoverHandlerBase
 
     public override Task<Hover?> Handle(HoverParams request, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var uri = request.TextDocument.Uri.ToString();
         var doc = _documentManager.GetDocument(uri);
 
@@ -33,6 +34,7 @@ public class HoverHandler : HoverHandlerBase
             return Task.FromResult<Hover?>(null);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var hover = GetHoverInfo(identifierChain, doc, offset);
         return Task.FromResult<Hover?>(hover);
     }

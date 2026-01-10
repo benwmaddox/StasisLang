@@ -20,6 +20,7 @@ public class CompletionHandler : CompletionHandlerBase
 
     public override async Task<CompletionList> Handle(CompletionParams request, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var uri = request.TextDocument.Uri.ToString();
         var doc = _documentManager.GetDocument(uri);
 
@@ -64,6 +65,7 @@ public class CompletionHandler : CompletionHandlerBase
             return new CompletionList();
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var items = GetMemberCompletions(receiverTypeName, doc.SymbolIndex);
         var preview = string.Join(", ", items.Take(10).Select(i => i.Label));
         var posInfoOk = $"{request.Position.Line}:{request.Position.Character}";
