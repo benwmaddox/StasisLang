@@ -229,7 +229,8 @@ public class HoverHandler : HoverHandlerBase
         var bracketIndex = typeText.IndexOf('[');
         if (bracketIndex >= 0)
         {
-            return null;
+            var element = typeText[..bracketIndex].Trim();
+            return string.IsNullOrEmpty(element) ? null : element;
         }
 
         return typeText;
