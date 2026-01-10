@@ -6,7 +6,7 @@ import "../src/stdlib/graphics.stasis";
 
 // External runtime APIs:
 // - init_window(width: i32, height: i32, title: string) -> bool: creates the SDL window/context.
-// - time() -> i64: returns unix timestamp seconds for seeding the PRNG.
+// - time() -> i32: returns unix timestamp seconds (truncated) for seeding the PRNG.
 // - get_time_ms() -> i32: millisecond-resolution clock used for timing logic.
 // - should_quit() -> bool: polls SDL events for quit requests.
 // - begin_frame(), end_frame(): bracket GPU work for the graphics backend.
