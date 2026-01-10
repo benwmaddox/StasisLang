@@ -180,6 +180,43 @@ function main() {
     }
 
     [Fact]
+    public async Task HandleAsync_OffersStructFieldsAfterDot_WhenMemberNameIsMissing()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct GameState {
+  score: i32;
+  phase: i32;
+}
+
+global state: GameState;
+
+function main() {
+  state.
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var dotOffset = content.IndexOf("state.", StringComparison.Ordinal) + "state.".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, dotOffset)
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("score", labels);
+        Assert.Contains("phase", labels);
+    }
+
+    [Fact]
     public async Task HandleCompletionItemAsync_ReturnsItemUnmodified()
     {
         // Arrange

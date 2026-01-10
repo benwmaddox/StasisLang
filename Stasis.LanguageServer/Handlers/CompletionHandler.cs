@@ -271,13 +271,17 @@ public class CompletionHandler : CompletionHandlerBase
             }, receiverChain, doc.SymbolIndex);
         }
 
-        if (doc.ParseResult?.CompilationUnit is not { } compilationUnit)
+        // Parse-tree fallback for globals/consts when semantic info is unavailable.
+        // Prefer the import-expanded parse (it has the full declaration set) and fall back to the local parse.
+        var globalsUnit = doc.ExpandedParseResult?.CompilationUnit ?? doc.ParseResult?.CompilationUnit;
+        var localsUnit = doc.ParseResult?.CompilationUnit;
+
+        if (globalsUnit is null)
         {
             return null;
         }
 
-        // Parse-tree fallback for globals/consts when semantic info is unavailable.
-        foreach (var decl in compilationUnit.Declarations)
+        foreach (var decl in globalsUnit.Declarations)
         {
             switch (decl)
             {
@@ -289,7 +293,7 @@ public class CompletionHandler : CompletionHandlerBase
         }
 
         // Local lookup inside the enclosing function/test (parameters + let bindings).
-        if (!TryGetEnclosingCallable(compilationUnit, cursorOffset, out var parameters, out var body))
+        if (localsUnit is null || !TryGetEnclosingCallable(localsUnit, cursorOffset, out var parameters, out var body))
         {
             return null;
         }
