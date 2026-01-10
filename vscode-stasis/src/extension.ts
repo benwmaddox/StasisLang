@@ -109,6 +109,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   client.onDidChangeState((e) => {
     output.appendLine(`[client:state] ${e.oldState} -> ${e.newState}`);
   });
+
+  let fallbackCompletionProvider: vscode.Disposable | undefined;
   void (async () => {
     try {
       await withTimeout(clientStart!, 10_000);
@@ -118,82 +120,88 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } else {
         output.appendLine("[client:init] missing initializeResult");
       }
+
+      const hasLspCompletion = !!client!.initializeResult?.capabilities?.completionProvider;
+      if (hasLspCompletion) {
+        output.appendLine("[completion:provider] using server completionProvider");
+        return;
+      }
+
+      output.appendLine("[completion:provider] server missing completionProvider; enabling fallback provider");
+
+      // As a pragmatic fallback, register a VS Code completion provider that forwards to the LSP request directly.
+      fallbackCompletionProvider = vscode.languages.registerCompletionItemProvider(
+        { scheme: "file", language: "stasis" },
+        {
+          provideCompletionItems: async (document, position, token, context) => {
+            if (!client) return [];
+            try {
+              if (!client.initializeResult && clientStart) {
+                await withTimeout(clientStart, 2_000);
+              }
+            } catch (err) {
+              output.appendLine(`[completion:provider] client not started: ${(err as Error)?.message ?? String(err)}`);
+              await delay(250);
+            }
+
+            const params = {
+              textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+              position: client.code2ProtocolConverter.asPosition(position),
+              context: {
+                triggerKind:
+                  context.triggerKind === vscode.CompletionTriggerKind.TriggerCharacter
+                    ? CompletionTriggerKind.TriggerCharacter
+                    : context.triggerKind === vscode.CompletionTriggerKind.TriggerForIncompleteCompletions
+                    ? CompletionTriggerKind.TriggerForIncompleteCompletions
+                    : CompletionTriggerKind.Invoked,
+                triggerCharacter: context.triggerCharacter ?? undefined,
+              },
+            };
+
+            output.appendLine(
+              `[completion:provider] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""}`
+            );
+
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const result: any = await client.sendRequest("textDocument/completion", params, token);
+              const items = Array.isArray(result) ? result : result?.items ?? [];
+              output.appendLine(`[completion:provider] items=${items.length}`);
+
+              return items.map((item: any) => {
+                const ci = new vscode.CompletionItem(item.label);
+                if (item.insertText) {
+                  ci.insertText = item.insertText;
+                }
+                if (item.detail) {
+                  ci.detail = item.detail;
+                }
+                if (item.documentation) {
+                  ci.documentation =
+                    typeof item.documentation === "string"
+                      ? item.documentation
+                      : item.documentation.value ?? item.documentation;
+                }
+                return ci;
+              });
+            } catch (err) {
+              output.appendLine(`[completion:error] ${(err as Error)?.message ?? String(err)}`);
+              return [];
+            }
+          },
+        },
+        "."
+      );
+      context.subscriptions.push(fallbackCompletionProvider);
     } catch (err) {
       output.appendLine(`[client:start] failed: ${(err as Error)?.message ?? String(err)}`);
     }
   })();
 
-  // Some language server stacks rely on dynamic registration and may not advertise completionProvider
-  // in initialize results. As a pragmatic fallback, register a VS Code completion provider that forwards
-  // to the LSP request directly so completions still work.
-  const completionProvider = vscode.languages.registerCompletionItemProvider(
-    { scheme: "file", language: "stasis" },
-    {
-      provideCompletionItems: async (document, position, token, context) => {
-        if (!client) return [];
-        try {
-          if (!client.initializeResult && clientStart) {
-            await withTimeout(clientStart, 2_000);
-          }
-        } catch (err) {
-          output.appendLine(`[completion:provider] client not started: ${(err as Error)?.message ?? String(err)}`);
-          // Give the client a brief chance to finish connecting if we're racing startup.
-          await delay(250);
-        }
-
-        const params = {
-          textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
-          position: client.code2ProtocolConverter.asPosition(position),
-          context: {
-            triggerKind:
-              context.triggerKind === vscode.CompletionTriggerKind.TriggerCharacter
-                ? CompletionTriggerKind.TriggerCharacter
-                : context.triggerKind === vscode.CompletionTriggerKind.TriggerForIncompleteCompletions
-                ? CompletionTriggerKind.TriggerForIncompleteCompletions
-                : CompletionTriggerKind.Invoked,
-            triggerCharacter: context.triggerCharacter ?? undefined,
-          },
-        };
-
-        output.appendLine(
-          `[completion:provider] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""}`
-        );
-
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const result: any = await client.sendRequest("textDocument/completion", params, token);
-          const items = Array.isArray(result) ? result : result?.items ?? [];
-          output.appendLine(`[completion:provider] items=${items.length}`);
-
-          return items.map((item: any) => {
-            const ci = new vscode.CompletionItem(item.label);
-            if (item.insertText) {
-              ci.insertText = item.insertText;
-            }
-            if (item.detail) {
-              ci.detail = item.detail;
-            }
-            if (item.documentation) {
-              ci.documentation =
-                typeof item.documentation === "string"
-                  ? item.documentation
-                  : item.documentation.value ?? item.documentation;
-            }
-            return ci;
-          });
-        } catch (err) {
-          output.appendLine(`[completion:error] ${(err as Error)?.message ?? String(err)}`);
-          return [];
-        }
-      },
-    },
-    "."
-  );
-  context.subscriptions.push(completionProvider);
-
   context.subscriptions.push({
     dispose: () => {
       void client?.stop();
+      fallbackCompletionProvider?.dispose();
     },
   });
 }
