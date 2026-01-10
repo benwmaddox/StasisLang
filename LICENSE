@@ -1,0 +1,68 @@
+Stasis Community License v1.0
+
+Copyright (c) 2026 Maddox Labs
+
+This is a source-available license. It is not an Open Source license.
+
+1. Definitions
+
+"Stasis" means the software and associated materials in this repository, including
+the compiler, runtime, standard library, tools, samples, and documentation, but
+excluding any subdirectory that contains its own LICENSE file.
+
+"Licensee" means (a) a company or other legal entity that uses Stasis, or (b) if
+no such entity applies, the individual person using Stasis.
+
+"Gross Revenue" means the total gross revenue of the Licensee for a given
+calendar year (January 1 through December 31), from all sources, before expenses.
+
+"Distribute" (or "Distribution") means to provide, publish, ship, deploy, or
+otherwise make available to any third party any binary, executable, application,
+game, or other artifact built using Stasis (including alpha, beta, and tester
+builds), whether for free or for a fee.
+
+"Internal Use" means use of Stasis entirely within the Licensee's organization,
+without any Distribution.
+
+2. Grant of Rights
+
+Subject to the conditions below, Maddox Labs grants Licensee a worldwide,
+royalty-free, non-exclusive license to use, copy, modify, and create derivative
+works of Stasis.
+
+3. Distribution Rights and Revenue Threshold
+
+3.1 Internal Use. Internal Use is permitted for any Licensee at any revenue
+level.
+
+3.2 Distribution under the Threshold. Licensee may Distribute artifacts built
+using Stasis only if Licensee's Gross Revenue for the current calendar year is
+less than or equal to USD $10,000.
+
+3.3 Distribution over the Threshold. If Licensee's Gross Revenue for the
+current calendar year exceeds USD $10,000, Licensee must obtain a separate
+commercial license from Maddox Labs before any Distribution. See
+COMMERCIAL_LICENSE.md.
+
+4. Restrictions
+
+4.1 No Trademark License. This license does not grant any rights in the
+trademarks, service marks, or logos of Maddox Labs.
+
+4.2 Compliance. Licensee is responsible for complying with applicable laws.
+
+5. Termination
+
+This license terminates automatically if Licensee violates its terms. Upon
+termination, Licensee must cease Distribution and use of Stasis, and delete all
+copies in Licensee's possession or control.
+
+6. Warranty Disclaimer and Limitation of Liability
+
+STASIS IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL MADDOX LABS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH STASIS OR THE USE
+OR OTHER DEALINGS IN STASIS.
+
