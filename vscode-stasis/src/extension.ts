@@ -10,6 +10,21 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+let clientStart: Promise<void> | undefined;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  const timeout = new Promise<never>((_, reject) => {
+    const id = setTimeout(() => {
+      clearTimeout(id);
+      reject(new Error(`timeout after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]);
+}
 
 function tryServerCommand(extensionPath: string): { command: string; args: string[] } | undefined {
   const serverDir = path.join(extensionPath, "server");
@@ -110,7 +125,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
   void client.setTrace(Trace.Verbose);
-  void client.start();
+  clientStart = client.start();
+  client.onDidChangeState((e) => {
+    output.appendLine(`[client:state] ${e.oldState} -> ${e.newState}`);
+  });
+  void (async () => {
+    try {
+      await withTimeout(clientStart!, 10_000);
+      output.appendLine("[client:start] ok");
+      if (client!.initializeResult) {
+        output.appendLine("[client:init] ok");
+      } else {
+        output.appendLine("[client:init] missing initializeResult");
+      }
+    } catch (err) {
+      output.appendLine(`[client:start] failed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  })();
 
   // Some language server stacks rely on dynamic registration and may not advertise completionProvider
   // in initialize results. As a pragmatic fallback, register a VS Code completion provider that forwards
@@ -120,6 +151,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     {
       provideCompletionItems: async (document, position, token, context) => {
         if (!client) return [];
+        try {
+          if (!client.initializeResult && clientStart) {
+            await withTimeout(clientStart, 2_000);
+          }
+        } catch (err) {
+          output.appendLine(`[completion:provider] client not started: ${(err as Error)?.message ?? String(err)}`);
+          // Give the client a brief chance to finish connecting if we're racing startup.
+          await delay(250);
+        }
 
         const params = {
           textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
