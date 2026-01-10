@@ -117,50 +117,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output.appendLine(`[client:state] ${e.oldState} -> ${e.newState}`);
   });
 
-  // If enabled, trigger suggestions on blank lines at top-level scope even before typing.
-  // This makes top-level keywords (import/global/struct/...) visible without requiring Ctrl+Space.
-  let suggestTimer: NodeJS.Timeout | undefined;
-  let lastSuggestKey = "";
-  context.subscriptions.push(
-    vscode.window.onDidChangeTextEditorSelection((e) => {
-      if (e.textEditor.document.languageId !== "stasis") return;
-      const enabled = vscode.workspace.getConfiguration("stasis").get<boolean>("suggestTopLevelOnBlankLine", true);
-      if (!enabled) return;
-
-      if (suggestTimer) clearTimeout(suggestTimer);
-      suggestTimer = setTimeout(() => {
-        const editor = e.textEditor;
-        const sel = editor.selection;
-        if (!sel.isEmpty) return;
-
-        const pos = sel.active;
-        let lineText = "";
-        try {
-          lineText = editor.document.lineAt(pos.line).text;
-        } catch {
-          return;
-        }
-
-        if (lineText.trim().length !== 0) return;
-
-        // Heuristic: top-level scope if brace depth is zero up to cursor.
-        const before = editor.document.getText(new vscode.Range(new vscode.Position(0, 0), pos));
-        let depth = 0;
-        for (let i = 0; i < before.length; i++) {
-          const ch = before[i];
-          if (ch === "{") depth++;
-          else if (ch === "}") depth = Math.max(0, depth - 1);
-        }
-        if (depth !== 0) return;
-
-        const key = `${editor.document.uri.toString()}@${pos.line}:${pos.character}`;
-        if (key === lastSuggestKey) return;
-        lastSuggestKey = key;
-
-        void vscode.commands.executeCommand("editor.action.triggerSuggest");
-      }, 125);
-    })
-  );
+  // Note: we intentionally do not auto-trigger completion on cursor movement (PageUp/PageDown, arrow keys, etc.).
+  // Top-level keywords are provided by the server when completion is invoked (Ctrl+Space) or when the user types a prefix.
 
   void (async () => {
     try {

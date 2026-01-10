@@ -628,6 +628,27 @@ function main() {
     }
 
     [Fact]
+    public async Task HandleAsync_DoesNotOfferTopLevelKeywords_WhenNotInvoked_AndNoPrefix()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = "";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = new Position(0, 0)
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        Assert.Empty(result.Items ?? new Container<CompletionItem>());
+    }
+
+    [Fact]
     public async Task HandleAsync_OffersTopLevelKeywords_OnBlankTopLevelLine_WhenInvoked()
     {
         var manager = new DocumentManager();

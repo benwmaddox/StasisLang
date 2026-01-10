@@ -25,8 +25,8 @@
       "properties": {
         "stasis.suggestTopLevelOnBlankLine": {
           "type": "boolean",
-          "default": true,
-          "description": "Automatically trigger completion on blank lines at top-level scope (useful for `import`, `global`, `struct`, etc.)."
+          "default": false,
+          "description": "Automatically trigger completion on blank lines at top-level scope (not recommended; can trigger when navigating)."
         }
       }
     },
