@@ -83,6 +83,7 @@ public class CompletionHandler : CompletionHandlerBase
     {
         return new CompletionRegistrationOptions
         {
+            DocumentSelector = new TextDocumentSelector(new TextDocumentFilter { Language = "stasis" }),
             TriggerCharacters = new Container<string>(".")
         };
     }

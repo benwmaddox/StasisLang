@@ -13,6 +13,7 @@ public class DidOpenTextDocumentDiagnosticsHandler : DidOpenTextDocumentHandlerB
 {
     private readonly DocumentManager _documentManager;
     private readonly DiagnosticsPublisher _diagnosticsPublisher;
+    private static readonly TextDocumentSelector Selector = new(new TextDocumentFilter { Language = "stasis" });
 
     public DidOpenTextDocumentDiagnosticsHandler(DocumentManager documentManager, DiagnosticsPublisher diagnosticsPublisher)
     {
@@ -24,12 +25,13 @@ public class DidOpenTextDocumentDiagnosticsHandler : DidOpenTextDocumentHandlerB
     {
         var uri = request.TextDocument.Uri.ToString();
         var content = request.TextDocument.Text;
+        var version = request.TextDocument.Version ?? 1;
 
         // Create or update document
         var doc = _documentManager.GetOrCreateDocument(uri, content);
 
         // Parse document and capture diagnostics
-        _documentManager.UpdateDocument(uri, content, 1);
+        _documentManager.UpdateDocument(uri, content, version);
 
         // Publish diagnostics
         var updatedDoc = _documentManager.GetDocument(uri);
@@ -43,7 +45,7 @@ public class DidOpenTextDocumentDiagnosticsHandler : DidOpenTextDocumentHandlerB
 
     protected override TextDocumentOpenRegistrationOptions CreateRegistrationOptions(TextSynchronizationCapability capability, ClientCapabilities clientCapabilities)
     {
-        return new TextDocumentOpenRegistrationOptions();
+        return new TextDocumentOpenRegistrationOptions { DocumentSelector = Selector };
     }
 }
 
@@ -54,6 +56,7 @@ public class DidChangeTextDocumentDiagnosticsHandler : DidChangeTextDocumentHand
 {
     private readonly DocumentManager _documentManager;
     private readonly DiagnosticsPublisher _diagnosticsPublisher;
+    private static readonly TextDocumentSelector Selector = new(new TextDocumentFilter { Language = "stasis" });
 
     public DidChangeTextDocumentDiagnosticsHandler(DocumentManager documentManager, DiagnosticsPublisher diagnosticsPublisher)
     {
@@ -88,7 +91,10 @@ public class DidChangeTextDocumentDiagnosticsHandler : DidChangeTextDocumentHand
 
     protected override TextDocumentChangeRegistrationOptions CreateRegistrationOptions(TextSynchronizationCapability capability, ClientCapabilities clientCapabilities)
     {
-        return new TextDocumentChangeRegistrationOptions();
+        return new TextDocumentChangeRegistrationOptions
+        {
+            DocumentSelector = Selector
+        };
     }
 
     /// <summary>
@@ -127,6 +133,7 @@ public class DidCloseTextDocumentDiagnosticsHandler : DidCloseTextDocumentHandle
 {
     private readonly DocumentManager _documentManager;
     private readonly DiagnosticsPublisher _diagnosticsPublisher;
+    private static readonly TextDocumentSelector Selector = new(new TextDocumentFilter { Language = "stasis" });
 
     public DidCloseTextDocumentDiagnosticsHandler(DocumentManager documentManager, DiagnosticsPublisher diagnosticsPublisher)
     {
@@ -149,6 +156,6 @@ public class DidCloseTextDocumentDiagnosticsHandler : DidCloseTextDocumentHandle
 
     protected override TextDocumentCloseRegistrationOptions CreateRegistrationOptions(TextSynchronizationCapability capability, ClientCapabilities clientCapabilities)
     {
-        return new TextDocumentCloseRegistrationOptions();
+        return new TextDocumentCloseRegistrationOptions { DocumentSelector = Selector };
     }
 }

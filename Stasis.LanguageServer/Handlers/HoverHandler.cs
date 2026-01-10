@@ -41,7 +41,10 @@ public class HoverHandler : HoverHandlerBase
 
     protected override HoverRegistrationOptions CreateRegistrationOptions(HoverCapability? capability, ClientCapabilities clientCapabilities)
     {
-        return new HoverRegistrationOptions();
+        return new HoverRegistrationOptions
+        {
+            DocumentSelector = new TextDocumentSelector(new TextDocumentFilter { Language = "stasis" })
+        };
     }
 
     /// <summary>
