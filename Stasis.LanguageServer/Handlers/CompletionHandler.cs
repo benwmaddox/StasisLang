@@ -58,7 +58,9 @@ public class CompletionHandler : CompletionHandlerBase
         var receiverTypeName = ResolveReceiverTypeName(receiverChain, doc, offset);
         if (string.IsNullOrEmpty(receiverTypeName))
         {
-            await Console.Error.WriteLineAsync($"[completion] {uri} unresolved chain {string.Join(".", receiverChain)}");
+            var posInfoFail = $"{request.Position.Line}:{request.Position.Character}";
+            await Console.Error.WriteLineAsync(
+                $"[completion] {uri} unresolved chain {string.Join(".", receiverChain)} pos {posInfoFail} line[{request.Position.Line}]={EscapeLine(lineSpan.Text)}");
             return new CompletionList();
         }
 
