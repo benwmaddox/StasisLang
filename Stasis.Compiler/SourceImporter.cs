@@ -193,6 +193,26 @@ public static class SourceImporter
 
         path = remainder.Substring(1, endQuote - 1);
         var tail = remainder.Substring(endQuote + 1).Trim();
-        return tail.Length == 0 || tail == ";";
+        if (tail.Length == 0 || tail == ";")
+        {
+            return true;
+        }
+
+        // Allow trailing line comments after an import (common in samples and during editing).
+        // Examples:
+        //   import "foo.stasis" // comment
+        //   import "foo.stasis"; // comment
+        if (tail.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (tail.StartsWith(";", StringComparison.Ordinal))
+        {
+            var afterSemi = tail.Substring(1).TrimStart();
+            return afterSemi.Length == 0 || afterSemi.StartsWith("//", StringComparison.Ordinal);
+        }
+
+        return false;
     }
 }

@@ -31,6 +31,56 @@ public class SourceImporterTests
     }
 
     [Fact]
+    public void ExpandImports_AllowsTrailingLineComment_AfterImport()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_imports");
+        try
+        {
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var importedPath = Path.Combine(tempDir.FullName, "lib.stasis");
+            File.WriteAllText(importedPath, "function helper(): i32 { return 1; }");
+            File.WriteAllText(entryPath, "import \"lib.stasis\" // comment\nfunction main(): i32 { return helper(); }");
+
+            var diagnostics = new List<Diagnostic>();
+            var source = File.ReadAllText(entryPath);
+            var result = SourceImporter.ExpandImports(entryPath, source, diagnostics);
+
+            Assert.Empty(diagnostics);
+            Assert.Contains("function helper()", result.ExpandedSource);
+            Assert.DoesNotContain("import \"lib.stasis\"", result.ExpandedSource);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
+
+    [Fact]
+    public void ExpandImports_AllowsTrailingLineComment_AfterSemicolon()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_imports");
+        try
+        {
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var importedPath = Path.Combine(tempDir.FullName, "lib.stasis");
+            File.WriteAllText(importedPath, "function helper(): i32 { return 1; }");
+            File.WriteAllText(entryPath, "import \"lib.stasis\"; // comment\nfunction main(): i32 { return helper(); }");
+
+            var diagnostics = new List<Diagnostic>();
+            var source = File.ReadAllText(entryPath);
+            var result = SourceImporter.ExpandImports(entryPath, source, diagnostics);
+
+            Assert.Empty(diagnostics);
+            Assert.Contains("function helper()", result.ExpandedSource);
+            Assert.DoesNotContain("import \"lib.stasis\"", result.ExpandedSource);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
+
+    [Fact]
     public void ExpandImports_ReportsMissingFile()
     {
         var tempDir = Directory.CreateTempSubdirectory("stasis_imports");
