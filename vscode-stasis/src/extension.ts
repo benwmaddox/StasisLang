@@ -121,6 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provideCompletionItems: async (document, position, token, context) => {
         if (context.triggerCharacter !== ".") return undefined;
         if (!client || !clientStart) return undefined;
+        output.appendLine(`[completion:dot] trigger '.' at ${position.line}:${position.character}`);
 
         try {
           await withTimeout(clientStart, 10_000);
@@ -157,6 +158,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const result: any = await client.sendRequest("textDocument/completion", params, token);
+          const count = Array.isArray(result)
+            ? result.length
+            : result && typeof result === "object" && "items" in result
+            ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ((result as any).items?.length ?? 0)
+            : 0;
+          output.appendLine(`[completion:dot] result count=${count}`);
           return result;
         } catch (err) {
           output.appendLine(`[completion:dot] request failed: ${(err as Error)?.message ?? String(err)}`);
@@ -166,6 +174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     "."
   );
+  output.appendLine("[completion:dot] enabled");
   context.subscriptions.push(dotCompletionShim);
 
   void (async () => {
