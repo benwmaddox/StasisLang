@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 call "%~dp0..\env.bat"
 
@@ -11,7 +11,7 @@ if /I "%STASIS_SKIP_RUNTIME%"=="1" (
     exit /b 0
 )
 
-:: Preflight checks for common failure modes.
+:: Preflight: CMake must be available for runtime builds.
 where cmake >nul 2>nul
 if errorlevel 1 (
     echo Error: cmake not found in PATH.
@@ -45,7 +45,6 @@ if %ERRORLEVEL% neq 0 (
     echo Error: vcpkg install failed.
     exit /b 1
 )
-
 :: Default generator: Visual Studio 2022. Override via STASIS_CMAKE_GENERATOR (e.g. "Ninja").
 if "%STASIS_CMAKE_GENERATOR%"=="" (
     set "STASIS_CMAKE_GENERATOR=Visual Studio 17 2022"
@@ -58,6 +57,9 @@ if /I "%STASIS_CLEAN_RUNTIME_BUILD%"=="1" (
         rmdir /s /q build
     )
 )
+:: CMake caches are not relocatable: if runtime/build was created under a different checkout path,
+:: CMake will error. Detect mismatches and auto-clean when needed.
+if exist build\CMakeCache.txt call :maybe_clean_stale_cmake_cache
 if not exist build mkdir build
 cd build
 
@@ -85,7 +87,7 @@ if /I "%STASIS_CMAKE_GENERATOR%"=="Ninja" (
 
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed.
-    echo Hint: if this is a generator mismatch, delete runtime\\build or set STASIS_CLEAN_RUNTIME_BUILD=1.
+    echo Hint: delete runtime\build or set STASIS_CLEAN_RUNTIME_BUILD=1.
     exit /b 1
 )
 
@@ -178,3 +180,28 @@ echo   .\\stasis.bat run samples\\asteroids.stasis --graphics
 echo (the CLI will pick up runtime\\build\\Release\\stasis_graphics_static.lib by default)
 
 endlocal
+
+goto :eof
+
+:maybe_clean_stale_cmake_cache
+set "CACHE_HOME="
+set "CACHE_DIR="
+for /f "tokens=2* delims==" %%A in ('findstr /b /c:"CMAKE_HOME_DIRECTORY:INTERNAL=" "build\\CMakeCache.txt"') do set "CACHE_HOME=%%B"
+for /f "tokens=2* delims==" %%A in ('findstr /b /c:"CMAKE_CACHEFILE_DIR:INTERNAL=" "build\\CMakeCache.txt"') do set "CACHE_DIR=%%B"
+
+set "RUNTIME_DIR=%CD%"
+set "BUILD_DIR=%CD%\\build"
+
+if defined CACHE_HOME (
+    if /I not "!CACHE_HOME!"=="!RUNTIME_DIR!" goto :do_clean_cache
+)
+if defined CACHE_DIR (
+    if /I not "!CACHE_DIR!"=="!BUILD_DIR!" goto :do_clean_cache
+)
+goto :eof
+
+:do_clean_cache
+echo NOTE: Detected stale CMake cache (previous root: "!CACHE_HOME!").
+echo NOTE: Cleaning runtime build directory...
+rmdir /s /q build
+goto :eof
