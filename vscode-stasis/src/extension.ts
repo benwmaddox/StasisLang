@@ -85,8 +85,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     traceOutputChannel: output,
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
+        const lineText = (() => {
+          try {
+            return document.lineAt(position.line).text;
+          } catch {
+            return "";
+          }
+        })();
         output.appendLine(
-          `[completion:req] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""} kind=${context.triggerKind}`
+          `[completion:req] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""} kind=${context.triggerKind} line=${JSON.stringify(lineText)}`
         );
         const result = await next(document, position, context, token);
         const count = Array.isArray(result)
@@ -121,7 +128,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provideCompletionItems: async (document, position, token, context) => {
         if (context.triggerCharacter !== ".") return undefined;
         if (!client || !clientStart) return undefined;
-        output.appendLine(`[completion:dot] trigger '.' at ${position.line}:${position.character}`);
+        const lineText = (() => {
+          try {
+            return document.lineAt(position.line).text;
+          } catch {
+            return "";
+          }
+        })();
+        output.appendLine(
+          `[completion:dot] trigger '.' at ${position.line}:${position.character} line=${JSON.stringify(lineText)}`
+        );
 
         try {
           await withTimeout(clientStart, 10_000);
