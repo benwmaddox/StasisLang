@@ -700,6 +700,9 @@ internal sealed class LspTestHarness : IAsyncDisposable
         PropertyNameCaseInsensitive = true
     };
 
+    private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
+
     private readonly CancellationTokenSource _shutdownCts = new();
     private Task _readerTask;
     private readonly Stream _clientIn;
@@ -835,8 +838,9 @@ internal sealed class LspTestHarness : IAsyncDisposable
 #pragma warning disable VSTHRD003, VSTHRD103
         try
         {
-            await SendRequestAsync("shutdown", new { }, CancellationToken.None);
-            await SendNotificationAsync("exit", new { }, CancellationToken.None);
+            using var cts = new CancellationTokenSource(ShutdownTimeout);
+            await SendRequestAsync("shutdown", new { }, cts.Token);
+            await SendNotificationAsync("exit", new { }, cts.Token);
         }
         catch
         {
@@ -872,7 +876,17 @@ internal sealed class LspTestHarness : IAsyncDisposable
         await WriteMessageAsync(payload, cancellationToken);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownCts.Token);
-        await using var _ = linked.Token.Register(() => tcs.TrySetCanceled(linked.Token));
+        if (!cancellationToken.CanBeCanceled)
+        {
+            linked.CancelAfter(DefaultRequestTimeout);
+        }
+
+        await using var registration = linked.Token.Register(() =>
+        {
+            _pending.TryRemove(id, out _);
+            tcs.TrySetCanceled(linked.Token);
+        });
+
         return await tcs.Task;
     }
 
