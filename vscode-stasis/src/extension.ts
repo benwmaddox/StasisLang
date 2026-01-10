@@ -17,9 +17,11 @@ function tryServerCommand(extensionPath: string): { command: string; args: strin
   const candidates: Array<{ exe: string; args: string[] }> =
     process.platform === "win32"
       ? [
+          // Prefer `dotnet <dll>` on Windows to avoid policies that block running arbitrary EXEs from the
+          // VS Code extensions folder (AppLocker/WDAC can manifest as "spawn UNKNOWN").
+          { exe: "Stasis.LanguageServer.dll", args: [] },
           { exe: "stasis-lsp.exe", args: [] },
           { exe: "Stasis.LanguageServer.exe", args: [] },
-          { exe: "Stasis.LanguageServer.dll", args: [] },
         ]
       : [
           { exe: "stasis-lsp", args: [] },
@@ -137,26 +139,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           `[completion:provider] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""}`
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result: any = await client.sendRequest("textDocument/completion", params, token);
-        const items = Array.isArray(result) ? result : result?.items ?? [];
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const result: any = await client.sendRequest("textDocument/completion", params, token);
+          const items = Array.isArray(result) ? result : result?.items ?? [];
+          output.appendLine(`[completion:provider] items=${items.length}`);
 
-        return items.map((item: any) => {
-          const ci = new vscode.CompletionItem(item.label);
-          if (item.insertText) {
-            ci.insertText = item.insertText;
-          }
-          if (item.detail) {
-            ci.detail = item.detail;
-          }
-          if (item.documentation) {
-            ci.documentation =
-              typeof item.documentation === "string"
-                ? item.documentation
-                : item.documentation.value ?? item.documentation;
-          }
-          return ci;
-        });
+          return items.map((item: any) => {
+            const ci = new vscode.CompletionItem(item.label);
+            if (item.insertText) {
+              ci.insertText = item.insertText;
+            }
+            if (item.detail) {
+              ci.detail = item.detail;
+            }
+            if (item.documentation) {
+              ci.documentation =
+                typeof item.documentation === "string"
+                  ? item.documentation
+                  : item.documentation.value ?? item.documentation;
+            }
+            return ci;
+          });
+        } catch (err) {
+          output.appendLine(`[completion:error] ${(err as Error)?.message ?? String(err)}`);
+          return [];
+        }
       },
     },
     "."

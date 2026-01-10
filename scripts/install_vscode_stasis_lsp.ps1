@@ -40,7 +40,16 @@ if (-not $code) {
   throw "VS Code CLI (code) not found in PATH. Enable it from the VS Code command palette."
 }
 
-& $dotnet.Path @("publish", $serverProject, "-c", $Configuration, "-r", $Runtime, "-o", $serverOut)
+& $dotnet.Path @(
+  "publish",
+  $serverProject,
+  "-c", $Configuration,
+  "-r", $Runtime,
+  "-o", $serverOut,
+  "/p:SelfContained=false",
+  "/p:PublishSingleFile=false",
+  "/p:PublishReadyToRun=false"
+)
 if ($LASTEXITCODE -ne 0) {
   throw "Language server publish failed."
 }
