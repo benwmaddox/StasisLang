@@ -20,6 +20,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configurationDefaults": {
+      "[stasis]": {
+        "editor.quickSuggestions": true,
+        "editor.suggestOnTriggerCharacters": true
+      }
+    },
     "languages": [
       {
         "id": "stasis",

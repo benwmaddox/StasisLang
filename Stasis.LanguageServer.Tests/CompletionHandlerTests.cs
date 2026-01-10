@@ -600,4 +600,61 @@ function main() {
         // Assert
         Assert.NotNull(options);
     }
+
+    [Fact]
+    public async Task HandleAsync_OffersTopLevelKeywords_WhenInvokedWithNoPrefix()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = "";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = new Position(0, 0),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("struct", labels);
+        Assert.Contains("global", labels);
+        Assert.Contains("function", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_DoesNotOfferGlobalKeyword_InsideFunctionBody()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+function main(): i32 {
+  g
+  return 0;
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var offset = content.IndexOf("\n  g", StringComparison.Ordinal) + "\n  g".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, offset),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.DoesNotContain("global", labels);
+    }
 }

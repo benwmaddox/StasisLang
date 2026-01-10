@@ -45,7 +45,7 @@ public class CompletionHandler : CompletionHandlerBase
             else
             {
                 // Not a member access completion; fall back to global identifier completions.
-                var fallbackItems = GetGlobalCompletions(doc, offset);
+                var fallbackItems = GetGlobalCompletions(doc, offset, request.Context);
                 return new CompletionList(fallbackItems);
             }
         }
@@ -119,15 +119,25 @@ public class CompletionHandler : CompletionHandlerBase
         return Array.Empty<CompletionItem>();
     }
 
-    private static IReadOnlyList<CompletionItem> GetGlobalCompletions(DocumentState doc, int cursorOffset)
+    private static IReadOnlyList<CompletionItem> GetGlobalCompletions(DocumentState doc, int cursorOffset, CompletionContext? context)
     {
         var prefix = GetIdentifierPrefix(doc.Content, cursorOffset);
-        if (string.IsNullOrEmpty(prefix))
+        var items = new List<CompletionItem>(128);
+
+        var isTopLevel = doc.ParseResult?.CompilationUnit is { } unit &&
+            !TryGetEnclosingCallable(unit, cursorOffset, out _, out _);
+
+        var triggerKind = context?.TriggerKind ?? default;
+        var allowKeywords = isTopLevel && (triggerKind == CompletionTriggerKind.Invoked || !string.IsNullOrEmpty(prefix));
+        if (allowKeywords)
+        {
+            AddKeywordCompletions(items, prefix);
+        }
+
+        if (string.IsNullOrEmpty(prefix) && items.Count == 0)
         {
             return Array.Empty<CompletionItem>();
         }
-
-        var items = new List<CompletionItem>(128);
 
         if (doc.SemanticResult?.Symbols is { Count: > 0 } symbols)
         {
@@ -204,6 +214,35 @@ public class CompletionHandler : CompletionHandlerBase
             .OrderBy(i => i.Label, StringComparer.Ordinal)
             .Take(200)
             .ToArray();
+    }
+
+    private static void AddKeywordCompletions(List<CompletionItem> items, string prefix)
+    {
+        var keywords = new[]
+        {
+            "import",
+            "const",
+            "global",
+            "struct",
+            "enum",
+            "function",
+            "test",
+        };
+
+        foreach (var keyword in keywords)
+        {
+            if (!string.IsNullOrEmpty(prefix) && !keyword.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            items.Add(new CompletionItem
+            {
+                Label = keyword,
+                Kind = CompletionItemKind.Keyword,
+                InsertText = keyword
+            });
+        }
     }
 
     private static bool IsGoodGlobalCompletionName(string name, string prefix)
