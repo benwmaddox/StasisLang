@@ -2562,17 +2562,6 @@ static string GetAssemblyCacheStamp(Assembly assembly)
 {
     var mvid = assembly.ManifestModule.ModuleVersionId.ToString("N");
 
-    // In single-file publishes, Assembly.Location is empty (and emits IL3000).
-    // Use the module path when available; otherwise fall back to MVID only.
-    var modulePath = assembly.ManifestModule.FullyQualifiedName;
-    if (!string.IsNullOrEmpty(modulePath) &&
-        !string.Equals(modulePath, "<Unknown>", StringComparison.OrdinalIgnoreCase) &&
-        File.Exists(modulePath))
-    {
-        var lastWriteTicks = File.GetLastWriteTimeUtc(modulePath).Ticks;
-        return $"{mvid}:{lastWriteTicks}";
-    }
-
     return mvid;
 }
 
