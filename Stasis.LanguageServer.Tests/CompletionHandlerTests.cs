@@ -3,6 +3,8 @@ namespace Stasis.LanguageServer.Tests;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using Stasis.LanguageServer.Handlers;
 using Stasis.LanguageServer.Services;
+using Stasis.Compiler;
+using CompilerDiagnostic = Stasis.Compiler.Diagnostic;
 using Xunit;
 
 public class CompletionHandlerTests
@@ -214,6 +216,143 @@ function main() {
         var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
         Assert.Contains("score", labels);
         Assert.Contains("phase", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersStructFieldsAfterNestedDot_WhenMemberNameIsMissing()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct Layout {
+  play_w: f32;
+  play_h: f32;
+}
+
+struct GameState {
+  layout: Layout;
+}
+
+global state: GameState;
+
+function main() {
+  state.layout.
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var dotOffset = content.IndexOf("state.layout.", StringComparison.Ordinal) + "state.layout.".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, dotOffset)
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("play_w", labels);
+        Assert.Contains("play_h", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersEnumMembersAfterDot_WhenMemberNameIsMissing()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+enum Phase { Boot, Play }
+
+function main() {
+  Phase.
+}
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var dotOffset = content.IndexOf("Phase.", StringComparison.Ordinal) + "Phase.".Length;
+
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = PositionAt(content, dotOffset)
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("Boot", labels);
+        Assert.Contains("Play", labels);
+    }
+
+    [Fact]
+    public async Task HandleAsync_OffersImportedStructFieldsAfterDot_WhenMemberNameIsMissing()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_completion_dot_missing_import_");
+        try
+        {
+            var importedPath = Path.Combine(tempDir.FullName, "types.stasis");
+            File.WriteAllText(importedPath, """
+struct Player {
+  hp: i32;
+  name: string;
+}
+""");
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var content = """
+import "types.stasis";
+
+global p: Player;
+
+function main() {
+  p.
+}
+""";
+
+            var docId = new TextDocumentIdentifier { Uri = new Uri(entryPath) };
+            var uri = docId.Uri.ToString();
+
+            var importDiags = new List<CompilerDiagnostic>();
+            var expanded = SourceImporter.ExpandImportsWithMap(entryPath, content, importDiags);
+            Assert.Empty(importDiags);
+            Assert.Contains("struct Player", expanded.ExpandedSource, StringComparison.Ordinal);
+
+            manager.GetOrCreateDocument(uri, content);
+            manager.UpdateDocument(uri, content, 1);
+
+            var doc = manager.GetDocument(uri);
+            Assert.NotNull(doc);
+            Assert.NotNull(doc!.SymbolIndex);
+            Assert.NotNull(doc.SymbolIndex!.GetStruct("Player"));
+
+            var dotOffset = content.IndexOf("p.", StringComparison.Ordinal) + "p.".Length;
+
+            var request = new CompletionParams
+            {
+                TextDocument = docId,
+                Position = PositionAt(content, dotOffset)
+            };
+
+            var result = await handler.Handle(request, CancellationToken.None);
+
+            var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+            Assert.Contains("hp", labels);
+            Assert.Contains("name", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
     }
 
     [Fact]
