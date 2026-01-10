@@ -20,6 +20,16 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Stasis",
+      "properties": {
+        "stasis.suggestTopLevelOnBlankLine": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically trigger completion on blank lines at top-level scope (useful for `import`, `global`, `struct`, etc.)."
+        }
+      }
+    },
     "configurationDefaults": {
       "[stasis]": {
         "editor.quickSuggestions": true,

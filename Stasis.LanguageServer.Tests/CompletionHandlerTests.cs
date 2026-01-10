@@ -628,6 +628,38 @@ function main() {
     }
 
     [Fact]
+    public async Task HandleAsync_OffersTopLevelKeywords_OnBlankTopLevelLine_WhenInvoked()
+    {
+        var manager = new DocumentManager();
+        var handler = new CompletionHandler(manager);
+        var uri = "file:///test.stasis";
+        var content = """
+struct A { x: i32; }
+
+
+function main(): i32 { return 0; }
+""";
+
+        manager.GetOrCreateDocument(uri, content);
+        manager.UpdateDocument(uri, content, 1);
+
+        var blankLineIndex = 2;
+        var request = new CompletionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = new Uri(uri) },
+            Position = new Position(blankLineIndex, 0),
+            Context = new CompletionContext { TriggerKind = CompletionTriggerKind.Invoked }
+        };
+
+        var result = await handler.Handle(request, CancellationToken.None);
+        var labels = (result.Items ?? new Container<CompletionItem>()).Select(i => i.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("global", labels);
+        Assert.Contains("struct", labels);
+        Assert.Contains("function", labels);
+    }
+
+    [Fact]
     public async Task HandleAsync_DoesNotOfferGlobalKeyword_InsideFunctionBody()
     {
         var manager = new DocumentManager();
