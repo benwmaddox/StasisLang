@@ -14,7 +14,9 @@ excluding any subdirectory that contains its own LICENSE file.
 no such entity applies, the individual person using Stasis.
 
 "Gross Revenue" means the total gross revenue of the Licensee for a given
-calendar year (January 1 through December 31), from all sources, before expenses.
+calendar year (January 1 through December 31) that is directly attributable to
+the Distribution of artifacts built using Stasis, before expenses. Revenue from
+products not built using Stasis is excluded.
 
 "Distribute" (or "Distribution") means to provide, publish, ship, deploy, or
 otherwise make available to any third party any binary, executable, application,
