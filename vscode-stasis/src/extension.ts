@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import {
   LanguageClient,
   LanguageClientOptions,
+  CompletionTriggerKind,
   ServerOptions,
   TransportKind,
   Trace,
@@ -108,6 +109,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
   void client.setTrace(Trace.Verbose);
   void client.start();
+
+  // Some language server stacks rely on dynamic registration and may not advertise completionProvider
+  // in initialize results. As a pragmatic fallback, register a VS Code completion provider that forwards
+  // to the LSP request directly so completions still work.
+  const completionProvider = vscode.languages.registerCompletionItemProvider(
+    { scheme: "file", language: "stasis" },
+    {
+      provideCompletionItems: async (document, position, token, context) => {
+        if (!client) return [];
+
+        const params = {
+          textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+          position: client.code2ProtocolConverter.asPosition(position),
+          context: {
+            triggerKind:
+              context.triggerKind === vscode.CompletionTriggerKind.TriggerCharacter
+                ? CompletionTriggerKind.TriggerCharacter
+                : context.triggerKind === vscode.CompletionTriggerKind.TriggerForIncompleteCompletions
+                ? CompletionTriggerKind.TriggerForIncompleteCompletions
+                : CompletionTriggerKind.Invoked,
+            triggerCharacter: context.triggerCharacter ?? undefined,
+          },
+        };
+
+        output.appendLine(
+          `[completion:provider] ${document.uri.toString()} ${position.line}:${position.character} trigger=${context.triggerCharacter ?? ""}`
+        );
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result: any = await client.sendRequest("textDocument/completion", params, token);
+        const items = Array.isArray(result) ? result : result?.items ?? [];
+
+        return items.map((item: any) => {
+          const ci = new vscode.CompletionItem(item.label);
+          if (item.insertText) {
+            ci.insertText = item.insertText;
+          }
+          if (item.detail) {
+            ci.detail = item.detail;
+          }
+          if (item.documentation) {
+            ci.documentation =
+              typeof item.documentation === "string"
+                ? item.documentation
+                : item.documentation.value ?? item.documentation;
+          }
+          return ci;
+        });
+      },
+    },
+    "."
+  );
+  context.subscriptions.push(completionProvider);
+
   context.subscriptions.push({
     dispose: () => {
       void client?.stop();
