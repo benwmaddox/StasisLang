@@ -17,6 +17,58 @@ namespace Stasis.LanguageServer.Tests;
 public sealed class LspCompletionTests
 {
     [Fact]
+    public async Task CompletesBrickoutStateMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var repoRoot = FindRepoRoot();
+        var entryPath = Path.GetFullPath(Path.Combine(repoRoot, "samples", "brickout_revenge", "brickout_revenge_v1.stasis"));
+        Assert.True(File.Exists(entryPath), $"Missing fixture: {entryPath}");
+
+        var document = await File.ReadAllTextAsync(entryPath, cts.Token);
+        var stateDotOffset = document.IndexOf("state.", StringComparison.Ordinal);
+        Assert.True(stateDotOffset >= 0, "brickout_revenge_v1.stasis should reference state.");
+
+        var uri = new Uri(entryPath).AbsoluteUri;
+        var dotPosition = GetPositionAt(document, stateDotOffset + "state.".Length);
+
+        await using var harness = await LspTestHarness.StartAsync(cts.Token);
+        await harness.InitializeAsync(cts.Token);
+        await harness.DidOpenAsync(uri, document, cts.Token);
+
+        var labels = await harness.RequestCompletionLabelsAsync(uri, dotPosition.Line, dotPosition.Character, cts.Token);
+        Assert.Contains("config", labels);
+        Assert.Contains("paddle", labels);
+        Assert.Contains("layout", labels);
+    }
+
+    private static string FindRepoRoot()
+    {
+        // `dotnet test` may run with CWD under bin/, so resolve from a known marker.
+        var candidates = new[]
+        {
+            AppContext.BaseDirectory,
+            Directory.GetCurrentDirectory()
+        };
+
+        foreach (var start in candidates)
+        {
+            var dir = new DirectoryInfo(start);
+            while (dir != null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "Stasis.sln")))
+                {
+                    return dir.FullName;
+                }
+
+                dir = dir.Parent;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate repo root (missing Stasis.sln).");
+    }
+
+    [Fact]
     public async Task CompletesNestedImportedStructMembersAfterDot()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
