@@ -2132,6 +2132,10 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     if (height) *height = h;
 }
 
+STASIS_EXPORT void get_desktop_size(int* width, int* height) {
+    stasis_get_desktop_size(width, height);
+}
+
 /*
  * Set window size (windowed mode).
  * width/height are in pixels.
@@ -2158,6 +2162,10 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 #else
     SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
 #endif
+}
+
+STASIS_EXPORT void set_window_size(int width, int height) {
+    stasis_set_window_size(width, height);
 }
 
 /*

@@ -2,6 +2,10 @@ LIBRARY stasis_graphics
 EXPORTS
     stasis_init_window
     stasis_get_window_size
+    stasis_get_desktop_size
+    get_desktop_size
+    stasis_set_window_size
+    set_window_size
     stasis_set_fullscreen
     stasis_should_quit
     stasis_begin_frame

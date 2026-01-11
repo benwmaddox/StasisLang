@@ -2320,6 +2320,12 @@ function main(): i32 {
     }
 
     maximize_window_for_desktop();
+    sync_screen_size();
+    print_string("window_px=");
+    print_int(state.runtime_screen.w);
+    print_string("x");
+    print_int(state.runtime_screen.h);
+    print_string("\n");
 
     audio_ready = audio_is_available();
     if (audio_ready) {
