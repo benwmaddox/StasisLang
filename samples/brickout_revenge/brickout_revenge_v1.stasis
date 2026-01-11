@@ -617,6 +617,18 @@ function snap_px(value: f32): f32 {
     return i32_to_f32(f32_to_i32(value - 0.5));
 }
 
+function play_snap_x(play_x: f32): f32 {
+    return snap_px(play_to_screen_x(play_x));
+}
+
+function play_snap_y(play_y: f32): f32 {
+    return snap_px(play_to_screen_y(play_y));
+}
+
+function play_snap_len(play_len: f32): f32 {
+    return snap_px(play_to_screen_len(play_len));
+}
+
 function screen_to_play_x(screen_x: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
     return (screen_x - state.layout.play_x) / state.layout.play_scale;
@@ -1449,44 +1461,44 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
 
 function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_line(
-        snap_px(play_to_screen_x(x1)),
-        snap_px(play_to_screen_y(y1)),
-        snap_px(play_to_screen_x(x2)),
-        snap_px(play_to_screen_y(y2)),
+        play_snap_x(x1),
+        play_snap_y(y1),
+        play_snap_x(x2),
+        play_snap_y(y2),
         red, green, blue, alpha);
 }
 
 function play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_rect(
-        snap_px(play_to_screen_x(x)),
-        snap_px(play_to_screen_y(y)),
-        snap_px(play_to_screen_len(width)),
-        snap_px(play_to_screen_len(height)),
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
         red, green, blue, alpha);
 }
 
 function play_draw_filled_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_filled_rect(
-        snap_px(play_to_screen_x(x)),
-        snap_px(play_to_screen_y(y)),
-        snap_px(play_to_screen_len(width)),
-        snap_px(play_to_screen_len(height)),
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
         red, green, blue, alpha);
 }
 
 function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_circle(
-        snap_px(play_to_screen_x(cx)),
-        snap_px(play_to_screen_y(cy)),
-        snap_px(play_to_screen_len(radius)),
+        play_snap_x(cx),
+        play_snap_y(cy),
+        play_snap_len(radius),
         red, green, blue, alpha);
 }
 
 function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
-    let screen_x: f32 = snap_px(play_to_screen_x(x));
-    let screen_y: f32 = snap_px(play_to_screen_y(y));
-    let screen_w_f: f32 = snap_px(play_to_screen_len(width));
-    let screen_h_f: f32 = snap_px(play_to_screen_len(height));
+    let screen_x: f32 = play_snap_x(x);
+    let screen_y: f32 = play_snap_y(y);
+    let screen_w_f: f32 = play_snap_len(width);
+    let screen_h_f: f32 = play_snap_len(height);
     let screen_w: i32 = f32_to_i32(screen_w_f);
     let screen_h: i32 = f32_to_i32(screen_h_f);
 
@@ -1597,12 +1609,21 @@ function draw_balls(): void {
                     let hp_f: f32 = i32_to_f32(ball.hp);
                     let max_f: f32 = i32_to_f32(ball.max_hp);
                     let t: f32 = hp_f / max_f;
-                    let bx: f32 = ball.x;
-                    let by: f32 = ball.y;
-                    let br: f32 = ball.radius;
-                    let y: f32 = by - br - 10.0;
-                    play_draw_line(bx - 16.0, y, bx + 16.0, y, 0.2, 0.2, 0.2, 0.9);
-                    play_draw_line(bx - 16.0, y, bx - 16.0 + 32.0 * t, y, 0.9, 0.3, 0.9, 0.9);
+                    let ball_x: f32 = ball.x;
+                    let ball_y: f32 = ball.y;
+                    let ball_r: f32 = ball.radius;
+
+                    // Anchor in screen space so rounding doesn't introduce drift as the ball moves.
+                    let sx: f32 = play_snap_x(ball_x);
+                    let sy: f32 = play_snap_y(ball_y);
+                    let half_w: f32 = play_snap_len(16.0);
+                    let offset_y: f32 = play_snap_len(ball_r + 10.0);
+                    let bar_y: f32 = sy - offset_y;
+                    let bar_w: f32 = half_w * 2.0;
+                    let filled_w: f32 = snap_px(bar_w * t);
+
+                    draw_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
+                    draw_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
                 }
             }
         }
