@@ -1485,9 +1485,17 @@ function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, b
 function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
     let screen_x: f32 = snap_px(play_to_screen_x(x));
     let screen_y: f32 = snap_px(play_to_screen_y(y));
-    let screen_w: f32 = snap_px(play_to_screen_len(width));
-    let screen_h: f32 = snap_px(play_to_screen_len(height));
-    gfx_draw_sprite(handle, f32_to_i32(screen_x), f32_to_i32(screen_y), f32_to_i32(screen_w), f32_to_i32(screen_h), rot_deg, alpha);
+    let screen_w_f: f32 = snap_px(play_to_screen_len(width));
+    let screen_h_f: f32 = snap_px(play_to_screen_len(height));
+    let screen_w: i32 = f32_to_i32(screen_w_f);
+    let screen_h: i32 = f32_to_i32(screen_h_f);
+
+    // Ensure even sizes so a centered sprite lands on integer pixel bounds.
+    // Otherwise `x - w/2` ends up at .5, which makes sprites appear misaligned with line primitives.
+    if ((screen_w % 2) != 0) { screen_w = screen_w + 1; }
+    if ((screen_h % 2) != 0) { screen_h = screen_h + 1; }
+
+    gfx_draw_sprite(handle, f32_to_i32(screen_x), f32_to_i32(screen_y), screen_w, screen_h, rot_deg, alpha);
 }
 
 function draw_bricks(): void {
