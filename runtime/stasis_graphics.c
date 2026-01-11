@@ -123,6 +123,7 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
+static void reset_line_program(void);
 #endif
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
@@ -326,6 +327,11 @@ static void stasis_pump_events(void) {
                                 g_sprites[i].needs_reraster = 1;
                             }
                         }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+                        if (!g_use_sdl_renderer) {
+                            reset_line_program();
+                        }
+#endif
                     }
 
                     g_input_frame.viewport_w_px = g_window_width;
@@ -788,6 +794,13 @@ static void ensure_line_program(void) {
     }
     if (g_line_vbo == 0) {
         glGenBuffers(1, &g_line_vbo);
+    }
+}
+
+static void reset_line_program(void) {
+    if (g_line_program != 0) {
+        glDeleteProgram(g_line_program);
+        g_line_program = 0;
     }
 }
 
@@ -2156,6 +2169,7 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     if (!g_use_sdl_renderer) {
         glViewport(0, 0, g_window_width, g_window_height);
         setup_ortho();
+        reset_line_program();
     } else {
         SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
     }
@@ -2189,6 +2203,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
         if (!g_use_sdl_renderer) {
             glViewport(0, 0, g_window_width, g_window_height);
             setup_ortho();
+            reset_line_program();
         } else {
             SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
         }
