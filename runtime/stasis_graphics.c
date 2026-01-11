@@ -2101,6 +2101,66 @@ STASIS_EXPORT void stasis_get_window_size(int* width, int* height) {
 }
 
 /*
+ * Get current desktop usable dimensions (excluding taskbar/docks when available).
+ * Writes width and height to provided pointers.
+ *
+ * Note: Requires SDL video to be initialized (typically via stasis_init_window).
+ */
+STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
+    int w = 0;
+    int h = 0;
+
+    if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+
+    SDL_Rect bounds;
+    if (SDL_GetDisplayUsableBounds(0, &bounds) == 0) {
+        w = bounds.w;
+        h = bounds.h;
+    } else {
+        SDL_DisplayMode mode;
+        if (SDL_GetDesktopDisplayMode(0, &mode) == 0) {
+            w = mode.w;
+            h = mode.h;
+        }
+    }
+
+    if (width) *width = w;
+    if (height) *height = h;
+}
+
+/*
+ * Set window size (windowed mode).
+ * width/height are in pixels.
+ */
+STASIS_EXPORT void stasis_set_window_size(int width, int height) {
+    if (!g_window) {
+        return;
+    }
+
+    if (width < 1 || height < 1) {
+        return;
+    }
+
+    SDL_SetWindowSize(g_window, width, height);
+    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer) {
+        glViewport(0, 0, g_window_width, g_window_height);
+        setup_ortho();
+    } else {
+        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+    }
+#else
+    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+#endif
+}
+
+/*
  * Set fullscreen mode
  * fullscreen: 1 for fullscreen desktop, 0 for windowed
  * Returns 1 on success, 0 on failure

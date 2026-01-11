@@ -18,6 +18,7 @@ A hybrid auto-battler/tower defense + breakout game where the player builds defe
 - Seeded randomization for replays
 - Fixed timestep physics
 - Virtual resolution: 360x720; bottom 96 units reserved for a slide-up UI menu (gameplay uses y in [0, 624]). Window size is configurable and the game scales to fit while preserving aspect ratio.
+- The v1 sample attempts to resize the window to best fit the desktop (either full height or full width) while preserving the virtual aspect ratio and staying >= the virtual size.
 - Brick grid: 6x6; placement requires bricks fully inside the gameplay area.
 
 ## Core Systems

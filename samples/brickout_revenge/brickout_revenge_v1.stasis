@@ -311,6 +311,8 @@ global audio_buf: f32[512];
 global audio_ready: bool;
 global audio_sr: i32;
 global sfx_voices: SoundVoice[12];
+global desktop_size_w: i32[1];
+global desktop_size_h: i32[1];
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -622,6 +624,69 @@ function clamp_i32(v: i32, min: i32, max: i32): i32 {
     if (v < min) { return min; }
     if (v > max) { return max; }
     return v;
+}
+
+function maximize_window_for_desktop(): void {
+    // Pick a window size that either fits the full desktop height or the full desktop width,
+    // while preserving the virtual aspect ratio, and never going below the virtual size.
+    desktop_size_w[0] = 0;
+    desktop_size_h[0] = 0;
+    get_desktop_size(desktop_size_w, desktop_size_h);
+
+    let dw: i32 = desktop_size_w[0];
+    let dh: i32 = desktop_size_h[0];
+    if (dw < 1 || dh < 1) {
+        return;
+    }
+
+    let margin_w: i32 = 80;
+    let margin_h: i32 = 120;
+    let usable_w: i32 = dw - margin_w;
+    let usable_h: i32 = dh - margin_h;
+    if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
+    if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
+
+    // Candidate A: fit height.
+    let fit_h_h: i32 = usable_h;
+    let fit_h_w: i32 = f32_to_i32(i32_to_f32(fit_h_h) * (VIRTUAL_W / VIRTUAL_H));
+
+    // Candidate B: fit width.
+    let fit_w_w: i32 = usable_w;
+    let fit_w_h: i32 = f32_to_i32(i32_to_f32(fit_w_w) * (VIRTUAL_H / VIRTUAL_W));
+
+    let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
+    let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
+
+    let choose_w: i32 = f32_to_i32(VIRTUAL_W);
+    let choose_h: i32 = f32_to_i32(VIRTUAL_H);
+
+    if (a_ok && b_ok) {
+        // Pick the bigger one (area).
+        let a_area: i32 = fit_h_w * fit_h_h;
+        let b_area: i32 = fit_w_w * fit_w_h;
+        if (a_area >= b_area) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            choose_w = fit_w_w;
+            choose_h = fit_w_h;
+        }
+    } else {
+        if (a_ok) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            if (b_ok) {
+                choose_w = fit_w_w;
+                choose_h = fit_w_h;
+            }
+        }
+    }
+
+    if (choose_w < f32_to_i32(VIRTUAL_W)) { choose_w = f32_to_i32(VIRTUAL_W); }
+    if (choose_h < f32_to_i32(VIRTUAL_H)) { choose_h = f32_to_i32(VIRTUAL_H); }
+
+    set_window_size(choose_w, choose_h);
 }
 
 function point_in_rect(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32): bool {
@@ -2253,6 +2318,8 @@ function main(): i32 {
     if (!init_ok) {
         return 1;
     }
+
+    maximize_window_for_desktop();
 
     audio_ready = audio_is_available();
     if (audio_ready) {
