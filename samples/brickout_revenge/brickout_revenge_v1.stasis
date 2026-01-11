@@ -376,6 +376,12 @@ function apply_config_live(): void {
 
 function ensure_config_loaded(): void {
     if (state.config.magic == 1337) {
+        // Data binding is optional, but the runner may bind only a subset of fields if JSON keys don't match.
+        // Ensure window size is always valid even if `screen.w/h` were not populated.
+        if (state.config.screen.w < 1 || state.config.screen.h < 1) {
+            state.config.screen.w = 540;
+            state.config.screen.h = 1080;
+        }
         return;
     }
 

@@ -3,7 +3,9 @@
     "magic": 1337,
     "screen": {
       "width": 540,
-      "height": 1080
+      "height": 1080,
+      "w": 540,
+      "h": 1080
     },
     "grid": {
       "origin_x": 14.0,
