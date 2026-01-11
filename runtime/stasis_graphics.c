@@ -1380,8 +1380,10 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
 }
 
 /*
- * Rasterize SVG to fit within max_w x max_h, preserving aspect ratio.
- * Returns actual rasterized dimensions in out_w, out_h.
+ * Rasterize SVG to exactly max_w x max_h (in pixels).
+ * The SVG content is scaled uniformly to fit within max_w x max_h (preserving aspect ratio)
+ * and centered with transparent padding. This keeps sprite textures 1:1 with draw sizes to
+ * avoid fuzz from resampling.
  */
 static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
                                    unsigned char** out_pixels, int* out_w, int* out_h) {
@@ -1418,15 +1420,16 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
     float scale_y = (float)max_h / image->height;
     float scale = (scale_x < scale_y) ? scale_x : scale_y;
 
-    /* Calculate actual output dimensions */
-    int w = (int)ceilf(image->width * scale);
-    int h = (int)ceilf(image->height * scale);
+    /* Calculate content size (rounded up) and center it in the full target buffer. */
+    int content_w = (int)ceilf(image->width * scale);
+    int content_h = (int)ceilf(image->height * scale);
+    if (content_w < 1) content_w = 1;
+    if (content_h < 1) content_h = 1;
+    if (content_w > max_w) content_w = max_w;
+    if (content_h > max_h) content_h = max_h;
 
-    /* Clamp to max (in case of rounding) */
-    if (w > max_w) w = max_w;
-    if (h > max_h) h = max_h;
-    if (w <= 0) w = 1;
-    if (h <= 0) h = 1;
+    float tx = (float)(max_w - content_w) * 0.5f;
+    float ty = (float)(max_h - content_h) * 0.5f;
 
     NSVGrasterizer* rast = nsvgCreateRasterizer();
     if (!rast) {
@@ -1435,23 +1438,23 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
         return 0;
     }
 
-    unsigned char* pixels = (unsigned char*)malloc((size_t)w * (size_t)h * 4u);
+    unsigned char* pixels = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!pixels) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", w, h, resolved);
+        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved);
         nsvgDeleteRasterizer(rast);
         nsvgDelete(image);
         return 0;
     }
-    memset(pixels, 0, (size_t)w * (size_t)h * 4u);
+    memset(pixels, 0, (size_t)max_w * (size_t)max_h * 4u);
 
-    nsvgRasterize(rast, image, 0.0f, 0.0f, scale, pixels, w, h, w * 4);
+    nsvgRasterize(rast, image, tx, ty, scale, pixels, max_w, max_h, max_w * 4);
 
     nsvgDeleteRasterizer(rast);
     nsvgDelete(image);
 
     *out_pixels = pixels;
-    *out_w = w;
-    *out_h = h;
+    *out_w = max_w;
+    *out_h = max_h;
     return 1;
 }
 
