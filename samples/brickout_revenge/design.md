@@ -17,6 +17,7 @@ A hybrid auto-battler/tower defense + breakout game where the player builds defe
 - `MAX_EFFECTS = 100` - Visual effects pool
 - Seeded randomization for replays
 - Fixed timestep physics
+- Virtual resolution: 360x720; bottom 96 units reserved for a slide-up UI menu (gameplay uses y in [0, 624]).
 
 ## Core Systems
 

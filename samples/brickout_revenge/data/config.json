@@ -2,8 +2,8 @@
   "config": {
     "magic": 1337,
     "screen": {
-      "width": 600,
-      "height": 1200
+      "width": 360,
+      "height": 720
     },
     "grid": {
       "origin_x": 50.0,
