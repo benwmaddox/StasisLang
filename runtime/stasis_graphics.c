@@ -2693,33 +2693,16 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
-    /* Check if re-rasterization is needed:
-     * 1. Sprite was marked for re-raster (window resize)
-     * 2. Requested draw size is larger than current raster (would look blurry)
-     * 3. Requested draw size is much smaller than current raster (heavy downscale can look soft)
-     */
-    int should_reraster = e->needs_reraster;
-    if (!should_reraster && (w > e->w || h > e->h)) {
-        should_reraster = 1;
-    }
-    if (!should_reraster && e->w > 0 && e->h > 0) {
-        if (w > 0 && h > 0) {
-            /* Downscale heuristic: if we’re drawing at <= 75% of the current raster, re-raster to match. */
-            if (w * 4 <= e->w * 3 || h * 4 <= e->h * 3) {
-                should_reraster = 1;
-            }
-        }
-    }
+    if (w <= 0 || h <= 0) return;
 
+    /* Re-rasterize when the requested draw size changes or when explicitly invalidated.
+     *
+     * This keeps virtual-space sizing (game logic) decoupled from display-space raster size:
+     * the sprite is baked to exactly the pixel size we are about to draw.
+     */
+    int should_reraster = e->needs_reraster || (w != e->max_w) || (h != e->max_h);
     if (should_reraster) {
-        if (e->path && e->max_w > 0 && e->max_h > 0) {
-            int new_max_w = w;
-            int new_max_h = h;
-            if (new_max_w < 1) new_max_w = 1;
-            if (new_max_h < 1) new_max_h = 1;
-            sprite_build_into_entry_sized(e, e->path, new_max_w, new_max_h, 1);
-            e->needs_reraster = 0;
-        }
+        if (e->path) sprite_build_into_entry_sized(e, e->path, w, h, 1);
     }
 
     /* Convert degrees to radians */
