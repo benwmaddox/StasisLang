@@ -2777,6 +2777,105 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
 }
 
 /*
+ * Draw a sprite at a specific size (top-left anchored) with rotation and tint.
+ * All parameters are integers for simpler Stasis integration.
+ * x, y: top-left position in pixels
+ * w, h: desired size in pixels
+ * rot_degrees: rotation in degrees (0-359), around the sprite center
+ * a: alpha 0-255
+ */
+STASIS_EXPORT void stasis_gfx_draw_sprite_tl(int handle, int x, int y, int w, int h,
+                                             int rot_degrees, int a) {
+    gfx_debug_hash_i32(handle);
+    gfx_debug_hash_i32(x);
+    gfx_debug_hash_i32(y);
+    gfx_debug_hash_i32(w);
+    gfx_debug_hash_i32(h);
+    gfx_debug_hash_i32(rot_degrees);
+    gfx_debug_hash_i32(a);
+    SpriteEntry* e = sprite_get(handle);
+    if (!e) return;
+
+    if (w <= 0 || h <= 0) return;
+
+    /* Re-rasterize when the requested draw size changes or when explicitly invalidated. */
+    int should_reraster = e->needs_reraster || (w != e->max_w) || (h != e->max_h);
+    if (should_reraster) {
+        if (e->path) sprite_build_into_entry_sized(e, e->path, w, h, 1);
+    }
+
+    /* Convert degrees to radians */
+    float rot = (float)rot_degrees * (3.14159265f / 180.0f);
+
+    /* Alpha from 0-255 to 0.0-1.0 */
+    float af = (float)a / 255.0f;
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer || !e->sdl_tex) return;
+#if SDL_VERSION_ATLEAST(2,0,10)
+        SDL_FRect dst;
+        dst.w = (float)w;
+        dst.h = (float)h;
+        dst.x = (float)x;
+        dst.y = (float)y;
+        SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+        SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
+        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
+        SDL_RenderCopyExF(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
+#else
+        SDL_Rect dst;
+        dst.w = w;
+        dst.h = h;
+        dst.x = x;
+        dst.y = y;
+        SDL_Point center = { w / 2, h / 2 };
+        SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
+        SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
+        SDL_RenderCopyEx(g_renderer, e->sdl_tex, NULL, &dst, (double)rot_degrees, &center, SDL_FLIP_NONE);
+#endif
+        return;
+    }
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
+        flush_sprites();
+    }
+#endif
+
+    float hw = (float)w * 0.5f;
+    float hh = (float)h * 0.5f;
+    float c = cosf(rot);
+    float s = sinf(rot);
+
+    float x0 = -hw, y0 = -hh;
+    float x1 = hw, y1 = hh;
+    float fx = (float)x + hw;
+    float fy = (float)y + hh;
+
+    float p0x = fx + x0 * c - y0 * s;
+    float p0y = fy + x0 * s + y0 * c;
+    float p1x = fx + x1 * c - y0 * s;
+    float p1y = fy + x1 * s + y0 * c;
+    float p2x = fx + x1 * c - y1 * s;
+    float p2y = fy + x1 * s + y1 * c;
+    float p3x = fx + x0 * c - y1 * s;
+    float p3y = fy + x0 * s + y1 * c;
+
+    float u0 = e->u0, v0 = e->v0, u1 = e->u1, v1 = e->v1;
+
+    SpriteVertex* v = &g_sprite_vertices[g_sprite_vert_count];
+    /* tri 1: 0,1,2 */
+    v[0] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
+    v[1] = (SpriteVertex){ p1x, p1y, u1, v0, af, af, af, af };
+    v[2] = (SpriteVertex){ p2x, p2y, u1, v1, af, af, af, af };
+    /* tri 2: 2,3,0 */
+    v[3] = (SpriteVertex){ p2x, p2y, u1, v1, af, af, af, af };
+    v[4] = (SpriteVertex){ p3x, p3y, u0, v1, af, af, af, af };
+    v[5] = (SpriteVertex){ p0x, p0y, u0, v0, af, af, af, af };
+    g_sprite_vert_count += 6;
+}
+
+/*
  * Batched sprite submission.
  * cmds: array of 7*i32 per sprite: handle,x,y,w,h,rot_degrees,a
  */

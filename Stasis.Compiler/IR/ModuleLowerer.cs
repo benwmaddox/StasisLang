@@ -671,6 +671,25 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDrawSpriteTopLeft(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_draw_sprite_tl");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[]
+        {
+            LLVMTypeRef.Int32, // handle
+            LLVMTypeRef.Int32, // x
+            LLVMTypeRef.Int32, // y
+            LLVMTypeRef.Int32, // w
+            LLVMTypeRef.Int32, // h
+            LLVMTypeRef.Int32, // rot_degrees
+            LLVMTypeRef.Int32  // a
+        }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_draw_sprite_tl", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDrawSpritesI32(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_draw_sprites_i32");
@@ -1250,6 +1269,7 @@ public sealed class ModuleLowerer
             "draw_lines_f32",
             "gfx_load_sprite",
             "gfx_draw_sprite",
+            "gfx_draw_sprite_tl",
             "gfx_draw_sprites_i32",
             "gfx_poll_reload",
             "gfx_window_width",
@@ -3055,6 +3075,23 @@ public sealed class ModuleLowerer
                             return ConstI32(0);
 
                         var (fn, fnType) = GetOrDeclareStasisGfxDrawSprite(_moduleBuilder);
+                        builder.BuildCall2(fnType, fn, loweredArgs, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_draw_sprite_tl":
+                    {
+                        if (args.Count != 7)
+                        {
+                            AddDiagnostic("gfx_draw_sprite_tl expects (handle,x,y,w,h,rot_degrees,a).", span);
+                            return ConstI32(0);
+                        }
+
+                        var loweredArgs = args.Select(arg => LowerExpression(builder, arg, locals)).ToArray();
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxDrawSpriteTopLeft(_moduleBuilder);
                         builder.BuildCall2(fnType, fn, loweredArgs, "");
                         return ConstI32(0);
                     }

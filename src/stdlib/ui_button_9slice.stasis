@@ -3,7 +3,7 @@ import "graphics.stasis";
 // Background uses 9 sprites (3x3 grid). Icons are sprites; text uses draw_text.
 
 function ui_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, a: i32): void {
-    gfx_draw_sprite(handle, f32_to_i32(x), f32_to_i32(y), f32_to_i32(w), f32_to_i32(h), 0, a);
+    gfx_draw_sprite_tl(handle, f32_to_i32(x), f32_to_i32(y), f32_to_i32(w), f32_to_i32(h), 0, a);
 }
 
 function ui_row_button_width(available_w: f32, count: i32, gap: f32): f32 {
