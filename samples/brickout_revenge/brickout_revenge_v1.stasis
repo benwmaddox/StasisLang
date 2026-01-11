@@ -35,8 +35,8 @@ import "../../src/stdlib/audio.stasis";
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
 const MAX_TAP_PULSES: i32 = 16;
-const GRID_COLS: i32 = 10;
-const GRID_ROWS: i32 = 5;
+const GRID_COLS: i32 = 6;
+const GRID_ROWS: i32 = 6;
 const UI_MENU_PAD: f32 = 10.0;
 const UI_MENU_HEADER_H: f32 = 26.0;
 const UI_MENU_SLOT_H: f32 = 30.0;
@@ -387,10 +387,10 @@ function ensure_config_loaded(): void {
 
     state.config.grid.origin_x = 50.0;
     state.config.grid.margin_bottom = 50.0;
-    state.config.grid.spacing = 5.0;
+    state.config.grid.spacing = 4.0;
 
-    state.config.brick.width = 60.0;
-    state.config.brick.height = 20.0;
+    state.config.brick.width = 52.0;
+    state.config.brick.height = 24.0;
 
     state.config.paddle.y = 30.0;
     state.config.paddle.width = 100.0;
@@ -649,6 +649,23 @@ function grid_in_bounds(gx: i32, gy: i32): bool {
     return true;
 }
 
+function grid_cell_fits_in_level(gx: i32, gy: i32): bool {
+    if (!grid_in_bounds(gx, gy)) { return false; }
+
+    let x: f32 = grid_to_world_x(gx);
+    let y: f32 = grid_to_world_y(gy);
+    let w: f32 = state.config.brick.width;
+    let h: f32 = state.config.brick.height;
+
+    if (w <= 0.0 || h <= 0.0) { return false; }
+    if (x < 0.0) { return false; }
+    if (y < 0.0) { return false; }
+    if (x + w > VIRTUAL_W) { return false; }
+    if (y + h > GAME_H) { return false; }
+
+    return true;
+}
+
 function world_to_grid_x(wx: f32): i32 {
     let cell_w: f32 = state.config.brick.width + state.config.grid.spacing;
     let local_x: f32 = wx - state.config.grid.origin_x;
@@ -689,6 +706,7 @@ function find_free_brick_slot(): i32 {
 
 function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
     if (!grid_in_bounds(gx, gy)) { return false; }
+    if (!grid_cell_fits_in_level(gx, gy)) { return false; }
     if (grid_is_occupied(gx, gy)) { return false; }
     let slot: i32 = find_free_brick_slot();
     if (slot < 0) { return false; }
@@ -2054,7 +2072,7 @@ function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
 
     let in_virtual: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
     let in_game: bool = in_virtual && state.drag_world_y <= GAME_H;
-    let valid: bool = in_game && grid_in_bounds(state.drag_grid_x, state.drag_grid_y);
+    let valid: bool = in_game && grid_cell_fits_in_level(state.drag_grid_x, state.drag_grid_y);
     if (valid) {
         if (grid_is_occupied(state.drag_grid_x, state.drag_grid_y)) {
             valid = false;

@@ -6,13 +6,13 @@
       "height": 720
     },
     "grid": {
-      "origin_x": 50.0,
+      "origin_x": 14.0,
       "margin_bottom": 50.0,
-      "spacing": 5.0
+      "spacing": 4.0
     },
     "brick": {
-      "width": 60.0,
-      "height": 20.0
+      "width": 52.0,
+      "height": 24.0
     },
     "paddle": {
       "y": 30.0,
