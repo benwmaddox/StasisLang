@@ -16,14 +16,14 @@ function tryServerCommand(extensionPath: string): { command: string; args: strin
   const candidates: Array<{ exe: string; args: string[] }> =
     process.platform === "win32"
       ? [
+          { exe: "Stasis.LanguageServer.dll", args: [] },
           { exe: "stasis-lsp.exe", args: [] },
           { exe: "Stasis.LanguageServer.exe", args: [] },
-          { exe: "Stasis.LanguageServer.dll", args: [] },
         ]
       : [
+          { exe: "Stasis.LanguageServer.dll", args: [] },
           { exe: "stasis-lsp", args: [] },
           { exe: "Stasis.LanguageServer", args: [] },
-          { exe: "Stasis.LanguageServer.dll", args: [] },
         ];
 
   for (const c of candidates) {

@@ -2561,11 +2561,16 @@ static string GetCompilerCacheSalt()
 static string GetAssemblyCacheStamp(Assembly assembly)
 {
     var mvid = assembly.ManifestModule.ModuleVersionId.ToString("N");
-    var location = assembly.Location;
-    if (!string.IsNullOrEmpty(location) && File.Exists(location))
+    var baseDir = AppContext.BaseDirectory;
+    var name = assembly.GetName().Name;
+    if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir) && !string.IsNullOrEmpty(name))
     {
-        var lastWriteTicks = File.GetLastWriteTimeUtc(location).Ticks;
-        return $"{mvid}:{lastWriteTicks}";
+        var candidate = Path.Combine(baseDir, name + ".dll");
+        if (File.Exists(candidate))
+        {
+            var lastWriteTicks = File.GetLastWriteTimeUtc(candidate).Ticks;
+            return $"{mvid}:{lastWriteTicks}";
+        }
     }
 
     return mvid;
