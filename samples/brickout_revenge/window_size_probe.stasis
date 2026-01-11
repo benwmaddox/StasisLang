@@ -17,16 +17,16 @@ function maximize_window_for_desktop(): void {
     desktop_h[0] = 0;
     get_desktop_size(desktop_w, desktop_h);
 
-    let dw: i32 = desktop_w[0];
-    let dh: i32 = desktop_h[0];
-    if (dw < 1 || dh < 1) {
+    let desktop_width: i32 = desktop_w[0];
+    let desktop_height: i32 = desktop_h[0];
+    if (desktop_width < 1 || desktop_height < 1) {
         return;
     }
 
     let margin_w: i32 = 80;
     let margin_h: i32 = 120;
-    let usable_w: i32 = dw - margin_w;
-    let usable_h: i32 = dh - margin_h;
+    let usable_w: i32 = desktop_width - margin_w;
+    let usable_h: i32 = desktop_height - margin_h;
     if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
     if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
 

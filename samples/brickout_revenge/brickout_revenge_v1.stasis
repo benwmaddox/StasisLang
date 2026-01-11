@@ -598,33 +598,33 @@ function update_layout(): void {
     state.layout.ui_h = UI_RESERVED_H * s;
 }
 
-function play_to_screen_x(x: f32): f32 {
-    return state.layout.play_x + x * state.layout.play_scale;
+function play_to_screen_x(play_x: f32): f32 {
+    return state.layout.play_x + play_x * state.layout.play_scale;
 }
 
-function play_to_screen_y(y: f32): f32 {
-    return state.layout.play_y + y * state.layout.play_scale;
+function play_to_screen_y(play_y: f32): f32 {
+    return state.layout.play_y + play_y * state.layout.play_scale;
 }
 
-function play_to_screen_len(v: f32): f32 {
-    return v * state.layout.play_scale;
+function play_to_screen_len(play_len: f32): f32 {
+    return play_len * state.layout.play_scale;
 }
 
-function snap_px(v: f32): f32 {
-    if (v >= 0.0) {
-        return i32_to_f32(f32_to_i32(v + 0.5));
+function snap_px(value: f32): f32 {
+    if (value >= 0.0) {
+        return i32_to_f32(f32_to_i32(value + 0.5));
     }
-    return i32_to_f32(f32_to_i32(v - 0.5));
+    return i32_to_f32(f32_to_i32(value - 0.5));
 }
 
-function screen_to_play_x(x: f32): f32 {
+function screen_to_play_x(screen_x: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
-    return (x - state.layout.play_x) / state.layout.play_scale;
+    return (screen_x - state.layout.play_x) / state.layout.play_scale;
 }
 
-function screen_to_play_y(y: f32): f32 {
+function screen_to_play_y(screen_y: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
-    return (y - state.layout.play_y) / state.layout.play_scale;
+    return (screen_y - state.layout.play_y) / state.layout.play_scale;
 }
 
 function clamp_i32(v: i32, min: i32, max: i32): i32 {
@@ -1447,47 +1447,47 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
     }
 }
 
-function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
+function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_line(
         snap_px(play_to_screen_x(x1)),
         snap_px(play_to_screen_y(y1)),
         snap_px(play_to_screen_x(x2)),
         snap_px(play_to_screen_y(y2)),
-        r, g, b, a);
+        red, green, blue, alpha);
 }
 
-function play_draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+function play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_rect(
         snap_px(play_to_screen_x(x)),
         snap_px(play_to_screen_y(y)),
-        snap_px(play_to_screen_len(w)),
-        snap_px(play_to_screen_len(h)),
-        r, g, b, a);
+        snap_px(play_to_screen_len(width)),
+        snap_px(play_to_screen_len(height)),
+        red, green, blue, alpha);
 }
 
-function play_draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+function play_draw_filled_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_filled_rect(
         snap_px(play_to_screen_x(x)),
         snap_px(play_to_screen_y(y)),
-        snap_px(play_to_screen_len(w)),
-        snap_px(play_to_screen_len(h)),
-        r, g, b, a);
+        snap_px(play_to_screen_len(width)),
+        snap_px(play_to_screen_len(height)),
+        red, green, blue, alpha);
 }
 
-function play_draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f32): void {
+function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_circle(
         snap_px(play_to_screen_x(cx)),
         snap_px(play_to_screen_y(cy)),
         snap_px(play_to_screen_len(radius)),
-        r, g, b, a);
+        red, green, blue, alpha);
 }
 
-function play_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
-    let sx: f32 = snap_px(play_to_screen_x(x));
-    let sy: f32 = snap_px(play_to_screen_y(y));
-    let sw: f32 = snap_px(play_to_screen_len(w));
-    let sh: f32 = snap_px(play_to_screen_len(h));
-    gfx_draw_sprite(handle, f32_to_i32(sx), f32_to_i32(sy), f32_to_i32(sw), f32_to_i32(sh), rot_deg, a);
+function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
+    let screen_x: f32 = snap_px(play_to_screen_x(x));
+    let screen_y: f32 = snap_px(play_to_screen_y(y));
+    let screen_w: f32 = snap_px(play_to_screen_len(width));
+    let screen_h: f32 = snap_px(play_to_screen_len(height));
+    gfx_draw_sprite(handle, f32_to_i32(screen_x), f32_to_i32(screen_y), f32_to_i32(screen_w), f32_to_i32(screen_h), rot_deg, alpha);
 }
 
 function draw_bricks(): void {
