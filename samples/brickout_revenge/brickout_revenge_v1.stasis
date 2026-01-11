@@ -382,8 +382,9 @@ function ensure_config_loaded(): void {
     // Fallback defaults for hosts that don't provide JSON data binding (e.g. WASM prototype).
     state.config.magic = 1337;
 
-    state.config.screen.w = 360;
-    state.config.screen.h = 720;
+    // Window size (pixels). Virtual resolution is fixed (VIRTUAL_W x VIRTUAL_H) and scaled to fit.
+    state.config.screen.w = 540;
+    state.config.screen.h = 1080;
 
     state.config.grid.origin_x = 50.0;
     state.config.grid.margin_bottom = 50.0;
@@ -562,12 +563,8 @@ function update_layout(): void {
     state.layout.viewport_w = vw;
     state.layout.viewport_h = vh;
 
-    let base_w: f32 = i32_to_f32(state.config.screen.w);
-    let base_h: f32 = i32_to_f32(state.config.screen.h);
-    if (base_w < 1.0 || base_h < 1.0) {
-        base_w = VIRTUAL_W;
-        base_h = VIRTUAL_H;
-    }
+    let base_w: f32 = VIRTUAL_W;
+    let base_h: f32 = VIRTUAL_H;
 
     // Fit the full virtual screen into the current viewport while preserving aspect ratio.
     let sx: f32 = vw / base_w;
@@ -765,7 +762,7 @@ function init_game(reset_progress: bool): void {
     }
 
     // Init paddle
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     state.paddle.x = sw / 2.0;
     state.paddle.y = state.config.paddle.y;
     state.paddle.width = state.config.paddle.width;
@@ -993,7 +990,7 @@ function count_active_balls(): i32 {
 
 // Physics update
 function update_balls(dt: f32): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     let sh: f32 = GAME_H;
     foreach (let ball in state.balls) {
         if (ball.active) {
@@ -1078,7 +1075,7 @@ function update_paddle(dt: f32): void {
 
     // Clamp paddle to screen
     let half_w: f32 = state.paddle.width / 2.0;
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     state.paddle.x = clamp_f32(state.paddle.x, half_w, sw - half_w);
 }
 
@@ -2002,7 +1999,7 @@ function draw_ui_panels(): void {
 }
 
 function draw_ui(): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     let sh: f32 = GAME_H;
     let s: f32 = state.layout.play_scale;
 
@@ -2151,7 +2148,7 @@ function handle_pointer_input(): void {
                     let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
                     let wx: f32 = screen_to_play_x(sx);
                     let wy: f32 = screen_to_play_y(sy);
-                    let in_game: bool = in_virtual && wy <= GAME_H && wx >= 0.0 && wx <= i32_to_f32(state.config.screen.w);
+                    let in_game: bool = in_virtual && wy <= GAME_H && wx >= 0.0 && wx <= VIRTUAL_W;
                     if (in_game) {
                         state.drag_active = 1;
                         state.drag_pointer_id = pid;
