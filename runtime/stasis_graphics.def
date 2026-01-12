@@ -47,8 +47,6 @@ EXPORTS
     gfx_load_sprite=stasis_gfx_load_sprite
     stasis_gfx_draw_sprite
     gfx_draw_sprite=stasis_gfx_draw_sprite
-    stasis_gfx_draw_sprite_tl
-    gfx_draw_sprite_tl=stasis_gfx_draw_sprite_tl
     stasis_gfx_draw_sprites_i32
     stasis_gfx_poll_reload
     gfx_poll_reload=stasis_gfx_poll_reload
