@@ -28,7 +28,10 @@ dotnet build Stasis.sln
 if errorlevel 1 exit /b 1
 
 set LSP_DIR=%CD%\vscode-stasis\server
-dotnet publish Stasis.LanguageServer\Stasis.LanguageServer.csproj -c Release -r win-x64 -o "%LSP_DIR%"
+if exist "%LSP_DIR%" rmdir /s /q "%LSP_DIR%"
+mkdir "%LSP_DIR%"
+type nul > "%LSP_DIR%\.gitkeep"
+dotnet publish Stasis.LanguageServer\Stasis.LanguageServer.csproj -c Release -o "%LSP_DIR%" -p:SelfContained=false -p:PublishSingleFile=false -p:PublishReadyToRun=false -p:UseAppHost=false
 if errorlevel 1 exit /b 1
 
 REM Keep the VSCode extension in sync with the repo build.
@@ -73,7 +76,7 @@ if not errorlevel 1 (
   set VSIX_SKIP_INSTALL=-SkipInstall
 )
 
-powershell -ExecutionPolicy Bypass -File "%~dp0scripts\install_vscode_stasis_lsp.ps1" -Runtime win-x64 -Configuration Release -Force %VSIX_SKIP_INSTALL%
+powershell -ExecutionPolicy Bypass -File "%~dp0scripts\install_vscode_stasis_lsp.ps1" -Configuration Release -Force %VSIX_SKIP_INSTALL%
 if errorlevel 1 exit /b 1
 
 :skip_vscode

@@ -1,5 +1,5 @@
 param(
-  [string]$Runtime = "win-x64",
+  [string]$Runtime = "",
   [string]$Configuration = "Release",
   [switch]$Force,
   [switch]$SkipInstall
@@ -40,7 +40,23 @@ if (-not $code) {
   throw "VS Code CLI (code) not found in PATH. Enable it from the VS Code command palette."
 }
 
-& $dotnet.Path @("publish", $serverProject, "-c", $Configuration, "-r", $Runtime, "-o", $serverOut)
+if (Test-Path $serverOut) {
+  Remove-Item -Recurse -Force $serverOut
+}
+New-Item -ItemType Directory -Force -Path $serverOut | Out-Null
+New-Item -ItemType File -Force -Path (Join-Path $serverOut ".gitkeep") | Out-Null
+
+$publishArgs = @("publish", $serverProject, "-c", $Configuration, "-o", $serverOut,
+  "-p:SelfContained=false",
+  "-p:PublishSingleFile=false",
+  "-p:PublishReadyToRun=false",
+  "-p:UseAppHost=false")
+
+if (-not [string]::IsNullOrWhiteSpace($Runtime)) {
+  $publishArgs += @("-r", $Runtime)
+}
+
+& $dotnet.Path $publishArgs
 if ($LASTEXITCODE -ne 0) {
   throw "Language server publish failed."
 }

@@ -20,7 +20,7 @@ import "../../src/stdlib/audio.stasis";
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
-// - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32)
+// - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
 // - gfx_poll_reload(handle: i32) -> bool
 // - gfx_window_width() -> i32
 // - gfx_window_height() -> i32
@@ -35,8 +35,8 @@ import "../../src/stdlib/audio.stasis";
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
 const MAX_TAP_PULSES: i32 = 16;
-const GRID_COLS: i32 = 10;
-const GRID_ROWS: i32 = 5;
+const GRID_COLS: i32 = 6;
+const GRID_ROWS: i32 = 6;
 const UI_MENU_PAD: f32 = 10.0;
 const UI_MENU_HEADER_H: f32 = 26.0;
 const UI_MENU_SLOT_H: f32 = 30.0;
@@ -56,6 +56,13 @@ const UI_SIDE_MIN_W: f32 = 220.0;
 const UI_BOTTOM_MIN_H: f32 = 160.0;
 const UI_PANEL_PAD: f32 = 12.0;
 const UI_PANEL_GAP: f32 = 12.0;
+
+// Virtual resolution + safe gameplay area.
+// The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
+const VIRTUAL_W: f32 = 360.0;
+const VIRTUAL_H: f32 = 720.0;
+const UI_RESERVED_H: f32 = 96.0;
+const GAME_H: f32 = 624.0;
 
 enum BrickType {
     Basic,
@@ -304,6 +311,8 @@ global audio_buf: f32[512];
 global audio_ready: bool;
 global audio_sr: i32;
 global sfx_voices: SoundVoice[12];
+global desktop_size_w: i32[1];
+global desktop_size_h: i32[1];
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -369,21 +378,28 @@ function apply_config_live(): void {
 
 function ensure_config_loaded(): void {
     if (state.config.magic == 1337) {
+        // Data binding is optional, but the runner may bind only a subset of fields if JSON keys don't match.
+        // Ensure window size is always valid even if `screen.w/h` were not populated.
+        if (state.config.screen.w < 1 || state.config.screen.h < 1) {
+            state.config.screen.w = 540;
+            state.config.screen.h = 1080;
+        }
         return;
     }
 
     // Fallback defaults for hosts that don't provide JSON data binding (e.g. WASM prototype).
     state.config.magic = 1337;
 
-    state.config.screen.w = 600;
-    state.config.screen.h = 1200;
+    // Window size (pixels). Virtual resolution is fixed (VIRTUAL_W x VIRTUAL_H) and scaled to fit.
+    state.config.screen.w = 540;
+    state.config.screen.h = 1080;
 
     state.config.grid.origin_x = 50.0;
     state.config.grid.margin_bottom = 50.0;
-    state.config.grid.spacing = 5.0;
+    state.config.grid.spacing = 4.0;
 
-    state.config.brick.width = 60.0;
-    state.config.brick.height = 20.0;
+    state.config.brick.width = 52.0;
+    state.config.brick.height = 24.0;
 
     state.config.paddle.y = 30.0;
     state.config.paddle.width = 100.0;
@@ -555,125 +571,141 @@ function update_layout(): void {
     state.layout.viewport_w = vw;
     state.layout.viewport_h = vh;
 
-    let base_w: f32 = i32_to_f32(state.config.screen.w);
-    let base_h: f32 = i32_to_f32(state.config.screen.h);
-    if (base_w < 1.0 || base_h < 1.0) {
-        base_w = 800.0;
-        base_h = 600.0;
-    }
-    let aspect: f32 = base_w / base_h;
+    let base_w: f32 = VIRTUAL_W;
+    let base_h: f32 = VIRTUAL_H;
 
-    let can_side: bool = (vw - UI_SIDE_MIN_W) > 0.0;
-    let can_bottom: bool = (vh - UI_BOTTOM_MIN_H) > 0.0;
+    // Fit the full virtual screen into the current viewport while preserving aspect ratio.
+    let sx: f32 = vw / base_w;
+    let sy: f32 = vh / base_h;
+    let s: f32 = sx;
+    if (sy < s) { s = sy; }
+    if (s <= 0.0) { return; }
 
-    let side_play_w: f32 = 0.0;
-    let side_play_h: f32 = 0.0;
-    let side_scale: f32 = 0.0;
-    if (can_side) {
-        side_play_h = vh;
-        side_play_w = side_play_h * aspect;
-        if (side_play_w > vw - UI_SIDE_MIN_W) {
-            side_play_w = vw - UI_SIDE_MIN_W;
-            side_play_h = side_play_w / aspect;
-        }
-        side_scale = side_play_w / base_w;
-    }
+    let play_w: f32 = base_w * s;
+    let play_h: f32 = base_h * s;
 
-    let bottom_play_w: f32 = 0.0;
-    let bottom_play_h: f32 = 0.0;
-    let bottom_scale: f32 = 0.0;
-    if (can_bottom) {
-        bottom_play_w = vw;
-        bottom_play_h = bottom_play_w / aspect;
-        if (bottom_play_h > vh - UI_BOTTOM_MIN_H) {
-            bottom_play_h = vh - UI_BOTTOM_MIN_H;
-            bottom_play_w = bottom_play_h * aspect;
-        }
-        bottom_scale = bottom_play_w / base_w;
-    }
+    state.layout.ui_mode = 2;
+    state.layout.play_w = play_w;
+    state.layout.play_h = play_h;
+    state.layout.play_x = vx + (vw - play_w) * 0.5;
+    state.layout.play_y = vy + (vh - play_h) * 0.5;
+    state.layout.play_scale = s;
 
-    let use_side: bool = false;
-    if (can_side && can_bottom) {
-        use_side = side_scale >= bottom_scale;
-    } else {
-        if (can_side) {
-            use_side = true;
-        } else {
-            if (can_bottom) {
-                use_side = false;
-            }
-        }
-    }
-
-    if (use_side) {
-        state.layout.ui_mode = 1;
-        state.layout.play_w = side_play_w;
-        state.layout.play_h = side_play_h;
-        state.layout.play_x = vx;
-        state.layout.play_y = vy + (vh - side_play_h) * 0.5;
-        state.layout.ui_x = vx + side_play_w;
-        state.layout.ui_y = vy;
-        state.layout.ui_w = vw - side_play_w;
-        state.layout.ui_h = vh;
-    } else {
-        if (can_bottom) {
-            state.layout.ui_mode = 2;
-            state.layout.play_w = bottom_play_w;
-            state.layout.play_h = bottom_play_h;
-            state.layout.play_x = vx + (vw - bottom_play_w) * 0.5;
-            state.layout.play_y = vy;
-            state.layout.ui_x = vx;
-            state.layout.ui_y = vy + bottom_play_h;
-            state.layout.ui_w = vw;
-            state.layout.ui_h = vh - bottom_play_h;
-        } else {
-            let play_w: f32 = vw;
-            let play_h: f32 = vw / aspect;
-            if (play_h > vh) {
-                play_h = vh;
-                play_w = vh * aspect;
-            }
-            state.layout.ui_mode = 0;
-            state.layout.play_w = play_w;
-            state.layout.play_h = play_h;
-            state.layout.play_x = vx + (vw - play_w) * 0.5;
-            state.layout.play_y = vy + (vh - play_h) * 0.5;
-            state.layout.ui_x = vx;
-            state.layout.ui_y = vy;
-            state.layout.ui_w = vw;
-            state.layout.ui_h = vh;
-        }
-    }
-
-    state.layout.play_scale = state.layout.play_w / base_w;
+    // Reserve a fixed bottom band (in virtual units) for UI. Gameplay should not place objects here.
+    state.layout.ui_x = state.layout.play_x;
+    state.layout.ui_y = state.layout.play_y + (base_h - UI_RESERVED_H) * s;
+    state.layout.ui_w = play_w;
+    state.layout.ui_h = UI_RESERVED_H * s;
 }
 
-function play_to_screen_x(x: f32): f32 {
-    return state.layout.play_x + x * state.layout.play_scale;
+function play_to_screen_x(play_x: f32): f32 {
+    return state.layout.play_x + play_x * state.layout.play_scale;
 }
 
-function play_to_screen_y(y: f32): f32 {
-    return state.layout.play_y + y * state.layout.play_scale;
+function play_to_screen_y(play_y: f32): f32 {
+    return state.layout.play_y + play_y * state.layout.play_scale;
 }
 
-function play_to_screen_len(v: f32): f32 {
-    return v * state.layout.play_scale;
+function play_to_screen_len(play_len: f32): f32 {
+    return play_len * state.layout.play_scale;
 }
 
-function screen_to_play_x(x: f32): f32 {
+function snap_px(value: f32): f32 {
+    if (value >= 0.0) {
+        return i32_to_f32(f32_to_i32(value + 0.5));
+    }
+    return i32_to_f32(f32_to_i32(value - 0.5));
+}
+
+function play_snap_x(play_x: f32): f32 {
+    return snap_px(play_to_screen_x(play_x));
+}
+
+function play_snap_y(play_y: f32): f32 {
+    return snap_px(play_to_screen_y(play_y));
+}
+
+function play_snap_len(play_len: f32): f32 {
+    return snap_px(play_to_screen_len(play_len));
+}
+
+function screen_to_play_x(screen_x: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
-    return (x - state.layout.play_x) / state.layout.play_scale;
+    return (screen_x - state.layout.play_x) / state.layout.play_scale;
 }
 
-function screen_to_play_y(y: f32): f32 {
+function screen_to_play_y(screen_y: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
-    return (y - state.layout.play_y) / state.layout.play_scale;
+    return (screen_y - state.layout.play_y) / state.layout.play_scale;
 }
 
 function clamp_i32(v: i32, min: i32, max: i32): i32 {
     if (v < min) { return min; }
     if (v > max) { return max; }
     return v;
+}
+
+function maximize_window_for_desktop(): void {
+    // Pick a window size that either fits the full desktop height or the full desktop width,
+    // while preserving the virtual aspect ratio, and never going below the virtual size.
+    desktop_size_w[0] = 0;
+    desktop_size_h[0] = 0;
+    get_desktop_size(desktop_size_w, desktop_size_h);
+
+    let dw: i32 = desktop_size_w[0];
+    let dh: i32 = desktop_size_h[0];
+    if (dw < 1 || dh < 1) {
+        return;
+    }
+
+    let margin_w: i32 = 80;
+    let margin_h: i32 = 120;
+    let usable_w: i32 = dw - margin_w;
+    let usable_h: i32 = dh - margin_h;
+    if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
+    if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
+
+    // Candidate A: fit height.
+    let fit_h_h: i32 = usable_h;
+    let fit_h_w: i32 = f32_to_i32(i32_to_f32(fit_h_h) * (VIRTUAL_W / VIRTUAL_H));
+
+    // Candidate B: fit width.
+    let fit_w_w: i32 = usable_w;
+    let fit_w_h: i32 = f32_to_i32(i32_to_f32(fit_w_w) * (VIRTUAL_H / VIRTUAL_W));
+
+    let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
+    let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
+
+    let choose_w: i32 = f32_to_i32(VIRTUAL_W);
+    let choose_h: i32 = f32_to_i32(VIRTUAL_H);
+
+    if (a_ok && b_ok) {
+        // Pick the bigger one (area).
+        let a_area: i32 = fit_h_w * fit_h_h;
+        let b_area: i32 = fit_w_w * fit_w_h;
+        if (a_area >= b_area) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            choose_w = fit_w_w;
+            choose_h = fit_w_h;
+        }
+    } else {
+        if (a_ok) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            if (b_ok) {
+                choose_w = fit_w_w;
+                choose_h = fit_w_h;
+            }
+        }
+    }
+
+    if (choose_w < f32_to_i32(VIRTUAL_W)) { choose_w = f32_to_i32(VIRTUAL_W); }
+    if (choose_h < f32_to_i32(VIRTUAL_H)) { choose_h = f32_to_i32(VIRTUAL_H); }
+
+    set_window_size(choose_w, choose_h);
 }
 
 function point_in_rect(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32): bool {
@@ -693,8 +725,7 @@ function grid_to_world_x(gx: i32): f32 {
 function grid_to_world_y(gy: i32): f32 {
     let gyf: f32 = i32_to_f32(gy);
     // Place bricks starting near the bottom and stack upward with the same spacing.
-    let sh: f32 = i32_to_f32(state.config.screen.h);
-    return sh - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
+    return GAME_H - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
 }
 
 function grid_in_bounds(gx: i32, gy: i32): bool {
@@ -702,6 +733,23 @@ function grid_in_bounds(gx: i32, gy: i32): bool {
     if (gy < 0) { return false; }
     if (gx >= GRID_COLS) { return false; }
     if (gy >= GRID_ROWS) { return false; }
+    return true;
+}
+
+function grid_cell_fits_in_level(gx: i32, gy: i32): bool {
+    if (!grid_in_bounds(gx, gy)) { return false; }
+
+    let x: f32 = grid_to_world_x(gx);
+    let y: f32 = grid_to_world_y(gy);
+    let w: f32 = state.config.brick.width;
+    let h: f32 = state.config.brick.height;
+
+    if (w <= 0.0 || h <= 0.0) { return false; }
+    if (x < 0.0) { return false; }
+    if (y < 0.0) { return false; }
+    if (x + w > VIRTUAL_W) { return false; }
+    if (y + h > GAME_H) { return false; }
+
     return true;
 }
 
@@ -714,8 +762,7 @@ function world_to_grid_x(wx: f32): i32 {
 }
 
 function world_to_grid_y(wy: f32): i32 {
-    let sh: f32 = i32_to_f32(state.config.screen.h);
-    let base_y: f32 = sh - state.config.grid.margin_bottom - state.config.brick.height;
+    let base_y: f32 = GAME_H - state.config.grid.margin_bottom - state.config.brick.height;
     let cell_h: f32 = state.config.brick.height + state.config.grid.spacing;
     if (cell_h <= 0.0) { return -1; }
     let local_y: f32 = base_y - wy;
@@ -746,6 +793,7 @@ function find_free_brick_slot(): i32 {
 
 function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
     if (!grid_in_bounds(gx, gy)) { return false; }
+    if (!grid_cell_fits_in_level(gx, gy)) { return false; }
     if (grid_is_occupied(gx, gy)) { return false; }
     let slot: i32 = find_free_brick_slot();
     if (slot < 0) { return false; }
@@ -804,7 +852,7 @@ function init_game(reset_progress: bool): void {
     }
 
     // Init paddle
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     state.paddle.x = sw / 2.0;
     state.paddle.y = state.config.paddle.y;
     state.paddle.width = state.config.paddle.width;
@@ -1032,8 +1080,8 @@ function count_active_balls(): i32 {
 
 // Physics update
 function update_balls(dt: f32): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sw: f32 = VIRTUAL_W;
+    let sh: f32 = GAME_H;
     foreach (let ball in state.balls) {
         if (ball.active) {
             // Move ball
@@ -1117,7 +1165,7 @@ function update_paddle(dt: f32): void {
 
     // Clamp paddle to screen
     let half_w: f32 = state.paddle.width / 2.0;
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32 = VIRTUAL_W;
     state.paddle.x = clamp_f32(state.paddle.x, half_w, sw - half_w);
 }
 
@@ -1411,28 +1459,59 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
     }
 }
 
-function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_line(play_to_screen_x(x1), play_to_screen_y(y1), play_to_screen_x(x2), play_to_screen_y(y2), r, g, b, a);
+function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_line(
+        play_snap_x(x1),
+        play_snap_y(y1),
+        play_snap_x(x2),
+        play_snap_y(y2),
+        red, green, blue, alpha);
 }
 
-function play_draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_rect(play_to_screen_x(x), play_to_screen_y(y), play_to_screen_len(w), play_to_screen_len(h), r, g, b, a);
+function play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_rect(
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
+        red, green, blue, alpha);
 }
 
-function play_draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_filled_rect(play_to_screen_x(x), play_to_screen_y(y), play_to_screen_len(w), play_to_screen_len(h), r, g, b, a);
+function play_draw_filled_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_filled_rect(
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
+        red, green, blue, alpha);
 }
 
-function play_draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f32): void {
-    draw_circle(play_to_screen_x(cx), play_to_screen_y(cy), play_to_screen_len(radius), r, g, b, a);
+function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_circle(
+        play_snap_x(cx),
+        play_snap_y(cy),
+        play_snap_len(radius),
+        red, green, blue, alpha);
 }
 
-function play_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
-    let sx: f32 = play_to_screen_x(x);
-    let sy: f32 = play_to_screen_y(y);
-    let sw: f32 = play_to_screen_len(w);
-    let sh: f32 = play_to_screen_len(h);
-    gfx_draw_sprite(handle, f32_to_i32(sx), f32_to_i32(sy), f32_to_i32(sw), f32_to_i32(sh), rot_deg, a);
+function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
+    let screen_x: f32 = play_snap_x(x);
+    let screen_y: f32 = play_snap_y(y);
+    let screen_w_f: f32 = play_snap_len(width);
+    let screen_h_f: f32 = play_snap_len(height);
+    let screen_w: i32 = f32_to_i32(screen_w_f);
+    let screen_h: i32 = f32_to_i32(screen_h_f);
+
+    // Ensure even sizes so a centered sprite lands on integer pixel bounds.
+    // Otherwise `x - w/2` ends up at .5, which makes sprites appear misaligned with line primitives.
+    if ((screen_w % 2) != 0) { screen_w = screen_w + 1; }
+    if ((screen_h % 2) != 0) { screen_h = screen_h + 1; }
+
+    let screen_x_i: i32 = f32_to_i32(screen_x);
+    let screen_y_i: i32 = f32_to_i32(screen_y);
+    let top_left_x: i32 = screen_x_i - (screen_w / 2);
+    let top_left_y: i32 = screen_y_i - (screen_h / 2);
+    gfx_draw_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -1534,12 +1613,21 @@ function draw_balls(): void {
                     let hp_f: f32 = i32_to_f32(ball.hp);
                     let max_f: f32 = i32_to_f32(ball.max_hp);
                     let t: f32 = hp_f / max_f;
-                    let bx: f32 = ball.x;
-                    let by: f32 = ball.y;
-                    let br: f32 = ball.radius;
-                    let y: f32 = by - br - 10.0;
-                    play_draw_line(bx - 16.0, y, bx + 16.0, y, 0.2, 0.2, 0.2, 0.9);
-                    play_draw_line(bx - 16.0, y, bx - 16.0 + 32.0 * t, y, 0.9, 0.3, 0.9, 0.9);
+                    let ball_x: f32 = ball.x;
+                    let ball_y: f32 = ball.y;
+                    let ball_r: f32 = ball.radius;
+
+                    // Anchor in screen space so rounding doesn't introduce drift as the ball moves.
+                    let sx: f32 = play_snap_x(ball_x);
+                    let sy: f32 = play_snap_y(ball_y);
+                    let half_w: f32 = play_snap_len(16.0);
+                    let offset_y: f32 = play_snap_len(ball_r + 10.0);
+                    let bar_y: f32 = sy - offset_y;
+                    let bar_w: f32 = half_w * 2.0;
+                    let filled_w: f32 = snap_px(bar_w * t);
+
+                    draw_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
+                    draw_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
                 }
             }
         }
@@ -2041,8 +2129,8 @@ function draw_ui_panels(): void {
 }
 
 function draw_ui(): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
-    let sh: f32 = i32_to_f32(state.config.screen.h);
+    let sw: f32 = VIRTUAL_W;
+    let sh: f32 = GAME_H;
     let s: f32 = state.layout.play_scale;
 
     // Score in top-left
@@ -2053,16 +2141,16 @@ function draw_ui(): void {
 
     // Average frame time in bottom-left (in milliseconds with 1 decimal)
     let avg_time_tenths: i32 = frame_timer_avg_tenths(state.frame_timer.samples_ms);
-    draw_decimal_1_tenths(avg_time_tenths, play_to_screen_x(20.0), play_to_screen_y(sh - 30.0), 6.0 * s);
-    hud_draw_ms_logic(play_to_screen_x(90.0), play_to_screen_y(sh - 28.0), 3.0 * s);
+    draw_decimal_1_tenths(avg_time_tenths, play_to_screen_x(20.0), play_to_screen_y(GAME_H - 30.0), 6.0 * s);
+    hud_draw_ms_logic(play_to_screen_x(90.0), play_to_screen_y(GAME_H - 28.0), 3.0 * s);
 
     // Debug: Active counts in bottom-right
     let active_balls_count: i32 = count_active_balls();
     let active_bricks_count: i32 = count_active_bricks();
-    hud_draw_balls(play_to_screen_x(sw - 190.0), play_to_screen_y(sh - 52.0), 3.0 * s);
-    draw_number(active_balls_count, play_to_screen_x(sw - 80.0), play_to_screen_y(sh - 50.0), 4.0 * s);
-    hud_draw_bricks(play_to_screen_x(sw - 190.0), play_to_screen_y(sh - 32.0), 3.0 * s);
-    draw_number(active_bricks_count, play_to_screen_x(sw - 80.0), play_to_screen_y(sh - 30.0), 4.0 * s);
+    hud_draw_balls(play_to_screen_x(sw - 190.0), play_to_screen_y(GAME_H - 52.0), 3.0 * s);
+    draw_number(active_balls_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 50.0), 4.0 * s);
+    hud_draw_bricks(play_to_screen_x(sw - 190.0), play_to_screen_y(GAME_H - 32.0), 3.0 * s);
+    draw_number(active_bricks_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 30.0), 4.0 * s);
 
     if (state.phase == Phase.Lose) {
         // "LOSE" indicator
@@ -2109,8 +2197,9 @@ function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
     state.drag_grid_x = world_to_grid_x(state.drag_world_x);
     state.drag_grid_y = world_to_grid_y(state.drag_world_y);
 
-    let in_play: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
-    let valid: bool = in_play && grid_in_bounds(state.drag_grid_x, state.drag_grid_y);
+    let in_virtual: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
+    let in_game: bool = in_virtual && state.drag_world_y <= GAME_H;
+    let valid: bool = in_game && grid_cell_fits_in_level(state.drag_grid_x, state.drag_grid_y);
     if (valid) {
         if (grid_is_occupied(state.drag_grid_x, state.drag_grid_y)) {
             valid = false;
@@ -2186,8 +2275,11 @@ function handle_pointer_input(): void {
                     if (slot == 1) { state.selected_tower = BrickType.Armored; state.cursor.brick_type = BrickType.Armored; sfx_play(SFX_SELECT); }
                     if (slot == 2) { state.selected_tower = BrickType.Reflector; state.cursor.brick_type = BrickType.Reflector; sfx_play(SFX_SELECT); }
                 } else {
-                    let in_play: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
-                    if (in_play) {
+                    let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
+                    let wx: f32 = screen_to_play_x(sx);
+                    let wy: f32 = screen_to_play_y(sy);
+                    let in_game: bool = in_virtual && wy <= GAME_H && wx >= 0.0 && wx <= VIRTUAL_W;
+                    if (in_game) {
                         state.drag_active = 1;
                         state.drag_pointer_id = pid;
                         update_drag_from_screen(sx, sy);
@@ -2285,6 +2377,14 @@ function main(): i32 {
     if (!init_ok) {
         return 1;
     }
+
+    maximize_window_for_desktop();
+    sync_screen_size();
+    print_string("window_px=");
+    print_int(state.runtime_screen.w);
+    print_string("x");
+    print_int(state.runtime_screen.h);
+    print_string("\n");
 
     audio_ready = audio_is_available();
     if (audio_ready) {

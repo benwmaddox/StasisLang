@@ -123,6 +123,7 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
+static void reset_line_program(void);
 #endif
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
@@ -326,6 +327,11 @@ static void stasis_pump_events(void) {
                                 g_sprites[i].needs_reraster = 1;
                             }
                         }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+                        if (!g_use_sdl_renderer) {
+                            reset_line_program();
+                        }
+#endif
                     }
 
                     g_input_frame.viewport_w_px = g_window_width;
@@ -788,6 +794,13 @@ static void ensure_line_program(void) {
     }
     if (g_line_vbo == 0) {
         glGenBuffers(1, &g_line_vbo);
+    }
+}
+
+static void reset_line_program(void) {
+    if (g_line_program != 0) {
+        glDeleteProgram(g_line_program);
+        g_line_program = 0;
     }
 }
 
@@ -1367,8 +1380,10 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
 }
 
 /*
- * Rasterize SVG to fit within max_w x max_h, preserving aspect ratio.
- * Returns actual rasterized dimensions in out_w, out_h.
+ * Rasterize SVG to exactly max_w x max_h (in pixels).
+ * The SVG content is scaled uniformly to fit within max_w x max_h (preserving aspect ratio)
+ * and centered with transparent padding. This keeps sprite textures 1:1 with draw sizes to
+ * avoid fuzz from resampling.
  */
 static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
                                    unsigned char** out_pixels, int* out_w, int* out_h) {
@@ -1405,15 +1420,16 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
     float scale_y = (float)max_h / image->height;
     float scale = (scale_x < scale_y) ? scale_x : scale_y;
 
-    /* Calculate actual output dimensions */
-    int w = (int)ceilf(image->width * scale);
-    int h = (int)ceilf(image->height * scale);
+    /* Calculate content size (rounded up) and center it in the full target buffer. */
+    int content_w = (int)ceilf(image->width * scale);
+    int content_h = (int)ceilf(image->height * scale);
+    if (content_w < 1) content_w = 1;
+    if (content_h < 1) content_h = 1;
+    if (content_w > max_w) content_w = max_w;
+    if (content_h > max_h) content_h = max_h;
 
-    /* Clamp to max (in case of rounding) */
-    if (w > max_w) w = max_w;
-    if (h > max_h) h = max_h;
-    if (w <= 0) w = 1;
-    if (h <= 0) h = 1;
+    float tx = (float)(max_w - content_w) * 0.5f;
+    float ty = (float)(max_h - content_h) * 0.5f;
 
     NSVGrasterizer* rast = nsvgCreateRasterizer();
     if (!rast) {
@@ -1422,23 +1438,23 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
         return 0;
     }
 
-    unsigned char* pixels = (unsigned char*)malloc((size_t)w * (size_t)h * 4u);
+    unsigned char* pixels = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!pixels) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", w, h, resolved);
+        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved);
         nsvgDeleteRasterizer(rast);
         nsvgDelete(image);
         return 0;
     }
-    memset(pixels, 0, (size_t)w * (size_t)h * 4u);
+    memset(pixels, 0, (size_t)max_w * (size_t)max_h * 4u);
 
-    nsvgRasterize(rast, image, 0.0f, 0.0f, scale, pixels, w, h, w * 4);
+    nsvgRasterize(rast, image, tx, ty, scale, pixels, max_w, max_h, max_w * 4);
 
     nsvgDeleteRasterizer(rast);
     nsvgDelete(image);
 
     *out_pixels = pixels;
-    *out_w = w;
-    *out_h = h;
+    *out_w = max_w;
+    *out_h = max_h;
     return 1;
 }
 
@@ -2101,6 +2117,75 @@ STASIS_EXPORT void stasis_get_window_size(int* width, int* height) {
 }
 
 /*
+ * Get current desktop usable dimensions (excluding taskbar/docks when available).
+ * Writes width and height to provided pointers.
+ *
+ * Note: Requires SDL video to be initialized (typically via stasis_init_window).
+ */
+STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
+    int w = 0;
+    int h = 0;
+
+    if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+
+    SDL_Rect bounds;
+    if (SDL_GetDisplayUsableBounds(0, &bounds) == 0) {
+        w = bounds.w;
+        h = bounds.h;
+    } else {
+        SDL_DisplayMode mode;
+        if (SDL_GetDesktopDisplayMode(0, &mode) == 0) {
+            w = mode.w;
+            h = mode.h;
+        }
+    }
+
+    if (width) *width = w;
+    if (height) *height = h;
+}
+
+STASIS_EXPORT void get_desktop_size(int* width, int* height) {
+    stasis_get_desktop_size(width, height);
+}
+
+/*
+ * Set window size (windowed mode).
+ * width/height are in pixels.
+ */
+STASIS_EXPORT void stasis_set_window_size(int width, int height) {
+    if (!g_window) {
+        return;
+    }
+
+    if (width < 1 || height < 1) {
+        return;
+    }
+
+    SDL_SetWindowSize(g_window, width, height);
+    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer) {
+        glViewport(0, 0, g_window_width, g_window_height);
+        setup_ortho();
+        reset_line_program();
+    } else {
+        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+    }
+#else
+    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+#endif
+}
+
+STASIS_EXPORT void set_window_size(int width, int height) {
+    stasis_set_window_size(width, height);
+}
+
+/*
  * Set fullscreen mode
  * fullscreen: 1 for fullscreen desktop, 0 for windowed
  * Returns 1 on success, 0 on failure
@@ -2121,6 +2206,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
         if (!g_use_sdl_renderer) {
             glViewport(0, 0, g_window_width, g_window_height);
             setup_ortho();
+            reset_line_program();
         } else {
             SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
         }
@@ -2588,11 +2674,11 @@ STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
 }
 
 /*
- * Draw a sprite at a specific size (centered) with rotation and tint.
+ * Draw a sprite at a specific size (top-left anchored) with rotation and tint.
  * All parameters are integers for simpler Stasis integration.
- * x, y: center position in pixels
+ * x, y: top-left position in pixels
  * w, h: desired size in pixels
- * rot_degrees: rotation in degrees (0-359)
+ * rot_degrees: rotation in degrees (0-359), around the sprite center
  * a: alpha 0-255
  */
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
@@ -2607,17 +2693,16 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
-    /* Check if re-rasterization is needed:
-     * 1. Sprite was marked for re-raster (window resize)
-     * 2. Requested draw size is larger than current raster (would look blurry)
+    if (w <= 0 || h <= 0) return;
+
+    /* Re-rasterize when the requested draw size changes or when explicitly invalidated.
+     *
+     * This keeps virtual-space sizing (game logic) decoupled from display-space raster size:
+     * the sprite is baked to exactly the pixel size we are about to draw.
      */
-    if (e->needs_reraster || (w > e->w || h > e->h)) {
-        if (e->path && e->max_w > 0 && e->max_h > 0) {
-            /* Calculate new max size based on requested draw size */
-            int new_max_w = (w > e->max_w) ? w : e->max_w;
-            int new_max_h = (h > e->max_h) ? h : e->max_h;
-            sprite_build_into_entry_sized(e, e->path, new_max_w, new_max_h, 1);
-        }
+    int should_reraster = e->needs_reraster || (w != e->max_w) || (h != e->max_h);
+    if (should_reraster) {
+        if (e->path) sprite_build_into_entry_sized(e, e->path, w, h, 1);
     }
 
     /* Convert degrees to radians */
@@ -2632,8 +2717,8 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
         SDL_FRect dst;
         dst.w = (float)w;
         dst.h = (float)h;
-        dst.x = (float)x - dst.w * 0.5f;
-        dst.y = (float)y - dst.h * 0.5f;
+        dst.x = (float)x;
+        dst.y = (float)y;
         SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
         SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
@@ -2642,8 +2727,8 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
         SDL_Rect dst;
         dst.w = w;
         dst.h = h;
-        dst.x = x - w / 2;
-        dst.y = y - h / 2;
+        dst.x = x;
+        dst.y = y;
         SDL_Point center = { w / 2, h / 2 };
         SDL_SetTextureColorMod(e->sdl_tex, 255, 255, 255);
         SDL_SetTextureAlphaMod(e->sdl_tex, (Uint8)a);
@@ -2665,8 +2750,8 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
 
     float x0 = -hw, y0 = -hh;
     float x1 = hw, y1 = hh;
-    float fx = (float)x;
-    float fy = (float)y;
+    float fx = (float)x + hw;
+    float fy = (float)y + hh;
 
     float p0x = fx + x0 * c - y0 * s;
     float p0y = fy + x0 * s + y0 * c;
