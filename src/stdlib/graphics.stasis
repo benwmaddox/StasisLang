@@ -15,7 +15,6 @@ extern function draw_lines_f32(lines: f32[], count: i32): void;
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 extern function gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void;
 extern function gfx_draw_sprites_i32(cmds: i32[], count: i32): void;
-extern function gfx_poll_reload(handle: i32): bool;
 extern function gfx_window_width(): i32;
 extern function gfx_window_height(): i32;
 extern function gfx_window_resized(): bool;

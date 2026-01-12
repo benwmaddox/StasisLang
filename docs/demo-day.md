@@ -81,7 +81,7 @@ Run:
 
 Features:
 - Sprite pipeline (`gfx_load_sprite`, `gfx_draw_sprite`)
-- Asset hot reload (`gfx_poll_reload`): edit the SVGs under `assets_src/flappy-birds/` while running
+- Asset hot reload: edit the SVGs under `assets_src/flappy-birds/` while running in dev watch mode
 - Keyboard input (`is_key_down` Space)
 
 Run:

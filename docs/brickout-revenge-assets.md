@@ -36,11 +36,6 @@ These functions are treated as built-ins by the compiler and lowered to external
   - `rot` is radians, rotating around the sprite's center.
   - `(r,g,b,a)` multiplies/tints the sprite output.
 
-- `gfx_poll_reload(handle: i32) -> bool`
-  - Checks whether the sprite source changed on disk and, if so, rebuilds it and updates the atlas region.
-  - Handle remains stable; subsequent draws use the new pixels.
-  - Intended to be called once per frame for a small set of sprites.
-
 Notes:
 - Stasis stores the returned `i32` handles in globals/struct fields (static memory friendly).
 - The runtime owns all allocations and GL resources; Stasis never sees pointers or variable-sized arrays.
@@ -57,14 +52,7 @@ Rasterization:
 
 ## Hot Reload Model
 
-Hot reload is always enabled for now (no flags):
-- `gfx_poll_reload(handle)` checks the on-disk modified time.
-- If modified, the runtime reloads and rebakes the sprite and updates the atlas region via `glTexSubImage2D`.
-- Mipmaps are regenerated for the atlas after updates (acceptable for dev; can be optimized later).
-
-Recommended usage pattern:
-- Load once during initialization (store handles in globals).
-- Call `gfx_poll_reload` once per frame for the small set of sprites you are actively using.
+In dev watch mode, sprite source SVGs are watched and hot-reloaded automatically (no explicit polling).
 
 ## Breakout Revenge - Sprite Set
 

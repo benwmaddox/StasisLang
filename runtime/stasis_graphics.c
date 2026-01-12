@@ -24,6 +24,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -146,7 +147,6 @@ typedef struct {
     SDL_Texture* sdl_tex;
     int used;
     int needs_reraster;  /* flag for window resize */
-    int last_poll_ms;    /* throttle gfx_poll_reload disk stats */
 } SpriteEntry;
 
 static SpriteEntry g_sprites[MAX_SPRITES];
@@ -891,6 +891,10 @@ static void ensure_asset_base(void) {
 #endif
 }
 
+static void gfx_asset_watch_init(void);
+static void gfx_asset_watch_apply_pending_changes(void);
+static void gfx_asset_watch_shutdown(void);
+
 static int is_absolute_path(const char* path) {
     if (!path || !*path) return 0;
 #if defined(_WIN32)
@@ -916,6 +920,119 @@ static int resolve_asset_path(const char* path, char* out, size_t out_size) {
         if (*p == '\\') *p = '/';
     }
     return 1;
+}
+
+#if defined(_WIN32)
+static volatile LONG g_asset_watch_dirty = 0;
+static HANDLE g_asset_watch_stop_event = NULL;
+static HANDLE g_asset_watch_change_handle = NULL;
+static HANDLE g_asset_watch_thread = NULL;
+
+static int gfx_asset_watch_enabled(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+
+    /* Explicit override (applies to both dev and non-dev runs). */
+    const char* env = getenv("STASIS_GFX_WATCH_ASSETS");
+    if (env && *env) {
+        cached = (env[0] == '1') ? 1 : 0;
+        return cached;
+    }
+
+    /* Default: enable only in dev (e.g. `stasis run --watch`). */
+    const char* dev = getenv("STASIS_DEV");
+    cached = (dev && dev[0] == '1') ? 1 : 0;
+    return cached;
+}
+
+static DWORD WINAPI gfx_asset_watch_thread_proc(LPVOID userdata) {
+    (void)userdata;
+
+    HANDLE handles[2];
+    handles[0] = g_asset_watch_stop_event;
+    handles[1] = g_asset_watch_change_handle;
+
+    for (;;) {
+        DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        if (wait == WAIT_OBJECT_0 + 1) {
+            InterlockedExchange(&g_asset_watch_dirty, 1);
+            if (!FindNextChangeNotification(g_asset_watch_change_handle)) {
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+
+    return 0;
+}
+#endif
+
+static void gfx_asset_watch_init(void) {
+#if defined(_WIN32)
+    if (!gfx_asset_watch_enabled()) return;
+    if (g_asset_watch_thread) return;
+
+    ensure_asset_base();
+
+    g_asset_watch_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!g_asset_watch_stop_event) {
+        return;
+    }
+
+    DWORD flags = FILE_NOTIFY_CHANGE_FILE_NAME |
+                  FILE_NOTIFY_CHANGE_DIR_NAME |
+                  FILE_NOTIFY_CHANGE_LAST_WRITE |
+                  FILE_NOTIFY_CHANGE_SIZE;
+    g_asset_watch_change_handle = FindFirstChangeNotificationA(g_asset_base, TRUE, flags);
+    if (g_asset_watch_change_handle == INVALID_HANDLE_VALUE) {
+        g_asset_watch_change_handle = NULL;
+        CloseHandle(g_asset_watch_stop_event);
+        g_asset_watch_stop_event = NULL;
+        return;
+    }
+
+    g_asset_watch_thread = CreateThread(NULL, 0, gfx_asset_watch_thread_proc, NULL, 0, NULL);
+    if (!g_asset_watch_thread) {
+        FindCloseChangeNotification(g_asset_watch_change_handle);
+        g_asset_watch_change_handle = NULL;
+        CloseHandle(g_asset_watch_stop_event);
+        g_asset_watch_stop_event = NULL;
+        return;
+    }
+#endif
+}
+
+static void gfx_asset_watch_shutdown(void) {
+#if defined(_WIN32)
+    if (g_asset_watch_stop_event) {
+        SetEvent(g_asset_watch_stop_event);
+    }
+    if (g_asset_watch_thread) {
+        WaitForSingleObject(g_asset_watch_thread, 5000);
+        CloseHandle(g_asset_watch_thread);
+        g_asset_watch_thread = NULL;
+    }
+    if (g_asset_watch_change_handle) {
+        FindCloseChangeNotification(g_asset_watch_change_handle);
+        g_asset_watch_change_handle = NULL;
+    }
+    if (g_asset_watch_stop_event) {
+        CloseHandle(g_asset_watch_stop_event);
+        g_asset_watch_stop_event = NULL;
+    }
+#endif
+}
+
+STASIS_EXPORT void stasis_gfx_notify_file_changed(const char* path) {
+    (void)path;
+#if defined(_WIN32)
+    if (!gfx_asset_watch_enabled()) return;
+    InterlockedExchange(&g_asset_watch_dirty, 1);
+#endif
 }
 
 static char* read_text_file(const char* path) {
@@ -2117,6 +2234,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 #endif
     }
 
+    gfx_asset_watch_init();
     return 1;
 }
 
@@ -2238,6 +2356,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
     gfx_debug_hash_reset_if_enabled();
+    gfx_asset_watch_apply_pending_changes();
     if (!g_events_pumped_this_frame) {
         stasis_pump_events();
         g_events_pumped_this_frame = 1;
@@ -2397,22 +2516,6 @@ static int gfx_should_log_sprite_loads(void) {
     if (cached != -1) return cached;
     const char* env = getenv("STASIS_GFX_LOG_SPRITES");
     cached = (env && env[0] == '1') ? 1 : 0;
-    return cached;
-}
-
-static int gfx_sprite_poll_min_interval_ms(void) {
-    static int cached = -1;
-    if (cached != -1) return cached;
-
-    const char* env = getenv("STASIS_GFX_POLL_RELOAD_MIN_MS");
-    if (!env || !*env) {
-        cached = 200; /* default: 5Hz polling per sprite handle */
-        return cached;
-    }
-
-    int v = atoi(env);
-    if (v < 0) v = 0;
-    cached = v;
     return cached;
 }
 
@@ -2641,6 +2744,28 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
 #endif
 }
 
+static void gfx_asset_watch_apply_pending_changes(void) {
+#if defined(_WIN32)
+    if (!gfx_asset_watch_enabled()) return;
+
+    if (InterlockedExchange(&g_asset_watch_dirty, 0) == 0) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_SPRITES; i++) {
+        SpriteEntry* e = &g_sprites[i];
+        if (!e->used || !e->path) continue;
+
+        uint64_t mt = get_file_mtime(e->path);
+        if (!mt || mt <= e->mtime) continue;
+
+        if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1)) {
+            SDL_Log("gfx_watch: reload failed for %s", e->path);
+        }
+    }
+#endif
+}
+
 /*
  * Load and bake a sprite from an SVG file at a specified max size.
  * The sprite will be rasterized to fit within max_w x max_h while preserving aspect ratio.
@@ -2686,35 +2811,6 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
 
     SDL_Log("gfx_load_sprite: MAX_SPRITES reached");
     return 0;
-}
-
-/*
- * Poll and reload a sprite if its source changed on disk.
- * Returns 1 if reloaded, 0 otherwise.
- */
-STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
-    SpriteEntry* e = sprite_get(handle);
-    if (!e || !e->path) return 0;
-
-    int min_interval_ms = gfx_sprite_poll_min_interval_ms();
-    if (min_interval_ms > 0) {
-        int now_ms = stasis_get_time_ms();
-        if (e->last_poll_ms != 0) {
-            int delta = now_ms - e->last_poll_ms;
-            if (delta >= 0 && delta < min_interval_ms) {
-                return 0;
-            }
-        }
-        e->last_poll_ms = now_ms;
-    }
-
-    uint64_t mt = get_file_mtime(e->path);
-    if (!mt || mt <= e->mtime) return 0;
-    /* Use sized version if max dimensions are set */
-    if (e->max_w > 0 && e->max_h > 0) {
-        return sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1) ? 1 : 0;
-    }
-    return sprite_build_into_entry(e, e->path, 1) ? 1 : 0;
 }
 
 /*
@@ -3034,6 +3130,7 @@ STASIS_EXPORT int stasis_gfx_window_resized(void) {
  */
 STASIS_EXPORT void stasis_shutdown(void) {
     stasis_audio_shutdown_internal();
+    gfx_asset_watch_shutdown();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (g_postfx_program) {
@@ -3102,7 +3199,6 @@ STASIS_EXPORT void stasis_shutdown(void) {
 /* ===== DIRECTORY LISTING ===== */
 
 #ifdef _WIN32
-#include <windows.h>
 #else
 #include <dirent.h>
 #endif

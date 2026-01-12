@@ -128,7 +128,6 @@ public sealed class SemanticAnalyzer
             AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
             AddSymbol("gfx_draw_sprites_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-            AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));

@@ -271,9 +271,6 @@ function draw_frame() {
     begin_frame();
     clear(0.05, 0.07, 0.12, 1.0);
 
-    gfx_poll_reload(spr_bird);
-    gfx_poll_reload(spr_pipe);
-
     let i: i32 = 0;
     for (i = 0; i < 3; i = i + 1) {
         draw_pipe(pipe_x[i], pipe_gap_y[i]);
@@ -314,7 +311,7 @@ runtime\build.bat
 dotnet run --project Stasis.Cli -- run examples/flappy_birds.stasis --backend cranelift --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
 ```
 
-**Why:** This mirrors the classic game loop—poll input, advance physics, draw—while keeping data in globals for deterministic behavior. Hot reload via `gfx_poll_reload` means you can tweak art without restarting.
+**Why:** This mirrors the classic game loop—poll input, advance physics, draw—while keeping data in globals for deterministic behavior. In dev watch mode, sprites hot-reload when you save SVGs.
 
 ---
 

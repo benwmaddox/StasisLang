@@ -67,7 +67,7 @@ With `tick()` hosting, the runner targets `--fps` and sleeps between ticks.
 
 - Store source art in `assets_src/<game-name>/.../*.svg`.
 - Load with `gfx_load_sprite(...)` once and store the returned handle in `state`.
-- For rapid art iteration, call `gfx_poll_reload(handle)` periodically (often once per tick is fine).
+- For rapid art iteration, run in dev watch mode and edit the SVGs; sprites reload automatically (no explicit polling).
 
 The runtime bakes SVG -> RGBA -> atlas and can update atlas regions on change.
 Keep SVGs within the supported subset described in `docs/svg-migration-plan.md`.
@@ -80,7 +80,7 @@ Goal: change something, feel it immediately, keep the game running.
 
 - Keep `.\stasis.bat run ... --fps ...` running.
 - Make a small code change (movement, cooldown, damage, camera), save, and keep playing.
-- Change SVGs and rely on `gfx_poll_reload(...)` to refresh art without recompiling.
+- Change SVGs and the running game will pick them up automatically in dev watch mode.
 - When a change makes the game less fun, revert immediately and try a different direction.
 
 ### The medium loop (30-60 minutes)
@@ -102,7 +102,7 @@ Tips:
 
 - Use `--fps 10` while debugging input/logic.
 - Keep the game running; save the `.stasis` file to hot-swap code between ticks.
-- Edit SVGs and rely on `gfx_poll_reload` to see art changes without recompiling.
+- Edit SVGs; sprites reload automatically in dev watch mode.
 
 ### What hot-swap actually does
 
@@ -231,7 +231,7 @@ These are not impossible forever, but they are high friction given the current m
 - [ ] Assets live under `assets_src/<game>/`
 - [ ] Only supported SVG features (no filters/SMIL; animate via layering + transforms in code)
 - [ ] Sprite handles live under `state` and are not recomputed every tick
-- [ ] Call `gfx_poll_reload(handle)` when you want live updates
+- [ ] Run in dev watch mode to get live sprite updates
 
 ### Performance instrumentation
 

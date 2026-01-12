@@ -43,13 +43,13 @@ EXPORTS
     stasis_input_viewport_y_px
     stasis_input_viewport_w_px
     stasis_input_viewport_h_px
+    stasis_gfx_notify_file_changed
+    gfx_notify_file_changed=stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
     gfx_load_sprite=stasis_gfx_load_sprite
     stasis_gfx_draw_sprite
     gfx_draw_sprite=stasis_gfx_draw_sprite
     stasis_gfx_draw_sprites_i32
-    stasis_gfx_poll_reload
-    gfx_poll_reload=stasis_gfx_poll_reload
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash

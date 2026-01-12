@@ -682,16 +682,6 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
-    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxPollReload(LlvmModuleBuilder builder)
-    {
-        var fn = builder.Module.GetNamedFunction("stasis_gfx_poll_reload");
-        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
-        if (fn.Handle != IntPtr.Zero)
-            return (fn, fnType);
-        fn = builder.Module.AddFunction("stasis_gfx_poll_reload", fnType);
-        return (fn, fnType);
-    }
-
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxWindowWidth(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_window_width");
@@ -1251,7 +1241,6 @@ public sealed class ModuleLowerer
             "gfx_load_sprite",
             "gfx_draw_sprite",
             "gfx_draw_sprites_i32",
-            "gfx_poll_reload",
             "gfx_window_width",
             "gfx_window_height",
             "gfx_window_resized",
@@ -3085,22 +3074,6 @@ public sealed class ModuleLowerer
                         var cast = builder.BuildBitCast(cmds, i8Ptr, "gfx_draw_sprites_i32.ptr");
                         builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
                         return ConstI32(0);
-                    }
-                case "gfx_poll_reload":
-                    {
-                        if (args.Count != 1)
-                        {
-                            AddDiagnostic("gfx_poll_reload expects a sprite handle.", span);
-                            return ConstI32(0);
-                        }
-
-                        var handle = LowerExpression(builder, args[0], locals);
-
-                        if (_headlessGraphics)
-                            return ConstI32(0);
-
-                        var (fn, fnType) = GetOrDeclareStasisGfxPollReload(_moduleBuilder);
-                        return builder.BuildCall2(fnType, fn, new[] { handle }, "gfx_poll_reload.call");
                     }
                 case "gfx_window_width":
                     {
