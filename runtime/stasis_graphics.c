@@ -21,6 +21,7 @@
 #include <ctype.h>
 #include <time.h>
 #if defined(_WIN32)
+#include <windows.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <direct.h>
@@ -2368,6 +2369,31 @@ static SpriteEntry* sprite_get(int handle) {
     return &g_sprites[idx];
 }
 
+/*
+ * Mark sprites dirty by path. The next draw triggers a re-bake/re-upload.
+ * Returns count of sprite entries marked.
+ */
+STASIS_EXPORT int stasis_gfx_notify_file_changed(const char* path) {
+    if (!path || !*path) return 0;
+
+    char resolved[1024];
+    const char* target = path;
+    if (resolve_asset_path(path, resolved, sizeof(resolved))) {
+        target = resolved;
+    }
+
+    int count = 0;
+    for (int i = 0; i < MAX_SPRITES; i++) {
+        SpriteEntry* e = &g_sprites[i];
+        if (!e->used || !e->path) continue;
+        if (strcmp(e->path, target) != 0) continue;
+        e->needs_reraster = 1;
+        e->mtime = 0;
+        count++;
+    }
+    return count;
+}
+
 static int sprite_find_by_path(const char* path) {
     for (int i = 0; i < MAX_SPRITES; i++) {
         if (g_sprites[i].used && g_sprites[i].path && strcmp(g_sprites[i].path, path) == 0) {
@@ -2376,6 +2402,146 @@ static int sprite_find_by_path(const char* path) {
     }
     return 0;
 }
+
+#if defined(_WIN32)
+/* ============================================================
+ * Windows asset watcher (prototype)
+ * ============================================================ */
+
+typedef struct {
+    char dir[1024];
+    HANDLE change_handle;
+} GfxWatchDir;
+
+static GfxWatchDir g_watch_dirs[32];
+static int g_watch_dir_count = 0;
+static HANDLE g_watch_thread = NULL;
+static HANDLE g_watch_wakeup = NULL;
+static CRITICAL_SECTION g_watch_lock;
+static int g_watch_lock_init = 0;
+
+static int gfx_watch_enabled(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+    const char* env = getenv("STASIS_GFX_WATCH_ASSETS");
+    cached = (env && env[0] == '1') ? 1 : 0;
+    return cached;
+}
+
+static void gfx_watch_lock_init(void) {
+    if (g_watch_lock_init) return;
+    InitializeCriticalSection(&g_watch_lock);
+    g_watch_lock_init = 1;
+}
+
+static int gfx_path_dirname(const char* path, char* out, size_t out_size) {
+    if (!path || !*path || !out || out_size < 2) return 0;
+    size_t len = strlen(path);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, path, len);
+    out[len] = '\0';
+
+    char* slash = strrchr(out, '\\');
+    char* fslash = strrchr(out, '/');
+    char* sep = slash > fslash ? slash : fslash;
+    if (!sep) return 0;
+    *sep = '\0';
+    return 1;
+}
+
+static DWORD WINAPI gfx_watch_thread_proc(LPVOID param) {
+    (void)param;
+
+    for (;;) {
+        HANDLE handles[33];
+        int count = 0;
+
+        gfx_watch_lock_init();
+        EnterCriticalSection(&g_watch_lock);
+        handles[count++] = g_watch_wakeup;
+        for (int i = 0; i < g_watch_dir_count && count < 33; i++) {
+            if (g_watch_dirs[i].change_handle) {
+                handles[count++] = g_watch_dirs[i].change_handle;
+            }
+        }
+        LeaveCriticalSection(&g_watch_lock);
+
+        DWORD res = WaitForMultipleObjects((DWORD)count, handles, FALSE, INFINITE);
+        if (res == WAIT_OBJECT_0) {
+            /* wakeup: rebuild handle list */
+            ResetEvent(g_watch_wakeup);
+            continue;
+        }
+
+        int idx = (int)(res - WAIT_OBJECT_0);
+        if (idx <= 0 || idx >= count) continue;
+
+        /* Mark all sprites under the triggered directory as dirty. */
+        gfx_watch_lock_init();
+        EnterCriticalSection(&g_watch_lock);
+        int dir_index = idx - 1;
+        if (dir_index >= 0 && dir_index < g_watch_dir_count) {
+            const char* dir = g_watch_dirs[dir_index].dir;
+            size_t dir_len = strlen(dir);
+            for (int s = 0; s < MAX_SPRITES; s++) {
+                SpriteEntry* e = &g_sprites[s];
+                if (!e->used || !e->path) continue;
+                if (strncmp(e->path, dir, dir_len) == 0) {
+                    e->needs_reraster = 1;
+                    e->mtime = 0;
+                }
+            }
+            FindNextChangeNotification(g_watch_dirs[dir_index].change_handle);
+        }
+        LeaveCriticalSection(&g_watch_lock);
+    }
+}
+
+static void gfx_watch_register_file(const char* path) {
+    if (!gfx_watch_enabled()) return;
+    if (!path || !*path) return;
+
+    char dir[1024];
+    if (!gfx_path_dirname(path, dir, sizeof(dir))) return;
+
+    gfx_watch_lock_init();
+    EnterCriticalSection(&g_watch_lock);
+
+    for (int i = 0; i < g_watch_dir_count; i++) {
+        if (strcmp(g_watch_dirs[i].dir, dir) == 0) {
+            LeaveCriticalSection(&g_watch_lock);
+            return;
+        }
+    }
+
+    if (g_watch_dir_count >= (int)(sizeof(g_watch_dirs) / sizeof(g_watch_dirs[0]))) {
+        LeaveCriticalSection(&g_watch_lock);
+        return;
+    }
+
+    HANDLE h = FindFirstChangeNotificationA(dir, FALSE,
+        FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
+    if (h == INVALID_HANDLE_VALUE || h == NULL) {
+        LeaveCriticalSection(&g_watch_lock);
+        return;
+    }
+
+    memset(&g_watch_dirs[g_watch_dir_count], 0, sizeof(g_watch_dirs[g_watch_dir_count]));
+    strncpy(g_watch_dirs[g_watch_dir_count].dir, dir, sizeof(g_watch_dirs[g_watch_dir_count].dir) - 1);
+    g_watch_dirs[g_watch_dir_count].change_handle = h;
+    g_watch_dir_count++;
+
+    if (!g_watch_wakeup) {
+        g_watch_wakeup = CreateEventA(NULL, TRUE, FALSE, NULL);
+    }
+    if (!g_watch_thread) {
+        g_watch_thread = CreateThread(NULL, 0, gfx_watch_thread_proc, NULL, 0, NULL);
+    }
+
+    if (g_watch_wakeup) SetEvent(g_watch_wakeup);
+    LeaveCriticalSection(&g_watch_lock);
+}
+#endif
 
 static int gfx_should_log_sprite_loads(void) {
     static int cached = -1;
@@ -2627,6 +2793,10 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
+
+#if defined(_WIN32)
+    gfx_watch_register_file(resolved);
+#endif
 
     /* Note: We don't check for existing sprites with same path because
      * the same SVG might be loaded at different sizes */
