@@ -46,6 +46,8 @@ EXPORTS
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash
+    stasis_host_get_frame
+    host_get_frame=stasis_host_get_frame
     stasis_load_font
     stasis_draw_text
     stasis_measure_text

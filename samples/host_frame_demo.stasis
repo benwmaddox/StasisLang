@@ -1,0 +1,42 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/host_frame.stasis";
+
+// Host Frame Demo (prototype)
+// Shows the "one snapshot per tick" read model.
+
+global host_i32: i32[64];
+global host_f32: f32[64];
+
+function main(): i32 {
+    let ok: bool = init_window(800, 600, "Stasis HostFrame Demo");
+    if (!ok) { return 1; }
+
+    let running: i32 = 1;
+    for (; running == 1;) {
+        begin_frame();
+
+        // Refresh snapshot AFTER begin_frame so the snapshot reflects the event pump for this frame.
+        host_frame_refresh(host_i32, host_f32);
+
+        clear(0.05, 0.05, 0.08, 1.0);
+
+        let w: f32 = i32_to_f32(host_window_w_px(host_i32));
+        let h: f32 = i32_to_f32(host_window_h_px(host_i32));
+        draw_line(0.0, 0.0, w, h, 0.2, 0.9, 0.9, 1.0);
+        draw_line(0.0, h, w, 0.0, 0.2, 0.9, 0.9, 1.0);
+
+        // Mouse is pointer slot 0 in the current runtime.
+        let mx: f32 = host_pointer_x_px(host_f32, 0);
+        let my: f32 = host_pointer_y_px(host_f32, 0);
+        draw_line(mx - 10.0, my, mx + 10.0, my, 1.0, 0.3, 0.3, 1.0);
+        draw_line(mx, my - 10.0, mx, my + 10.0, 1.0, 0.3, 0.3, 1.0);
+
+        end_frame();
+
+        if (should_quit()) { running = 0; }
+        sleep_ms(16);
+    }
+
+    return 0;
+}

@@ -120,6 +120,9 @@ static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
 static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
+/* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
+STASIS_EXPORT int stasis_get_time_ms(void);
+
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
@@ -486,6 +489,51 @@ STASIS_EXPORT int stasis_input_viewport_w_px(void) {
 
 STASIS_EXPORT int stasis_input_viewport_h_px(void) {
     return g_window ? g_input_frame.viewport_h_px : 0;
+}
+
+/*
+ * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
+ *
+ * Layout is defined in src/stdlib/host_frame.stasis. This is intentionally a simple
+ * "copy out" ABI for native now, and a good fit for WASM later (one import to get a snapshot).
+ */
+STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
+    if (!out_i32 || !out_f32) return;
+
+    /* i32 header */
+    out_i32[0] = stasis_get_time_ms();
+    out_i32[1] = g_window_width;
+    out_i32[2] = g_window_height;
+    out_i32[3] = g_input_frame.viewport_x_px;
+    out_i32[4] = g_input_frame.viewport_y_px;
+    out_i32[5] = g_input_frame.viewport_w_px;
+    out_i32[6] = g_input_frame.viewport_h_px;
+    out_i32[7] = g_input_frame.pointer_count;
+    out_i32[8] = g_input_frame.dropped_pointers;
+
+    for (int i = 9; i < 16; i++) out_i32[i] = 0;
+
+    const int i32_base = 16;
+    const int i32_stride = 4;
+    const int f32_base = 0;
+    const int f32_stride = 6;
+    for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
+        const StasisPointer* p = &g_input_frame.pointers[i];
+        out_i32[i32_base + i * i32_stride + 0] = p->id;
+        out_i32[i32_base + i * i32_stride + 1] = p->is_down;
+        out_i32[i32_base + i * i32_stride + 2] = p->went_down;
+        out_i32[i32_base + i * i32_stride + 3] = p->went_up;
+
+        out_f32[f32_base + i * f32_stride + 0] = p->x_px;
+        out_f32[f32_base + i * f32_stride + 1] = p->y_px;
+        out_f32[f32_base + i * f32_stride + 2] = p->dx_px;
+        out_f32[f32_base + i * f32_stride + 3] = p->dy_px;
+        out_f32[f32_base + i * f32_stride + 4] = p->x_n;
+        out_f32[f32_base + i * f32_stride + 5] = p->y_n;
+    }
+
+    for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 64; i++) out_i32[i] = 0;
+    for (int i = f32_base + STASIS_MAX_POINTERS * f32_stride; i < 64; i++) out_f32[i] = 0.0f;
 }
 
 /* ============================================================

@@ -1,0 +1,91 @@
+import "graphics.stasis";
+
+// Host frame snapshot (prototype)
+//
+// Practical hybrid approach:
+// - Reads: host writes a single deterministic snapshot once per tick via `host_get_frame`.
+// - Writes/effects: rendering/audio remain explicit command calls (draw_line/gfx_draw_sprite/etc).
+//
+// Usage:
+// - In your program, define `global host_i32: i32[64];` and `global host_f32: f32[64];`
+// - Call `host_frame_refresh(host_i32, host_f32)` once at the start of your tick.
+// - Read everything using the accessors below for the rest of the tick.
+
+// NOTE: This is a prototype layout. Treat all unused indices as reserved.
+
+const HOST_MAX_POINTERS: i32 = 8;
+
+// i32 layout
+const HOST_I_TIME_MS: i32 = 0;
+const HOST_I_WINDOW_W_PX: i32 = 1;
+const HOST_I_WINDOW_H_PX: i32 = 2;
+const HOST_I_VIEWPORT_X_PX: i32 = 3;
+const HOST_I_VIEWPORT_Y_PX: i32 = 4;
+const HOST_I_VIEWPORT_W_PX: i32 = 5;
+const HOST_I_VIEWPORT_H_PX: i32 = 6;
+const HOST_I_POINTER_COUNT: i32 = 7;
+const HOST_I_DROPPED_POINTERS: i32 = 8;
+const HOST_I_POINTER_BASE: i32 = 16; // reserve space for future fields before pointers
+const HOST_I_POINTER_STRIDE: i32 = 4; // id, is_down, went_down, went_up
+const HOST_I32_COUNT: i32 = 64;
+
+// f32 layout
+const HOST_F_POINTER_BASE: i32 = 0;
+const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
+const HOST_F32_COUNT: i32 = 64;
+
+extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;
+
+function host_frame_refresh(out_i32: i32[], out_f32: f32[]): void {
+    host_get_frame(out_i32, out_f32);
+}
+
+function host_time_ms(i32s: i32[]): i32 { return i32s[HOST_I_TIME_MS]; }
+function host_window_w_px(i32s: i32[]): i32 { return i32s[HOST_I_WINDOW_W_PX]; }
+function host_window_h_px(i32s: i32[]): i32 { return i32s[HOST_I_WINDOW_H_PX]; }
+function host_viewport_x_px(i32s: i32[]): i32 { return i32s[HOST_I_VIEWPORT_X_PX]; }
+function host_viewport_y_px(i32s: i32[]): i32 { return i32s[HOST_I_VIEWPORT_Y_PX]; }
+function host_viewport_w_px(i32s: i32[]): i32 { return i32s[HOST_I_VIEWPORT_W_PX]; }
+function host_viewport_h_px(i32s: i32[]): i32 { return i32s[HOST_I_VIEWPORT_H_PX]; }
+function host_pointer_count(i32s: i32[]): i32 { return i32s[HOST_I_POINTER_COUNT]; }
+function host_dropped_pointers(i32s: i32[]): i32 { return i32s[HOST_I_DROPPED_POINTERS]; }
+
+function host_pointer_id(i32s: i32[], index: i32): i32 {
+    return i32s[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 0];
+}
+
+function host_pointer_is_down(i32s: i32[], index: i32): i32 {
+    return i32s[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 1];
+}
+
+function host_pointer_went_down(i32s: i32[], index: i32): i32 {
+    return i32s[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 2];
+}
+
+function host_pointer_went_up(i32s: i32[], index: i32): i32 {
+    return i32s[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 3];
+}
+
+function host_pointer_x_px(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 0];
+}
+
+function host_pointer_y_px(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 1];
+}
+
+function host_pointer_dx_px(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 2];
+}
+
+function host_pointer_dy_px(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 3];
+}
+
+function host_pointer_x_n(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 4];
+}
+
+function host_pointer_y_n(f32s: f32[], index: i32): f32 {
+    return f32s[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 5];
+}
