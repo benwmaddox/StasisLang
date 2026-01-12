@@ -124,6 +124,7 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
 static void reset_line_program(void);
+static void reset_sprite_program(void);
 #endif
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
@@ -330,6 +331,7 @@ static void stasis_pump_events(void) {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
                         if (!g_use_sdl_renderer) {
                             reset_line_program();
+                            reset_sprite_program();
                         }
 #endif
                     }
@@ -801,6 +803,13 @@ static void reset_line_program(void) {
     if (g_line_program != 0) {
         glDeleteProgram(g_line_program);
         g_line_program = 0;
+    }
+}
+
+static void reset_sprite_program(void) {
+    if (g_sprite_program != 0) {
+        glDeleteProgram(g_sprite_program);
+        g_sprite_program = 0;
     }
 }
 
@@ -2173,6 +2182,7 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         glViewport(0, 0, g_window_width, g_window_height);
         setup_ortho();
         reset_line_program();
+        reset_sprite_program();
     } else {
         SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
     }
@@ -2207,6 +2217,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
             glViewport(0, 0, g_window_width, g_window_height);
             setup_ortho();
             reset_line_program();
+            reset_sprite_program();
         } else {
             SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
         }
