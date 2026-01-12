@@ -9,7 +9,7 @@ Current hot reload timings:
 | Change Type | Time | Bottleneck |
 |-------------|------|------------|
 | Code (.stasis) | 50-250ms | Cranelift AOT + linking |
-| SVG assets | ~5-10ms | `gfx_poll_reload()` |
+| SVG assets | ~5-10ms | runtime sprite hot-reload |
 | Data files | N/A | Not implemented |
 
 Code changes require compilation. Data changes (level layouts, entity definitions, balance parameters) don't need compilation - they should reload in <50ms.
@@ -36,7 +36,7 @@ Examples of data that should hot-reload fast:
 Not data (handled by existing systems):
 
 - Code logic (hot-swap workflow)
-- SVG sprites (`gfx_poll_reload()`)
+- SVG sprites (runtime sprite hot-reload)
 - Audio assets (future work)
 
 ## Design Options
@@ -59,7 +59,7 @@ if (data_changed("data/levels.json")) {
 **Pros:**
 - No language changes required
 - Fast C implementation in runtime
-- Matches existing `gfx_poll_reload()` pattern
+- Matches existing sprite hot-reload model
 - Clear separation: code is compiled, data is interpreted
 
 **Cons:**
@@ -99,7 +99,7 @@ Runner memory-maps data files directly. File changes are visible immediately.
 
 ## Recommended Approach: Option A (Runtime Facilities)
 
-Matches the existing pattern (`gfx_load_sprite` / `gfx_poll_reload`) and keeps the runtime self-contained.
+Matches the existing pattern (load once, hot-reload on save) and keeps the runtime self-contained.
 
 ## Data Format
 
@@ -337,7 +337,7 @@ data/
 
 assets_src/
   my_game/
-    player.svg         # Art (gfx_poll_reload on change)
+    player.svg         # Art (hot-reload on save)
     enemy.svg
 ```
 

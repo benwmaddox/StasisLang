@@ -126,16 +126,7 @@ function tick(): i32 {
 
 function draw_frame(): void {
     // Hot reload during development (no flags for now)
-    // if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
-    // if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
-    // if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
-    // if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
-    // if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
-    // if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
-    // if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }    
-    // if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
-    // if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
-    // if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
+    // Asset hot reload is automatic in dev (`stasis run --watch`).
 
     // draw_bricks();
     // draw_balls();
