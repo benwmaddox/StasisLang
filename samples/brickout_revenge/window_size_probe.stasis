@@ -1,0 +1,92 @@
+import "../../src/stdlib/stdlib.stasis";
+import "../../src/stdlib/graphics.stasis";
+
+const VIRTUAL_W: f32 = 360.0;
+const VIRTUAL_H: f32 = 720.0;
+
+struct ProbeState {
+    dummy: i32;
+}
+
+global state: ProbeState;
+global desktop_w: i32[1];
+global desktop_h: i32[1];
+
+function maximize_window_for_desktop(): void {
+    desktop_w[0] = 0;
+    desktop_h[0] = 0;
+    get_desktop_size(desktop_w, desktop_h);
+
+    let desktop_width: i32 = desktop_w[0];
+    let desktop_height: i32 = desktop_h[0];
+    if (desktop_width < 1 || desktop_height < 1) {
+        return;
+    }
+
+    let margin_w: i32 = 80;
+    let margin_h: i32 = 120;
+    let usable_w: i32 = desktop_width - margin_w;
+    let usable_h: i32 = desktop_height - margin_h;
+    if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
+    if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
+
+    // Candidate A: fit height.
+    let fit_h_h: i32 = usable_h;
+    let fit_h_w: i32 = f32_to_i32(i32_to_f32(fit_h_h) * (VIRTUAL_W / VIRTUAL_H));
+
+    // Candidate B: fit width.
+    let fit_w_w: i32 = usable_w;
+    let fit_w_h: i32 = f32_to_i32(i32_to_f32(fit_w_w) * (VIRTUAL_H / VIRTUAL_W));
+
+    let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
+    let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
+
+    let choose_w: i32 = f32_to_i32(VIRTUAL_W);
+    let choose_h: i32 = f32_to_i32(VIRTUAL_H);
+
+    if (a_ok && b_ok) {
+        let a_area: i32 = fit_h_w * fit_h_h;
+        let b_area: i32 = fit_w_w * fit_w_h;
+        if (a_area >= b_area) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            choose_w = fit_w_w;
+            choose_h = fit_w_h;
+        }
+    } else {
+        if (a_ok) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            if (b_ok) {
+                choose_w = fit_w_w;
+                choose_h = fit_w_h;
+            }
+        }
+    }
+
+    if (choose_w < f32_to_i32(VIRTUAL_W)) { choose_w = f32_to_i32(VIRTUAL_W); }
+    if (choose_h < f32_to_i32(VIRTUAL_H)) { choose_h = f32_to_i32(VIRTUAL_H); }
+
+    set_window_size(choose_w, choose_h);
+}
+
+function main(): i32 {
+    let ok: bool = init_window(f32_to_i32(VIRTUAL_W), f32_to_i32(VIRTUAL_H), "Stasis Window Size Probe");
+    if (!ok) { return 1; }
+
+    maximize_window_for_desktop();
+
+    print_string("WINDOW_SIZE ");
+    print_int(gfx_window_width());
+    print_string(" ");
+    print_int(gfx_window_height());
+    print_string("\n");
+    return 0;
+}
+
+function tick(): i32 {
+    // Exit immediately after main(). This is a probe, not an interactive sample.
+    return 1;
+}

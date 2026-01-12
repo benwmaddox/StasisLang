@@ -13,7 +13,7 @@ extern function clear(r: f32, g: f32, b: f32, a: f32): void;
 extern function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void;
 extern function draw_lines_f32(lines: f32[], count: i32): void;
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
-extern function gfx_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: f32, a: f32): void;
+extern function gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void;
 extern function gfx_draw_sprites_i32(cmds: i32[], count: i32): void;
 extern function gfx_poll_reload(handle: i32): bool;
 extern function gfx_window_width(): i32;
@@ -26,6 +26,8 @@ extern function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32
 extern function is_key_down(scancode: i32): bool;
 extern function should_quit(): bool;
 extern function get_window_size(out_w: i32[], out_h: i32[]): void;
+extern function get_desktop_size(out_w: i32[], out_h: i32[]): void;
+extern function set_window_size(width: i32, height: i32): void;
 extern function set_fullscreen(enabled: i32): i32;
 extern function load_font(path: string, size: i32): i32;
 extern function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;

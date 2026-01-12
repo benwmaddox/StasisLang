@@ -4,7 +4,11 @@
   "description": "Stasis language support (syntax + LSP).",
   "version": "0.0.1",
   "publisher": "stasislang",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benwmaddox/StasisLang.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -14,7 +18,7 @@
   "activationEvents": [
     "onLanguage:stasis"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "languages": [
       {
@@ -38,7 +42,8 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p .",
+    "build": "npm run bundle",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node18 --format=cjs --external:vscode --outfile=dist/extension.js",
     "watch": "tsc -p . -w",
     "package": "vsce package"
   },
@@ -51,6 +56,7 @@
   "devDependencies": {
     "@types/node": "^20.11.5",
     "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.6.3",
     "@vscode/vsce": "^3.2.1"
   }
