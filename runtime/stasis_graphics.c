@@ -120,6 +120,9 @@ static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
 static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
+/* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
+STASIS_EXPORT int stasis_get_time_ms(void);
+
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
@@ -143,6 +146,7 @@ typedef struct {
     SDL_Texture* sdl_tex;
     int used;
     int needs_reraster;  /* flag for window resize */
+    int last_poll_ms;    /* throttle gfx_poll_reload disk stats */
 } SpriteEntry;
 
 static SpriteEntry g_sprites[MAX_SPRITES];
@@ -2396,6 +2400,22 @@ static int gfx_should_log_sprite_loads(void) {
     return cached;
 }
 
+static int gfx_sprite_poll_min_interval_ms(void) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+
+    const char* env = getenv("STASIS_GFX_POLL_RELOAD_MIN_MS");
+    if (!env || !*env) {
+        cached = 200; /* default: 5Hz polling per sprite handle */
+        return cached;
+    }
+
+    int v = atoi(env);
+    if (v < 0) v = 0;
+    cached = v;
+    return cached;
+}
+
 static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
@@ -2675,6 +2695,19 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
 STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
     SpriteEntry* e = sprite_get(handle);
     if (!e || !e->path) return 0;
+
+    int min_interval_ms = gfx_sprite_poll_min_interval_ms();
+    if (min_interval_ms > 0) {
+        int now_ms = stasis_get_time_ms();
+        if (e->last_poll_ms != 0) {
+            int delta = now_ms - e->last_poll_ms;
+            if (delta >= 0 && delta < min_interval_ms) {
+                return 0;
+            }
+        }
+        e->last_poll_ms = now_ms;
+    }
+
     uint64_t mt = get_file_mtime(e->path);
     if (!mt || mt <= e->mtime) return 0;
     /* Use sized version if max dimensions are set */
