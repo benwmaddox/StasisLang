@@ -21,7 +21,6 @@ import "../../src/stdlib/audio.stasis";
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
 // - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
-// - gfx_poll_reload(handle: i32) -> bool
 // - gfx_window_width() -> i32
 // - gfx_window_height() -> i32
 // - gfx_window_resized() -> bool
@@ -2161,18 +2160,6 @@ function draw_ui(): void {
 }
 
 function draw_frame(): void {
-    // Hot reload during development (no flags for now)
-    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
-    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
-    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
-    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
-    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
-    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
-    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
-    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
-    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
-    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
-
     draw_bricks();
     draw_balls();
     draw_paddle();
