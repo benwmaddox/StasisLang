@@ -1014,6 +1014,7 @@ public sealed class CraneliftFunctionBuilder
             "clear" => true,
             "draw_line" => true,
             "draw_lines_f32" => true,
+            "host_get_frame" => true,
             "gfx_load_sprite" => true,
             "gfx_draw_sprite" => true,
             "gfx_draw_sprites_i32" => true,
@@ -1438,6 +1439,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerDrawLine(arguments);
             case "draw_lines_f32":
                 return LowerDrawLinesF32(arguments);
+            case "host_get_frame":
+                return LowerHostGetFrame(arguments);
             case "gfx_load_sprite":
                 return LowerGfxLoadSprite(arguments);
             case "gfx_draw_sprite":
@@ -2214,6 +2217,9 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerDrawLinesF32(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallVoid("stasis_draw_lines_f32", "draw_lines_f32 expects (lines: f32[], count: i32).", arguments, 2);
+
+    private string LowerHostGetFrame(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_host_get_frame", "host_get_frame expects (out_i32: i32[], out_f32: f32[]).", arguments, 2);
 
     private string LowerGfxLoadSprite(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_load_sprite", "gfx_load_sprite expects (path, max_w, max_h).", arguments, 3);
