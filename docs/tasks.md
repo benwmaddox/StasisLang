@@ -10,6 +10,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
 - [x] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
 - [x] Sys: add bulk copy helpers (`sys_memcpy_u8/i32/f32`) and use them in command-buffer writers.
+- [ ] Sys: add bulk set/move helpers (`sys_memset_*`, `sys_memmove_*`) and add safe stdlib wrappers (`mem_copy_*`, `mem_set_*`).
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite call overhead when debug hashing is off; build vertex buffers directly from streams).
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
 - [x] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
