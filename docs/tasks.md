@@ -8,10 +8,14 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Self-host compiler: implement MIR + incremental compilation plan in `docs/self-host-ir-and-incremental.md`.
 - [ ] Self-host hot swap runner notes: `docs/self-host-hot-swap-runner.md`.
 - [ ] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
-- [ ] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
+- [x] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite call overhead when debug hashing is off; build vertex buffers directly from streams).
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
-- [ ] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
+- [x] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
+- [ ] HostFrame: add `version`, `flags`, `frame_index`, and `dt` so tick can be snapshot-only (no ad-hoc queries).
+- [ ] HostFrame: add keyboard state + quit/focus flags to snapshot to reduce per-tick host calls (esp. for WASM).
+- [ ] Host bulk mode: runner writes `host_i32[]`/`host_f32[]` directly and program never calls `host_get_frame`.
+- [ ] Host bulk mode: runner reads `gfx_cmd_*` globals and submits/presents (program never calls `gfx_submit*`/`end_frame`).
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
@@ -24,7 +28,6 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Follow through: execute `docs/host-snapshot-command-buffer.md` (HostFrame snapshot + per-tick command buffers).
 - [ ] Follow through: execute `docs/android-plan.md` (Android runtime build + host proof-of-concept).
 - [ ] Follow through: execute `docs/brickout-android-debug-plan.md` (debug APK + adb asset push workflow).
-- [ ] Follow through: review `docs/self-hosted-compiler-plan.md` (background; superseded by `docs/self-host-gap-closure.md`).
 - [ ] Follow through: execute `docs/svg-migration-plan.md` (finish SVG pipeline + validation).
 - [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 - [ ] Maintenance: regularly scan open PRs for merge conflicts and fix by merging `main` into the PR branch (or rebasing) so PRs stay mergeable.
