@@ -693,6 +693,38 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxSubmit(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_submit");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_submit", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxSubmitU8(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_submit_u8");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, i8Ptr, i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_submit_u8", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxPollReload(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_poll_reload");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { LLVMTypeRef.Int32 }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_poll_reload", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxWindowWidth(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_window_width");
@@ -771,6 +803,16 @@ public sealed class ModuleLowerer
         if (fn.Handle != IntPtr.Zero)
             return (fn, fnType);
         fn = builder.Module.AddFunction("stasis_get_time_ms", fnType);
+        return (fn, fnType);
+    }
+
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGetTimeUs(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_get_time_us");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_get_time_us", fnType);
         return (fn, fnType);
     }
 
@@ -1189,6 +1231,7 @@ public sealed class ModuleLowerer
         private Dictionary<string, EnumDeclarationSyntax> _enums = new(StringComparer.Ordinal);
         private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _inlineStack = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
         {
             // Legacy I/O (to be deprecated)
@@ -1240,6 +1283,7 @@ public sealed class ModuleLowerer
             // Legacy system (to be renamed)
             "time",
             "get_time_ms",
+            "get_time_us",
             "sleep_ms",
 
             // Legacy graphics (external runtime)
@@ -1253,6 +1297,9 @@ public sealed class ModuleLowerer
             "gfx_load_sprite",
             "gfx_draw_sprite",
             "gfx_draw_sprites_i32",
+            "gfx_submit",
+            "gfx_submit_u8",
+            "gfx_poll_reload",
             "gfx_window_width",
             "gfx_window_height",
             "gfx_window_resized",
@@ -2082,6 +2129,11 @@ public sealed class ModuleLowerer
                 return LowerBuiltInCall(builder, id.Identifier.Text, call.Arguments, locals, call.Span);
             }
 
+            if (TryInlineCall(builder, call, id.Identifier.Text, locals, out var inlined))
+            {
+                return inlined;
+            }
+
             if (!_symbols.TryGetValue(id.Identifier.Text, out var sym) || sym.Kind is not (SymbolKind.Function or SymbolKind.Test))
             {
                 AddDiagnostic($"Unknown function '{id.Identifier.Text}'.", call.Span);
@@ -2132,6 +2184,187 @@ public sealed class ModuleLowerer
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
         }
+
+        private bool TryInlineCall(
+            LLVMBuilderRef builder,
+            CallExpressionSyntax call,
+            string funcName,
+            Dictionary<string, LocalBinding> locals,
+            out LLVMValueRef result)
+        {
+            result = default;
+
+            if (!_functions.TryGetValue(funcName, out var func))
+            {
+                return false;
+            }
+
+            if (func.IsExtern || func.Body is null)
+            {
+                return false;
+            }
+
+            if (!HasInlineAttribute(func))
+            {
+                return false;
+            }
+
+            if (_inlineStack.Contains(funcName))
+            {
+                return false;
+            }
+
+            if (func.Parameters.Count != call.Arguments.Count)
+            {
+                return false;
+            }
+
+            // Restrict v1 inlining to straight-line blocks (no control flow) so we don't
+            // need to rewrite returns/labels in the caller.
+            foreach (var stmt in func.Body.Statements)
+            {
+                if (stmt is VariableDeclarationSyntax or ExpressionStatementSyntax or ReturnStatementSyntax)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            var signature = ResolveFunctionSignature(funcName);
+            var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
+            var isVoid = fnType.ReturnType.Kind == LLVMTypeKind.LLVMVoidTypeKind;
+
+            if (!isVoid)
+            {
+                if (func.Body.Statements.Count == 0)
+                {
+                    return false;
+                }
+
+                if (func.Body.Statements[^1] is not ReturnStatementSyntax { Expression: not null })
+                {
+                    return false;
+                }
+            }
+
+            var savedLocals = new List<(string Name, bool HadValue, LocalBinding Value)>();
+            void SaveLocal(string name)
+            {
+                for (int i = 0; i < savedLocals.Count; i++)
+                {
+                    if (string.Equals(savedLocals[i].Name, name, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                }
+
+                if (locals.TryGetValue(name, out var existing))
+                {
+                    savedLocals.Add((name, true, existing));
+                }
+                else
+                {
+                    savedLocals.Add((name, false, default));
+                }
+            }
+
+            _inlineStack.Add(funcName);
+
+            // Bind parameters by creating stack slots in the caller and storing evaluated args.
+            for (int i = 0; i < func.Parameters.Count; i++)
+            {
+                var param = func.Parameters[i];
+                var paramType = ResolveType(param.Type, _symbols);
+
+                if (paramType is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    var llvmType = layout.DescriptorType;
+                    var argValue = BuildArrayDescriptorValue(builder, call.Arguments[i], arr, layout, locals);
+
+                    SaveLocal(param.Name.Text);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(argValue, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType, layout, true);
+                }
+                else
+                {
+                    var llvmType = _moduleBuilder.TypeMapper.Map(paramType);
+                    var argValue = LowerExpression(builder, call.Arguments[i], locals);
+                    argValue = ConvertToType(builder, argValue, llvmType);
+
+                    SaveLocal(param.Name.Text);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(argValue, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType);
+                }
+            }
+
+            LLVMValueRef inlineResult = isVoid ? ConstI32(0) : LLVMValueRef.CreateConstNull(fnType.ReturnType);
+            var hasResult = false;
+
+            foreach (var stmt in func.Body.Statements)
+            {
+                switch (stmt)
+                {
+                    case VariableDeclarationSyntax decl:
+                        SaveLocal(decl.Name.Text);
+                        LowerVariableDeclaration(builder, decl, locals);
+                        break;
+                    case ExpressionStatementSyntax exprStmt:
+                        LowerExpression(builder, exprStmt.Expression, locals);
+                        break;
+                    case ReturnStatementSyntax ret:
+                        if (!isVoid)
+                        {
+                            if (ret.Expression is null)
+                            {
+                                RestoreLocals(savedLocals, locals);
+                                _inlineStack.Remove(funcName);
+                                return false;
+                            }
+
+                            inlineResult = LowerExpression(builder, ret.Expression, locals);
+                            inlineResult = ConvertToType(builder, inlineResult, fnType.ReturnType);
+                            hasResult = true;
+                        }
+
+                        goto done;
+                }
+            }
+
+        done:
+            RestoreLocals(savedLocals, locals);
+            _inlineStack.Remove(funcName);
+
+            if (!isVoid && !hasResult)
+            {
+                return false;
+            }
+
+            result = isVoid ? ConstI32(0) : inlineResult;
+            return true;
+        }
+
+        private static void RestoreLocals(List<(string Name, bool HadValue, LocalBinding Value)> savedLocals, Dictionary<string, LocalBinding> locals)
+        {
+            for (int i = savedLocals.Count - 1; i >= 0; i--)
+            {
+                var saved = savedLocals[i];
+                if (!saved.HadValue)
+                {
+                    locals.Remove(saved.Name);
+                }
+                else
+                {
+                    locals[saved.Name] = saved.Value;
+                }
+            }
+        }
+
+        private static bool HasInlineAttribute(FunctionDeclarationSyntax func) =>
+            func.Attributes.Any(attr => string.Equals(attr.Text, "inline", StringComparison.Ordinal));
 
         private LLVMValueRef BuildArrayDescriptorValue(LLVMBuilderRef builder, ExpressionSyntax expr, ArrayTypeSymbol arrayType, ArrayDescriptorLayout layout, Dictionary<string, LocalBinding> locals)
         {
@@ -3115,6 +3348,90 @@ public sealed class ModuleLowerer
                         builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
                         return ConstI32(0);
                     }
+                case "gfx_submit":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("gfx_submit expects (cmd_i32, cmd_f32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmdI32 = LowerArrayPointer(builder, args[0], locals);
+                        if (cmdI32.Handle == IntPtr.Zero)
+                            cmdI32 = LowerExpression(builder, args[0], locals);
+                        var cmdF32 = LowerArrayPointer(builder, args[1], locals);
+                        if (cmdF32.Handle == IntPtr.Zero)
+                            cmdF32 = LowerExpression(builder, args[1], locals);
+
+                        if (cmdI32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind || cmdF32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("gfx_submit expects array/pointer arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxSubmit(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var castI32 = builder.BuildBitCast(cmdI32, i8Ptr, "gfx_submit.i32");
+                        var castF32 = builder.BuildBitCast(cmdF32, i8Ptr, "gfx_submit.f32");
+                        builder.BuildCall2(fnType, fn, new[] { castI32, castF32 }, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_submit_u8":
+                    {
+                        if (args.Count != 3)
+                        {
+                            AddDiagnostic("gfx_submit_u8 expects (cmd_i32, cmd_f32, cmd_u8).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmdI32 = LowerArrayPointer(builder, args[0], locals);
+                        if (cmdI32.Handle == IntPtr.Zero)
+                            cmdI32 = LowerExpression(builder, args[0], locals);
+                        var cmdF32 = LowerArrayPointer(builder, args[1], locals);
+                        if (cmdF32.Handle == IntPtr.Zero)
+                            cmdF32 = LowerExpression(builder, args[1], locals);
+                        var cmdU8 = LowerArrayPointer(builder, args[2], locals);
+                        if (cmdU8.Handle == IntPtr.Zero)
+                            cmdU8 = LowerExpression(builder, args[2], locals);
+
+                        if (cmdI32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind ||
+                            cmdF32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind ||
+                            cmdU8.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("gfx_submit_u8 expects array/pointer arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxSubmitU8(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var castI32 = builder.BuildBitCast(cmdI32, i8Ptr, "gfx_submit_u8.i32");
+                        var castF32 = builder.BuildBitCast(cmdF32, i8Ptr, "gfx_submit_u8.f32");
+                        var castU8 = builder.BuildBitCast(cmdU8, i8Ptr, "gfx_submit_u8.u8");
+                        builder.BuildCall2(fnType, fn, new[] { castI32, castF32, castU8 }, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_poll_reload":
+                    {
+                        if (args.Count != 1)
+                        {
+                            AddDiagnostic("gfx_poll_reload expects a sprite handle.", span);
+                            return ConstI32(0);
+                        }
+
+                        var handle = LowerExpression(builder, args[0], locals);
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxPollReload(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, new[] { handle }, "gfx_poll_reload.call");
+                    }
                 case "gfx_window_width":
                     {
                         if (args.Count != 0)
@@ -3250,6 +3567,20 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisGetTimeMs(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "get_time_ms.call");
+                    }
+                case "get_time_us":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("get_time_us expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return EmitGetTimeUs(builder);
+
+                        var (fn, fnType) = GetOrDeclareStasisGetTimeUs(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "get_time_us.call");
                     }
                 case "sleep_ms":
                     {
@@ -5633,6 +5964,16 @@ public sealed class ModuleLowerer
             var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
             var ms64 = builder.BuildUDiv(ticksMs, clocksPerSec, "gfx.ms64");
             return builder.BuildTrunc(ms64, LLVMTypeRef.Int32, "gfx.ms");
+        }
+
+        private LLVMValueRef EmitGetTimeUs(LLVMBuilderRef builder)
+        {
+            var (clockFn, clockType) = GetOrDeclareClock(_moduleBuilder);
+            var ticks = builder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "gfx.clock");
+            var ticksUs = builder.BuildMul(ticks, ConstInt64(1000000), "gfx.clock_us");
+            var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
+            var us64 = builder.BuildUDiv(ticksUs, clocksPerSec, "gfx.us64");
+            return builder.BuildTrunc(us64, LLVMTypeRef.Int32, "gfx.us");
         }
 
         private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)
