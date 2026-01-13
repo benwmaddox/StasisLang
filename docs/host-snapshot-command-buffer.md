@@ -66,6 +66,80 @@ Key property: resize/viewport/DPI changes become *just fields in the HostFrame*,
 - AoS -> SoA: command buffers can be SoA-friendly (separate streams per command type).
 - WASM friendly: reduces imports/exports to a small stable surface.
 
+## Command buffers in practice (what your game code does)
+
+The "command buffer" is not a heap queue. It is just fixed-size global arrays plus a few counters.
+
+Per tick, your program does:
+
+1) `host_frame_refresh()` once, then read `host_*` accessors for the rest of the tick.
+2) Reset command counters to 0 (`gfx_cmd_begin()`).
+3) Append draw commands by writing into arrays (no host calls while building).
+4) Submit once (`gfx_cmd_submit()`), and the host executes the commands and presents.
+
+### Concrete shape (v1)
+
+Prefer a stream-per-command SoA layout with explicit counts:
+
+- `gfx_cmd_i32[]`: header + packed i32 payloads (sprites, text glyph indices, etc.)
+- `gfx_cmd_f32[]`: packed f32 payloads (lines, sprite transforms if desired, etc.)
+
+Example header layout in `gfx_cmd_i32[]` (indices are illustrative, reserve space up front):
+
+- `i32[0]`: `GFX_CMD_MAGIC` (debug aid)
+- `i32[1]`: `GFX_CMD_VERSION`
+- `i32[2]`: `GFX_CMD_FLAGS` (bitfield: clear, present, etc.)
+- `i32[3]`: `GFX_CMD_LINE_COUNT`
+- `i32[4]`: `GFX_CMD_SPRITE_COUNT`
+- `i32[5]`: `GFX_CMD_DROPPED_LINES`
+- `i32[6]`: `GFX_CMD_DROPPED_SPRITES`
+- `i32[7..31]`: reserved
+
+Example payload layout:
+
+- Lines in `gfx_cmd_f32[]` starting at `f32[0]`, stride 8:
+  - `x1,y1,x2,y2,r,g,b,a`
+  - capacity = `GFX_MAX_LINES * 8`
+- Sprites packed in `gfx_cmd_i32[]` starting at `i32[32]`, stride N (choose one packing and freeze it):
+  - `handle, x_px, y_px, w_px, h_px, rot_deg, a` (7 i32s) matches the existing `gfx_draw_sprite` ABI
+  - capacity = `GFX_MAX_SPRITES * 7`
+
+Deterministic overflow:
+
+- If a stream is full, increment `DROPPED_*` and skip the write.
+- Do not resize and do not partially write a command.
+
+### Ordering (important design choice)
+
+You have two practical options:
+
+1) Fixed pass ordering (recommended for v1)
+   - Host executes streams in a fixed order: clear -> lines -> sprites -> text -> present.
+   - If you need "layers", add multiple streams (e.g. `sprite_bg`, `sprite_fg`, `sprite_ui`) with separate counts.
+
+2) Explicit ordering stream (more flexible)
+   - Add a small `opcodes_i32[]` stream that references ranges inside the SoA streams.
+   - More code and more validation; good later if layering needs grow.
+
+### Coordinate space (another early decision)
+
+Pick one coordinate space for commands and keep it consistent:
+
+- Pixel space: commands store pixels, host uses a pixel-perfect ortho.
+- Virtual/game space: commands store virtual units, host uses HostFrame viewport + an ortho matrix to map to pixels.
+
+The important part is that the host uses one authoritative set of transforms per tick (driven by HostFrame fields), so resize/DPI changes cannot desynchronize pipelines.
+
+### Relationship to today's `begin_frame/end_frame`
+
+For the "one submit call per tick" ideal, `gfx_submit` should do the equivalent of:
+
+1) begin frame (reset internal runtime queues, set current projection/uniforms)
+2) execute the submitted commands
+3) end frame (flush/present)
+
+During migration, it is fine to keep the existing extern-call API for simple samples, while larger/high-churn paths switch to command buffers.
+
 ## ABI pieces
 
 This section describes a v1-shaped ABI. It is intentionally conservative: fixed-size buffers, versioning, and "copy out" semantics.
@@ -212,4 +286,3 @@ Phase 4: Fold more host queries into HostFrame
 Phase 5: Prepare for a WASM host
 - HostFrame becomes one import from JS, command buffers become one export or one import call.
 - The native runner becomes "a host implementation", not the canonical execution model.
-
