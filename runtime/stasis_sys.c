@@ -974,3 +974,73 @@ void stasis_sys_memcpy_f32(float *dst, int dst_index, const float *src, int src_
     }
     memcpy(dst + dst_index, src + src_index, (size_t)count * sizeof(float));
 }
+
+void stasis_sys_memmove_u8(unsigned char *dst, int dst_index, const unsigned char *src, int src_index, int count)
+{
+    if (!dst || !src || count <= 0 || dst_index < 0 || src_index < 0)
+    {
+        return;
+    }
+    memmove(dst + dst_index, src + src_index, (size_t)count);
+}
+
+void stasis_sys_memmove_i32(int32_t *dst, int dst_index, const int32_t *src, int src_index, int count)
+{
+    if (!dst || !src || count <= 0 || dst_index < 0 || src_index < 0)
+    {
+        return;
+    }
+    memmove(dst + dst_index, src + src_index, (size_t)count * sizeof(int32_t));
+}
+
+void stasis_sys_memmove_f32(float *dst, int dst_index, const float *src, int src_index, int count)
+{
+    if (!dst || !src || count <= 0 || dst_index < 0 || src_index < 0)
+    {
+        return;
+    }
+    memmove(dst + dst_index, src + src_index, (size_t)count * sizeof(float));
+}
+
+void stasis_sys_memset_u8(unsigned char *dst, int dst_index, int value, int count)
+{
+    if (!dst || count <= 0 || dst_index < 0)
+    {
+        return;
+    }
+    memset(dst + dst_index, (unsigned char)value, (size_t)count);
+}
+
+void stasis_sys_memset_i32(int32_t *dst, int dst_index, int32_t value, int count)
+{
+    if (!dst || count <= 0 || dst_index < 0)
+    {
+        return;
+    }
+    if (value == 0)
+    {
+        memset(dst + dst_index, 0, (size_t)count * sizeof(int32_t));
+        return;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        dst[dst_index + i] = value;
+    }
+}
+
+void stasis_sys_memset_f32(float *dst, int dst_index, float value, int count)
+{
+    if (!dst || count <= 0 || dst_index < 0)
+    {
+        return;
+    }
+    if (value == 0.0f)
+    {
+        memset(dst + dst_index, 0, (size_t)count * sizeof(float));
+        return;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        dst[dst_index + i] = value;
+    }
+}
