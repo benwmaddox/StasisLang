@@ -125,6 +125,6 @@ This "present bit" exists so benchmarks can exclude swap/vsync while still exerc
   - per-call `draw_line` (many host calls)
   - batched `draw_lines_f32` (1 host call)
   - `gfx_cmd_submit_*` (1 host call; can measure build vs prebuilt)
+- `samples/render_heavy_submit_bench.stasis` compares the same submission styles with both lines and sprites, so the signal is large enough to see on native.
 
 For more stable timing than `get_time_ms()`, use `get_time_us()` (added to the runtime bindings).
-

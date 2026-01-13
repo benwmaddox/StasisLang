@@ -15,7 +15,7 @@ function main(): i32 {
         return 1;
     }
 
-    let sprite: i32 = gfx_load_sprite("assets/ui/white_1x1.svg", 64, 64);
+    let sprite: i32 = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 64, 64);
 
     for (; !should_quit(); ) {
         gfx_cmd_begin();
