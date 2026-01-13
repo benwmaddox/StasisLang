@@ -118,15 +118,16 @@ Run:
 .\stasis.bat run .\samples\input_pointers.stasis --backend llvm --graphics
 ```
 
-### Render command buffer benchmark (draw_line vs batched)
+### Render submission benchmark (per-call vs batched vs command buffer)
 
 Features:
-- Shows the performance difference between many host calls vs one batched call (`draw_lines_f32`)
-- Uses debug hash to validate both paths submit identical draw streams
+- Compares many host calls (`draw_line`) vs one batched call (`draw_lines_f32`) vs one command-buffer submit (`gfx_submit_*`)
+- Uses debug hash to validate all paths submit identical draw streams
+- See `docs/graphics-command-buffer-v1.md` for the command buffer layout
 
 Run:
 ```bat
-.\stasis.bat run .\samples\render_command_buffer_bench.stasis --backend llvm --graphics
+.\stasis.bat run .\samples\render_command_buffer_bench_submit.stasis --backend cranelift --graphics
 ```
 
 ## Console / IO demos
