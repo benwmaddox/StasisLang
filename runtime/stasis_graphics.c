@@ -544,13 +544,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
 
     out_i32[10] = g_host_tick_index++;
 
-    int flags = 0;
-    if (g_window_resized)
-    {
-        flags |= 1; /* HOST_FLAG_RESIZED */
-        g_window_resized = false;
-    }
-    out_i32[11] = flags;
+    out_i32[11] = g_window_resized ? 1 : 0;
+    g_window_resized = false;
 
     int screen_w = 0;
     int screen_h = 0;
@@ -2676,10 +2671,6 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     if (height) *height = h;
 }
 
-STASIS_EXPORT void get_desktop_size(int* width, int* height) {
-    stasis_get_desktop_size(width, height);
-}
-
 /*
  * Set window size (windowed mode).
  * width/height are in pixels.
@@ -2708,10 +2699,6 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 #else
     SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
 #endif
-}
-
-STASIS_EXPORT void set_window_size(int width, int height) {
-    stasis_set_window_size(width, height);
 }
 
 /*

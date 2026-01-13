@@ -22,15 +22,12 @@ const HOST_I_POINTER_COUNT: i32 = 7;
 const HOST_I_DROPPED_POINTERS: i32 = 8;
 const HOST_I_QUIT_REQUESTED: i32 = 9;
 const HOST_I_TICK_INDEX: i32 = 10;
-const HOST_I_FLAGS: i32 = 11;
+const HOST_I_RESIZED: i32 = 11;
 const HOST_I_SCREEN_W_PX: i32 = 12;
 const HOST_I_SCREEN_H_PX: i32 = 13;
 const HOST_I_POINTER_BASE: i32 = 16; // reserve space for future fields before pointers
 const HOST_I_POINTER_STRIDE: i32 = 4; // id, is_down, went_down, went_up
 const HOST_I32_COUNT: i32 = 64;
-
-// flags (HOST_I_FLAGS)
-const HOST_FLAG_RESIZED: i32 = 1;
 
 // f32 layout
 const HOST_F_POINTER_BASE: i32 = 0;
@@ -52,7 +49,7 @@ function host_viewport_h_px(): i32 { return host_i32[HOST_I_VIEWPORT_H_PX]; }
 function host_pointer_count(): i32 { return host_i32[HOST_I_POINTER_COUNT]; }
 function host_dropped_pointers(): i32 { return host_i32[HOST_I_DROPPED_POINTERS]; }
 function host_quit_requested(): bool { return host_i32[HOST_I_QUIT_REQUESTED] != 0; }
-function host_resized(): bool { return (host_i32[HOST_I_FLAGS] & HOST_FLAG_RESIZED) != 0; }
+function host_resized(): bool { return host_i32[HOST_I_RESIZED] != 0; }
 function host_screen_w_px(): i32 { return host_i32[HOST_I_SCREEN_W_PX]; }
 function host_screen_h_px(): i32 { return host_i32[HOST_I_SCREEN_H_PX]; }
 
