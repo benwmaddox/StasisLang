@@ -1127,7 +1127,8 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
                 {
                     foreach (var ex in windowsExports)
                     {
-                        args.Add($"-Wl,/EXPORT:{ex}");
+                        args.Add("-Xlinker");
+                        args.Add($"/EXPORT:{ex}");
                     }
                 }
             }
@@ -1138,7 +1139,8 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
                     : new[] { exportName };
                 foreach (var ex in exports)
                 {
-                    args.Add($"-Wl,/EXPORT:{ex}");
+                    args.Add("-Xlinker");
+                    args.Add($"/EXPORT:{ex}");
                 }
             }
         }
