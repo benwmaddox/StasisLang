@@ -1018,6 +1018,7 @@ public sealed class CraneliftFunctionBuilder
             "gfx_draw_sprite" => true,
             "gfx_draw_sprites_i32" => true,
             "gfx_submit" => true,
+            "gfx_submit_u8" => true,
             "gfx_poll_reload" => true,
             "gfx_window_width" => true,
             "gfx_window_height" => true,
@@ -1448,6 +1449,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGfxDrawSpritesI32(arguments);
             case "gfx_submit":
                 return LowerGfxSubmit(arguments);
+            case "gfx_submit_u8":
+                return LowerGfxSubmitU8(arguments);
             case "gfx_poll_reload":
                 return LowerGfxPollReload(arguments);
             case "gfx_window_width":
@@ -2232,6 +2235,9 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerGfxSubmit(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallVoid("stasis_gfx_submit", "gfx_submit expects (cmd_i32: i32[], cmd_f32: f32[]).", arguments, 2);
+
+    private string LowerGfxSubmitU8(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_submit_u8", "gfx_submit_u8 expects (cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[]).", arguments, 3);
 
     private string LowerGfxPollReload(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_poll_reload", "gfx_poll_reload expects (handle: i32).", arguments, 1);

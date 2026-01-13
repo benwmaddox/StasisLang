@@ -2382,7 +2382,7 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
  * clear -> lines -> sprites -> present.
  */
-STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f32) {
+static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     if (!cmd_i32 || !cmd_f32) return;
 
     const int32_t magic = cmd_i32[0];
@@ -2393,15 +2393,24 @@ STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f3
 
     const int32_t flags = cmd_i32[2];
     const int32_t gfx_cmd_max_lines = MAX_LINES;
-    const int32_t gfx_cmd_max_sprites = 16384;
+    const int32_t gfx_cmd_max_sprites = 4096;  /* must match MAX_SPRITE_VERTS/6 */
+    const int32_t gfx_cmd_max_text = 2048;
+    const int32_t gfx_cmd_max_text_bytes = 65536;
 
     int32_t line_count = cmd_i32[3];
     int32_t sprite_count = cmd_i32[4];
+    int32_t text_count = cmd_i32[7];
+    int32_t text_bytes_used = cmd_i32[9];
 
     if (line_count < 0) line_count = 0;
     if (sprite_count < 0) sprite_count = 0;
+    if (text_count < 0) text_count = 0;
+    if (text_bytes_used < 0) text_bytes_used = 0;
+
     if (line_count > gfx_cmd_max_lines) line_count = gfx_cmd_max_lines;
     if (sprite_count > gfx_cmd_max_sprites) sprite_count = gfx_cmd_max_sprites;
+    if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
+    if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
     stasis_begin_frame();
 
@@ -2430,10 +2439,49 @@ STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f3
         }
     }
 
+    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
+    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
+        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t* text_meta = cmd_i32 + text_i32_base;
+
+        for (int i = 0; i < text_count; i++) {
+            const int base_i = i * 3;
+            const int font = text_meta[base_i + 0];
+            const int byte_off = text_meta[base_i + 1];
+            const int byte_len = text_meta[base_i + 2];
+
+            if (font <= 0) continue;
+            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_len < 0) continue;
+            if (byte_off + byte_len >= text_bytes_used) continue;
+
+            const char* text = (const char*)(cmd_u8 + byte_off);
+
+            const int base_f = text_f32_base + i * 6;
+            const float x = cmd_f32[base_f + 0];
+            const float y = cmd_f32[base_f + 1];
+            const float r = cmd_f32[base_f + 2];
+            const float g = cmd_f32[base_f + 3];
+            const float b = cmd_f32[base_f + 4];
+            const float a = cmd_f32[base_f + 5];
+
+            stasis_draw_text(font, text, x, y, r, g, b, a);
+        }
+    }
+
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
     if ((flags & 2) != 0) {
         stasis_end_frame();
     }
+}
+
+STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f32) {
+    stasis_gfx_submit_v1(cmd_i32, cmd_f32, NULL);
+}
+
+STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    stasis_gfx_submit_v1(cmd_i32, cmd_f32, cmd_u8);
 }
 
 static SpriteEntry* sprite_get(int handle) {

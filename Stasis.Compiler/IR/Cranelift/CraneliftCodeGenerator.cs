@@ -379,6 +379,14 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.R64);
         }
 
+        if (builtins.Contains("gfx_submit_u8"))
+        {
+            builder.DeclareExternal("stasis_gfx_submit_u8", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
         if (builtins.Contains("gfx_window_width"))
         {
             builder.DeclareExternal("stasis_gfx_window_width", CraneliftTypeMapper.ClifType.I32);
@@ -1294,6 +1302,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "sin" or "cos" or "sin_fast" or "cos_fast"
             or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line" or "draw_lines_f32"
             or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_submit"
+            or "gfx_submit_u8"
             or "gfx_window_width" or "gfx_window_height" or "gfx_window_resized"
             or "gfx_poll_reload" or "gfx_debug_bake_hash" or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
