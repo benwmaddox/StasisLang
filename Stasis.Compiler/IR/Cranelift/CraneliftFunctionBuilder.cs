@@ -1089,51 +1089,10 @@ public sealed class CraneliftFunctionBuilder
             "i32_to_u16_trunc" => true,
             "i32_to_u16_checked" => true,
             "init_window" => true,
-            "begin_frame" => true,
-            "end_frame" => true,
-            "clear" => true,
-            "draw_line" => true,
-            "draw_lines_f32" => true,
-            "host_get_frame" => true,
             "gfx_load_sprite" => true,
-            "gfx_draw_sprite" => true,
-            "gfx_draw_sprites_i32" => true,
-            "gfx_submit" => true,
-            "gfx_submit_u8" => true,
             "gfx_poll_reload" => true,
-            "gfx_window_width" => true,
-            "gfx_window_height" => true,
-            "gfx_window_resized" => true,
-            "gfx_debug_bake_hash" => true,
-            "gfx_debug_enable_hash" => true,
-            "gfx_debug_get_frame_hash" => true,
-            "is_key_down" => true,
-            "should_quit" => true,
-            "get_window_size" => true,
-            "set_fullscreen" => true,
-            "set_postfx" => true,
             "load_font" => true,
-            "draw_text" => true,
             "measure_text" => true,
-            "list_directory" => true,
-            "dir_list_entry_is_dir" => true,
-            "dir_list_entry_copy_name" => true,
-            "input_pointer_count" => true,
-            "input_pointer_id" => true,
-            "input_pointer_is_down" => true,
-            "input_pointer_went_down" => true,
-            "input_pointer_went_up" => true,
-            "input_pointer_x_px" => true,
-            "input_pointer_y_px" => true,
-            "input_pointer_dx_px" => true,
-            "input_pointer_dy_px" => true,
-            "input_pointer_x_n" => true,
-            "input_pointer_y_n" => true,
-            "input_dropped_pointers" => true,
-            "input_viewport_x_px" => true,
-            "input_viewport_y_px" => true,
-            "input_viewport_w_px" => true,
-            "input_viewport_h_px" => true,
             "char_is_digit" => true,
             "char_is_alpha" => true,
             "char_is_alnum" => true,
@@ -1532,96 +1491,14 @@ public sealed class CraneliftFunctionBuilder
                 return LowerI32ToU16Checked(arguments);
             case "init_window":
                 return LowerInitWindow(arguments);
-            case "begin_frame":
-                return LowerBeginFrame(arguments);
-            case "end_frame":
-                return LowerEndFrame(arguments);
-            case "clear":
-                return LowerClear(arguments);
-            case "draw_line":
-                return LowerDrawLine(arguments);
-            case "draw_lines_f32":
-                return LowerDrawLinesF32(arguments);
-            case "host_get_frame":
-                return LowerHostGetFrame(arguments);
             case "gfx_load_sprite":
                 return LowerGfxLoadSprite(arguments);
-            case "gfx_draw_sprite":
-                return LowerGfxDrawSprite(arguments);
-            case "gfx_draw_sprites_i32":
-                return LowerGfxDrawSpritesI32(arguments);
-            case "gfx_submit":
-                return LowerGfxSubmit(arguments);
-            case "gfx_submit_u8":
-                return LowerGfxSubmitU8(arguments);
             case "gfx_poll_reload":
                 return LowerGfxPollReload(arguments);
-            case "gfx_window_width":
-                return LowerGfxWindowWidth(arguments);
-            case "gfx_window_height":
-                return LowerGfxWindowHeight(arguments);
-            case "gfx_window_resized":
-                return LowerGfxWindowResized(arguments);
-            case "gfx_debug_bake_hash":
-                return LowerGfxDebugBakeHash(arguments);
-            case "gfx_debug_enable_hash":
-                return LowerGfxDebugEnableHash(arguments);
-            case "gfx_debug_get_frame_hash":
-                return LowerGfxDebugGetFrameHash(arguments);
-            case "is_key_down":
-                return LowerIsKeyDown(arguments);
-            case "should_quit":
-                return LowerShouldQuit(arguments);
-            case "get_window_size":
-                return LowerGetWindowSize(arguments);
-            case "set_fullscreen":
-                return LowerSetFullscreen(arguments);
-            case "set_postfx":
-                return LowerSetPostfx(arguments);
             case "load_font":
                 return LowerLoadFont(arguments);
-            case "draw_text":
-                return LowerDrawText(arguments);
             case "measure_text":
                 return LowerMeasureText(arguments);
-            case "list_directory":
-                return LowerListDirectory(arguments);
-            case "dir_list_entry_is_dir":
-                return LowerDirListEntryIsDir(arguments);
-            case "dir_list_entry_copy_name":
-                return LowerDirListEntryCopyName(arguments);
-            case "input_pointer_count":
-                return LowerExternalCallValue("stasis_input_pointer_count", "input_pointer_count expects no arguments.", arguments, 0);
-            case "input_pointer_id":
-                return LowerExternalCallValue("stasis_input_pointer_id", "input_pointer_id expects (idx: i32).", arguments, 1);
-            case "input_pointer_is_down":
-                return LowerExternalCallValue("stasis_input_pointer_is_down", "input_pointer_is_down expects (idx: i32).", arguments, 1);
-            case "input_pointer_went_down":
-                return LowerExternalCallValue("stasis_input_pointer_went_down", "input_pointer_went_down expects (idx: i32).", arguments, 1);
-            case "input_pointer_went_up":
-                return LowerExternalCallValue("stasis_input_pointer_went_up", "input_pointer_went_up expects (idx: i32).", arguments, 1);
-            case "input_pointer_x_px":
-                return LowerExternalCallValue("stasis_input_pointer_x_px", "input_pointer_x_px expects (idx: i32).", arguments, 1);
-            case "input_pointer_y_px":
-                return LowerExternalCallValue("stasis_input_pointer_y_px", "input_pointer_y_px expects (idx: i32).", arguments, 1);
-            case "input_pointer_dx_px":
-                return LowerExternalCallValue("stasis_input_pointer_dx_px", "input_pointer_dx_px expects (idx: i32).", arguments, 1);
-            case "input_pointer_dy_px":
-                return LowerExternalCallValue("stasis_input_pointer_dy_px", "input_pointer_dy_px expects (idx: i32).", arguments, 1);
-            case "input_pointer_x_n":
-                return LowerExternalCallValue("stasis_input_pointer_x_n", "input_pointer_x_n expects (idx: i32).", arguments, 1);
-            case "input_pointer_y_n":
-                return LowerExternalCallValue("stasis_input_pointer_y_n", "input_pointer_y_n expects (idx: i32).", arguments, 1);
-            case "input_dropped_pointers":
-                return LowerExternalCallValue("stasis_input_dropped_pointers", "input_dropped_pointers expects no arguments.", arguments, 0);
-            case "input_viewport_x_px":
-                return LowerExternalCallValue("stasis_input_viewport_x_px", "input_viewport_x_px expects no arguments.", arguments, 0);
-            case "input_viewport_y_px":
-                return LowerExternalCallValue("stasis_input_viewport_y_px", "input_viewport_y_px expects no arguments.", arguments, 0);
-            case "input_viewport_w_px":
-                return LowerExternalCallValue("stasis_input_viewport_w_px", "input_viewport_w_px expects no arguments.", arguments, 0);
-            case "input_viewport_h_px":
-                return LowerExternalCallValue("stasis_input_viewport_h_px", "input_viewport_h_px expects no arguments.", arguments, 0);
             case "char_is_digit":
                 return LowerCharIsDigit(arguments);
             case "char_is_alpha":

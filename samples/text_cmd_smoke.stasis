@@ -1,6 +1,7 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/graphics.stasis";
 import "../src/gfx_cmd.stasis";
+import "../src/host_frame.stasis";
 
 // Smoke test: command-buffer text submission.
 //
@@ -9,6 +10,20 @@ import "../src/gfx_cmd.stasis";
 const FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
 const FONT_SIZE: i32 = 20;
 
+global font: i32;
+
+function tick(): void {
+    if (font == 0) {
+        return;
+    }
+
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.02, 0.02, 0.03, 1.0);
+    gfx_cmd_text(font, "Hello from gfx_cmd_text()", 24.0, 24.0, 0.9, 0.9, 0.95, 1.0);
+    gfx_cmd_text(font, "Coordinates are host pixels.", 24.0, 52.0, 0.7, 0.8, 0.9, 1.0);
+    gfx_cmd_mark_present();
+}
+
 function main(): i32 {
     let ok: bool = init_window(640, 360, "text_cmd_smoke");
     if (!ok) {
@@ -16,19 +31,10 @@ function main(): i32 {
         return 1;
     }
 
-    let font: i32 = load_font(FONT_PATH, FONT_SIZE);
+    font = load_font(FONT_PATH, FONT_SIZE);
     if (font == 0) {
         print_string("load_font failed\n");
         return 2;
-    }
-
-    for (; !should_quit(); ) {
-        gfx_cmd_begin();
-        gfx_cmd_clear(0.02, 0.02, 0.03, 1.0);
-        gfx_cmd_text(font, "Hello from gfx_cmd_text()", 24.0, 24.0, 0.9, 0.9, 0.95, 1.0);
-        gfx_cmd_text(font, "Coordinates are host pixels.", 24.0, 52.0, 0.7, 0.8, 0.9, 1.0);
-        gfx_cmd_submit();
-        sleep_ms(16);
     }
 
     return 0;
