@@ -153,6 +153,12 @@ These are host-provided helpers intended for tooling and self-hosted programs (c
 - `sys_memcpy_u8(dst: u8[M], dst_index: i32, src: u8[N], src_index: i32, count: i32) -> void` (copies `count` bytes)
 - `sys_memcpy_i32(dst: i32[M], dst_index: i32, src: i32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
 - `sys_memcpy_f32(dst: f32[M], dst_index: i32, src: f32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
+- `sys_memmove_u8(dst: u8[M], dst_index: i32, src: u8[N], src_index: i32, count: i32) -> void` (copies `count` bytes; overlap-safe)
+- `sys_memmove_i32(dst: i32[M], dst_index: i32, src: i32[N], src_index: i32, count: i32) -> void` (copies `count` elements; overlap-safe)
+- `sys_memmove_f32(dst: f32[M], dst_index: i32, src: f32[N], src_index: i32, count: i32) -> void` (copies `count` elements; overlap-safe)
+- `sys_memset_u8(dst: u8[M], dst_index: i32, value: i32, count: i32) -> void` (sets `count` bytes to `(value & 255)`)
+- `sys_memset_i32(dst: i32[M], dst_index: i32, value: i32, count: i32) -> void` (sets `count` elements)
+- `sys_memset_f32(dst: f32[M], dst_index: i32, value: f32, count: i32) -> void` (sets `count` elements)
 
 ### Imports
 
