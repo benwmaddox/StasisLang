@@ -13,7 +13,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite call overhead when debug hashing is off; build vertex buffers directly from streams).
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
 - [x] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
-- [ ] HostFrame: add `version`, `flags`, `frame_index`, and `dt` so tick can be snapshot-only (no ad-hoc queries).
+- [ ] HostFrame: add `version`, `flags`, `tick_index`, and (optional) `tick_hz` so tick can be snapshot-only (no ad-hoc queries).
 - [ ] HostFrame: add keyboard state + quit/focus flags to snapshot so tick can avoid `is_key_down`/`should_quit` imports.
 - [x] Host bulk mode: export `host_*` globals from program DLL for runner/hosts.
 - [x] Host bulk mode: runner writes HostFrame globals before `tick()` (no `host_frame_refresh()` in hot paths).
