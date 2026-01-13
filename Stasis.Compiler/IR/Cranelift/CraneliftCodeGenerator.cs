@@ -345,6 +345,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("host_get_frame"))
+        {
+            builder.DeclareExternal("stasis_host_get_frame", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
         if (builtins.Contains("gfx_load_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,

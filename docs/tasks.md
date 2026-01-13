@@ -15,6 +15,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Follow through: implement `docs/aquarium-sample-plan.md` (add `samples/aquarium.stasis`).
 - [ ] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).
 - [ ] Follow through: execute `docs/cranelift-backend-plan.md` (close remaining backend gaps).
+- [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
 - [ ] Follow through: execute `docs/host-snapshot-command-buffer.md` (HostFrame snapshot + per-tick command buffers).
 - [ ] Follow through: execute `docs/android-plan.md` (Android runtime build + host proof-of-concept).
 - [ ] Follow through: execute `docs/brickout-android-debug-plan.md` (debug APK + adb asset push workflow).
