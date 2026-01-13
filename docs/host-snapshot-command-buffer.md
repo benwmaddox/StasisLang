@@ -187,6 +187,10 @@ These should be treated as legacy compatibility surfaces (keep for now, but plan
 - Per-draw externs (`draw_line`, `gfx_draw_sprite`, `draw_text`, etc.).
 - Per-tick submit/present calls from Stasis (`gfx_submit*`, `end_frame`, etc.).
 
+In this direction, these legacy calls should not cross the host boundary at all:
+- They should not be compiler built-ins that lower to runtime hooks.
+- If retained at all, they should be pure Stasis wrappers over `host_*` + `gfx_cmd_*` (or removed entirely once samples migrate).
+
 ### 1) HostFrame snapshot (already prototyped)
 
 There is already a prototype in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:

@@ -526,6 +526,8 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
+    static int32_t g_host_tick_index = 0;
+
     /* i32 header */
     out_i32[0] = stasis_get_time_ms();
     out_i32[1] = g_window_width;
@@ -538,7 +540,17 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[8] = g_input_frame.dropped_pointers;
     out_i32[9] = stasis_should_quit();
 
-    for (int i = 10; i < 16; i++) out_i32[i] = 0;
+    out_i32[10] = g_host_tick_index++;
+
+    int flags = 0;
+    if (g_window_resized)
+    {
+        flags |= 1; /* HOST_FLAG_RESIZED */
+        g_window_resized = false;
+    }
+    out_i32[11] = flags;
+
+    for (int i = 12; i < 16; i++) out_i32[i] = 0;
 
     const int i32_base = 16;
     const int i32_stride = 4;
