@@ -1,20 +1,20 @@
 # Demo Day (Windows): runnable Stasis programs
 
-This is a quick "what can I run live?" guide for demo day. Commands assume a `cmd.exe` prompt from the repo root (`E:\StasisLang`).
+This is a quick "what can I run live?" guide for demo day. Commands assume a `cmd.exe` prompt from the repo root (`F:\StasisLang`).
 
 ## One-time setup
 
 Build everything (compiler, runtime, runner, Cranelift AOT tool):
 
 ```bat
-cd /d E:\StasisLang
+cd /d F:\StasisLang
 build.bat
 ```
 
 Run the full test suite (C# unit tests + Stasis end-to-end tests):
 
 ```bat
-cd /d E:\StasisLang
+cd /d F:\StasisLang
 test.bat
 ```
 
