@@ -250,6 +250,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_get_time_ms", CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("get_time_us"))
+        {
+            // stasis_get_time_us() -> i32
+            builder.DeclareExternal("stasis_get_time_us", CraneliftTypeMapper.ClifType.I32);
+        }
+
         if (builtins.Contains("sleep_ms"))
         {
             // stasis_sleep_ms(ms: i32) -> void
@@ -377,6 +383,21 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_gfx_draw_sprites_i32", CraneliftTypeMapper.ClifType.Void,
                 CraneliftTypeMapper.ClifType.R64,
                 CraneliftTypeMapper.ClifType.I32);
+        }
+
+        if (builtins.Contains("gfx_submit"))
+        {
+            builder.DeclareExternal("stasis_gfx_submit", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("gfx_submit_u8"))
+        {
+            builder.DeclareExternal("stasis_gfx_submit_u8", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
         }
 
         if (builtins.Contains("gfx_window_width"))
@@ -1282,12 +1303,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "sys_argc" or "sys_argv"
             or "sys_read_file" or "sys_list_dir" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
             or "sys_exec" or "sys_spawn" or "sys_sleep_ms"
-            or "time" or "get_time_ms" or "sleep_ms"
+            or "time" or "get_time_ms" or "get_time_us" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
             or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"
             or "sin" or "cos" or "sin_fast" or "cos_fast"
             or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line" or "draw_lines_f32"
-            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32"
+            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_submit"
+            or "gfx_submit_u8"
             or "gfx_window_width" or "gfx_window_height" or "gfx_window_resized"
             or "gfx_debug_bake_hash" or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"

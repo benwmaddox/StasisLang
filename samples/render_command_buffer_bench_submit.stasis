@@ -1,20 +1,22 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/graphics.stasis";
+import "../src/gfx_cmd.stasis";
 
-// Render command buffer microbench:
-// - Per-call: many draw_line() calls from Stasis.
+// Render submission microbench:
+// - Per-call: many draw_line() calls from Stasis (many host boundary calls).
 // - Batched: one draw_lines_f32() call that loops in the runtime.
+// - Submit: one gfx_cmd_submit_no_present() call (command buffer) that loops in the runtime.
 //
 // Notes:
-// - This times submission only (no end_frame()), so it isolates host<->runtime call overhead.
-// - begin_frame() is called every iteration to reset the line queue and (when enabled) the debug hash.
+// - This times submission only (no end_frame()), so it isolates host boundary overhead.
+// - The command-buffer path uses `gfx_cmd_submit_no_present()` so it also excludes present.
 
 const LINE_COUNT: i32 = 10000;
 const LINE_STRIDE: i32 = 8;
 const LINE_DATA_LEN: i32 = 80000; // LINE_COUNT * LINE_STRIDE
 
-const WARMUP_ITERS: i32 = 10;
-const BENCH_ITERS: i32 = 100;
+const WARMUP_ITERS: i32 = 20;
+const BENCH_ITERS: i32 = 500;
 
 struct BenchState {
     lines: f32[80000];
@@ -62,6 +64,17 @@ function submit_lines_batched(): void {
     draw_lines_f32(state.lines, LINE_COUNT);
 }
 
+function submit_lines_cmd(): void {
+    gfx_cmd_begin();
+    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
+    gfx_cmd_submit_no_present();
+}
+
+function build_lines_cmd_once(): void {
+    gfx_cmd_begin();
+    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
+}
+
 function bench_per_call(iterations: i32): i32 {
     let it: i32 = 0;
     let start_ms: i32 = get_time_ms();
@@ -82,8 +95,26 @@ function bench_batched(iterations: i32): i32 {
     return get_time_ms() - start_ms;
 }
 
+function bench_submit(iterations: i32): i32 {
+    let it: i32 = 0;
+    let start_ms: i32 = get_time_ms();
+    for (it = 0; it < iterations; it = it + 1) {
+        submit_lines_cmd();
+    }
+    return get_time_ms() - start_ms;
+}
+
+function bench_submit_prebuilt(iterations: i32): i32 {
+    let it: i32 = 0;
+    let start_ms: i32 = get_time_ms();
+    for (it = 0; it < iterations; it = it + 1) {
+        gfx_cmd_submit_no_present();
+    }
+    return get_time_ms() - start_ms;
+}
+
 function print_header(): void {
-    print_string("render_command_buffer_bench\n");
+    print_string("render_command_buffer_bench_submit\n");
     print_string("lines=");
     print_int(LINE_COUNT);
     print_string(" iterations=");
@@ -94,7 +125,7 @@ function print_header(): void {
 }
 
 function main(): i32 {
-    let init_ok: bool = init_window(64, 64, "render_command_buffer_bench");
+    let init_ok: bool = init_window(64, 64, "render_command_buffer_bench_submit");
     if (!init_ok) {
         print_string("init_window failed\n");
         return 1;
@@ -105,6 +136,7 @@ function main(): i32 {
 
     // Correctness: hash the draw-call stream for one iteration of each path.
     gfx_debug_enable_hash(1);
+
     begin_frame();
     submit_lines_per_call();
     let hash_per: i32 = gfx_debug_get_frame_hash();
@@ -112,30 +144,50 @@ function main(): i32 {
     begin_frame();
     submit_lines_batched();
     let hash_batch: i32 = gfx_debug_get_frame_hash();
+
+    submit_lines_cmd();
+    let hash_submit: i32 = gfx_debug_get_frame_hash();
+
     gfx_debug_enable_hash(0);
 
     print_string("hash per_call=");
     print_int(hash_per);
     print_string(" batched=");
     print_int(hash_batch);
+    print_string(" submit=");
+    print_int(hash_submit);
     print_char(10);
 
     if (!(hash_per == hash_batch)) {
-        print_string("ERROR: hash mismatch\n");
+        print_string("ERROR: hash mismatch per_call vs batched\n");
         return 2;
+    }
+    if (!(hash_per == hash_submit)) {
+        print_string("ERROR: hash mismatch per_call vs submit\n");
+        return 3;
     }
 
     // Warmup to reduce first-run noise.
-    _ = bench_per_call(WARMUP_ITERS);
-    _ = bench_batched(WARMUP_ITERS);
+    bench_per_call(WARMUP_ITERS);
+    bench_batched(WARMUP_ITERS);
+    bench_submit(WARMUP_ITERS);
+    build_lines_cmd_once();
+    bench_submit_prebuilt(WARMUP_ITERS);
 
     let per_ms: i32 = bench_per_call(BENCH_ITERS);
     let batched_ms: i32 = bench_batched(BENCH_ITERS);
+    let submit_build_ms: i32 = bench_submit(BENCH_ITERS);
+    build_lines_cmd_once();
+    let submit_prebuilt_ms: i32 = bench_submit_prebuilt(BENCH_ITERS);
 
     print_string("per_call_ms=");
     print_int(per_ms);
     print_string(" batched_ms=");
     print_int(batched_ms);
+    print_string(" submit_build_ms=");
+    print_int(submit_build_ms);
+    print_string(" submit_prebuilt_ms=");
+    print_int(submit_prebuilt_ms);
     print_char(10);
 
     return 0;

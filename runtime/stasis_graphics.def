@@ -15,6 +15,7 @@ EXPORTS
     stasis_draw_lines_f32
     stasis_is_key_down
     stasis_get_time_ms
+    stasis_get_time_us
     stasis_sleep_ms
     stasis_audio_init
     stasis_audio_shutdown
@@ -51,6 +52,10 @@ EXPORTS
     gfx_load_sprite=stasis_gfx_load_sprite
     stasis_gfx_draw_sprite
     gfx_draw_sprite=stasis_gfx_draw_sprite
+    stasis_gfx_submit
+    gfx_submit=stasis_gfx_submit
+    stasis_gfx_submit_u8
+    gfx_submit_u8=stasis_gfx_submit_u8
     stasis_gfx_draw_sprites_i32
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash

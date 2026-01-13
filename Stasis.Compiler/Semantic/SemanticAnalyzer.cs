@@ -116,6 +116,7 @@ public sealed class SemanticAnalyzer
             // Legacy system functions (to be renamed to sys_*)
             AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("get_time_us", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
             // Legacy graphics functions (external runtime)
@@ -128,6 +129,9 @@ public sealed class SemanticAnalyzer
             AddSymbol("gfx_load_sprite", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_draw_sprite", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
             AddSymbol("gfx_draw_sprites_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_submit", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_submit_u8", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
+            AddSymbol("gfx_poll_reload", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_width", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_height", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("gfx_window_resized", SymbolKind.Function, new PrimitiveTypeSymbol("bool"), new SourceSpan(0, 0));
