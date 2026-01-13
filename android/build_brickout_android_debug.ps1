@@ -80,7 +80,8 @@ Require-Command "dotnet"
 
 $vcpkgRoot = Resolve-VcpkgRoot -RepoRoot $repoRoot
 $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
-$triplet = "arm64-android"
+$triplet = "arm64-android-dynamic"
+$androidPlatform = "android-28"
 $emitHeapLimitBytes = 2147483648
 
 Write-Host "Repo:  $repoRoot"
@@ -89,13 +90,14 @@ Write-Host "vcpkg: $vcpkgExe"
 
 # vcpkg expects ANDROID_NDK_HOME for Android triplets.
 $env:ANDROID_NDK_HOME = $ndk
+$env:VCPKG_OVERLAY_TRIPLETS = Join-Path $repoRoot "android\\vcpkg-triplets"
 
 & $vcpkgExe install "sdl2:$triplet" --recurse
 
 $outDir = Join-Path $repoRoot "android\\out"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-$game = Join-Path $repoRoot "samples\\brickout_revenge\\brickout_revenge.stasis"
+$game = Join-Path $repoRoot "samples\\brickout_revenge\\brickout_revenge_v1.stasis"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $llPath = Join-Path $outDir "brickout_revenge_$stamp.ll"
 
@@ -114,7 +116,7 @@ $emitCmd = @(
     "--backend", "llvm",
     "--graphics",
     "--emit-ir",
-    "--llvm-target", "aarch64-linux-android21",
+    "--llvm-target", "aarch64-linux-android28",
     "--out", "`"$llPath`""
 ) -join " "
 
@@ -131,12 +133,25 @@ finally {
 }
 if ($LASTEXITCODE -ne 0) { throw "stasis IR emit failed with exit code $LASTEXITCODE" }
 
-$toolchain = Join-Path $vcpkgRoot "scripts\\buildsystems\\vcpkg.cmake"
-if (-not (Test-Path $toolchain)) {
-    throw "vcpkg toolchain not found: $toolchain"
+$androidToolchain = Join-Path $ndk "build\\cmake\\android.toolchain.cmake"
+if (-not (Test-Path $androidToolchain)) {
+    throw "Android CMake toolchain not found: $androidToolchain"
+}
+
+$vcpkgInstalled = Join-Path $vcpkgRoot "installed\\$triplet"
+if (-not (Test-Path $vcpkgInstalled)) {
+    throw "vcpkg installed triplet not found: $vcpkgInstalled (did vcpkg install succeed?)"
+}
+
+$sdl2Dir = Join-Path $vcpkgInstalled "share\\sdl2"
+if (-not (Test-Path $sdl2Dir)) {
+    throw "SDL2Config.cmake directory not found: $sdl2Dir"
 }
 
 $nativeBuildDir = Join-Path $repoRoot "android\\build\\brickout-android-arm64-debug"
+if (Test-Path $nativeBuildDir) {
+    Remove-Item -Recurse -Force $nativeBuildDir
+}
 New-Item -ItemType Directory -Force -Path $nativeBuildDir | Out-Null
 
 Write-Host ""
@@ -144,8 +159,12 @@ Write-Host "Building native libmain.so..."
 
 & cmake -S (Join-Path $repoRoot "android\\brickout-revenge\\native") -B $nativeBuildDir -G Ninja `
     -DCMAKE_BUILD_TYPE=Debug `
-    -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
-    -DVCPKG_TARGET_TRIPLET="$triplet" `
+    -DCMAKE_TOOLCHAIN_FILE="$androidToolchain" `
+    -DANDROID_ABI="arm64-v8a" `
+    -DANDROID_PLATFORM="$androidPlatform" `
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE="STATIC_LIBRARY" `
+    -DCMAKE_PREFIX_PATH="$vcpkgInstalled" `
+    -DSDL2_DIR="$sdl2Dir" `
     -DSTASIS_REPO_ROOT="$repoRoot" `
     -DSTASIS_GAME_LL="$llPath"
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
