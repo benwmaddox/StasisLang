@@ -2537,6 +2537,21 @@ function tick(): i32 {
             print_string(" frames=");
             print_int(bench_count);
             print_char(10);
+            print_string("cmd lines=");
+            print_int(gfx_cmd_line_count());
+            print_string(" sprites=");
+            print_int(gfx_cmd_sprite_count());
+            print_string(" text=");
+            print_int(gfx_cmd_text_count());
+            print_string(" dropped_lines=");
+            print_int(gfx_cmd_dropped_lines());
+            print_string(" dropped_sprites=");
+            print_int(gfx_cmd_dropped_sprites());
+            print_string(" dropped_text=");
+            print_int(gfx_cmd_dropped_text());
+            print_string(" text_bytes_used=");
+            print_int(gfx_cmd_text_bytes_used());
+            print_char(10);
             state.running = 0;
             return 1;
         }
