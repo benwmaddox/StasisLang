@@ -15,8 +15,16 @@ extern function get_time_ms(): i32;
 extern function get_time_us(): i32;
 extern function sleep_ms(ms: i32): void;
 
+// Window request ABI (guest -> host). Runner polls and applies these.
+const HOST_REQ_FLAG_WINDOWED: i32 = 1;
+const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
+
+global host_req_seq: i32;
+global host_req_flags: i32;
+global host_req_window_w_px: i32;
+global host_req_window_h_px: i32;
+
 // Startup / assets (host calls; avoid in hot paths)
-extern function init_window(width: i32, height: i32, title: string): bool;
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 extern function gfx_poll_reload(handle: i32): bool;
 extern function load_font(path: string, size: i32): i32;
@@ -31,12 +39,34 @@ function gfx_debug_enable_hash(enabled: i32): void { }
 function gfx_debug_get_frame_hash(): i32 { return 0; }
 
 function get_desktop_size(out_w: i32[], out_h: i32[]): void {
-    out_w[0] = host_window_w_px();
-    out_h[0] = host_window_h_px();
+    out_w[0] = host_screen_w_px();
+    out_h[0] = host_screen_h_px();
 }
 
-function set_window_size(width: i32, height: i32): void { }
-function set_fullscreen(enabled: i32): i32 { return 0; }
+function init_window(width: i32, height: i32, title: string): bool {
+    host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    host_req_window_w_px = width;
+    host_req_window_h_px = height;
+    host_req_seq = host_req_seq + 1;
+    return true;
+}
+
+function set_window_size(width: i32, height: i32): void {
+    host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    host_req_window_w_px = width;
+    host_req_window_h_px = height;
+    host_req_seq = host_req_seq + 1;
+}
+
+function set_fullscreen(enabled: i32): i32 {
+    if (enabled != 0) {
+        host_req_flags = HOST_REQ_FLAG_FULLSCREEN;
+    } else {
+        host_req_flags = HOST_REQ_FLAG_WINDOWED;
+    }
+    host_req_seq = host_req_seq + 1;
+    return 0;
+}
 
 // Legacy-ish names retained as pure wrappers (no host calls).
 function begin_frame(): void {

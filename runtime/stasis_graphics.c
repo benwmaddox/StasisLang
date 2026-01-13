@@ -507,6 +507,8 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
     return g_window ? g_input_frame.viewport_h_px : 0;
 }
 
+STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
+
 /*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
@@ -540,7 +542,13 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     }
     out_i32[11] = flags;
 
-    for (int i = 12; i < 16; i++) out_i32[i] = 0;
+    int screen_w = 0;
+    int screen_h = 0;
+    stasis_get_desktop_size(&screen_w, &screen_h);
+    out_i32[12] = screen_w;
+    out_i32[13] = screen_h;
+
+    for (int i = 14; i < 16; i++) out_i32[i] = 0;
 
     const int i32_base = 16;
     const int i32_stride = 4;
