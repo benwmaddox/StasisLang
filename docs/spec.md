@@ -150,6 +150,9 @@ These are host-provided helpers intended for tooling and self-hosted programs (c
 - `sys_file_mtime_ms(path: utf8[N]) -> i32` (returns ms since epoch on supported hosts, `-1` on failure)
 - `sys_exec(command: utf8[N]) -> i32` (process exit code)
 - `sys_sleep_ms(ms: i32) -> i32` (returns 0; used by polling `watch` loops)
+- `sys_memcpy_u8(dst: u8[M], dst_index: i32, src: u8[N], src_index: i32, count: i32) -> void` (copies `count` bytes)
+- `sys_memcpy_i32(dst: i32[M], dst_index: i32, src: i32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
+- `sys_memcpy_f32(dst: f32[M], dst_index: i32, src: f32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
 
 ### Imports
 
