@@ -179,31 +179,35 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
-    public void DrawLinesF32_UsesRuntimeHook()
+    public void Legacy_graphics_draw_calls_are_not_builtins()
     {
-        var ir = CompileCraneliftIr("""
+        var parse = Parser.Parse("""
             global lines: f32[8];
             function main(): i32 {
                 draw_lines_f32(lines, 1);
                 return 0;
             }
             """);
+        Assert.Empty(parse.Diagnostics);
 
-        Assert.Contains("call %stasis_draw_lines_f32", ir);
-        Assert.DoesNotContain("TODO:", ir);
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.NotEmpty(semantic.Diagnostics);
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'draw_lines_f32'", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void InputPointerCount_UsesRuntimeHook()
+    public void Legacy_input_query_calls_are_not_builtins()
     {
-        var ir = CompileCraneliftIr("""
+        var parse = Parser.Parse("""
             function main(): i32 {
                 return input_pointer_count();
             }
             """);
+        Assert.Empty(parse.Diagnostics);
 
-        Assert.Contains("call %stasis_input_pointer_count", ir);
-        Assert.DoesNotContain("TODO:", ir);
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.NotEmpty(semantic.Diagnostics);
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'input_pointer_count'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -220,44 +224,50 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
-    public void GfxDrawSpritesI32_UsesRuntimeHook()
+    public void Legacy_sprite_draw_calls_are_not_builtins()
     {
-        var ir = CompileCraneliftIr("""
+        var parse = Parser.Parse("""
             global cmds: i32[7];
             function main(): i32 {
                 gfx_draw_sprites_i32(cmds, 1);
                 return 0;
             }
             """);
+        Assert.Empty(parse.Diagnostics);
 
-        Assert.Contains("call %stasis_gfx_draw_sprites_i32", ir);
-        Assert.DoesNotContain("TODO:", ir);
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.NotEmpty(semantic.Diagnostics);
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'gfx_draw_sprites_i32'", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void GfxDebugGetFrameHash_UsesRuntimeHook()
+    public void Legacy_gfx_debug_calls_are_not_builtins()
     {
-        var ir = CompileCraneliftIr("""
+        var parse = Parser.Parse("""
             function main(): i32 {
                 return gfx_debug_get_frame_hash();
             }
             """);
+        Assert.Empty(parse.Diagnostics);
 
-        Assert.Contains("call %stasis_gfx_debug_get_frame_hash", ir);
-        Assert.DoesNotContain("TODO:", ir);
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.NotEmpty(semantic.Diagnostics);
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'gfx_debug_get_frame_hash'", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void InputPointerXPx_UsesRuntimeHook()
+    public void Legacy_input_pointer_calls_are_not_builtins()
     {
-        var ir = CompileCraneliftIr("""
+        var parse = Parser.Parse("""
             function main(): f32 {
                 return input_pointer_x_px(0);
             }
             """);
+        Assert.Empty(parse.Diagnostics);
 
-        Assert.Contains("call %stasis_input_pointer_x_px", ir);
-        Assert.DoesNotContain("TODO:", ir);
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.NotEmpty(semantic.Diagnostics);
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'input_pointer_x_px'", StringComparison.Ordinal));
     }
 
     [Fact]
