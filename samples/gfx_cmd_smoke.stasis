@@ -1,0 +1,39 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/gfx_cmd.stasis";
+
+// Smoke test for gfx command buffer submission.
+//
+// Notes:
+// - Coordinates are host pixels (top-left origin).
+// - Ordering is defined by gfx_cmd layout: clear -> lines -> sprites -> present.
+
+function main(): i32 {
+    let ok: bool = init_window(640, 360, "gfx_cmd_smoke");
+    if (!ok) {
+        print_string("init_window failed\n");
+        return 1;
+    }
+
+    let sprite: i32 = gfx_load_sprite("assets/ui/white_1x1.svg", 64, 64);
+
+    while (!should_quit()) {
+        gfx_cmd_begin();
+        gfx_cmd_clear(0.08, 0.09, 0.11, 1.0);
+
+        // Crosshair
+        gfx_cmd_line(0.0, 0.0, 640.0, 360.0, 0.2, 0.9, 0.7, 1.0);
+        gfx_cmd_line(0.0, 360.0, 640.0, 0.0, 0.2, 0.9, 0.7, 1.0);
+
+        // Sprite in the middle (64x64)
+        if (sprite != 0) {
+            gfx_cmd_sprite(sprite, 320 - 32, 180 - 32, 64, 64, 0, 255);
+        }
+
+        gfx_cmd_submit();
+        sleep_ms(16);
+    }
+
+    return 0;
+}
+

@@ -2376,6 +2376,60 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
     }
 }
 
+/*
+ * Command-buffer submission (v1 prototype).
+ *
+ * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
+ * clear -> lines -> sprites -> present.
+ */
+STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f32) {
+    if (!cmd_i32 || !cmd_f32) return;
+
+    const int32_t magic = cmd_i32[0];
+    const int32_t version = cmd_i32[1];
+    if (magic != 0x47584631 || version != 1) {
+        return;
+    }
+
+    const int32_t flags = cmd_i32[2];
+    int32_t line_count = cmd_i32[3];
+    int32_t sprite_count = cmd_i32[4];
+
+    if (line_count < 0) line_count = 0;
+    if (sprite_count < 0) sprite_count = 0;
+    if (line_count > MAX_LINES) line_count = MAX_LINES;
+    if (sprite_count > MAX_SPRITES) sprite_count = MAX_SPRITES;
+
+    stasis_begin_frame();
+
+    if ((flags & 1) != 0) {
+        stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
+    }
+
+    /* lines: f32 header is 4 (clear rgba), then line payload */
+    if (line_count > 0) {
+        stasis_draw_lines_f32(cmd_f32 + 4, line_count);
+    }
+
+    /* sprites: i32 header is 32, then sprite payload */
+    if (sprite_count > 0) {
+        const int32_t* sprites = cmd_i32 + 32;
+        for (int i = 0; i < sprite_count; i++) {
+            const int base = i * 7;
+            stasis_gfx_draw_sprite(
+                sprites[base + 0],
+                sprites[base + 1],
+                sprites[base + 2],
+                sprites[base + 3],
+                sprites[base + 4],
+                sprites[base + 5],
+                sprites[base + 6]);
+        }
+    }
+
+    stasis_end_frame();
+}
+
 static SpriteEntry* sprite_get(int handle) {
     int idx = handle - 1;
     if (idx < 0 || idx >= MAX_SPRITES) return NULL;

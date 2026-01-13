@@ -682,6 +682,17 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxSubmit(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_gfx_submit");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_gfx_submit", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxPollReload(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_poll_reload");
@@ -1251,6 +1262,7 @@ public sealed class ModuleLowerer
             "gfx_load_sprite",
             "gfx_draw_sprite",
             "gfx_draw_sprites_i32",
+            "gfx_submit",
             "gfx_poll_reload",
             "gfx_window_width",
             "gfx_window_height",
@@ -3084,6 +3096,37 @@ public sealed class ModuleLowerer
                         var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
                         var cast = builder.BuildBitCast(cmds, i8Ptr, "gfx_draw_sprites_i32.ptr");
                         builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
+                        return ConstI32(0);
+                    }
+                case "gfx_submit":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("gfx_submit expects (cmd_i32, cmd_f32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var cmdI32 = LowerArrayPointer(builder, args[0], locals);
+                        if (cmdI32.Handle == IntPtr.Zero)
+                            cmdI32 = LowerExpression(builder, args[0], locals);
+                        var cmdF32 = LowerArrayPointer(builder, args[1], locals);
+                        if (cmdF32.Handle == IntPtr.Zero)
+                            cmdF32 = LowerExpression(builder, args[1], locals);
+
+                        if (cmdI32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind || cmdF32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("gfx_submit expects array/pointer arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return ConstI32(0);
+
+                        var (fn, fnType) = GetOrDeclareStasisGfxSubmit(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var castI32 = builder.BuildBitCast(cmdI32, i8Ptr, "gfx_submit.i32");
+                        var castF32 = builder.BuildBitCast(cmdF32, i8Ptr, "gfx_submit.f32");
+                        builder.BuildCall2(fnType, fn, new[] { castI32, castF32 }, "");
                         return ConstI32(0);
                     }
                 case "gfx_poll_reload":
