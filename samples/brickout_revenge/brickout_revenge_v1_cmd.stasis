@@ -2194,7 +2194,7 @@ function draw_frame(): void {
 
 // Timing
 function compute_delta_ms(): i32 {
-    let current_time: i32 = get_time_ms();
+    let current_time: i32 = host_time_ms();
     let delta_ms: i32 = current_time - state.timers.last_time;
     if (delta_ms < 1) { delta_ms = 1; }
     if (delta_ms > 100) { delta_ms = 100; }
@@ -2392,12 +2392,8 @@ function main(): i32 {
     if (!(BENCH_SKIP_MAXIMIZE == 1)) {
         maximize_window_for_desktop();
     }
-
-    // Ensure viewport/pointer state is up to date before querying HostFrame.
-    // (`should_quit` pumps SDL events and updates `g_input_frame`.)
-    should_quit();
-    host_frame_refresh();
-    sync_screen_size();
+    state.runtime_screen.w = state.config.screen.w;
+    state.runtime_screen.h = state.config.screen.h;
     print_string("window_px=");
     print_int(state.runtime_screen.w);
     print_string("x");
@@ -2411,8 +2407,6 @@ function main(): i32 {
         audio_sr = 0;
     }
 
-    state.runtime_screen.w = host_window_w_px();
-    state.runtime_screen.h = host_window_h_px();
     state.layout.viewport_x = 0.0;
     state.layout.viewport_y = 0.0;
     state.layout.viewport_w = i32_to_f32(state.runtime_screen.w);
@@ -2468,12 +2462,9 @@ function tick(): i32 {
         return 1;
     }
 
-    let quit: bool = should_quit();
-    if (quit) {
+    if (host_quit_requested()) {
         state.running = 0;
     }
-
-    host_frame_refresh();
     sync_screen_size();
     update_layout();
     apply_config_live();
@@ -2481,7 +2472,7 @@ function tick(): i32 {
     state.timers.frame_start = get_time_ms();
     let bench_start_us: i32 = get_time_us();
 
-    if (is_key_down(Scancode.Escape)) {
+    if (host_key_down(Scancode.Escape)) {
         state.running = 0;
     }
 
@@ -2503,7 +2494,7 @@ function tick(): i32 {
     update_game(dt, delta_ms);
     audio_update();
     draw_frame();
-    gfx_cmd_submit_no_present();
+    gfx_cmd_mark_present();
     // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
     let frame_end: i32 = get_time_ms();
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;
@@ -2514,8 +2505,6 @@ function tick(): i32 {
     // Store in circular buffer for averaging
     state.frame_timer.sample_index =
         frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
-
-    end_frame();
 
     if (BENCH_AUTO_EXIT == 1) {
         bench_frame = bench_frame + 1;

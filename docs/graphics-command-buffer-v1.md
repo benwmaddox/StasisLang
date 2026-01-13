@@ -36,6 +36,7 @@ Stasis builtins:
 Helper module (recommended writer):
 
 - `src/gfx_cmd.stasis` (`gfx_cmd_begin`, `gfx_cmd_clear`, `gfx_cmd_line`, `gfx_cmd_sprite`, `gfx_cmd_text`, `gfx_cmd_submit`, `gfx_cmd_submit_no_present`)
+  - For bulk host mode: call `gfx_cmd_mark_present()` and let the host submit after `tick()`.
 
 ## Memory layout (v1)
 
