@@ -1,0 +1,2495 @@
+import "../../src/stdlib/stdlib.stasis";
+import "../../src/stdlib/frame_timer.stasis";
+import "../../src/stdlib/sdl_scancodes.stasis";
+import "../../src/stdlib/graphics.stasis";
+import "../../src/stdlib/gfx_cmd.stasis";
+import "../../src/stdlib/audio.stasis";
+
+// Brickout Revenge - Tower Defense meets Breakout
+// An auto-battler where you set up brick defenses and watch balls try to destroy them
+//
+// Live tuning:
+// - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --backend cranelift --graphics`
+// - Edit: `samples/brickout_revenge/data/config.json` (hot-reloaded between ticks)
+
+// External runtime APIs
+// - init_window(width: i32, height: i32, title: string) -> bool
+// - time() -> i64: returns unix timestamp for seeding PRNG
+// - get_time_ms() -> i32: millisecond clock
+// - should_quit() -> bool: polls SDL quit events
+// - begin_frame(), end_frame(): bracket GPU work
+// - gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
+// - gfx_cmd_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
+// - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
+// - gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
+// - gfx_poll_reload(handle: i32) -> bool
+// - gfx_window_width() -> i32
+// - gfx_window_height() -> i32
+// - gfx_window_resized() -> bool
+// - input_viewport_x_px() -> i32
+// - input_viewport_y_px() -> i32
+// - input_viewport_w_px() -> i32
+// - input_viewport_h_px() -> i32
+// - is_key_down(scancode: i32) -> bool
+
+// Pool sizes (compile-time; keep in sync with the array sizes below)
+const MAX_BRICKS: i32 = 50;
+const MAX_BALLS: i32 = 90;
+const MAX_TAP_PULSES: i32 = 16;
+const GRID_COLS: i32 = 6;
+const GRID_ROWS: i32 = 6;
+const UI_MENU_PAD: f32 = 10.0;
+const UI_MENU_HEADER_H: f32 = 26.0;
+const UI_MENU_SLOT_H: f32 = 30.0;
+const UI_MENU_SLOT_GAP: f32 = 10.0;
+const SFX_MAX_VOICES: i32 = 12;
+const AUDIO_FRAMES_PER_PUSH: i32 = 256;
+const PI2: f32 = 6.28318;
+const SFX_SELECT: i32 = 1;
+const SFX_DRAG_START: i32 = 2;
+const SFX_DRAG_PLACE: i32 = 3;
+const SFX_DRAG_INVALID: i32 = 4;
+const SFX_SHOT: i32 = 5;
+const SFX_BOUNCE: i32 = 6;
+const SFX_BRICK_BREAK: i32 = 7;
+const TAP_PULSE_DURATION_MS: i32 = 2000;
+const UI_SIDE_MIN_W: f32 = 220.0;
+const UI_BOTTOM_MIN_H: f32 = 160.0;
+const UI_PANEL_PAD: f32 = 12.0;
+const UI_PANEL_GAP: f32 = 12.0;
+
+// Virtual resolution + safe gameplay area.
+// The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
+const VIRTUAL_W: f32 = 360.0;
+const VIRTUAL_H: f32 = 720.0;
+const UI_RESERVED_H: f32 = 96.0;
+const GAME_H: f32 = 624.0;
+
+enum BrickType {
+    Basic,
+    Armored,
+    Reflector
+}
+
+enum Phase {
+    Setup,
+    Battle,
+    Win,
+    Lose
+}
+
+// Math
+const PI: f32 = 3.14159;
+
+// Tunable parameters (loaded from JSON via runner data binding in dev)
+struct BrickoutScreenConfig {
+    w: i32;
+    h: i32;
+}
+
+struct BrickoutGridConfig {
+    origin_x: f32;
+    margin_bottom: f32;
+    spacing: f32;
+}
+
+struct BrickoutBrickConfig {
+    width: f32;
+    height: f32;
+}
+
+struct BrickoutPaddleConfig {
+    y: f32;
+    width: f32;
+    height: f32;
+    speed: f32;
+}
+
+struct BrickoutBallConfig {
+    radius: f32;
+    spawn_jitter_x: f32;
+    clamp_margin_x: f32;
+    vx_rand: f32;
+    speed_min_base: f32;
+    speed_min_per_wave: f32;
+    speed_max_base: f32;
+    speed_max_per_wave: f32;
+    damage_base: i32;
+    damage_wave_div: i32;
+    hp_base: i32;
+    hp_wave_div: i32;
+    hp_scale: i32;
+}
+
+struct BrickoutWaveConfig {
+    start_wave: i32;
+    start_max_balls_wave: i32;
+    max_balls_wave_add: i32;
+    start_spawn_balls: i32;
+}
+
+struct BrickoutTimingConfig {
+    ball_spawn_cd_ms: i32;
+    end_phase_restart_ms: i32;
+}
+
+struct BrickoutFxConfig {
+    jiggle_threshold: i32;
+    jiggle_degrees: f32;
+    paddle_aim_degrees: f32;
+    paddle_bounce_vx_scale: f32;
+}
+
+struct TowerStats {
+    range: f32;
+    cooldown_ms: i32;
+    damage: i32;
+    shot_fx_ms: i32;
+}
+
+struct BrickoutScoreConfig {
+    ball_kill: i32;
+    brick_kill: i32;
+}
+
+struct BrickoutConfig {
+    magic: i32;
+    screen: BrickoutScreenConfig;
+    grid: BrickoutGridConfig;
+    brick: BrickoutBrickConfig;
+    paddle: BrickoutPaddleConfig;
+    ball: BrickoutBallConfig;
+    wave: BrickoutWaveConfig;
+    timing: BrickoutTimingConfig;
+    fx: BrickoutFxConfig;
+    tower_basic: TowerStats;
+    tower_armored: TowerStats;
+    tower_reflector: TowerStats;
+    score: BrickoutScoreConfig;
+}
+
+// Structs
+struct Vec2 {
+    x: f32;
+    y: f32;
+}
+
+struct Ball {
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+    radius: f32;
+    damage: i32;
+    hp: i32;
+    max_hp: i32;
+    active: bool;
+    bounce_streak: i32;
+}
+
+struct Brick {
+    x: f32;
+    y: f32;
+    grid_x: i32;
+    grid_y: i32;
+    width: f32;
+    height: f32;
+    hp: i32;
+    max_hp: i32;
+    brick_type: BrickType;
+    attack_cd_ms: i32;
+    shot_fx_ms: i32;
+    shot_tx: f32;
+    shot_ty: f32;
+    active: bool;
+}
+
+struct Paddle {
+    x: f32;
+    y: f32;
+    width: f32;
+    height: f32;
+    speed: f32;
+}
+
+struct Cursor {
+    grid_x: i32;
+    grid_y: i32;
+    brick_type: BrickType;
+}
+
+struct Timers {
+    last_time: i32;
+    frame_start: i32;
+    ball_spawn_cd: i32;
+    phase_timer: i32;
+    tick_time_ms: i32;
+}
+
+struct BrickoutSprites {
+    paddle: i32;
+    ball: i32;
+    brick_basic_base: i32;
+    brick_basic_turret: i32;
+    brick_basic_fx: i32;
+    brick_armored_base: i32;
+    brick_armored_turret: i32;
+    brick_armored_fx: i32;
+    brick_reflector_base: i32;
+    brick_reflector_fx: i32;
+}
+
+struct TapPulse {
+    x: f32;
+    y: f32;
+    age_ms: i32;
+    active: i32;
+}
+
+struct SoundVoice {
+    active: i32;
+    phase: f32;
+    freq: f32;
+    amp: f32;
+    age_frames: i32;
+    duration_frames: i32;
+}
+
+struct BrickoutRuntimeScreen {
+    w: i32;
+    h: i32;
+}
+
+struct BrickoutLayout {
+    viewport_x: f32;
+    viewport_y: f32;
+    viewport_w: f32;
+    viewport_h: f32;
+    play_x: f32;
+    play_y: f32;
+    play_w: f32;
+    play_h: f32;
+    play_scale: f32;
+    ui_x: f32;
+    ui_y: f32;
+    ui_w: f32;
+    ui_h: f32;
+    ui_mode: i32;
+}
+
+struct GameState {
+    config: BrickoutConfig;
+    bricks: Brick[50];
+    balls: Ball[900];
+    paddle: Paddle;
+    cursor: Cursor;
+    timers: Timers;
+    frame_timer: FrameTimer;
+    initialized: i32;
+    phase: Phase;
+    wave: i32;
+    score: i32;
+    balls_spawned: i32;
+    max_balls_wave: i32;
+    rng_state: i32;
+    running: i32;
+    sprites: BrickoutSprites;
+    tap_pulses: TapPulse[16];
+    runtime_screen: BrickoutRuntimeScreen;
+    layout: BrickoutLayout;
+    selected_tower: BrickType;
+    drag_active: i32;
+    drag_pointer_id: i32;
+    drag_world_x: f32;
+    drag_world_y: f32;
+    drag_grid_x: i32;
+    drag_grid_y: i32;
+    drag_valid: i32;
+}
+
+global state: GameState;
+global audio_buf: f32[512];
+global audio_ready: bool;
+global audio_sr: i32;
+global sfx_voices: SoundVoice[12];
+global desktop_size_w: i32[1];
+global desktop_size_h: i32[1];
+
+// RNG functions
+function seed_rng(seed: i32): void {
+    state.rng_state = seed;
+}
+
+function next_rand(): i32 {
+    state.rng_state = state.rng_state * 1103515245 + 12345;
+    if (state.rng_state < 0) {
+        state.rng_state = 0 - state.rng_state;
+    }
+    return state.rng_state;
+}
+
+function rand_float(max: f32): f32 {
+    let r: i32 = next_rand() % 1000;
+    let rf: f32 = i32_to_f32(r);
+    return (rf / 1000.0) * max;
+}
+
+function rand_range(min: f32, max: f32): f32 {
+    return min + rand_float(max - min);
+}
+
+// Math helpers
+function abs_f32(x: f32): f32 {
+    if (x < 0.0) {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+function clamp_f32(val: f32, min: f32, max: f32): f32 {
+    if (val < min) { return min; }
+    if (val > max) { return max; }
+    return val;
+}
+
+function sign_f32(x: f32): f32 {
+    if (x < 0.0) { return -1.0; }
+    if (x > 0.0) { return 1.0; }
+    return 0.0;
+}
+
+function apply_config_live(): void {
+    // Apply a subset of config values every tick so hot-reload edits take effect immediately.
+    //
+    // Note: This is dev-only behavior; it trades determinism/stability for iteration speed.
+    state.paddle.y = state.config.paddle.y;
+    state.paddle.width = state.config.paddle.width;
+    state.paddle.height = state.config.paddle.height;
+    state.paddle.speed = state.config.paddle.speed;
+
+    foreach (let brick in state.bricks) {
+        brick.width = state.config.brick.width;
+        brick.height = state.config.brick.height;
+    }
+
+    foreach (let ball in state.balls) {
+        ball.radius = state.config.ball.radius;
+    }
+}
+
+function ensure_config_loaded(): void {
+    if (state.config.magic == 1337) {
+        // Data binding is optional, but the runner may bind only a subset of fields if JSON keys don't match.
+        // Ensure window size is always valid even if `screen.w/h` were not populated.
+        if (state.config.screen.w < 1 || state.config.screen.h < 1) {
+            state.config.screen.w = 540;
+            state.config.screen.h = 1080;
+        }
+        return;
+    }
+
+    // Fallback defaults for hosts that don't provide JSON data binding (e.g. WASM prototype).
+    state.config.magic = 1337;
+
+    // Window size (pixels). Virtual resolution is fixed (VIRTUAL_W x VIRTUAL_H) and scaled to fit.
+    state.config.screen.w = 540;
+    state.config.screen.h = 1080;
+
+    state.config.grid.origin_x = 50.0;
+    state.config.grid.margin_bottom = 50.0;
+    state.config.grid.spacing = 4.0;
+
+    state.config.brick.width = 52.0;
+    state.config.brick.height = 24.0;
+
+    state.config.paddle.y = 30.0;
+    state.config.paddle.width = 100.0;
+    state.config.paddle.height = 10.0;
+    state.config.paddle.speed = 400.0;
+
+    state.config.ball.radius = 6.0;
+    state.config.ball.spawn_jitter_x = 30.0;
+    state.config.ball.clamp_margin_x = 100.0;
+    state.config.ball.vx_rand = 100.0;
+    state.config.ball.speed_min_base = 150.0;
+    state.config.ball.speed_min_per_wave = 10.0;
+    state.config.ball.speed_max_base = 250.0;
+    state.config.ball.speed_max_per_wave = 12.0;
+    state.config.ball.damage_base = 1;
+    state.config.ball.damage_wave_div = 4;
+    state.config.ball.hp_base = 20;
+    state.config.ball.hp_wave_div = 2;
+    state.config.ball.hp_scale = 10;
+
+    state.config.wave.start_wave = 1;
+    state.config.wave.start_max_balls_wave = 5;
+    state.config.wave.max_balls_wave_add = 2;
+    state.config.wave.start_spawn_balls = 90;
+
+    state.config.timing.ball_spawn_cd_ms = 1000;
+    state.config.timing.end_phase_restart_ms = 3000;
+
+    state.config.fx.jiggle_threshold = 10;
+    state.config.fx.jiggle_degrees = 5.0;
+    state.config.fx.paddle_aim_degrees = 15.0;
+    state.config.fx.paddle_bounce_vx_scale = 200.0;
+
+    state.config.tower_basic.range = 140.0;
+    state.config.tower_basic.cooldown_ms = 220;
+    state.config.tower_basic.damage = 1;
+    state.config.tower_basic.shot_fx_ms = 90;
+
+    state.config.tower_armored.range = 160.0;
+    state.config.tower_armored.cooldown_ms = 320;
+    state.config.tower_armored.damage = 2;
+    state.config.tower_armored.shot_fx_ms = 90;
+
+    state.config.tower_reflector.range = 190.0;
+    state.config.tower_reflector.cooldown_ms = 180;
+    state.config.tower_reflector.damage = 1;
+    state.config.tower_reflector.shot_fx_ms = 90;
+
+    state.config.score.ball_kill = 1;
+    state.config.score.brick_kill = 10;
+
+    print_string("warning: config.json not bound; using fallback defaults\n");
+}
+
+function sfx_reset(): void {
+    let i: i32 = 0;
+    for (i = 0; i < SFX_MAX_VOICES; i = i + 1) {
+        sfx_voices[i].active = 0;
+        sfx_voices[i].phase = 0.0;
+        sfx_voices[i].freq = 0.0;
+        sfx_voices[i].amp = 0.0;
+        sfx_voices[i].age_frames = 0;
+        sfx_voices[i].duration_frames = 0;
+    }
+}
+
+function sfx_spawn(freq: f32, amp: f32, duration_ms: f32): void {
+    let sr: i32 = audio_sr;
+    if (sr < 1) { sr = 48000; }
+    let sr_f: f32 = i32_to_f32(sr);
+    let dur_frames: i32 = f32_to_i32((duration_ms / 1000.0) * sr_f);
+    if (dur_frames < 1) { dur_frames = 1; }
+    let i: i32 = 0;
+    for (i = 0; i < SFX_MAX_VOICES; i = i + 1) {
+        if (sfx_voices[i].active == 0) {
+            sfx_voices[i].active = 1;
+            sfx_voices[i].phase = 0.0;
+            sfx_voices[i].freq = freq;
+            sfx_voices[i].amp = amp;
+            sfx_voices[i].age_frames = 0;
+            sfx_voices[i].duration_frames = dur_frames;
+            return;
+        }
+    }
+}
+
+function sfx_play(kind: i32): void {
+    if (!audio_ready) { return; }
+    if (kind == SFX_SELECT) { sfx_spawn(620.0, 0.05, 90.0); }
+    if (kind == SFX_DRAG_START) { sfx_spawn(420.0, 0.04, 80.0); }
+    if (kind == SFX_DRAG_PLACE) { sfx_spawn(320.0, 0.06, 140.0); }
+    if (kind == SFX_DRAG_INVALID) { sfx_spawn(140.0, 0.05, 160.0); }
+    if (kind == SFX_SHOT) { sfx_spawn(760.0, 0.04, 60.0); }
+    if (kind == SFX_BOUNCE) { sfx_spawn(260.0, 0.04, 70.0); }
+    if (kind == SFX_BRICK_BREAK) { sfx_spawn(180.0, 0.06, 160.0); }
+}
+
+function fill_audio_chunk(sample_rate: i32): void {
+    let sr_f: f32 = i32_to_f32(sample_rate);
+    if (sr_f < 1.0) { return; }
+    let frame: i32 = 0;
+    for (frame = 0; frame < AUDIO_FRAMES_PER_PUSH; frame = frame + 1) {
+        let mix: f32 = 0.0;
+        let v: i32 = 0;
+        for (v = 0; v < SFX_MAX_VOICES; v = v + 1) {
+            if (sfx_voices[v].active != 0) {
+                let age_f: f32 = i32_to_f32(sfx_voices[v].age_frames);
+                let dur_f: f32 = i32_to_f32(sfx_voices[v].duration_frames);
+                let t: f32 = age_f / dur_f;
+                if (t >= 1.0) {
+                    sfx_voices[v].active = 0;
+                } else {
+                    let env: f32 = 1.0 - t;
+                    let sample: f32 = sin_fast(sfx_voices[v].phase) * sfx_voices[v].amp * env;
+                    mix = mix + sample;
+                    sfx_voices[v].phase = sfx_voices[v].phase + (sfx_voices[v].freq / sr_f) * PI2;
+                    if (sfx_voices[v].phase > PI2) { sfx_voices[v].phase = sfx_voices[v].phase - PI2; }
+                    sfx_voices[v].age_frames = sfx_voices[v].age_frames + 1;
+                }
+            }
+        }
+        if (mix > 0.4) { mix = 0.4; }
+        if (mix < -0.4) { mix = -0.4; }
+        let idx: i32 = frame * 2;
+        audio_buf[idx] = mix;
+        audio_buf[idx + 1] = mix;
+    }
+}
+
+function audio_update(): void {
+    if (!audio_ready) { return; }
+    let target: i32 = audio_sr / 5;
+    let queued: i32 = audio_get_queued_frames();
+    let i: i32 = 0;
+    for (i = 0; i < 8 && queued < target; i = i + 1) {
+        fill_audio_chunk(audio_sr);
+        let pushed: i32 = audio_push_f32_interleaved(audio_buf, AUDIO_FRAMES_PER_PUSH);
+        if (pushed < 1) { return; }
+        queued = queued + pushed;
+    }
+}
+
+function sync_screen_size(): void {
+    if (!gfx_window_resized()) {
+        return;
+    }
+
+    let w: i32 = gfx_window_width();
+    let h: i32 = gfx_window_height();
+    if (w < 1 || h < 1) {
+        return;
+    }
+
+    state.runtime_screen.w = w;
+    state.runtime_screen.h = h;
+}
+
+function update_layout(): void {
+    let vx: f32 = i32_to_f32(input_viewport_x_px());
+    let vy: f32 = i32_to_f32(input_viewport_y_px());
+    let vw: f32 = i32_to_f32(input_viewport_w_px());
+    let vh: f32 = i32_to_f32(input_viewport_h_px());
+    if (vw < 1.0 || vh < 1.0) {
+        return;
+    }
+
+    state.layout.viewport_x = vx;
+    state.layout.viewport_y = vy;
+    state.layout.viewport_w = vw;
+    state.layout.viewport_h = vh;
+
+    let base_w: f32 = VIRTUAL_W;
+    let base_h: f32 = VIRTUAL_H;
+
+    // Fit the full virtual screen into the current viewport while preserving aspect ratio.
+    let sx: f32 = vw / base_w;
+    let sy: f32 = vh / base_h;
+    let s: f32 = sx;
+    if (sy < s) { s = sy; }
+    if (s <= 0.0) { return; }
+
+    let play_w: f32 = base_w * s;
+    let play_h: f32 = base_h * s;
+
+    state.layout.ui_mode = 2;
+    state.layout.play_w = play_w;
+    state.layout.play_h = play_h;
+    state.layout.play_x = vx + (vw - play_w) * 0.5;
+    state.layout.play_y = vy + (vh - play_h) * 0.5;
+    state.layout.play_scale = s;
+
+    // Reserve a fixed bottom band (in virtual units) for UI. Gameplay should not place objects here.
+    state.layout.ui_x = state.layout.play_x;
+    state.layout.ui_y = state.layout.play_y + (base_h - UI_RESERVED_H) * s;
+    state.layout.ui_w = play_w;
+    state.layout.ui_h = UI_RESERVED_H * s;
+}
+
+function play_to_screen_x(play_x: f32): f32 {
+    return state.layout.play_x + play_x * state.layout.play_scale;
+}
+
+function play_to_screen_y(play_y: f32): f32 {
+    return state.layout.play_y + play_y * state.layout.play_scale;
+}
+
+function play_to_screen_len(play_len: f32): f32 {
+    return play_len * state.layout.play_scale;
+}
+
+function snap_px(value: f32): f32 {
+    if (value >= 0.0) {
+        return i32_to_f32(f32_to_i32(value + 0.5));
+    }
+    return i32_to_f32(f32_to_i32(value - 0.5));
+}
+
+function play_snap_x(play_x: f32): f32 {
+    return snap_px(play_to_screen_x(play_x));
+}
+
+function play_snap_y(play_y: f32): f32 {
+    return snap_px(play_to_screen_y(play_y));
+}
+
+function play_snap_len(play_len: f32): f32 {
+    return snap_px(play_to_screen_len(play_len));
+}
+
+function screen_to_play_x(screen_x: f32): f32 {
+    if (state.layout.play_scale <= 0.0) { return 0.0; }
+    return (screen_x - state.layout.play_x) / state.layout.play_scale;
+}
+
+function screen_to_play_y(screen_y: f32): f32 {
+    if (state.layout.play_scale <= 0.0) { return 0.0; }
+    return (screen_y - state.layout.play_y) / state.layout.play_scale;
+}
+
+function clamp_i32(v: i32, min: i32, max: i32): i32 {
+    if (v < min) { return min; }
+    if (v > max) { return max; }
+    return v;
+}
+
+function maximize_window_for_desktop(): void {
+    // Pick a window size that either fits the full desktop height or the full desktop width,
+    // while preserving the virtual aspect ratio, and never going below the virtual size.
+    desktop_size_w[0] = 0;
+    desktop_size_h[0] = 0;
+    get_desktop_size(desktop_size_w, desktop_size_h);
+
+    let dw: i32 = desktop_size_w[0];
+    let dh: i32 = desktop_size_h[0];
+    if (dw < 1 || dh < 1) {
+        return;
+    }
+
+    let margin_w: i32 = 80;
+    let margin_h: i32 = 120;
+    let usable_w: i32 = dw - margin_w;
+    let usable_h: i32 = dh - margin_h;
+    if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
+    if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
+
+    // Candidate A: fit height.
+    let fit_h_h: i32 = usable_h;
+    let fit_h_w: i32 = f32_to_i32(i32_to_f32(fit_h_h) * (VIRTUAL_W / VIRTUAL_H));
+
+    // Candidate B: fit width.
+    let fit_w_w: i32 = usable_w;
+    let fit_w_h: i32 = f32_to_i32(i32_to_f32(fit_w_w) * (VIRTUAL_H / VIRTUAL_W));
+
+    let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
+    let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
+
+    let choose_w: i32 = f32_to_i32(VIRTUAL_W);
+    let choose_h: i32 = f32_to_i32(VIRTUAL_H);
+
+    if (a_ok && b_ok) {
+        // Pick the bigger one (area).
+        let a_area: i32 = fit_h_w * fit_h_h;
+        let b_area: i32 = fit_w_w * fit_w_h;
+        if (a_area >= b_area) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            choose_w = fit_w_w;
+            choose_h = fit_w_h;
+        }
+    } else {
+        if (a_ok) {
+            choose_w = fit_h_w;
+            choose_h = fit_h_h;
+        } else {
+            if (b_ok) {
+                choose_w = fit_w_w;
+                choose_h = fit_w_h;
+            }
+        }
+    }
+
+    if (choose_w < f32_to_i32(VIRTUAL_W)) { choose_w = f32_to_i32(VIRTUAL_W); }
+    if (choose_h < f32_to_i32(VIRTUAL_H)) { choose_h = f32_to_i32(VIRTUAL_H); }
+
+    set_window_size(choose_w, choose_h);
+}
+
+function point_in_rect(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32): bool {
+    if (px < rx) { return false; }
+    if (py < ry) { return false; }
+    if (px > rx + rw) { return false; }
+    if (py > ry + rh) { return false; }
+    return true;
+}
+
+// Grid helpers - bricks are placed on a grid in the lower portion
+function grid_to_world_x(gx: i32): f32 {
+    let gxf: f32 = i32_to_f32(gx);
+    return state.config.grid.origin_x + gxf * (state.config.brick.width + state.config.grid.spacing);
+}
+
+function grid_to_world_y(gy: i32): f32 {
+    let gyf: f32 = i32_to_f32(gy);
+    // Place bricks starting near the bottom and stack upward with the same spacing.
+    return GAME_H - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
+}
+
+function grid_in_bounds(gx: i32, gy: i32): bool {
+    if (gx < 0) { return false; }
+    if (gy < 0) { return false; }
+    if (gx >= GRID_COLS) { return false; }
+    if (gy >= GRID_ROWS) { return false; }
+    return true;
+}
+
+function grid_cell_fits_in_level(gx: i32, gy: i32): bool {
+    if (!grid_in_bounds(gx, gy)) { return false; }
+
+    let x: f32 = grid_to_world_x(gx);
+    let y: f32 = grid_to_world_y(gy);
+    let w: f32 = state.config.brick.width;
+    let h: f32 = state.config.brick.height;
+
+    if (w <= 0.0 || h <= 0.0) { return false; }
+    if (x < 0.0) { return false; }
+    if (y < 0.0) { return false; }
+    if (x + w > VIRTUAL_W) { return false; }
+    if (y + h > GAME_H) { return false; }
+
+    return true;
+}
+
+function world_to_grid_x(wx: f32): i32 {
+    let cell_w: f32 = state.config.brick.width + state.config.grid.spacing;
+    let local_x: f32 = wx - state.config.grid.origin_x;
+    if (cell_w <= 0.0) { return -1; }
+    if (local_x < 0.0) { return -1; }
+    return f32_to_i32(local_x / cell_w);
+}
+
+function world_to_grid_y(wy: f32): i32 {
+    let base_y: f32 = GAME_H - state.config.grid.margin_bottom - state.config.brick.height;
+    let cell_h: f32 = state.config.brick.height + state.config.grid.spacing;
+    if (cell_h <= 0.0) { return -1; }
+    let local_y: f32 = base_y - wy;
+    if (local_y < 0.0) { return -1; }
+    return f32_to_i32(local_y / cell_h);
+}
+
+function grid_is_occupied(gx: i32, gy: i32): bool {
+    foreach (let brick in state.bricks) {
+        if (brick.active) {
+            if (brick.grid_x == gx && brick.grid_y == gy) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function find_free_brick_slot(): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_BRICKS; i = i + 1) {
+        if (!state.bricks[i].active) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
+    if (!grid_in_bounds(gx, gy)) { return false; }
+    if (!grid_cell_fits_in_level(gx, gy)) { return false; }
+    if (grid_is_occupied(gx, gy)) { return false; }
+    let slot: i32 = find_free_brick_slot();
+    if (slot < 0) { return false; }
+
+    state.bricks[slot].active = true;
+    state.bricks[slot].grid_x = gx;
+    state.bricks[slot].grid_y = gy;
+    state.bricks[slot].x = grid_to_world_x(gx);
+    state.bricks[slot].y = grid_to_world_y(gy);
+    state.bricks[slot].width = state.config.brick.width;
+    state.bricks[slot].height = state.config.brick.height;
+    state.bricks[slot].brick_type = brick_type;
+    state.bricks[slot].attack_cd_ms = 0;
+    state.bricks[slot].shot_fx_ms = 0;
+    state.bricks[slot].shot_tx = 0.0;
+    state.bricks[slot].shot_ty = 0.0;
+
+    let hp: i32 = 10 + (next_rand() % 21);
+    state.bricks[slot].hp = hp;
+    state.bricks[slot].max_hp = hp;
+    return true;
+}
+
+// Initialization
+function init_game(reset_progress: bool): void {
+    // Clear all bricks
+    foreach (let brick in state.bricks) {
+        brick.active = false;
+        brick.hp = 0;
+        brick.max_hp = 0;
+        brick.x = 0.0;
+        brick.y = 0.0;
+        brick.grid_x = -1;
+        brick.grid_y = -1;
+        brick.width = state.config.brick.width;
+        brick.height = state.config.brick.height;
+        brick.brick_type = BrickType.Basic;
+        brick.attack_cd_ms = 0;
+        brick.shot_fx_ms = 0;
+        brick.shot_tx = 0.0;
+        brick.shot_ty = 0.0;
+    }
+
+    // Clear all balls
+    foreach (let ball in state.balls) {
+        ball.active = false;
+        ball.x = 0.0;
+        ball.y = 0.0;
+        ball.vx = 0.0;
+        ball.vy = 0.0;
+        ball.radius = state.config.ball.radius;
+        ball.damage = state.config.ball.damage_base;
+        ball.hp = 0;
+        ball.max_hp = 0;
+        ball.bounce_streak = 0;
+    }
+
+    // Init paddle
+    let sw: f32 = VIRTUAL_W;
+    state.paddle.x = sw / 2.0;
+    state.paddle.y = state.config.paddle.y;
+    state.paddle.width = state.config.paddle.width;
+    state.paddle.height = state.config.paddle.height;
+    state.paddle.speed = state.config.paddle.speed;
+
+    // Init cursor
+    state.cursor.grid_x = 3;
+    state.cursor.grid_y = 3;
+    state.cursor.brick_type = BrickType.Basic;
+    state.selected_tower = BrickType.Basic;
+    state.drag_active = 0;
+    state.drag_pointer_id = -1;
+    state.drag_world_x = 0.0;
+    state.drag_world_y = 0.0;
+    state.drag_grid_x = -1;
+    state.drag_grid_y = -1;
+    state.drag_valid = 0;
+
+    // Init timers
+    state.timers.last_time = get_time_ms();
+    state.timers.ball_spawn_cd = 0;
+    state.timers.phase_timer = 0;
+    state.timers.tick_time_ms = 0;
+
+    frame_timer_init(state.frame_timer.samples_ms);
+    state.frame_timer.sample_index = 0;
+
+    // Game state
+    // Start immediately in battle; no setup pause.
+    state.phase = Phase.Battle;
+    state.balls_spawned = 0;
+    state.running = 1;
+
+    // Initialize frame time tracking
+    // Note: Frame times will be filled with first actual measurement
+    // to provide accurate average from the start
+    state.frame_timer.sample_index = 0;
+
+    if (reset_progress) {
+        state.wave = state.config.wave.start_wave;
+        state.score = 0;
+        state.max_balls_wave = state.config.wave.start_max_balls_wave;
+    }
+
+    sfx_reset();
+}
+
+function setup_default_bricks(): void {
+    // Stress test: Fill the bottom of the screen with bricks
+    let brick_idx: i32 = 0;
+    let row: i32 = 0;
+    let col: i32 = 0;
+
+    // Fill grid rows/cols for the starting layout.
+    for (row = 0; row < GRID_ROWS; row = row + 1) {
+        for (col = 0; col < GRID_COLS; col = col + 1) {
+            if (brick_idx < MAX_BRICKS) {
+                state.bricks[brick_idx].active = true;
+                state.bricks[brick_idx].x = grid_to_world_x(col);
+                state.bricks[brick_idx].y = grid_to_world_y(row);
+                state.bricks[brick_idx].grid_x = col;
+                state.bricks[brick_idx].grid_y = row;
+                state.bricks[brick_idx].attack_cd_ms = 0;
+                state.bricks[brick_idx].shot_fx_ms = 0;
+
+                // Mix brick types for variety
+                let type_selector: i32 = (row + col) % 3;
+
+                // Stress test: bricks have 10-30 HP
+                let brick_hp: i32 = 10 + (next_rand() % 21);
+
+                if (type_selector == 0) {
+                    state.bricks[brick_idx].brick_type = BrickType.Basic;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+                if (type_selector == 1) {
+                    state.bricks[brick_idx].brick_type = BrickType.Armored;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+                if (type_selector == 2) {
+                    state.bricks[brick_idx].brick_type = BrickType.Reflector;
+                    state.bricks[brick_idx].hp = brick_hp;
+                    state.bricks[brick_idx].max_hp = brick_hp;
+                }
+
+                brick_idx = brick_idx + 1;
+            }
+        }
+    }
+}
+
+function dist2(ax: f32, ay: f32, bx: f32, by: f32): f32 {
+    let dx: f32 = ax - bx;
+    let dy: f32 = ay - by;
+    return dx * dx + dy * dy;
+}
+
+function update_brick_attacks(delta_ms: i32): void {
+    foreach (let brick in state.bricks) {
+        if (brick.active) {
+            if (brick.attack_cd_ms > 0) {
+                brick.attack_cd_ms = brick.attack_cd_ms - delta_ms;
+            }
+            if (brick.shot_fx_ms > 0) {
+                brick.shot_fx_ms = brick.shot_fx_ms - delta_ms;
+                if (brick.shot_fx_ms < 0) { brick.shot_fx_ms = 0; }
+            }
+
+            if (brick.attack_cd_ms < 1) {
+                let range: f32 = state.config.tower_basic.range;
+                let cd: i32 = state.config.tower_basic.cooldown_ms;
+                let dmg: i32 = state.config.tower_basic.damage;
+                let shot_fx_ms: i32 = state.config.tower_basic.shot_fx_ms;
+
+                if (brick.brick_type == BrickType.Armored) {
+                    range = state.config.tower_armored.range;
+                    cd = state.config.tower_armored.cooldown_ms;
+                    dmg = state.config.tower_armored.damage;
+                    shot_fx_ms = state.config.tower_armored.shot_fx_ms;
+                }
+                if (brick.brick_type == BrickType.Reflector) {
+                    range = state.config.tower_reflector.range;
+                    cd = state.config.tower_reflector.cooldown_ms;
+                    dmg = state.config.tower_reflector.damage;
+                    shot_fx_ms = state.config.tower_reflector.shot_fx_ms;
+                }
+
+                let range2: f32 = range * range;
+                let bx: f32 = brick.x + brick.width / 2.0;
+                let by: f32 = brick.y + brick.height / 2.0;
+
+                let best_i: i32 = -1;
+                let best_d2: f32 = range2 + 1.0;
+
+                foreach (let ball, i in state.balls) {
+                    if (ball.active) {
+                        let ballx: f32 = ball.x;
+                        let bally: f32 = ball.y;
+                        let d2v: f32 = dist2(bx, by, ballx, bally);
+                        if (d2v < best_d2) {
+                            if (d2v <= range2) {
+                                best_d2 = d2v;
+                                best_i = i;
+                            }
+                        }
+                    }
+                }
+
+                if (best_i == -1) {
+                    // No target in range.
+                } else {
+                    state.balls[best_i].hp = state.balls[best_i].hp - dmg;
+                    if (state.balls[best_i].hp < 1) {
+                        state.balls[best_i].active = false;
+                        state.score = state.score + state.config.score.ball_kill;
+                    }
+                    brick.attack_cd_ms = cd;
+                    brick.shot_fx_ms = shot_fx_ms;
+                    brick.shot_tx = state.balls[best_i].x;
+                    brick.shot_ty = state.balls[best_i].y;
+                    sfx_play(SFX_SHOT);
+                }
+            }
+        }
+    }
+}
+
+// Spawn a ball near the paddle, heading downward
+function spawn_ball(): void {
+    let sw: f32 = i32_to_f32(state.config.screen.w);
+    foreach (let ball in state.balls) {
+        if (!ball.active) {
+            ball.active = true;
+            let jitter: f32 = state.config.ball.spawn_jitter_x;
+            ball.x = rand_range(state.paddle.x - jitter, state.paddle.x + jitter);
+            let margin: f32 = state.config.ball.clamp_margin_x;
+            if (ball.x < margin) { ball.x = margin; }
+            if (ball.x > sw - margin) { ball.x = sw - margin; }
+
+            ball.radius = state.config.ball.radius;
+            let ph: f32 = state.paddle.height;
+            ball.y = state.paddle.y + ph / 2.0 + ball.radius + 2.0;
+            let vr: f32 = state.config.ball.vx_rand;
+            ball.vx = rand_range(0.0 - vr, vr);
+            let wf: f32 = i32_to_f32(state.wave);
+            let speed_min: f32 = state.config.ball.speed_min_base + wf * state.config.ball.speed_min_per_wave;
+            let speed_max: f32 = state.config.ball.speed_max_base + wf * state.config.ball.speed_max_per_wave;
+            ball.vy = rand_range(speed_min, speed_max);
+            let div: i32 = state.config.ball.damage_wave_div;
+            if (div < 1) { div = 1; }
+            ball.damage = state.config.ball.damage_base + (state.wave / div);
+            let hp_div: i32 = state.config.ball.hp_wave_div;
+            if (hp_div < 1) { hp_div = 1; }
+            ball.max_hp = (state.config.ball.hp_base + (state.wave / hp_div)) * state.config.ball.hp_scale;
+            ball.hp = ball.max_hp;
+            state.balls_spawned = state.balls_spawned + 1;
+            return;
+        }
+    }
+}
+
+// Count active entities
+function count_active_bricks(): i32 {
+    let count: i32 = 0;
+    foreach (let brick in state.bricks) {
+        if (brick.active) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+function count_active_balls(): i32 {
+    let count: i32 = 0;
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// Physics update
+function update_balls(dt: f32): void {
+    let sw: f32 = VIRTUAL_W;
+    let sh: f32 = GAME_H;
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            // Move ball
+            ball.x = ball.x + ball.vx * dt;
+            ball.y = ball.y + ball.vy * dt;
+
+            // Wall bounces (left, right, bottom)
+            let bounced: bool = false;
+            if (ball.x < ball.radius) {
+                ball.x = ball.radius;
+                ball.vx = abs_f32(ball.vx);
+                bounced = true;
+            }
+            if (ball.x > sw - ball.radius) {
+                ball.x = sw - ball.radius;
+                ball.vx = 0.0 - abs_f32(ball.vx);
+                bounced = true;
+            }
+            if (ball.y > sh - ball.radius) {
+                ball.y = sh - ball.radius;
+                ball.vy = 0.0 - abs_f32(ball.vy);
+                bounced = true;
+            }
+            if (bounced) {
+                ball.bounce_streak = ball.bounce_streak + 1;
+                if (ball.bounce_streak >= state.config.fx.jiggle_threshold) {
+                    ball.bounce_streak = 0;
+                    let jiggle_rad: f32 = state.config.fx.jiggle_degrees * (PI / 180.0);
+                    let angle: f32 = rand_range(0.0 - jiggle_rad, jiggle_rad);
+                    let c: f32 = cos_fast(angle);
+                    let s: f32 = sin_fast(angle);
+                    let old_vx: f32 = ball.vx;
+                    let old_vy: f32 = ball.vy;
+                    ball.vx = old_vx * c - old_vy * s;
+                    ball.vy = old_vx * s + old_vy * c;
+                }
+            }
+
+            // Ball flies past the top - deactivate
+            if (ball.y < (0.0 - ball.radius)) {
+                ball.active = false;
+            }
+        }
+    }
+}
+
+// Paddle AI - tracks nearest ball
+function update_paddle(dt: f32): void {
+    state.paddle.speed = state.config.paddle.speed;
+    // Find nearest ball heading up toward the top paddle
+    let nearest_x: f32 = state.paddle.x;
+    let nearest_dist: f32 = 99999.0;
+    let found: bool = false;
+
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            if (ball.vy < 0.0) {
+                let dx: f32 = abs_f32(ball.x - state.paddle.x);
+                let dy: f32 = abs_f32(ball.y - state.paddle.y);
+                let dist: f32 = dx + dy;
+                if (dist < nearest_dist) {
+                    nearest_dist = dist;
+                    nearest_x = ball.x;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if (found) {
+        // Move paddle toward ball
+        let diff: f32 = nearest_x - state.paddle.x;
+        let move_dist: f32 = state.paddle.speed * dt;
+
+        if (abs_f32(diff) < move_dist) {
+            state.paddle.x = nearest_x;
+        } else {
+            state.paddle.x = state.paddle.x + sign_f32(diff) * move_dist;
+        }
+    }
+
+    // Clamp paddle to screen
+    let half_w: f32 = state.paddle.width / 2.0;
+    let sw: f32 = VIRTUAL_W;
+    state.paddle.x = clamp_f32(state.paddle.x, half_w, sw - half_w);
+}
+
+// Ball-paddle collision
+function check_paddle_collisions(): void {
+    let px: f32 = state.paddle.x;
+    let py: f32 = state.paddle.y;
+    let pw: f32 = state.paddle.width;
+    let ph: f32 = state.paddle.height;
+
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            if (ball.vy < 0.0) {
+                // Simple AABB check
+                let bx: f32 = ball.x;
+                let by: f32 = ball.y;
+                let br: f32 = ball.radius;
+
+                let left: f32 = px - pw / 2.0;
+                let right: f32 = px + pw / 2.0;
+                let top: f32 = py - ph / 2.0;
+                let bottom: f32 = py + ph / 2.0;
+
+                // Check AABB collision
+                let hit_x: bool = false;
+                let hit_y: bool = false;
+                if (bx + br > left) {
+                    if (bx - br < right) {
+                        hit_x = true;
+                    }
+                }
+                if (by + br > top) {
+                    if (by - br < bottom) {
+                        hit_y = true;
+                    }
+                }
+
+                if (hit_x) {
+                    if (hit_y) {
+                        // Bounce with angle based on hit position
+                        ball.vy = abs_f32(ball.vy);
+
+                        // Offset determines angle
+                        let offset: f32 = (bx - px) / (pw / 2.0);
+                        ball.vx = offset * state.config.fx.paddle_bounce_vx_scale;
+
+                        // Move ball out of paddle
+                        ball.y = bottom + br + 1.0;
+                        ball.bounce_streak = ball.bounce_streak + 1;
+                        sfx_play(SFX_BOUNCE);
+                        if (ball.bounce_streak >= state.config.fx.jiggle_threshold) {
+                            ball.bounce_streak = 0;
+                            // Find first active brick and angle ball toward it (up to 15 degrees)
+                            let found_brick: bool = false;
+                            let brick_cx: f32 = 0.0;
+                            let brick_cy: f32 = 0.0;
+                            foreach (let brick in state.bricks) {
+                                if (brick.active) {
+                                    if (!found_brick) {
+                                        brick_cx = brick.x + brick.width / 2.0;
+                                        brick_cy = brick.y + brick.height / 2.0;
+                                        found_brick = true;
+                                    }
+                                }
+                            }
+
+                            if (found_brick) {
+                                // Calculate direction to brick
+                                let tx: f32 = brick_cx - bx;
+                                let ty: f32 = brick_cy - by;
+
+                                // Use cross product to determine which way to rotate
+                                // cross = vx * ty - vy * tx
+                                let cross: f32 = ball.vx * ty - ball.vy * tx;
+
+                                // Apply up to 15 degrees rotation toward the brick
+                                let max_adjustment: f32 = state.config.fx.paddle_aim_degrees * (PI / 180.0);
+                                let angle: f32 = 0.0;
+                                if (cross > 0.0) {
+                                    // Rotate counterclockwise
+                                    angle = max_adjustment;
+                                } else {
+                                    // Rotate clockwise
+                                    angle = 0.0 - max_adjustment;
+                                }
+
+                                let c: f32 = cos_fast(angle);
+                                let s: f32 = sin_fast(angle);
+                                let old_vx: f32 = ball.vx;
+                                let old_vy: f32 = ball.vy;
+                                ball.vx = old_vx * c - old_vy * s;
+                                ball.vy = old_vx * s + old_vy * c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function compute_ball_spawn_cd_ms(): i32 {
+    // Stress test: spawn a ball every second
+    return state.config.timing.ball_spawn_cd_ms;
+}
+
+function start_wave(): void {
+    state.balls_spawned = 0;
+    state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
+
+    // Stress test: spawn a bunch of balls at the start
+    let n: i32 = state.config.wave.start_spawn_balls;
+    if (n < 0) { n = 0; }
+    if (n > MAX_BALLS) { n = MAX_BALLS; }
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        spawn_ball();
+    }
+}
+
+// Ball-brick collision
+function check_brick_collisions(): void {
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            foreach (let brick in state.bricks) {
+                if (brick.active) {
+                    // AABB collision
+                    let bx: f32 = ball.x;
+                    let by: f32 = ball.y;
+                    let br: f32 = ball.radius;
+
+                    let left: f32 = brick.x;
+                    let right: f32 = brick.x + brick.width;
+                    let top: f32 = brick.y;
+                    let bottom: f32 = brick.y + brick.height;
+
+                    // Check AABB collision
+                    let brick_hit_x: bool = false;
+                    let brick_hit_y: bool = false;
+                    if (bx + br > left) {
+                        if (bx - br < right) {
+                            brick_hit_x = true;
+                        }
+                    }
+                    if (by + br > top) {
+                        if (by - br < bottom) {
+                            brick_hit_y = true;
+                        }
+                    }
+
+                    if (brick_hit_x) {
+                        if (brick_hit_y) {
+                            // Hit! Damage brick
+                            brick.hp = brick.hp - ball.damage;
+                            if (brick.hp < 1) {
+                                brick.active = false;
+                                sfx_play(SFX_BRICK_BREAK);
+                                state.score = state.score + state.config.score.brick_kill;
+                            }
+
+                            // Bounce ball
+                            // Determine collision side
+                            let dx_left: f32 = abs_f32(bx - left);
+                            let dx_right: f32 = abs_f32(bx - right);
+                            let dy_top: f32 = abs_f32(by - top);
+                            let dy_bottom: f32 = abs_f32(by - bottom);
+
+                            let min_d: f32 = dx_left;
+                            if (dx_right < min_d) { min_d = dx_right; }
+                            if (dy_top < min_d) { min_d = dy_top; }
+                            if (dy_bottom < min_d) { min_d = dy_bottom; }
+
+                            // Check if horizontal or vertical bounce
+                            let horiz_bounce: bool = false;
+                            if (min_d == dx_left) { horiz_bounce = true; }
+                            if (min_d == dx_right) { horiz_bounce = true; }
+
+                            if (horiz_bounce) {
+                                ball.vx = 0.0 - ball.vx;
+                            } else {
+                                ball.vy = 0.0 - ball.vy;
+                            }
+                            ball.bounce_streak = 0;
+                            sfx_play(SFX_BOUNCE);
+
+                            // Reflector type adds randomness
+                            if (brick.brick_type == BrickType.Reflector) {
+                                ball.vx = ball.vx + rand_range(-50.0, 50.0);
+                                ball.vy = ball.vy + rand_range(-50.0, 50.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Input handling for setup phase
+function handle_setup_input(): void {
+    // Arrow keys move cursor
+    // (simplified - in full version would track key press/release)
+}
+
+// Update game logic
+function update_game(dt: f32, delta_ms: i32): void {
+    if (state.phase == Phase.Battle) {
+        // Spawn balls periodically (stress test: no limit)
+        state.timers.ball_spawn_cd = state.timers.ball_spawn_cd - delta_ms;
+        if (state.timers.ball_spawn_cd < 0) {
+            spawn_ball();
+            state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
+        }
+
+        // Update physics
+        update_balls(dt);
+        update_paddle(dt);
+        update_brick_attacks(delta_ms);
+        check_paddle_collisions();
+        check_brick_collisions();
+
+        // Check win/lose
+        let active_bricks: i32 = count_active_bricks();
+        let active_balls: i32 = count_active_balls();
+
+        if (active_bricks == 0) {
+            state.phase = Phase.Lose; // All bricks destroyed = player loses
+            state.timers.phase_timer = 0;
+        }
+
+        // Check if all balls spawned and none active = survived wave
+        let all_spawned: bool = state.balls_spawned > (state.max_balls_wave - 1);
+        if (all_spawned) {
+            if (active_balls == 0) {
+                // Survived the wave: immediately start the next wave (no pause banner).
+                state.wave = state.wave + 1;
+                state.max_balls_wave = state.max_balls_wave + state.config.wave.max_balls_wave_add;
+                start_wave();
+            }
+        }
+    }
+
+    // Handle end phases (WIN or LOSE)
+    let in_end_phase: bool = false;
+    if (state.phase == Phase.Lose) { in_end_phase = true; }
+
+    if (in_end_phase) {
+        state.timers.phase_timer = state.timers.phase_timer + delta_ms;
+        if (state.timers.phase_timer > state.config.timing.end_phase_restart_ms) {
+            // Restart
+            init_game(true);
+            setup_default_bricks();
+            start_wave();
+        }
+    }
+}
+
+// Drawing functions
+function draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+    // Draw rectangle as 4 lines
+    gfx_cmd_line(x, y, x + w, y, r, g, b, a);
+    gfx_cmd_line(x + w, y, x + w, y + h, r, g, b, a);
+    gfx_cmd_line(x + w, y + h, x, y + h, r, g, b, a);
+    gfx_cmd_line(x, y + h, x, y, r, g, b, a);
+}
+
+function draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+    // Draw filled rectangle with horizontal lines
+    let line_y: f32 = y;
+    for (line_y = y; line_y < y + h; line_y = line_y + 2.0) {
+        gfx_cmd_line(x, line_y, x + w, line_y, r, g, b, a);
+    }
+}
+
+function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f32): void {
+    // Draw circle as octagon
+    let segments: i32 = 8;
+    let i: i32 = 0;
+    let prev_x: f32 = cx + radius;
+    let prev_y: f32 = cy;
+
+    for (i = 1; i < (segments + 1); i = i + 1) {
+        let fi: f32 = i32_to_f32(i);
+        let seg_f: f32 = i32_to_f32(segments);
+        let angle: f32 = (fi / seg_f) * 2.0 * PI;
+        let px: f32 = cx + cos_fast(angle) * radius;
+        let py: f32 = cy + sin_fast(angle) * radius;
+        gfx_cmd_line(prev_x, prev_y, px, py, r, g, b, a);
+        prev_x = px;
+        prev_y = py;
+    }
+}
+
+function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    gfx_cmd_line(
+        play_snap_x(x1),
+        play_snap_y(y1),
+        play_snap_x(x2),
+        play_snap_y(y2),
+        red, green, blue, alpha);
+}
+
+function play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_rect(
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
+        red, green, blue, alpha);
+}
+
+function play_draw_filled_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_filled_rect(
+        play_snap_x(x),
+        play_snap_y(y),
+        play_snap_len(width),
+        play_snap_len(height),
+        red, green, blue, alpha);
+}
+
+function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+    draw_circle(
+        play_snap_x(cx),
+        play_snap_y(cy),
+        play_snap_len(radius),
+        red, green, blue, alpha);
+}
+
+function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
+    let screen_x: f32 = play_snap_x(x);
+    let screen_y: f32 = play_snap_y(y);
+    let screen_w_f: f32 = play_snap_len(width);
+    let screen_h_f: f32 = play_snap_len(height);
+    let screen_w: i32 = f32_to_i32(screen_w_f);
+    let screen_h: i32 = f32_to_i32(screen_h_f);
+
+    // Ensure even sizes so a centered sprite lands on integer pixel bounds.
+    // Otherwise `x - w/2` ends up at .5, which makes sprites appear misaligned with line primitives.
+    if ((screen_w % 2) != 0) { screen_w = screen_w + 1; }
+    if ((screen_h % 2) != 0) { screen_h = screen_h + 1; }
+
+    let screen_x_i: i32 = f32_to_i32(screen_x);
+    let screen_y_i: i32 = f32_to_i32(screen_y);
+    let top_left_x: i32 = screen_x_i - (screen_w / 2);
+    let top_left_y: i32 = screen_y_i - (screen_h / 2);
+    gfx_cmd_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
+}
+
+function draw_bricks(): void {
+    let now_ms: i32 = get_time_ms();
+    let t_mod: i32 = now_ms % 2000;
+    let t_f: f32 = i32_to_f32(t_mod);
+    let phase: f32 = (t_f / 2000.0) * 2.0 * PI;
+    let wave: f32 = sin_fast(phase);
+    let pulse: f32 = 0.5 + 0.5 * wave;
+    let fx_alpha: f32 = 0.10 + 0.20 * pulse;
+
+    foreach (let brick in state.bricks) {
+        if (brick.active) {
+            let h_base: i32 = state.sprites.brick_basic_base;
+            let h_turret: i32 = state.sprites.brick_basic_turret;
+            let h_fx: i32 = state.sprites.brick_basic_fx;
+            if (brick.brick_type == BrickType.Basic) {
+                h_base = state.sprites.brick_basic_base;
+                h_turret = state.sprites.brick_basic_turret;
+                h_fx = state.sprites.brick_basic_fx;
+            }
+            if (brick.brick_type == BrickType.Armored) {
+                h_base = state.sprites.brick_armored_base;
+                h_turret = state.sprites.brick_armored_turret;
+                h_fx = state.sprites.brick_armored_fx;
+            }
+            if (brick.brick_type == BrickType.Reflector) {
+                h_base = state.sprites.brick_reflector_base;
+                h_turret = 0;
+                h_fx = state.sprites.brick_reflector_fx;
+            }
+
+            let cx: f32 = brick.x + brick.width / 2.0;
+            let cy: f32 = brick.y + brick.height / 2.0;
+
+            if (h_base != 0) {
+                play_draw_sprite(h_base, cx, cy, brick.width, brick.height, 0, 255);
+            }
+
+            // Turret bob/pulse (driven by time; no SVG animation tags)
+            if (h_turret != 0) {
+                let seed: f32 = cx * 0.013 + cy * 0.021;
+                let wobble: f32 = sin_fast(phase + seed);
+                let oy: f32 = wobble * 1.4;
+                let rot_deg: i32 = f32_to_i32(wobble * 3.0);  // ~0.05 radians = ~3 degrees
+                let a: i32 = f32_to_i32((0.85 + 0.15 * (0.5 + 0.5 * wobble)) * 255.0);
+                play_draw_sprite(h_turret, cx, cy + oy, brick.width, brick.height, rot_deg, a);
+            }
+
+            // Effects layer (pulse alpha)
+            if (h_fx != 0) {
+                let a_f: f32 = fx_alpha;
+                if (brick.brick_type == BrickType.Reflector) {
+                    a_f = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
+                }
+                let a: i32 = f32_to_i32(a_f * 255.0);
+                play_draw_sprite(h_fx, cx, cy, brick.width, brick.height, 0, a);
+            }
+
+            // Shot tracer (tower attack feedback)
+            if (brick.shot_fx_ms > 0) {
+                let a: f32 = i32_to_f32(brick.shot_fx_ms);
+                let alpha: f32 = a / 90.0;
+                let sr: f32 = 1.0;
+                let sg: f32 = 0.4;
+                let sb: f32 = 0.2;
+                if (brick.brick_type == BrickType.Armored) { sr = 0.6; sg = 0.8; sb = 1.0; }
+                if (brick.brick_type == BrickType.Reflector) { sr = 0.7; sg = 0.3; sb = 1.0; }
+                let txf: f32 = brick.shot_tx;
+                let tyf: f32 = brick.shot_ty;
+                play_draw_line(cx, cy, txf, tyf, sr, sg, sb, alpha);
+            }
+
+            // Draw HP indicator for armored
+            if (brick.hp > 1) {
+                let hp_x: f32 = brick.x + brick.width / 2.0 - 5.0;
+                let hp_y: f32 = brick.y + brick.height / 2.0;
+                play_draw_line(hp_x, hp_y, hp_x + 10.0, hp_y, 1.0, 1.0, 1.0, 1.0);
+            }
+        }
+    }
+}
+
+function draw_balls(): void {
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            if (state.sprites.ball == 0) {
+                let bx: f32 = ball.x;
+                let by: f32 = ball.y;
+                let br: f32 = ball.radius;
+                play_draw_circle(bx, by, br, 1.0, 0.3, 1.0, 1.0);
+            } else {
+                play_draw_sprite(state.sprites.ball, ball.x, ball.y, ball.radius * 2.0, ball.radius * 2.0, 0, 255);
+            }
+
+            // Ball HP bar
+            if (ball.max_hp > 0) {
+                if (ball.hp < ball.max_hp) {
+                    let hp_f: f32 = i32_to_f32(ball.hp);
+                    let max_f: f32 = i32_to_f32(ball.max_hp);
+                    let t: f32 = hp_f / max_f;
+                    let ball_x: f32 = ball.x;
+                    let ball_y: f32 = ball.y;
+                    let ball_r: f32 = ball.radius;
+
+                    // Anchor in screen space so rounding doesn't introduce drift as the ball moves.
+                    let sx: f32 = play_snap_x(ball_x);
+                    let sy: f32 = play_snap_y(ball_y);
+                    let half_w: f32 = play_snap_len(16.0);
+                    let offset_y: f32 = play_snap_len(ball_r + 10.0);
+                    let bar_y: f32 = sy - offset_y;
+                    let bar_w: f32 = half_w * 2.0;
+                    let filled_w: f32 = snap_px(bar_w * t);
+
+                    gfx_cmd_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
+                    gfx_cmd_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
+                }
+            }
+        }
+    }
+}
+
+function draw_paddle(): void {
+    if (state.sprites.paddle == 0) {
+        let half_w: f32 = state.paddle.width / 2.0;
+        let half_h: f32 = state.paddle.height / 2.0;
+        let px: f32 = state.paddle.x - half_w;
+        let py: f32 = state.paddle.y - half_h;
+        let pw: f32 = state.paddle.width;
+        let ph: f32 = state.paddle.height;
+        play_draw_filled_rect(px, py, pw, ph, 0.3, 1.0, 1.0, 1.0);
+    } else {
+        play_draw_sprite(state.sprites.paddle, state.paddle.x, state.paddle.y, state.paddle.width, state.paddle.height, 0, 255);
+    }
+}
+
+// 7-segment digit display (from asteroids)
+function draw_digit(digit: i32, x: f32, y: f32, scale: f32): void {
+    let seg0: bool = false;
+    let seg1: bool = false;
+    let seg2: bool = false;
+    let seg3: bool = false;
+    let seg4: bool = false;
+    let seg5: bool = false;
+    let seg6: bool = false;
+
+    if (digit == 0) { seg0 = true; seg1 = true; seg2 = true; seg3 = true; seg4 = true; seg5 = true; }
+    if (digit == 1) { seg1 = true; seg2 = true; }
+    if (digit == 2) { seg0 = true; seg1 = true; seg6 = true; seg4 = true; seg3 = true; }
+    if (digit == 3) { seg0 = true; seg1 = true; seg6 = true; seg2 = true; seg3 = true; }
+    if (digit == 4) { seg5 = true; seg6 = true; seg1 = true; seg2 = true; }
+    if (digit == 5) { seg0 = true; seg5 = true; seg6 = true; seg2 = true; seg3 = true; }
+    if (digit == 6) { seg0 = true; seg5 = true; seg6 = true; seg2 = true; seg3 = true; seg4 = true; }
+    if (digit == 7) { seg0 = true; seg1 = true; seg2 = true; }
+    if (digit == 8) { seg0 = true; seg1 = true; seg2 = true; seg3 = true; seg4 = true; seg5 = true; seg6 = true; }
+    if (digit == 9) { seg0 = true; seg1 = true; seg5 = true; seg6 = true; seg2 = true; seg3 = true; }
+
+    let top: f32 = y;
+    let mid: f32 = y + scale;
+    let bot: f32 = y + scale * 2.0;
+    let left: f32 = x;
+    let right: f32 = x + scale;
+
+    if (seg0) { gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0); }
+    if (seg1) { gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg2) { gfx_cmd_line(right, mid, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg3) { gfx_cmd_line(left, bot, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg4) { gfx_cmd_line(left, mid, left, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg5) { gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg6) { gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0); }
+}
+
+function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
+    // Draw up to 4 digits
+    let n: i32 = num;
+    if (n < 0) { n = 0; }
+    if (n > 9999) { n = 9999; }
+
+    let d0: i32 = n % 10;
+    let d1: i32 = (n / 10) % 10;
+    let d2: i32 = (n / 100) % 10;
+    let d3: i32 = (n / 1000) % 10;
+
+    let spacing: f32 = scale * 1.5;
+
+    if (n > 999) {
+        draw_digit(d3, x, y, scale);
+        draw_digit(d2, x + spacing, y, scale);
+        draw_digit(d1, x + spacing * 2.0, y, scale);
+        draw_digit(d0, x + spacing * 3.0, y, scale);
+    } else {
+        if (n > 99) {
+            draw_digit(d2, x, y, scale);
+            draw_digit(d1, x + spacing, y, scale);
+            draw_digit(d0, x + spacing * 2.0, y, scale);
+        } else {
+            if (n > 9) {
+                draw_digit(d1, x, y, scale);
+                draw_digit(d0, x + spacing, y, scale);
+            } else {
+                draw_digit(d0, x, y, scale);
+            }
+        }
+    }
+}
+
+function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
+    // Draw a float with 1 decimal place (e.g., 3.5)
+    let int_part: i32 = f32_to_i32(value);
+    let int_part_f: f32 = i32_to_f32(int_part);
+    let decimal_f: f32 = (value - int_part_f) * 10.0;
+    let decimal_part: i32 = f32_to_i32(decimal_f);
+
+    // Draw integer part
+    draw_number(int_part, x, y, scale);
+
+    // Calculate width of integer part for positioning
+    let int_digits: i32 = 1;
+    if (int_part > 9) { int_digits = 2; }
+    if (int_part > 99) { int_digits = 3; }
+
+    let spacing: f32 = scale * 1.5;
+    let int_width: f32 = i32_to_f32(int_digits);
+    let decimal_x: f32 = x + int_width * spacing;
+
+    // Draw decimal point (small filled square)
+    let dot_size: f32 = scale * 0.2;
+    let dot_y: f32 = y + scale * 1.7;
+    draw_filled_rect(decimal_x, dot_y, dot_size, dot_size, 1.0, 1.0, 1.0, 1.0);
+
+    // Draw decimal digit
+    let digit_x: f32 = decimal_x + spacing * 0.3;
+    draw_digit(decimal_part, digit_x, y, scale);
+}
+
+function draw_decimal_1_tenths(value_tenths: i32, x: f32, y: f32, scale: f32): void {
+    let int_part: i32 = value_tenths / 10;
+    let decimal_part: i32 = value_tenths - int_part * 10;
+
+    // Draw integer part
+    draw_number(int_part, x, y, scale);
+
+    // Calculate width of integer part for positioning
+    let int_digits: i32 = 1;
+    if (int_part > 9) { int_digits = 2; }
+    if (int_part > 99) { int_digits = 3; }
+    if (int_part > 999) { int_digits = 4; }
+
+    let spacing: f32 = scale * 1.5;
+    let int_width: f32 = i32_to_f32(int_digits);
+    let decimal_x: f32 = x + int_width * spacing;
+
+    // Draw decimal point (small filled square)
+    let dot_size: f32 = scale * 0.2;
+    let dot_y: f32 = y + scale * 1.7;
+    draw_filled_rect(decimal_x, dot_y, dot_size, dot_size, 1.0, 1.0, 1.0, 1.0);
+
+    // Draw decimal digit
+    let digit_x: f32 = decimal_x + spacing * 0.3;
+    draw_digit(decimal_part, digit_x, y, scale);
+}
+
+function hud_glyph_M(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    gfx_cmd_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_S(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_L(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_O(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_G(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_I(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_C(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_B(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_A(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    gfx_cmd_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_R(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_K(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_E(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_N(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_U(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_T(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let bottom: f32 = y + 2.0 * s;
+    let midx: f32 = x + s;
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_glyph_H(x: f32, y: f32, s: f32): void {
+    let left: f32 = x;
+    let right: f32 = x + 2.0 * s;
+    let top: f32 = y;
+    let mid: f32 = y + s;
+    let bottom: f32 = y + 2.0 * s;
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+}
+
+function hud_draw_ms_logic(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_M(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+    cx = cx + adv * 2.0;
+    hud_glyph_L(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_O(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_G(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_I(cx, y, s);
+    cx = cx + adv;
+    hud_glyph_C(cx, y, s);
+}
+
+function hud_draw_balls(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_B(cx, y, s); cx = cx + adv;
+    hud_glyph_A(cx, y, s); cx = cx + adv;
+    hud_glyph_L(cx, y, s); cx = cx + adv;
+    hud_glyph_L(cx, y, s); cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+}
+
+function hud_draw_bricks(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_B(cx, y, s); cx = cx + adv;
+    hud_glyph_R(cx, y, s); cx = cx + adv;
+    hud_glyph_I(cx, y, s); cx = cx + adv;
+    hud_glyph_C(cx, y, s); cx = cx + adv;
+    hud_glyph_K(cx, y, s); cx = cx + adv;
+    hud_glyph_S(cx, y, s);
+}
+
+function hud_draw_menu(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_M(cx, y, s); cx = cx + adv;
+    hud_glyph_E(cx, y, s); cx = cx + adv;
+    hud_glyph_N(cx, y, s); cx = cx + adv;
+    hud_glyph_U(cx, y, s);
+}
+
+function hud_draw_tech(x: f32, y: f32, s: f32): void {
+    let adv: f32 = 3.0 * s;
+    let cx: f32 = x;
+    hud_glyph_T(cx, y, s); cx = cx + adv;
+    hud_glyph_E(cx, y, s); cx = cx + adv;
+    hud_glyph_C(cx, y, s); cx = cx + adv;
+    hud_glyph_H(cx, y, s);
+}
+
+function ui_pick_menu_slot(px: f32, py: f32, panel_x: f32, panel_y: f32, panel_w: f32, panel_h: f32): i32 {
+    let slot_w: f32 = panel_w - UI_MENU_PAD * 2.0;
+    let slot_y: f32 = panel_y + UI_MENU_HEADER_H + UI_MENU_PAD;
+    let i: i32 = 0;
+    for (i = 0; i < 3; i = i + 1) {
+        let sy: f32 = slot_y + i32_to_f32(i) * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
+        if (sy + UI_MENU_SLOT_H > panel_y + panel_h - UI_MENU_PAD) {
+            return -1;
+        }
+        if (point_in_rect(px, py, panel_x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
+    draw_filled_rect(x, y, w, h, 0.08, 0.09, 0.12, 0.92);
+    draw_rect(x, y, w, h, 0.2, 0.7, 0.9, 0.9);
+    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.7, 0.9, 0.6);
+    hud_draw_menu(x + UI_MENU_PAD, y + 6.0, 3.0);
+
+    let slot_w: f32 = w - UI_MENU_PAD * 2.0;
+    let slot_y: f32 = y + UI_MENU_HEADER_H + UI_MENU_PAD;
+    let i: i32 = 0;
+    let slots_done: bool = false;
+    for (i = 0; i < 3; i = i + 1) {
+        if (!slots_done) {
+            let sy: f32 = slot_y + i32_to_f32(i) * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
+            if (sy + UI_MENU_SLOT_H > y + h - UI_MENU_PAD) {
+                slots_done = true;
+            } else {
+                draw_rect(x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H, 0.3, 0.6, 0.8, 0.8);
+                let icon_handle: i32 = state.sprites.brick_basic_base;
+                if (i == 1) { icon_handle = state.sprites.brick_armored_base; }
+                if (i == 2) { icon_handle = state.sprites.brick_reflector_base; }
+                if (icon_handle != 0) {
+                    let icon_size: f32 = UI_MENU_SLOT_H - 10.0;
+                    let max_size: f32 = slot_w - 12.0;
+                    if (icon_size > max_size) { icon_size = max_size; }
+                    if (icon_size > 4.0) {
+                        let icon_x: f32 = x + UI_MENU_PAD + slot_w * 0.5;
+                        let icon_y: f32 = sy + UI_MENU_SLOT_H * 0.5;
+                        gfx_cmd_sprite(icon_handle, f32_to_i32(icon_x), f32_to_i32(icon_y), f32_to_i32(icon_size), f32_to_i32(icon_size), 0, 255);
+                    }
+                }
+                let selected: bool = false;
+                if (i == 0 && state.selected_tower == BrickType.Basic) { selected = true; }
+                if (i == 1 && state.selected_tower == BrickType.Armored) { selected = true; }
+                if (i == 2 && state.selected_tower == BrickType.Reflector) { selected = true; }
+                if (selected) {
+                    draw_rect(x + UI_MENU_PAD - 2.0, sy - 2.0, slot_w + 4.0, UI_MENU_SLOT_H + 4.0, 0.9, 0.8, 0.3, 0.9);
+                }
+            }
+        }
+    }
+}
+
+function draw_tech_panel(x: f32, y: f32, w: f32, h: f32): void {
+    draw_filled_rect(x, y, w, h, 0.06, 0.08, 0.12, 0.92);
+    draw_rect(x, y, w, h, 0.2, 0.6, 0.9, 0.9);
+    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.6, 0.9, 0.6);
+    hud_draw_tech(x + UI_MENU_PAD, y + 6.0, 3.0);
+
+    let cx: f32 = x + w * 0.5;
+    let top: f32 = y + UI_MENU_HEADER_H + UI_MENU_PAD + 10.0;
+    let mid: f32 = y + UI_MENU_HEADER_H + UI_MENU_PAD + 60.0;
+    let bot: f32 = y + UI_MENU_HEADER_H + UI_MENU_PAD + 110.0;
+    let spread: f32 = w * 0.25;
+    let radius: f32 = 8.0;
+
+    gfx_cmd_line(cx, top, cx - spread, mid, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx, top, cx + spread, mid, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx - spread, mid, cx - spread, bot, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx + spread, mid, cx + spread, bot, 0.4, 0.8, 0.9, 0.8);
+
+    draw_circle(cx, top, radius, 0.4, 0.9, 0.9, 0.9);
+    draw_circle(cx - spread, mid, radius, 0.4, 0.9, 0.9, 0.9);
+    draw_circle(cx + spread, mid, radius, 0.4, 0.9, 0.9, 0.9);
+    draw_circle(cx - spread, bot, radius, 0.4, 0.9, 0.9, 0.9);
+    draw_circle(cx + spread, bot, radius, 0.4, 0.9, 0.9, 0.9);
+}
+
+function draw_ui_panels(): void {
+    if (state.layout.ui_w <= 1.0 || state.layout.ui_h <= 1.0) {
+        return;
+    }
+
+    let pad: f32 = UI_PANEL_PAD;
+    let gap: f32 = UI_PANEL_GAP;
+    let ui_x: f32 = state.layout.ui_x;
+    let ui_y: f32 = state.layout.ui_y;
+    let ui_w: f32 = state.layout.ui_w;
+    let ui_h: f32 = state.layout.ui_h;
+
+    if (state.layout.ui_mode == 1) {
+        let panel_w: f32 = ui_w - pad * 2.0;
+        let panel_h: f32 = (ui_h - pad * 2.0 - gap) * 0.5;
+        if (panel_w > 1.0 && panel_h > 1.0) {
+            draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
+            draw_tech_panel(ui_x + pad, ui_y + pad + panel_h + gap, panel_w, panel_h);
+        }
+    } else {
+        if (state.layout.ui_mode == 2) {
+            let panel_w: f32 = (ui_w - pad * 2.0 - gap) * 0.5;
+            let panel_h: f32 = ui_h - pad * 2.0;
+            if (panel_w > 1.0 && panel_h > 1.0) {
+                draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
+                draw_tech_panel(ui_x + pad + panel_w + gap, ui_y + pad, panel_w, panel_h);
+            }
+        }
+    }
+}
+
+function draw_ui(): void {
+    let sw: f32 = VIRTUAL_W;
+    let sh: f32 = GAME_H;
+    let s: f32 = state.layout.play_scale;
+
+    // Score in top-left
+    draw_number(state.score, play_to_screen_x(20.0), play_to_screen_y(10.0), 8.0 * s);
+
+    // Wave indicator in top-right
+    draw_number(state.wave, play_to_screen_x(sw - 60.0), play_to_screen_y(10.0), 8.0 * s);
+
+    // Average frame time in bottom-left (in milliseconds with 1 decimal)
+    let avg_time_tenths: i32 = frame_timer_avg_tenths(state.frame_timer.samples_ms);
+    draw_decimal_1_tenths(avg_time_tenths, play_to_screen_x(20.0), play_to_screen_y(GAME_H - 30.0), 6.0 * s);
+    hud_draw_ms_logic(play_to_screen_x(90.0), play_to_screen_y(GAME_H - 28.0), 3.0 * s);
+
+    // Debug: Active counts in bottom-right
+    let active_balls_count: i32 = count_active_balls();
+    let active_bricks_count: i32 = count_active_bricks();
+    hud_draw_balls(play_to_screen_x(sw - 190.0), play_to_screen_y(GAME_H - 52.0), 3.0 * s);
+    draw_number(active_balls_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 50.0), 4.0 * s);
+    hud_draw_bricks(play_to_screen_x(sw - 190.0), play_to_screen_y(GAME_H - 32.0), 3.0 * s);
+    draw_number(active_bricks_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 30.0), 4.0 * s);
+
+    if (state.phase == Phase.Lose) {
+        // "LOSE" indicator
+        play_draw_rect(sw / 2.0 - 40.0, sh / 2.0 - 20.0, 80.0, 40.0, 1.0, 0.3, 0.3, 1.0);
+    }
+
+    draw_ui_panels();
+}
+
+function draw_frame(): void {
+    // Hot reload during development (no flags for now)
+    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
+    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
+    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
+    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
+    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
+    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
+    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
+    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
+    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
+    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
+
+    draw_bricks();
+    draw_balls();
+    draw_paddle();
+    draw_drag_preview();
+    draw_ui();
+    draw_tap_pulses();
+}
+
+// Timing
+function compute_delta_ms(): i32 {
+    let current_time: i32 = get_time_ms();
+    let delta_ms: i32 = current_time - state.timers.last_time;
+    if (delta_ms < 1) { delta_ms = 1; }
+    if (delta_ms > 100) { delta_ms = 100; }
+    state.timers.last_time = current_time;
+    return delta_ms;
+}
+
+function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
+    state.drag_world_x = screen_to_play_x(screen_x);
+    state.drag_world_y = screen_to_play_y(screen_y);
+    state.drag_grid_x = world_to_grid_x(state.drag_world_x);
+    state.drag_grid_y = world_to_grid_y(state.drag_world_y);
+
+    let in_virtual: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
+    let in_game: bool = in_virtual && state.drag_world_y <= GAME_H;
+    let valid: bool = in_game && grid_cell_fits_in_level(state.drag_grid_x, state.drag_grid_y);
+    if (valid) {
+        if (grid_is_occupied(state.drag_grid_x, state.drag_grid_y)) {
+            valid = false;
+        }
+    }
+    if (valid) {
+        state.drag_valid = 1;
+    } else {
+        state.drag_valid = 0;
+    }
+}
+
+function handle_pointer_input(): void {
+    let count: i32 = input_pointer_count();
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        let pid: i32 = input_pointer_id(i);
+        let went_down: bool = input_pointer_went_down(i);
+        let went_up: bool = input_pointer_went_up(i);
+        let is_down: bool = input_pointer_is_down(i);
+        let sx: f32 = input_pointer_x_px(i) + state.layout.viewport_x;
+        let sy: f32 = input_pointer_y_px(i) + state.layout.viewport_y;
+
+        if (state.drag_active != 0) {
+            if (pid == state.drag_pointer_id) {
+                if (is_down) {
+                    update_drag_from_screen(sx, sy);
+                }
+                if (went_up) {
+                    if (state.drag_valid != 0) {
+                        let placed: bool = place_brick_at_grid(state.drag_grid_x, state.drag_grid_y, state.selected_tower);
+                        if (placed) {
+                            sfx_play(SFX_DRAG_PLACE);
+                        } else {
+                            sfx_play(SFX_DRAG_INVALID);
+                        }
+                    } else {
+                        sfx_play(SFX_DRAG_INVALID);
+                    }
+                    state.drag_active = 0;
+                    state.drag_pointer_id = -1;
+                    state.drag_valid = 0;
+                }
+            }
+        } else {
+            if (went_down) {
+                let pad: f32 = UI_PANEL_PAD;
+                let gap: f32 = UI_PANEL_GAP;
+                let ui_x: f32 = state.layout.ui_x;
+                let ui_y: f32 = state.layout.ui_y;
+                let ui_w: f32 = state.layout.ui_w;
+                let ui_h: f32 = state.layout.ui_h;
+                let menu_x: f32 = ui_x + pad;
+                let menu_y: f32 = ui_y + pad;
+                let menu_w: f32 = 0.0;
+                let menu_h: f32 = 0.0;
+                let have_menu: bool = false;
+                if (state.layout.ui_mode == 1) {
+                    menu_w = ui_w - pad * 2.0;
+                    menu_h = (ui_h - pad * 2.0 - gap) * 0.5;
+                    have_menu = true;
+                } else {
+                    if (state.layout.ui_mode == 2) {
+                        menu_w = (ui_w - pad * 2.0 - gap) * 0.5;
+                        menu_h = ui_h - pad * 2.0;
+                        have_menu = true;
+                    }
+                }
+
+                if (have_menu && point_in_rect(sx, sy, menu_x, menu_y, menu_w, menu_h)) {
+                    let slot: i32 = ui_pick_menu_slot(sx, sy, menu_x, menu_y, menu_w, menu_h);
+                    if (slot == 0) { state.selected_tower = BrickType.Basic; state.cursor.brick_type = BrickType.Basic; sfx_play(SFX_SELECT); }
+                    if (slot == 1) { state.selected_tower = BrickType.Armored; state.cursor.brick_type = BrickType.Armored; sfx_play(SFX_SELECT); }
+                    if (slot == 2) { state.selected_tower = BrickType.Reflector; state.cursor.brick_type = BrickType.Reflector; sfx_play(SFX_SELECT); }
+                } else {
+                    let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
+                    let wx: f32 = screen_to_play_x(sx);
+                    let wy: f32 = screen_to_play_y(sy);
+                    let in_game: bool = in_virtual && wy <= GAME_H && wx >= 0.0 && wx <= VIRTUAL_W;
+                    if (in_game) {
+                        state.drag_active = 1;
+                        state.drag_pointer_id = pid;
+                        update_drag_from_screen(sx, sy);
+                        sfx_play(SFX_DRAG_START);
+                    }
+                }
+            }
+        }
+    }
+}
+
+function record_tap_pulses(): void {
+    let count: i32 = input_pointer_count();
+    let i: i32 = 0;
+    for (i = 0; i < count; i = i + 1) {
+        let went_down: bool = input_pointer_went_down(i);
+        if (went_down) {
+            let x: f32 = input_pointer_x_px(i);
+            let y: f32 = input_pointer_y_px(i);
+            let vx: f32 = state.layout.viewport_x;
+            let vy: f32 = state.layout.viewport_y;
+            let j: i32 = 0;
+            let placed: bool = false;
+            for (j = 0; j < MAX_TAP_PULSES; j = j + 1) {
+                if (!placed) {
+                    if (state.tap_pulses[j].active == 0) {
+                        state.tap_pulses[j].active = 1;
+                        state.tap_pulses[j].age_ms = 0;
+                        state.tap_pulses[j].x = x + vx;
+                        state.tap_pulses[j].y = y + vy;
+                        placed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+function update_tap_pulses(delta_ms: i32): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
+        if (state.tap_pulses[i].active != 0) {
+            state.tap_pulses[i].age_ms = state.tap_pulses[i].age_ms + delta_ms;
+            if (state.tap_pulses[i].age_ms >= TAP_PULSE_DURATION_MS) {
+                state.tap_pulses[i].active = 0;
+            }
+        }
+    }
+}
+
+function draw_tap_pulses(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
+        if (state.tap_pulses[i].active != 0) {
+            let age_f: f32 = i32_to_f32(state.tap_pulses[i].age_ms);
+            let dur_f: f32 = i32_to_f32(TAP_PULSE_DURATION_MS);
+            let t: f32 = age_f / dur_f;
+            if (t > 1.0) { t = 1.0; }
+            let radius: f32 = 8.0 + (48.0 * t);
+            let alpha: f32 = 0.6 * (1.0 - t);
+            draw_circle(state.tap_pulses[i].x, state.tap_pulses[i].y, radius, 0.2, 0.9, 1.0, alpha);
+        }
+    }
+}
+
+function draw_drag_preview(): void {
+    if (state.drag_active == 0) { return; }
+    if (!grid_in_bounds(state.drag_grid_x, state.drag_grid_y)) { return; }
+    let x: f32 = grid_to_world_x(state.drag_grid_x);
+    let y: f32 = grid_to_world_y(state.drag_grid_y);
+    let w: f32 = state.config.brick.width;
+    let h: f32 = state.config.brick.height;
+    let r: f32 = 0.2;
+    let g: f32 = 0.8;
+    let b: f32 = 0.3;
+    let a: f32 = 0.4;
+    if (state.drag_valid == 0) {
+        r = 0.9; g = 0.2; b = 0.2; a = 0.45;
+    }
+    play_draw_filled_rect(x, y, w, h, r, g, b, 0.12);
+    play_draw_rect(x, y, w, h, r, g, b, a);
+}
+
+function main(): i32 {
+    ensure_config_loaded();
+
+    print_string("Brickout config loaded (magic=1337)\n");
+    print_string("screen.w=");
+    print_int(state.config.screen.w);
+    print_string(" screen.h=");
+    print_int(state.config.screen.h);
+    print_string("\n");
+
+    let init_ok: bool = init_window(state.config.screen.w, state.config.screen.h, "Brickout Revenge");
+    if (!init_ok) {
+        return 1;
+    }
+
+    maximize_window_for_desktop();
+    sync_screen_size();
+    print_string("window_px=");
+    print_int(state.runtime_screen.w);
+    print_string("x");
+    print_int(state.runtime_screen.h);
+    print_string("\n");
+
+    audio_ready = audio_is_available();
+    if (audio_ready) {
+        audio_sr = audio_get_sample_rate();
+    } else {
+        audio_sr = 0;
+    }
+
+    state.runtime_screen.w = gfx_window_width();
+    state.runtime_screen.h = gfx_window_height();
+    state.layout.viewport_x = 0.0;
+    state.layout.viewport_y = 0.0;
+    state.layout.viewport_w = i32_to_f32(state.runtime_screen.w);
+    state.layout.viewport_h = i32_to_f32(state.runtime_screen.h);
+    state.layout.play_x = 0.0;
+    state.layout.play_y = 0.0;
+    state.layout.play_w = i32_to_f32(state.config.screen.w);
+    state.layout.play_h = i32_to_f32(state.config.screen.h);
+    state.layout.play_scale = 1.0;
+    state.layout.ui_x = 0.0;
+    state.layout.ui_y = 0.0;
+    state.layout.ui_w = 0.0;
+    state.layout.ui_h = 0.0;
+    state.layout.ui_mode = 0;
+
+    state.sprites.paddle = gfx_load_sprite("samples/brickout_revenge/assets/paddle.svg", 128, 24);
+    state.sprites.ball = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 32, 32);
+    state.sprites.brick_basic_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic.svg", 160, 64);
+    state.sprites.brick_basic_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg", 160, 64);
+    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg", 160, 64);
+    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_armored_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_fx.svg", 160, 64);
+    state.sprites.brick_reflector_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector.svg", 160, 64);
+    state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg", 160, 64);
+
+    if (state.initialized == 0) {
+        // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
+        seed_rng(get_time_ms());
+        init_game(true);
+        setup_default_bricks();
+        start_wave();
+
+        // Initialize frame time buffer with baseline value
+        frame_timer_init(state.frame_timer.samples_ms);
+        state.frame_timer.sample_index = frame_timer_reset_index();
+
+        state.initialized = 1;
+    }
+
+    state.timers.last_time = get_time_ms();
+    state.running = 1;
+    return 0;
+}
+
+function tick(): i32 {
+    if (state.running != 1) {
+        return 1;
+    }
+
+    let quit: bool = should_quit();
+    if (quit) {
+        state.running = 0;
+    }
+
+    sync_screen_size();
+    update_layout();
+    apply_config_live();
+
+    state.timers.frame_start = get_time_ms();
+
+    if (is_key_down(Scancode.Escape)) {
+        state.running = 0;
+    }
+
+    if (state.running != 1) {
+        return 1;
+    }
+
+    handle_pointer_input();
+    record_tap_pulses();
+
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.05, 0.05, 0.15, 1.0);
+
+    let delta_ms: i32 = compute_delta_ms();
+    let delta_f: f32 = i32_to_f32(delta_ms);
+    let dt: f32 = delta_f / 1000.0;
+
+    update_tap_pulses(delta_ms);
+    update_game(dt, delta_ms);
+    audio_update();
+    draw_frame();
+    gfx_cmd_submit_no_present();
+    // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
+    let frame_end: i32 = get_time_ms();
+    state.timers.tick_time_ms = frame_end - state.timers.frame_start;
+    if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
+
+    // Store in circular buffer for averaging
+    state.frame_timer.sample_index =
+        frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
+
+    end_frame();
+    return 0;
+}
+

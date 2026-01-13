@@ -2392,13 +2392,16 @@ STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f3
     }
 
     const int32_t flags = cmd_i32[2];
+    const int32_t gfx_cmd_max_lines = MAX_LINES;
+    const int32_t gfx_cmd_max_sprites = 16384;
+
     int32_t line_count = cmd_i32[3];
     int32_t sprite_count = cmd_i32[4];
 
     if (line_count < 0) line_count = 0;
     if (sprite_count < 0) sprite_count = 0;
-    if (line_count > MAX_LINES) line_count = MAX_LINES;
-    if (sprite_count > MAX_SPRITES) sprite_count = MAX_SPRITES;
+    if (line_count > gfx_cmd_max_lines) line_count = gfx_cmd_max_lines;
+    if (sprite_count > gfx_cmd_max_sprites) sprite_count = gfx_cmd_max_sprites;
 
     stasis_begin_frame();
 
@@ -2427,7 +2430,10 @@ STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f3
         }
     }
 
-    stasis_end_frame();
+    /* Present only if requested (lets benchmarks exclude swap/vsync). */
+    if ((flags & 2) != 0) {
+        stasis_end_frame();
+    }
 }
 
 static SpriteEntry* sprite_get(int handle) {
