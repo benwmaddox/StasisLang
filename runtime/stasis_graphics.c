@@ -2985,6 +2985,37 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
     }
 
+    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
+    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
+        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t* text_meta = cmd_i32 + text_i32_base;
+
+        for (int i = 0; i < text_count; i++) {
+            const int base_i = i * 3;
+            const int font = text_meta[base_i + 0];
+            const int byte_off = text_meta[base_i + 1];
+            const int byte_len = text_meta[base_i + 2];
+
+            if (font <= 0) continue;
+            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_len < 0) continue;
+            if (byte_off + byte_len >= text_bytes_used) continue;
+
+            const char* text = (const char*)(cmd_u8 + byte_off);
+
+            const int base_f = text_f32_base + i * 6;
+            const float x = cmd_f32[base_f + 0];
+            const float y = cmd_f32[base_f + 1];
+            const float r = cmd_f32[base_f + 2];
+            const float g = cmd_f32[base_f + 3];
+            const float b = cmd_f32[base_f + 4];
+            const float a = cmd_f32[base_f + 5];
+
+            stasis_draw_text(font, text, x, y, r, g, b, a);
+        }
+    }
+
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
     if ((flags & 2) != 0) {
         stasis_end_frame();
