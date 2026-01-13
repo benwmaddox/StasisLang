@@ -179,6 +179,10 @@ We need a minimal host API accessible from Stasis code:
   - `sys_file_mtime_ms(path: utf8[]) -> i32` (for watch polling)
 - process (for driving AOT/link from Stasis):
   - `sys_exec(command: utf8[]) -> i32`
+- memory (for bulk data moves):
+  - `sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32) -> void`
+  - `sys_memcpy_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32) -> void`
+  - `sys_memcpy_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32) -> void`
 
 This milestone includes:
 - runtime implementation (C)
