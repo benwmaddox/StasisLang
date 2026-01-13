@@ -123,6 +123,7 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
+STASIS_EXPORT int stasis_should_quit(void);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
@@ -525,8 +526,9 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[6] = g_input_frame.viewport_h_px;
     out_i32[7] = g_input_frame.pointer_count;
     out_i32[8] = g_input_frame.dropped_pointers;
+    out_i32[9] = stasis_should_quit();
 
-    for (int i = 9; i < 16; i++) out_i32[i] = 0;
+    for (int i = 10; i < 16; i++) out_i32[i] = 0;
 
     const int i32_base = 16;
     const int i32_stride = 4;
@@ -3128,6 +3130,21 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
     if (!g_keyboard_state) return 0;
     if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return 0;
     return g_keyboard_state[scancode] ? 1 : 0;
+}
+
+/*
+ * Bulk keyboard snapshot: copy SDL keyboard state into caller-provided buffer.
+ * Returns number of bytes written.
+ */
+STASIS_EXPORT int stasis_host_get_keyboard_state(uint8_t* out_u8, int max_bytes) {
+    if (!out_u8 || max_bytes <= 0) return 0;
+    SDL_PumpEvents();
+    int len = 0;
+    const uint8_t* state = SDL_GetKeyboardState(&len);
+    if (!state || len <= 0) return 0;
+    int n = len < max_bytes ? len : max_bytes;
+    memcpy(out_u8, state, (size_t)n);
+    return n;
 }
 
 /*
