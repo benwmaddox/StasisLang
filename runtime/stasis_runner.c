@@ -18,6 +18,27 @@
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
+typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
+typedef int (*stasis_host_get_keyboard_state_fn)(uint8_t *out_u8, int max_bytes);
+typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+
+static int stasis_env_flag(const char *name, int default_value)
+{
+    const char *v = getenv(name);
+    if (!v || !v[0])
+    {
+        return default_value;
+    }
+    if (v[0] == '0')
+    {
+        return 0;
+    }
+    if (v[0] == '1')
+    {
+        return 1;
+    }
+    return default_value;
+}
 
 #ifndef _WIN32
 static void stasis_sleep_us(long long usec)
@@ -1364,6 +1385,43 @@ int main(int argc, char **argv)
         QueryPerformanceFrequency(&freq);
         long long target_us = 1000000LL / (long long)fps;
 
+        /* Bulk host mode: host writes HostFrame globals and submits command buffers. */
+        const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
+        int bulk_active = 0;
+        int32_t *host_i32 = NULL;
+        float *host_f32 = NULL;
+        uint8_t *host_keys = NULL;
+        int32_t *gfx_cmd_i32 = NULL;
+        float *gfx_cmd_f32 = NULL;
+        uint8_t *gfx_cmd_u8 = NULL;
+
+        stasis_host_get_frame_fn host_get_frame = NULL;
+        stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
+        stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
+
+        if (bulk_enabled)
+        {
+            host_i32 = (int32_t *)GetProcAddress(lib, "host_i32");
+            host_f32 = (float *)GetProcAddress(lib, "host_f32");
+            host_keys = (uint8_t *)GetProcAddress(lib, "host_keys");
+            gfx_cmd_i32 = (int32_t *)GetProcAddress(lib, "gfx_cmd_i32");
+            gfx_cmd_f32 = (float *)GetProcAddress(lib, "gfx_cmd_f32");
+            gfx_cmd_u8 = (uint8_t *)GetProcAddress(lib, "gfx_cmd_u8");
+
+            HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+            if (gfx)
+            {
+                host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
+                host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)GetProcAddress(gfx, "stasis_host_get_keyboard_state");
+                gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
+            }
+
+            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_get_frame && gfx_submit_u8)
+            {
+                bulk_active = 1;
+            }
+        }
+
         LARGE_INTEGER last;
         QueryPerformanceCounter(&last);
 
@@ -1530,11 +1588,25 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
+            if (bulk_active)
+            {
+                host_get_frame(host_i32, host_f32);
+                if (host_get_keyboard_state && host_keys)
+                {
+                    (void)host_get_keyboard_state(host_keys, 512);
+                }
+            }
+
             int tick_result = tick();
             if (tick_result != 0)
             {
                 result = tick_result == 1 ? 0 : tick_result;
                 break;
+            }
+
+            if (bulk_active)
+            {
+                gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
             }
 
             LARGE_INTEGER now;

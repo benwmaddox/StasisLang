@@ -216,6 +216,10 @@ function @inline gfx_cmd_submit_no_present(): void {
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
 
+function @inline gfx_cmd_mark_present(): void {
+    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
+}
+
 function @inline gfx_cmd_line_count(): i32 { return gfx_cmd_i32[GFX_I_LINE_COUNT]; }
 function @inline gfx_cmd_sprite_count(): i32 { return gfx_cmd_i32[GFX_I_SPRITE_COUNT]; }
 function @inline gfx_cmd_text_count(): i32 { return gfx_cmd_i32[GFX_I_TEXT_COUNT]; }
