@@ -1,4 +1,4 @@
-import "graphics.stasis";
+import "stdlib/graphics.stasis";
 
 // Host frame snapshot (prototype)
 //
@@ -9,7 +9,7 @@ import "graphics.stasis";
 // Usage:
 // - Call `host_frame_refresh()` once at the start of your tick.
 // - Read everything from `host_i32[]` / `host_f32[]` accessors below for the rest of the tick.
-
+//
 // NOTE: This is a prototype layout. Treat all unused indices as reserved.
 
 const HOST_MAX_POINTERS: i32 = 8;
@@ -33,8 +33,8 @@ const HOST_F_POINTER_BASE: i32 = 0;
 const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
 const HOST_F32_COUNT: i32 = 64;
 
-global host_i32: i32[HOST_I32_COUNT];
-global host_f32: f32[HOST_F32_COUNT];
+global host_i32: i32[64];
+global host_f32: f32[64];
 
 extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;
 
@@ -91,4 +91,3 @@ function host_pointer_x_n(index: i32): f32 {
 function host_pointer_y_n(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 5];
 }
-

@@ -56,6 +56,8 @@ EXPORTS
     gfx_submit=stasis_gfx_submit
     stasis_gfx_submit_u8
     gfx_submit_u8=stasis_gfx_submit_u8
+    stasis_gfx_poll_reload
+    gfx_poll_reload=stasis_gfx_poll_reload
     stasis_gfx_draw_sprites_i32
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
