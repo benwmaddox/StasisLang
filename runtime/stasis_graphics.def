@@ -15,6 +15,7 @@ EXPORTS
     stasis_draw_lines_f32
     stasis_is_key_down
     stasis_get_time_ms
+    stasis_get_time_us
     stasis_sleep_ms
     stasis_audio_init
     stasis_audio_shutdown

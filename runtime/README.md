@@ -80,6 +80,7 @@ The library exports these functions for Stasis programs:
 | `stasis_gfx_debug_get_frame_hash()` | Debug: get current frame hash (0 if disabled) |
 | `stasis_is_key_down(scancode)` | Check if key is pressed |
 | `stasis_get_time_ms()` | Get time in milliseconds |
+| `stasis_get_time_us()` | Get time in microseconds (truncated to i32) |
 | `stasis_sleep_ms(ms)` | Sleep for milliseconds |
 | `stasis_should_quit()` | Pump input/events (once per frame) and report quit state |
 | `stasis_input_pointer_count()` | Number of pointers tracked this frame (mouse + active touches) |

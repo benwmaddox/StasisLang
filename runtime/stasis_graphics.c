@@ -122,6 +122,8 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
+STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
+STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -1964,9 +1966,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
                 SDL_GL_DeleteContext(g_gl_context);
                 g_gl_context = NULL;
             } else {
-                int swap_ok = SDL_GL_SetSwapInterval(1);
+                int want_vsync = 1;
+                const char* vsync_env = getenv("STASIS_GFX_VSYNC");
+                if (vsync_env && vsync_env[0] == '0') {
+                    want_vsync = 0;
+                }
+                int swap_ok = SDL_GL_SetSwapInterval(want_vsync ? 1 : 0);
                 if (swap_ok != 0) {
-                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync): %s", SDL_GetError());
+                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync=%d): %s", want_vsync, SDL_GetError());
                 }
                 glViewport(0, 0, width, height);
                 glDisable(GL_SCISSOR_TEST);
@@ -2847,14 +2854,13 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
 
     if (w <= 0 || h <= 0) return;
 
-    /* Re-rasterize when the requested draw size changes or when explicitly invalidated.
+    /* Re-rasterize only when explicitly invalidated (resize/reload).
      *
-     * This keeps virtual-space sizing (game logic) decoupled from display-space raster size:
-     * the sprite is baked to exactly the pixel size we are about to draw.
+     * Re-baking per draw-size can overflow the atlas when sizes fluctuate frame-to-frame.
+     * Sprites are baked at their load-time max size (max_w/max_h) and drawn scaled.
      */
-    int should_reraster = e->needs_reraster || (w != e->max_w) || (h != e->max_h);
-    if (should_reraster) {
-        if (e->path) sprite_build_into_entry_sized(e, e->path, w, h, 1);
+    if (e->needs_reraster) {
+        if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1);
     }
 
     /* Convert degrees to radians */
@@ -2981,6 +2987,22 @@ STASIS_EXPORT int stasis_get_time_ms(void) {
     }
     return (int)((now.tv_sec * 1000) + (now.tv_nsec / 1000000));
 #endif
+}
+
+/*
+ * Get current time in microseconds (truncated to i32).
+ */
+STASIS_EXPORT int stasis_get_time_us(void) {
+    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return 0;
+        }
+    }
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    if (freq == 0) return 0;
+    Uint64 counter = SDL_GetPerformanceCounter();
+    Uint64 us = (counter * 1000000ull) / freq;
+    return (int)us;
 }
 
 /*

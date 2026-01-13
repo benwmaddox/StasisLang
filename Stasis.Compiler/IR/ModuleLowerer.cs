@@ -795,6 +795,16 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGetTimeUs(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_get_time_us");
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_get_time_us", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisSleepMs(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_sleep_ms");
@@ -1261,6 +1271,7 @@ public sealed class ModuleLowerer
             // Legacy system (to be renamed)
             "time",
             "get_time_ms",
+            "get_time_us",
             "sleep_ms",
 
             // Legacy graphics (external runtime)
@@ -3329,6 +3340,20 @@ public sealed class ModuleLowerer
 
                         var (fn, fnType) = GetOrDeclareStasisGetTimeMs(_moduleBuilder);
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "get_time_ms.call");
+                    }
+                case "get_time_us":
+                    {
+                        if (args.Count != 0)
+                        {
+                            AddDiagnostic("get_time_us expects no arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        if (_headlessGraphics)
+                            return EmitGetTimeUs(builder);
+
+                        var (fn, fnType) = GetOrDeclareStasisGetTimeUs(_moduleBuilder);
+                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "get_time_us.call");
                     }
                 case "sleep_ms":
                     {
@@ -5712,6 +5737,16 @@ public sealed class ModuleLowerer
             var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
             var ms64 = builder.BuildUDiv(ticksMs, clocksPerSec, "gfx.ms64");
             return builder.BuildTrunc(ms64, LLVMTypeRef.Int32, "gfx.ms");
+        }
+
+        private LLVMValueRef EmitGetTimeUs(LLVMBuilderRef builder)
+        {
+            var (clockFn, clockType) = GetOrDeclareClock(_moduleBuilder);
+            var ticks = builder.BuildCall2(clockType, clockFn, Array.Empty<LLVMValueRef>(), "gfx.clock");
+            var ticksUs = builder.BuildMul(ticks, ConstInt64(1000000), "gfx.clock_us");
+            var clocksPerSec = ConstInt64(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 1000 : 1000000);
+            var us64 = builder.BuildUDiv(ticksUs, clocksPerSec, "gfx.us64");
+            return builder.BuildTrunc(us64, LLVMTypeRef.Int32, "gfx.us");
         }
 
         private LLVMValueRef AsBoolean(LLVMBuilderRef builder, LLVMValueRef value)

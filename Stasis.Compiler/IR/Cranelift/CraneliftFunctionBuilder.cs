@@ -989,6 +989,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_flush" => true,
             "time" => true,
             "get_time_ms" => true,
+            "get_time_us" => true,
             "sleep_ms" => true,
             "audio_is_available" => true,
             "audio_get_sample_rate" => true,
@@ -1391,6 +1392,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerTime(arguments);
             case "get_time_ms":
                 return LowerGetTimeMs(arguments);
+            case "get_time_us":
+                return LowerGetTimeUs(arguments);
             case "sleep_ms":
                 return LowerSleepMs(arguments);
             case "audio_is_available":
@@ -2006,6 +2009,18 @@ public sealed class CraneliftFunctionBuilder
 
         var result = NewValue();
         _instructions.AppendLine($"    {result} = call %stasis_get_time_ms()");
+        return result;
+    }
+
+    private string LowerGetTimeUs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("get_time_us expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_get_time_us()");
         return result;
     }
 

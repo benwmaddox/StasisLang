@@ -4,6 +4,7 @@
 
 extern function time(): i32;
 extern function get_time_ms(): i32;
+extern function get_time_us(): i32;
 extern function sleep_ms(ms: i32): void;
 
 extern function init_window(width: i32, height: i32, title: string): bool;

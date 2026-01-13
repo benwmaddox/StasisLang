@@ -1,6 +1,6 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/graphics.stasis";
-import "../src/stdlib/gfx_cmd.stasis";
+import "../src/gfx_cmd.stasis";
 
 // Smoke test for gfx command buffer submission.
 //
@@ -17,7 +17,7 @@ function main(): i32 {
 
     let sprite: i32 = gfx_load_sprite("assets/ui/white_1x1.svg", 64, 64);
 
-    while (!should_quit()) {
+    for (; !should_quit(); ) {
         gfx_cmd_begin();
         gfx_cmd_clear(0.08, 0.09, 0.11, 1.0);
 

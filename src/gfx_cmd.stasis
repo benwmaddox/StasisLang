@@ -1,5 +1,5 @@
-import "graphics.stasis";
-import "stdlib.stasis";
+import "stdlib/graphics.stasis";
+import "stdlib/stdlib.stasis";
 
 // Graphics command buffer (v1 prototype)
 //
@@ -7,7 +7,7 @@ import "stdlib.stasis";
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.
 // - Coordinates: host pixels.
 
-const GFX_CMD_MAGIC: i32 = 0x47584631; // 'GXF1'
+const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 const GFX_CMD_VERSION: i32 = 1;
 
 // i32 header indices
@@ -44,16 +44,17 @@ const GFX_F_CLEAR_G: i32 = 1;
 const GFX_F_CLEAR_B: i32 = 2;
 const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
-const GFX_F_TEXT_BASE: i32 = GFX_F_LINE_BASE + GFX_MAX_LINES * GFX_LINE_STRIDE_F32;
+const GFX_F_TEXT_BASE: i32 = 80004;
 
-const GFX_I_TEXT_BASE: i32 = GFX_I_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_I32;
+// NOTE: Array sizes must be integer literals in Stasis today.
+// Keep these in sync with the constants above:
+// - i32 count = 32 + (4096*7) + (2048*3) = 34848
+// - f32 count = 4 + (10000*8) + (2048*6) = 92292
+const GFX_I_TEXT_BASE: i32 = 28704;
 
-const GFX_CMD_I32_COUNT: i32 = GFX_I_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_I32;
-const GFX_CMD_F32_COUNT: i32 = GFX_F_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_F32;
-
-global gfx_cmd_i32: i32[GFX_CMD_I32_COUNT];
-global gfx_cmd_f32: f32[GFX_CMD_F32_COUNT];
-global gfx_cmd_u8: u8[GFX_TEXT_MAX_BYTES];
+global gfx_cmd_i32: i32[34848];
+global gfx_cmd_f32: f32[92292];
+global gfx_cmd_u8: u8[65536];
 
 function gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
@@ -69,7 +70,7 @@ function gfx_cmd_begin(): void {
 }
 
 function gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] | GFX_FLAG_CLEAR;
+    gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
     gfx_cmd_f32[GFX_F_CLEAR_R] = r;
     gfx_cmd_f32[GFX_F_CLEAR_G] = g;
     gfx_cmd_f32[GFX_F_CLEAR_B] = b;
@@ -157,7 +158,7 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
 }
 
 function gfx_cmd_submit(): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] | GFX_FLAG_PRESENT;
+    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
 

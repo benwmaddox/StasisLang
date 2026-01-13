@@ -26,11 +26,14 @@ function fill_lines(): void {
     let i: i32 = 0;
     for (i = 0; i < LINE_COUNT; i = i + 1) {
         let base: i32 = i * LINE_STRIDE;
-        let fi: f32 = i;
-        state.lines[base + 0] = (fi % 640.0); // x1
-        state.lines[base + 1] = (fi % 360.0); // y1
-        state.lines[base + 2] = ((fi + 13.0) % 640.0); // x2
-        state.lines[base + 3] = ((fi + 29.0) % 360.0); // y2
+        let x1_i: i32 = i % 640;
+        let y1_i: i32 = i % 360;
+        let x2_i: i32 = (i + 13) % 640;
+        let y2_i: i32 = (i + 29) % 360;
+        state.lines[base + 0] = i32_to_f32(x1_i); // x1
+        state.lines[base + 1] = i32_to_f32(y1_i); // y1
+        state.lines[base + 2] = i32_to_f32(x2_i); // x2
+        state.lines[base + 3] = i32_to_f32(y2_i); // y2
         state.lines[base + 4] = 0.05; // r
         state.lines[base + 5] = 0.85; // g
         state.lines[base + 6] = 0.78; // b

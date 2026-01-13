@@ -2,7 +2,7 @@ import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
-import "../../src/stdlib/gfx_cmd.stasis";
+import "../../src/gfx_cmd.stasis";
 import "../../src/stdlib/audio.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
@@ -57,6 +57,19 @@ const UI_SIDE_MIN_W: f32 = 220.0;
 const UI_BOTTOM_MIN_H: f32 = 160.0;
 const UI_PANEL_PAD: f32 = 12.0;
 const UI_PANEL_GAP: f32 = 12.0;
+
+// Non-interactive benchmark harness:
+// - Runs for a fixed number of ticks, prints average `tick_time_ms`, then exits.
+// - `tick_time_ms` excludes `end_frame()` (swap/vsync) by design in this sample.
+const BENCH_AUTO_EXIT: i32 = 1;
+const BENCH_WARMUP_FRAMES: i32 = 200;
+const BENCH_TOTAL_FRAMES: i32 = 2000;
+const BENCH_SKIP_MAXIMIZE: i32 = 1;
+
+global bench_frame: i32;
+global bench_sum_ms: i32;
+global bench_sum_us: i32;
+global bench_count: i32;
 
 // Virtual resolution + safe gameplay area.
 // The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
@@ -2379,7 +2392,9 @@ function main(): i32 {
         return 1;
     }
 
-    maximize_window_for_desktop();
+    if (!(BENCH_SKIP_MAXIMIZE == 1)) {
+        maximize_window_for_desktop();
+    }
     sync_screen_size();
     print_string("window_px=");
     print_int(state.runtime_screen.w);
@@ -2436,6 +2451,11 @@ function main(): i32 {
         state.initialized = 1;
     }
 
+    bench_frame = 0;
+    bench_sum_ms = 0;
+    bench_sum_us = 0;
+    bench_count = 0;
+
     state.timers.last_time = get_time_ms();
     state.running = 1;
     return 0;
@@ -2456,6 +2476,7 @@ function tick(): i32 {
     apply_config_live();
 
     state.timers.frame_start = get_time_ms();
+    let bench_start_us: i32 = get_time_us();
 
     if (is_key_down(Scancode.Escape)) {
         state.running = 0;
@@ -2484,12 +2505,40 @@ function tick(): i32 {
     let frame_end: i32 = get_time_ms();
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;
     if (state.timers.tick_time_ms < 0) { state.timers.tick_time_ms = 0; }
+    let tick_us: i32 = get_time_us() - bench_start_us;
+    if (tick_us < 0) { tick_us = 0; }
 
     // Store in circular buffer for averaging
     state.frame_timer.sample_index =
         frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
 
     end_frame();
+
+    if (BENCH_AUTO_EXIT == 1) {
+        bench_frame = bench_frame + 1;
+        if (bench_frame > BENCH_WARMUP_FRAMES) {
+            bench_sum_ms = bench_sum_ms + state.timers.tick_time_ms;
+            bench_sum_us = bench_sum_us + tick_us;
+            bench_count = bench_count + 1;
+        }
+        if (bench_frame >= BENCH_TOTAL_FRAMES) {
+            if (bench_count < 1) { bench_count = 1; }
+            print_string("bench avg_tick_ms=");
+            print_int(bench_sum_ms / bench_count);
+            print_string(" avg_tick_us=");
+            print_int(bench_sum_us / bench_count);
+            print_string(" avg_tick_0p1ms=");
+            let avg_us: i32 = bench_sum_us / bench_count;
+            let avg_0p1ms: i32 = (avg_us + 50) / 100;
+            print_int(avg_0p1ms);
+            print_string(" frames=");
+            print_int(bench_count);
+            print_char(10);
+            state.running = 0;
+            return 1;
+        }
+    }
+
     return 0;
 }
 

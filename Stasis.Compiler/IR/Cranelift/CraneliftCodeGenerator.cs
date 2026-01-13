@@ -250,6 +250,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_get_time_ms", CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("get_time_us"))
+        {
+            // stasis_get_time_us() -> i32
+            builder.DeclareExternal("stasis_get_time_us", CraneliftTypeMapper.ClifType.I32);
+        }
+
         if (builtins.Contains("sleep_ms"))
         {
             // stasis_sleep_ms(ms: i32) -> void
@@ -1296,7 +1302,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "sys_argc" or "sys_argv"
             or "sys_read_file" or "sys_list_dir" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
             or "sys_exec" or "sys_spawn" or "sys_sleep_ms"
-            or "time" or "get_time_ms" or "sleep_ms"
+            or "time" or "get_time_ms" or "get_time_us" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
             or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"
             or "sin" or "cos" or "sin_fast" or "cos_fast"

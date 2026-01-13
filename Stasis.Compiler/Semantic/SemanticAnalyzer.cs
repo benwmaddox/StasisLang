@@ -116,6 +116,7 @@ public sealed class SemanticAnalyzer
             // Legacy system functions (to be renamed to sys_*)
             AddSymbol("time", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("get_time_ms", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
+            AddSymbol("get_time_us", SymbolKind.Function, new PrimitiveTypeSymbol("i32"), new SourceSpan(0, 0));
             AddSymbol("sleep_ms", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
             // Legacy graphics functions (external runtime)
