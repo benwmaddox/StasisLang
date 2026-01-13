@@ -28,11 +28,12 @@ const GFX_F_LINE_BASE: i32 = 4;
 
 // flags
 const GFX_FLAG_CLEAR: i32 = 1;
+const GFX_FLAG_PRESENT: i32 = 2;
 
-// capacities (match runtime defaults)
+// capacities (must match runtime clamp in `stasis_gfx_submit`)
 const GFX_MAX_LINES: i32 = 10000;
 const GFX_LINE_STRIDE_F32: i32 = 8;
-const GFX_MAX_SPRITES: i32 = 256;
+const GFX_MAX_SPRITES: i32 = 16384;
 const GFX_SPRITE_STRIDE_I32: i32 = 7; // handle,x,y,w,h,rot_deg,a
 
 const GFX_CMD_I32_COUNT: i32 = GFX_I_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_I32;
@@ -99,6 +100,10 @@ function gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i3
 }
 
 function gfx_cmd_submit(): void {
+    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] | GFX_FLAG_PRESENT;
     gfx_submit(gfx_cmd_i32, gfx_cmd_f32);
 }
 
+function gfx_cmd_submit_no_present(): void {
+    gfx_submit(gfx_cmd_i32, gfx_cmd_f32);
+}
