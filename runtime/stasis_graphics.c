@@ -125,6 +125,9 @@ STASIS_EXPORT int stasis_get_time_ms(void);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
+/* Forward decls for internal helpers used before their definitions. */
+static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
+
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void setup_ortho(void);
@@ -2435,14 +2438,15 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         const int32_t* sprites = cmd_i32 + 32;
         for (int i = 0; i < sprite_count; i++) {
             const int base = i * 7;
-            stasis_gfx_draw_sprite(
+            stasis_gfx_draw_sprite_internal(
                 sprites[base + 0],
                 sprites[base + 1],
                 sprites[base + 2],
                 sprites[base + 3],
                 sprites[base + 4],
                 sprites[base + 5],
-                sprites[base + 6]);
+                sprites[base + 6],
+                g_debug_hash_enabled);
         }
     }
 
@@ -2840,15 +2844,17 @@ STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
  * rot_degrees: rotation in degrees (0-359), around the sprite center
  * a: alpha 0-255
  */
-STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
-                                          int rot_degrees, int a) {
-    gfx_debug_hash_i32(handle);
-    gfx_debug_hash_i32(x);
-    gfx_debug_hash_i32(y);
-    gfx_debug_hash_i32(w);
-    gfx_debug_hash_i32(h);
-    gfx_debug_hash_i32(rot_degrees);
-    gfx_debug_hash_i32(a);
+static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h,
+                                           int rot_degrees, int a, int do_hash) {
+    if (do_hash) {
+        gfx_debug_hash_i32(handle);
+        gfx_debug_hash_i32(x);
+        gfx_debug_hash_i32(y);
+        gfx_debug_hash_i32(w);
+        gfx_debug_hash_i32(h);
+        gfx_debug_hash_i32(rot_degrees);
+        gfx_debug_hash_i32(a);
+    }
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
@@ -2934,6 +2940,11 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     g_sprite_vert_count += 6;
 }
 
+STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
+                                          int rot_degrees, int a) {
+    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 1);
+}
+
 /*
  * Batched sprite submission.
  * cmds: array of 7*i32 per sprite: handle,x,y,w,h,rot_degrees,a
@@ -2942,14 +2953,15 @@ STASIS_EXPORT void stasis_gfx_draw_sprites_i32(const int32_t* cmds, int sprite_c
     if (!cmds || sprite_count <= 0) return;
     for (int i = 0; i < sprite_count; i++) {
         const int base = i * 7;
-        stasis_gfx_draw_sprite(
+        stasis_gfx_draw_sprite_internal(
             cmds[base + 0],
             cmds[base + 1],
             cmds[base + 2],
             cmds[base + 3],
             cmds[base + 4],
             cmds[base + 5],
-            cmds[base + 6]);
+            cmds[base + 6],
+            g_debug_hash_enabled);
     }
 }
 
