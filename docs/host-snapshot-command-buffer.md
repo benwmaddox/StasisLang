@@ -109,26 +109,24 @@ Deterministic overflow:
 - If a stream is full, increment `DROPPED_*` and skip the write.
 - Do not resize and do not partially write a command.
 
-### Ordering (important design choice)
+### Ordering
 
-You have two practical options:
+Ordering is defined by the order of fields in the command-buffer struct/layout.
 
-1) Fixed pass ordering (recommended for v1)
-   - Host executes streams in a fixed order: clear -> lines -> sprites -> text -> present.
-   - If you need "layers", add multiple streams (e.g. `sprite_bg`, `sprite_fg`, `sprite_ui`) with separate counts.
+Concretely: if the command buffer defines `clear`, then `lines`, then `sprites`, the host executes those streams in that order. If you need layers, express them as multiple fields/streams (e.g. `sprites_bg`, `sprites_world`, `sprites_ui`) in the desired order.
 
-2) Explicit ordering stream (more flexible)
-   - Add a small `opcodes_i32[]` stream that references ranges inside the SoA streams.
-   - More code and more validation; good later if layering needs grow.
+This keeps ordering deterministic without introducing a separate opcode stream.
 
-### Coordinate space (another early decision)
+### Coordinate space
 
-Pick one coordinate space for commands and keep it consistent:
+Command coordinates are host pixels.
 
-- Pixel space: commands store pixels, host uses a pixel-perfect ortho.
-- Virtual/game space: commands store virtual units, host uses HostFrame viewport + an ortho matrix to map to pixels.
+This implies:
 
-The important part is that the host uses one authoritative set of transforms per tick (driven by HostFrame fields), so resize/DPI changes cannot desynchronize pipelines.
+- The host uses a pixel-perfect ortho/projection for all command execution.
+- `x/y/w/h` are interpreted in pixels (define and keep consistent whether `x/y` are top-left or center for each command type).
+
+HostFrame still carries viewport/window dimensions so game code can adapt, but command submission does not require a virtual-resolution transform.
 
 ### Relationship to today's `begin_frame/end_frame`
 
