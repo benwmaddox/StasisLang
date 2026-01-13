@@ -9,15 +9,16 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Self-host hot swap runner notes: `docs/self-host-hot-swap-runner.md`.
 - [ ] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
 - [x] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
+- [x] Sys: add bulk copy helpers (`sys_memcpy_u8/i32/f32`) and use them in command-buffer writers.
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite call overhead when debug hashing is off; build vertex buffers directly from streams).
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
 - [x] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
 - [ ] HostFrame: add `version`, `flags`, `frame_index`, and `dt` so tick can be snapshot-only (no ad-hoc queries).
 - [ ] HostFrame: add keyboard state + quit/focus flags to snapshot so tick can avoid `is_key_down`/`should_quit` imports.
-- [ ] Host bulk mode: export `host_*` globals from program DLL for runner/hosts.
-- [ ] Host bulk mode: runner writes HostFrame globals before `tick()` (no `host_frame_refresh()` in hot paths).
-- [ ] Host bulk mode: export `gfx_cmd_*` globals from program DLL for runner/hosts.
-- [ ] Host bulk mode: runner submits `gfx_cmd_*` after `tick()` (no `gfx_submit*`/`end_frame` in hot paths).
+- [x] Host bulk mode: export `host_*` globals from program DLL for runner/hosts.
+- [x] Host bulk mode: runner writes HostFrame globals before `tick()` (no `host_frame_refresh()` in hot paths).
+- [x] Host bulk mode: export `gfx_cmd_*` globals from program DLL for runner/hosts.
+- [x] Host bulk mode: runner submits `gfx_cmd_*` after `tick()` (no `gfx_submit*`/`end_frame` in hot paths).
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
