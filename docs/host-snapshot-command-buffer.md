@@ -82,6 +82,51 @@ This is the direction that minimizes Stasis->host calls on hot paths (important 
 
 This section describes a v1-shaped ABI. It is intentionally conservative: fixed-size buffers, versioning, and "copy out" semantics.
 
+### 0) Boundary contract (v1 minimal surface area)
+
+The bulk-host model aims for a tiny, stable boundary:
+
+- Per tick:
+  - Host writes input/state snapshots into guest memory.
+  - Host calls `tick()`.
+  - Host reads command buffers from guest memory and executes them.
+- No Stasis->host calls are required on hot paths.
+
+#### Required exports (guest -> host)
+
+Functions:
+- `tick() -> void` (required; called exactly once per tick).
+
+Data (fixed-size globals):
+- `host_i32: i32[HOST_I32_COUNT]` (written by host, read by guest).
+- `host_f32: f32[HOST_F32_COUNT]` (written by host, read by guest).
+- `host_keys: u8[512]` (written by host, read by guest).
+- `gfx_cmd_i32: i32[...]` (written by guest, read by host).
+- `gfx_cmd_f32: f32[...]` (written by guest, read by host).
+- `gfx_cmd_u8: u8[...]` (written by guest, read by host).
+
+Notes:
+- Sizes/indices/strides are part of the ABI. They must be treated like a struct layout and versioned.
+- Ownership is strict: host never writes `gfx_cmd_*`, guest never writes `host_*` (except in tests/mocks).
+
+#### Versioning and validation
+
+To avoid silent corruption, the host should validate at least:
+- `host_i32[HOST_I_MAGIC]` / `host_i32[HOST_I_VERSION]` (if/when added to the layout).
+- `gfx_cmd_i32[GFX_I_MAGIC]` / `gfx_cmd_i32[GFX_I_VERSION]` (already present).
+
+On mismatch: fail fast with a clear diagnostic (layout mismatch is not recoverable without a compat path).
+
+#### What does NOT belong in the per-tick host ABI
+
+These can exist as tooling/sys helpers without being part of the game-host tick boundary:
+- `sys_*` (argv/file I/O/spawn/time) helpers.
+
+These should be treated as legacy compatibility surfaces (keep for now, but plan to remove from hot paths):
+- Window/input query calls (`gfx_window_*`, `input_*`, `is_key_down`, `should_quit`, etc.).
+- Per-draw externs (`draw_line`, `gfx_draw_sprite`, `draw_text`, etc.).
+- Per-tick submit/present calls from Stasis (`gfx_submit*`, `end_frame`, etc.).
+
 ### 1) HostFrame snapshot (already prototyped)
 
 There is already a prototype in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:
