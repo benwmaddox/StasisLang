@@ -9,20 +9,12 @@
 
 import "../host_frame.stasis";
 import "../gfx_cmd.stasis";
+import "../host_window_request.stasis";
 
 extern function time(): i32;
 extern function get_time_ms(): i32;
 extern function get_time_us(): i32;
 extern function sleep_ms(ms: i32): void;
-
-// Window request ABI (guest -> host). Runner polls and applies these.
-const HOST_REQ_FLAG_WINDOWED: i32 = 1;
-const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
-
-global host_req_seq: i32;
-global host_req_flags: i32;
-global host_req_window_w_px: i32;
-global host_req_window_h_px: i32;
 
 // Startup / assets (host calls; avoid in hot paths)
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;

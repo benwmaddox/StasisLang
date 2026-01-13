@@ -24,7 +24,9 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         var arrType = LLVMTypeRef.CreateArray(elementType, length);
         var global = Module.AddGlobal(arrType, name);
-        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.Linkage = ShouldExportGlobal(name)
+            ? LLVMLinkage.LLVMExternalLinkage
+            : LLVMLinkage.LLVMInternalLinkage;
         global.Initializer = LLVMValueRef.CreateConstNull(arrType);
         return global;
     }
@@ -32,7 +34,9 @@ public sealed class LlvmModuleBuilder : IDisposable
     public LLVMValueRef DefineGlobalScalar(string name, LLVMTypeRef elementType)
     {
         var global = Module.AddGlobal(elementType, name);
-        global.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        global.Linkage = ShouldExportGlobal(name)
+            ? LLVMLinkage.LLVMExternalLinkage
+            : LLVMLinkage.LLVMInternalLinkage;
         global.Initializer = LLVMValueRef.CreateConstNull(elementType);
         return global;
     }
@@ -58,6 +62,23 @@ public sealed class LlvmModuleBuilder : IDisposable
     {
         Module.Dispose();
         Context.Dispose();
+    }
+
+    private static bool ShouldExportGlobal(string name)
+    {
+        // These globals form the stable bulk host ABI surface. They must be externally linkable
+        // so native hosts (runner/Android/etc.) can read/write them directly.
+        return name is
+            "host_i32" or
+            "host_f32" or
+            "host_keys" or
+            "gfx_cmd_i32" or
+            "gfx_cmd_f32" or
+            "gfx_cmd_u8" or
+            "host_req_seq" or
+            "host_req_flags" or
+            "host_req_window_w_px" or
+            "host_req_window_h_px";
     }
 
     private static string GetHostTriple()

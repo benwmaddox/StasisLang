@@ -22,9 +22,23 @@ endif()
 
 # Build the Stasis game LLVM IR into an object file with the active toolchain compiler.
 set(GAME_OBJ "${CMAKE_CURRENT_BINARY_DIR}/brickout_revenge.o")
+
+set(IR_C_COMPILER "${CMAKE_C_COMPILER}")
+if(ANDROID)
+    # When cross-compiling, `${CMAKE_C_COMPILER}` is `clang` and relies on additional flags to
+    # select the target. Our custom command does not automatically inherit those flags, so we
+    # use the NDK's target-prefixed clang wrapper for a deterministic ELF object output.
+    string(REPLACE "android-" "" ANDROID_API "${ANDROID_PLATFORM}")
+    get_filename_component(NDK_CLANG_BIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+    set(IR_C_COMPILER "${NDK_CLANG_BIN_DIR}/aarch64-linux-android${ANDROID_API}-clang")
+    if(EXISTS "${IR_C_COMPILER}.cmd")
+        set(IR_C_COMPILER "${IR_C_COMPILER}.cmd")
+    endif()
+endif()
+
 add_custom_command(
     OUTPUT "${GAME_OBJ}"
-    COMMAND "${CMAKE_C_COMPILER}" -c "${STASIS_GAME_LL_ABS}" -o "${GAME_OBJ}"
+    COMMAND "${IR_C_COMPILER}" -c "${STASIS_GAME_LL_ABS}" -o "${GAME_OBJ}"
     DEPENDS "${STASIS_GAME_LL_ABS}"
     VERBATIM
 )
