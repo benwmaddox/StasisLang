@@ -169,6 +169,15 @@ Notes:
 - Sizes/indices/strides are part of the ABI. They must be treated like a struct layout and versioned.
 - Ownership is strict: host never writes `gfx_cmd_*`, guest never writes `host_*` (except in tests/mocks).
 
+#### Window policy (recommended)
+
+- Default: host starts in fullscreen (desktop) without the guest creating a window.
+- Guest may request windowed/fullscreen by writing `host_req_*` globals (typically during `main()`):
+  - `host_req_seq: i32` (monotonic; bump to apply changes)
+  - `host_req_flags: i32` (`WINDOWED=1`, `FULLSCREEN=2`)
+  - `host_req_window_w_px: i32`, `host_req_window_h_px: i32` (used when `WINDOWED`)
+- Host should expose both window and screen size in HostFrame so programs can lay out UI deterministically.
+
 #### Versioning and validation
 
 To avoid silent corruption, the host should validate at least:

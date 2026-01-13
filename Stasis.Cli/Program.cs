@@ -281,6 +281,12 @@ static void AddHostAbiDataExports(LayoutPlan layout, List<string> exports)
     AddIfGlobalExists(layout, exports, "gfx_cmd_i32");
     AddIfGlobalExists(layout, exports, "gfx_cmd_f32");
     AddIfGlobalExists(layout, exports, "gfx_cmd_u8");
+
+    // Window requests (optional): guest writes, runner applies (bulk, no guest->host calls).
+    AddIfGlobalExists(layout, exports, "host_req_seq");
+    AddIfGlobalExists(layout, exports, "host_req_flags");
+    AddIfGlobalExists(layout, exports, "host_req_window_w_px");
+    AddIfGlobalExists(layout, exports, "host_req_window_h_px");
 }
 
 if (mode == "format")
