@@ -3497,6 +3497,7 @@ static Process StartWatchChild(string exePath, string[] args)
         UseShellExecute = false
     };
     psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = Directory.GetCurrentDirectory();
+    psi.EnvironmentVariables["STASIS_DEV"] = "1";
     return Process.Start(psi)!;
 }
 

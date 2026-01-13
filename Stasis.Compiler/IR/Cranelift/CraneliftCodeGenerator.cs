@@ -351,6 +351,13 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("host_get_frame"))
+        {
+            builder.DeclareExternal("stasis_host_get_frame", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64,
+                CraneliftTypeMapper.ClifType.R64);
+        }
+
         if (builtins.Contains("gfx_load_sprite"))
         {
             builder.DeclareExternal("stasis_gfx_load_sprite", CraneliftTypeMapper.ClifType.I32,
@@ -406,12 +413,6 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         if (builtins.Contains("gfx_window_resized"))
         {
             builder.DeclareExternal("stasis_gfx_window_resized", CraneliftTypeMapper.ClifType.I32);
-        }
-
-        if (builtins.Contains("gfx_poll_reload"))
-        {
-            builder.DeclareExternal("stasis_gfx_poll_reload", CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("gfx_debug_bake_hash"))
@@ -1310,7 +1311,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_submit"
             or "gfx_submit_u8"
             or "gfx_window_width" or "gfx_window_height" or "gfx_window_resized"
-            or "gfx_poll_reload" or "gfx_debug_bake_hash" or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
+            or "gfx_debug_bake_hash" or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
             or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
             or "load_font" or "draw_text" or "measure_text" or "set_postfx"
             or "list_directory" or "dir_list_entry_is_dir" or "dir_list_entry_copy_name"

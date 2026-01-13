@@ -641,6 +641,17 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
+    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisHostGetFrame(LlvmModuleBuilder builder)
+    {
+        var fn = builder.Module.GetNamedFunction("stasis_host_get_frame");
+        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { i8Ptr, i8Ptr }, false);
+        if (fn.Handle != IntPtr.Zero)
+            return (fn, fnType);
+        fn = builder.Module.AddFunction("stasis_host_get_frame", fnType);
+        return (fn, fnType);
+    }
+
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxLoadSprite(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_gfx_load_sprite");
@@ -1282,6 +1293,7 @@ public sealed class ModuleLowerer
             "clear",
             "draw_line",
             "draw_lines_f32",
+            "host_get_frame",
             "gfx_load_sprite",
             "gfx_draw_sprite",
             "gfx_draw_sprites_i32",
@@ -3245,6 +3257,34 @@ public sealed class ModuleLowerer
                         var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
                         var cast = builder.BuildBitCast(lines, i8Ptr, "draw_lines_f32.ptr");
                         builder.BuildCall2(fnType, fn, new[] { cast, count }, "");
+                        return ConstI32(0);
+                    }
+                case "host_get_frame":
+                    {
+                        if (args.Count != 2)
+                        {
+                            AddDiagnostic("host_get_frame expects (out_i32: i32[], out_f32: f32[]).", span);
+                            return ConstI32(0);
+                        }
+
+                        var outI32 = LowerArrayPointer(builder, args[0], locals);
+                        if (outI32.Handle == IntPtr.Zero)
+                            outI32 = LowerExpression(builder, args[0], locals);
+                        var outF32 = LowerArrayPointer(builder, args[1], locals);
+                        if (outF32.Handle == IntPtr.Zero)
+                            outF32 = LowerExpression(builder, args[1], locals);
+
+                        if (outI32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind || outF32.TypeOf.Kind != LLVMTypeKind.LLVMPointerTypeKind)
+                        {
+                            AddDiagnostic("host_get_frame expects array/pointer arguments.", span);
+                            return ConstI32(0);
+                        }
+
+                        var (fn, fnType) = GetOrDeclareStasisHostGetFrame(_moduleBuilder);
+                        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+                        var castI32 = builder.BuildBitCast(outI32, i8Ptr, "host_get_frame.i32");
+                        var castF32 = builder.BuildBitCast(outF32, i8Ptr, "host_get_frame.f32");
+                        builder.BuildCall2(fnType, fn, new[] { castI32, castF32 }, "");
                         return ConstI32(0);
                     }
                 case "gfx_load_sprite":

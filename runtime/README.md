@@ -74,7 +74,6 @@ The library exports these functions for Stasis programs:
 | `stasis_gfx_load_sprite(path)` | Load and bake an SVG sprite into an atlas; returns handle |
 | `stasis_gfx_draw_sprite(handle, x, y, sx, sy, rot, r, g, b, a)` | Draw baked sprite (centered) with scale/rotation/tint |
 | `stasis_gfx_draw_sprites_i32(cmds, count)` | Batch: draw `count` sprites from an `i32` array (7 ints per sprite) |
-| `stasis_gfx_poll_reload(handle)` | Hot reload baked sprite if source file changed |
 | `stasis_gfx_debug_bake_hash(path)` | Debug: bake SVG on CPU and return a pixel hash |
 | `stasis_gfx_debug_enable_hash(enabled)` | Debug: enable per-frame draw-call hash (for verifying batch equivalence) |
 | `stasis_gfx_debug_get_frame_hash()` | Debug: get current frame hash (0 if disabled) |

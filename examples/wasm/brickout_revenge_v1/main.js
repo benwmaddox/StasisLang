@@ -319,8 +319,6 @@ async function start() {
         ctx.restore();
       },
 
-      stasis_gfx_poll_reload: (_handle) => 0,
-
       stasis_gfx_window_width: () => virtualW | 0,
       stasis_gfx_window_height: () => virtualH | 0,
       stasis_gfx_window_resized: () => {
