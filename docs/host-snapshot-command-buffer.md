@@ -66,6 +66,18 @@ Key property: resize/viewport/DPI changes become *just fields in the HostFrame*,
 - AoS -> SoA: command buffers can be SoA-friendly (separate streams per command type).
 - WASM friendly: reduces imports/exports to a small stable surface.
 
+### Bulk host mode (no explicit calls from Stasis)
+
+In the "bulk host" model, the program does not call `host_get_frame` or `gfx_submit*` at all.
+
+Per tick:
+
+1) Host writes HostFrame directly into exported Stasis globals (`host_i32[]`, `host_f32[]`, `host_keys[]`).
+2) Host calls `tick()`.
+3) Host reads exported command buffers (`gfx_cmd_i32[]`, `gfx_cmd_f32[]`, `gfx_cmd_u8[]`) and submits/presents once.
+
+This is the direction that minimizes Stasis->host calls on hot paths (important for WASM).
+
 ## ABI pieces
 
 This section describes a v1-shaped ABI. It is intentionally conservative: fixed-size buffers, versioning, and "copy out" semantics.

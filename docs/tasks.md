@@ -13,9 +13,11 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
 - [x] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
 - [ ] HostFrame: add `version`, `flags`, `frame_index`, and `dt` so tick can be snapshot-only (no ad-hoc queries).
-- [ ] HostFrame: add keyboard state + quit/focus flags to snapshot to reduce per-tick host calls (esp. for WASM).
-- [ ] Host bulk mode: runner writes `host_i32[]`/`host_f32[]` directly and program never calls `host_get_frame`.
-- [ ] Host bulk mode: runner reads `gfx_cmd_*` globals and submits/presents (program never calls `gfx_submit*`/`end_frame`).
+- [ ] HostFrame: add keyboard state + quit/focus flags to snapshot so tick can avoid `is_key_down`/`should_quit` imports.
+- [ ] Host bulk mode: export `host_*` globals from program DLL for runner/hosts.
+- [ ] Host bulk mode: runner writes HostFrame globals before `tick()` (no `host_frame_refresh()` in hot paths).
+- [ ] Host bulk mode: export `gfx_cmd_*` globals from program DLL for runner/hosts.
+- [ ] Host bulk mode: runner submits `gfx_cmd_*` after `tick()` (no `gfx_submit*`/`end_frame` in hot paths).
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
