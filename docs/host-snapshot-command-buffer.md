@@ -72,7 +72,7 @@ This section describes a v1-shaped ABI. It is intentionally conservative: fixed-
 
 ### 1) HostFrame snapshot (already prototyped)
 
-There is already a prototype in `src/stdlib/host_frame.stasis`, and a native implementation in `runtime/stasis_graphics.c`:
+There is already a prototype in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:
 
 - `extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;`
 - `STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32)`
@@ -193,7 +193,7 @@ Phase 0: Fix resize smoothness in current runtime
 - Centralize resize handling in `runtime/stasis_graphics.c`.
 
 Phase 1: Make HostFrame v1 real
-- Extend `src/stdlib/host_frame.stasis` with version/flags/dt/frame_index.
+- Extend `src/host_frame.stasis` with version/flags/dt/frame_index.
 - Update `runtime/stasis_graphics.c` `stasis_host_get_frame` to fill them.
 - Add a small sample that prints HostFrame fields and validates invariants.
 
@@ -212,4 +212,3 @@ Phase 4: Fold more host queries into HostFrame
 Phase 5: Prepare for a WASM host
 - HostFrame becomes one import from JS, command buffers become one export or one import call.
 - The native runner becomes "a host implementation", not the canonical execution model.
-

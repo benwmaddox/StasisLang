@@ -152,6 +152,7 @@ typedef struct {
     SDL_Texture* sdl_tex;
     int used;
     int needs_reraster;  /* flag for window resize */
+    int reload_pending;  /* set when the asset watcher reloads this sprite */
 } SpriteEntry;
 
 static SpriteEntry g_sprites[MAX_SPRITES];
@@ -508,7 +509,7 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
 /*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
- * Layout is defined in src/stdlib/host_frame.stasis. This is intentionally a simple
+ * Layout is defined in src/host_frame.stasis. This is intentionally a simple
  * "copy out" ABI for native now, and a good fit for WASM later (one import to get a snapshot).
  */
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
@@ -2666,6 +2667,14 @@ static SpriteEntry* sprite_get(int handle) {
     return &g_sprites[idx];
 }
 
+STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
+    SpriteEntry* e = sprite_get(handle);
+    if (!e) return 0;
+    if (!e->reload_pending) return 0;
+    e->reload_pending = 0;
+    return 1;
+}
+
 static int sprite_find_by_path(const char* path) {
     for (int i = 0; i < MAX_SPRITES; i++) {
         if (g_sprites[i].used && g_sprites[i].path && strcmp(g_sprites[i].path, path) == 0) {
@@ -2925,6 +2934,8 @@ static void gfx_asset_watch_apply_pending_changes(void) {
 
         if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1)) {
             SDL_Log("gfx_watch: reload failed for %s", e->path);
+        } else {
+            e->reload_pending = 1;
         }
     }
 #endif
