@@ -612,15 +612,15 @@ function update_layout(): void {
     state.layout.ui_h = UI_RESERVED_H * s;
 }
 
-function play_to_screen_x(play_x: f32): f32 {
+function @inline play_to_screen_x(play_x: f32): f32 {
     return state.layout.play_x + play_x * state.layout.play_scale;
 }
 
-function play_to_screen_y(play_y: f32): f32 {
+function @inline play_to_screen_y(play_y: f32): f32 {
     return state.layout.play_y + play_y * state.layout.play_scale;
 }
 
-function play_to_screen_len(play_len: f32): f32 {
+function @inline play_to_screen_len(play_len: f32): f32 {
     return play_len * state.layout.play_scale;
 }
 
@@ -643,12 +643,12 @@ function play_snap_len(play_len: f32): f32 {
     return snap_px(play_to_screen_len(play_len));
 }
 
-function screen_to_play_x(screen_x: f32): f32 {
+function @inline screen_to_play_x(screen_x: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
     return (screen_x - state.layout.play_x) / state.layout.play_scale;
 }
 
-function screen_to_play_y(screen_y: f32): f32 {
+function @inline screen_to_play_y(screen_y: f32): f32 {
     if (state.layout.play_scale <= 0.0) { return 0.0; }
     return (screen_y - state.layout.play_y) / state.layout.play_scale;
 }

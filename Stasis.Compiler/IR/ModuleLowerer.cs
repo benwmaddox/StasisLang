@@ -1220,6 +1220,7 @@ public sealed class ModuleLowerer
         private Dictionary<string, EnumDeclarationSyntax> _enums = new(StringComparer.Ordinal);
         private Dictionary<string, FunctionDeclarationSyntax> _functions = new(StringComparer.Ordinal);
         private Dictionary<string, TestDeclarationSyntax> _tests = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _inlineStack = new(StringComparer.Ordinal);
         private readonly HashSet<string> _builtIns = new(StringComparer.Ordinal)
         {
             // Legacy I/O (to be deprecated)
@@ -2116,6 +2117,11 @@ public sealed class ModuleLowerer
                 return LowerBuiltInCall(builder, id.Identifier.Text, call.Arguments, locals, call.Span);
             }
 
+            if (TryInlineCall(builder, call, id.Identifier.Text, locals, out var inlined))
+            {
+                return inlined;
+            }
+
             if (!_symbols.TryGetValue(id.Identifier.Text, out var sym) || sym.Kind is not (SymbolKind.Function or SymbolKind.Test))
             {
                 AddDiagnostic($"Unknown function '{id.Identifier.Text}'.", call.Span);
@@ -2166,6 +2172,187 @@ public sealed class ModuleLowerer
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
         }
+
+        private bool TryInlineCall(
+            LLVMBuilderRef builder,
+            CallExpressionSyntax call,
+            string funcName,
+            Dictionary<string, LocalBinding> locals,
+            out LLVMValueRef result)
+        {
+            result = default;
+
+            if (!_functions.TryGetValue(funcName, out var func))
+            {
+                return false;
+            }
+
+            if (func.IsExtern || func.Body is null)
+            {
+                return false;
+            }
+
+            if (!HasInlineAttribute(func))
+            {
+                return false;
+            }
+
+            if (_inlineStack.Contains(funcName))
+            {
+                return false;
+            }
+
+            if (func.Parameters.Count != call.Arguments.Count)
+            {
+                return false;
+            }
+
+            // Restrict v1 inlining to straight-line blocks (no control flow) so we don't
+            // need to rewrite returns/labels in the caller.
+            foreach (var stmt in func.Body.Statements)
+            {
+                if (stmt is VariableDeclarationSyntax or ExpressionStatementSyntax or ReturnStatementSyntax)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            var signature = ResolveFunctionSignature(funcName);
+            var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
+            var isVoid = fnType.ReturnType.Kind == LLVMTypeKind.LLVMVoidTypeKind;
+
+            if (!isVoid)
+            {
+                if (func.Body.Statements.Count == 0)
+                {
+                    return false;
+                }
+
+                if (func.Body.Statements[^1] is not ReturnStatementSyntax { Expression: not null })
+                {
+                    return false;
+                }
+            }
+
+            var savedLocals = new List<(string Name, bool HadValue, LocalBinding Value)>();
+            void SaveLocal(string name)
+            {
+                for (int i = 0; i < savedLocals.Count; i++)
+                {
+                    if (string.Equals(savedLocals[i].Name, name, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                }
+
+                if (locals.TryGetValue(name, out var existing))
+                {
+                    savedLocals.Add((name, true, existing));
+                }
+                else
+                {
+                    savedLocals.Add((name, false, default));
+                }
+            }
+
+            _inlineStack.Add(funcName);
+
+            // Bind parameters by creating stack slots in the caller and storing evaluated args.
+            for (int i = 0; i < func.Parameters.Count; i++)
+            {
+                var param = func.Parameters[i];
+                var paramType = ResolveType(param.Type, _symbols);
+
+                if (paramType is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    var llvmType = layout.DescriptorType;
+                    var argValue = BuildArrayDescriptorValue(builder, call.Arguments[i], arr, layout, locals);
+
+                    SaveLocal(param.Name.Text);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(argValue, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType, layout, true);
+                }
+                else
+                {
+                    var llvmType = _moduleBuilder.TypeMapper.Map(paramType);
+                    var argValue = LowerExpression(builder, call.Arguments[i], locals);
+                    argValue = ConvertToType(builder, argValue, llvmType);
+
+                    SaveLocal(param.Name.Text);
+                    var alloca = builder.BuildAlloca(llvmType, param.Name.Text);
+                    builder.BuildStore(argValue, alloca);
+                    locals[param.Name.Text] = new LocalBinding(alloca, llvmType, true, null, paramType);
+                }
+            }
+
+            LLVMValueRef inlineResult = isVoid ? ConstI32(0) : LLVMValueRef.CreateConstNull(fnType.ReturnType);
+            var hasResult = false;
+
+            foreach (var stmt in func.Body.Statements)
+            {
+                switch (stmt)
+                {
+                    case VariableDeclarationSyntax decl:
+                        SaveLocal(decl.Name.Text);
+                        LowerVariableDeclaration(builder, decl, locals);
+                        break;
+                    case ExpressionStatementSyntax exprStmt:
+                        LowerExpression(builder, exprStmt.Expression, locals);
+                        break;
+                    case ReturnStatementSyntax ret:
+                        if (!isVoid)
+                        {
+                            if (ret.Expression is null)
+                            {
+                                RestoreLocals(savedLocals, locals);
+                                _inlineStack.Remove(funcName);
+                                return false;
+                            }
+
+                            inlineResult = LowerExpression(builder, ret.Expression, locals);
+                            inlineResult = ConvertToType(builder, inlineResult, fnType.ReturnType);
+                            hasResult = true;
+                        }
+
+                        goto done;
+                }
+            }
+
+        done:
+            RestoreLocals(savedLocals, locals);
+            _inlineStack.Remove(funcName);
+
+            if (!isVoid && !hasResult)
+            {
+                return false;
+            }
+
+            result = isVoid ? ConstI32(0) : inlineResult;
+            return true;
+        }
+
+        private static void RestoreLocals(List<(string Name, bool HadValue, LocalBinding Value)> savedLocals, Dictionary<string, LocalBinding> locals)
+        {
+            for (int i = savedLocals.Count - 1; i >= 0; i--)
+            {
+                var saved = savedLocals[i];
+                if (!saved.HadValue)
+                {
+                    locals.Remove(saved.Name);
+                }
+                else
+                {
+                    locals[saved.Name] = saved.Value;
+                }
+            }
+        }
+
+        private static bool HasInlineAttribute(FunctionDeclarationSyntax func) =>
+            func.Attributes.Any(attr => string.Equals(attr.Text, "inline", StringComparison.Ordinal));
 
         private LLVMValueRef BuildArrayDescriptorValue(LLVMBuilderRef builder, ExpressionSyntax expr, ArrayTypeSymbol arrayType, ArrayDescriptorLayout layout, Dictionary<string, LocalBinding> locals)
         {

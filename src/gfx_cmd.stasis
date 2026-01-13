@@ -56,7 +56,7 @@ global gfx_cmd_i32: i32[34848];
 global gfx_cmd_f32: f32[92292];
 global gfx_cmd_u8: u8[65536];
 
-function gfx_cmd_begin(): void {
+function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
     gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
     gfx_cmd_i32[GFX_I_FLAGS] = 0;
@@ -69,7 +69,7 @@ function gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = 0;
 }
 
-function gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
+function @inline gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
     gfx_cmd_f32[GFX_F_CLEAR_R] = r;
     gfx_cmd_f32[GFX_F_CLEAR_G] = g;
@@ -207,11 +207,11 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
 }
 
-function gfx_cmd_submit(): void {
+function @inline gfx_cmd_submit(): void {
     gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
 
-function gfx_cmd_submit_no_present(): void {
+function @inline gfx_cmd_submit_no_present(): void {
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }

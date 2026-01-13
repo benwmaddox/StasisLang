@@ -11,6 +11,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite call overhead when debug hashing is off; build vertex buffers directly from streams).
 - [ ] Command buffers: evolve text output toward glyph runs/caching (avoid per-frame UTF-8 copies + per-string parsing).
+- [ ] Compiler: implement `function @inline ...` (parse + carry attribute + inline small functions in LLVM/Cranelift codegen).
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.

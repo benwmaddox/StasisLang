@@ -750,13 +750,43 @@ public sealed class CraneliftFunctionBuilder
             return false;
         }
 
-        if (func.Body.Statements.Count != 1 || func.Body.Statements[0] is not ReturnStatementSyntax ret || ret.Expression is null)
+        // Restrict v1 inlining to straight-line blocks (no control flow) so we don't
+        // need to rewrite returns/labels in the caller.
+        foreach (var stmt in func.Body.Statements)
         {
+            if (stmt is VariableDeclarationSyntax or ExpressionStatementSyntax or ReturnStatementSyntax)
+            {
+                continue;
+            }
+
             return false;
+        }
+
+        var isVoid = func.ReturnType is null || (func.ReturnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
+        if (!isVoid)
+        {
+            if (func.Body.Statements.Count == 0)
+            {
+                return false;
+            }
+            if (func.Body.Statements[^1] is not ReturnStatementSyntax { Expression: not null })
+            {
+                return false;
+            }
         }
 
         var savedLocals = new List<(string Name, LocalSlot? Slot, TypeSymbol? Type)>();
         _inlineStack.Add(funcName);
+
+        void SaveLocal(string name)
+        {
+            if (savedLocals.Any(s => string.Equals(s.Name, name, StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            savedLocals.Add((name, _locals.TryGetValue(name, out var existing) ? existing : null, _localTypes.TryGetValue(name, out var existingType) ? existingType : null));
+        }
 
         for (int i = 0; i < func.Parameters.Count; i++)
         {
@@ -773,13 +803,56 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
             _instructions.AppendLine($"    store {argValue}, {addr}");
 
-            savedLocals.Add((param.Name.Text, _locals.TryGetValue(param.Name.Text, out var existing) ? existing : null, _localTypes.TryGetValue(param.Name.Text, out var existingType) ? existingType : null));
+            SaveLocal(param.Name.Text);
             _locals[param.Name.Text] = new LocalSlot(addr, clifType);
             _localTypes[param.Name.Text] = paramType;
         }
 
-        result = LowerExpression(ret.Expression);
+        var hasResult = false;
+        result = ZeroI32();
 
+        foreach (var stmt in func.Body.Statements)
+        {
+            switch (stmt)
+            {
+                case VariableDeclarationSyntax varDecl:
+                    SaveLocal(varDecl.Name.Text);
+                    LowerVariableDeclaration(varDecl);
+                    break;
+                case ExpressionStatementSyntax exprStmt:
+                    LowerExpression(exprStmt.Expression);
+                    break;
+                case ReturnStatementSyntax ret:
+                    if (!isVoid)
+                    {
+                        if (ret.Expression is null)
+                        {
+                            _inlineStack.Remove(funcName);
+                            RestoreSavedLocals(savedLocals);
+                            return false;
+                        }
+                        result = LowerExpression(ret.Expression);
+                        hasResult = true;
+                    }
+                    goto done;
+            }
+        }
+
+    done:
+
+        RestoreSavedLocals(savedLocals);
+        _inlineStack.Remove(funcName);
+
+        if (!isVoid && !hasResult)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void RestoreSavedLocals(List<(string Name, LocalSlot? Slot, TypeSymbol? Type)> savedLocals)
+    {
         for (int i = savedLocals.Count - 1; i >= 0; i--)
         {
             var saved = savedLocals[i];
@@ -801,9 +874,6 @@ public sealed class CraneliftFunctionBuilder
                 _localTypes[saved.Name] = saved.Type;
             }
         }
-
-        _inlineStack.Remove(funcName);
-        return true;
     }
 
     private string LowerInlineArgument(ExpressionSyntax argExpr, TypeSymbol paramType)
