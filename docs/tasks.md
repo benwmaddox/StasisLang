@@ -20,6 +20,8 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [x] Host bulk mode: runner writes HostFrame globals before `tick()` (no `host_frame_refresh()` in hot paths).
 - [x] Host bulk mode: export `gfx_cmd_*` globals from program DLL for runner/hosts.
 - [x] Host bulk mode: runner submits `gfx_cmd_*` after `tick()` (no `gfx_submit*`/`end_frame` in hot paths).
+- [ ] Host ABI cleanup: route all hot-path reads through `host_*` globals and remove per-tick query calls (`gfx_window_*`, `input_*`, `is_key_down`, `should_quit`) from samples.
+- [ ] Host ABI cleanup: treat per-draw externs as legacy; migrate render-heavy paths to command buffers only.
 - [ ] Game dev readiness: P0 stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing string headers directly).
 - [ ] Game dev readiness: P1 input helpers (went_down/up, mapping), viewport/camera helpers, and draw batching helpers.
 - [ ] Game dev readiness: P2 audio mixer layer (one-shots + loops) and more templates/examples.
