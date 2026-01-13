@@ -15,10 +15,11 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Follow through: implement `docs/aquarium-sample-plan.md` (add `samples/aquarium.stasis`).
 - [ ] Follow through: execute `docs/data-hot-reload-plan.md` (end-to-end dev workflow + tests).
 - [ ] Follow through: execute `docs/cranelift-backend-plan.md` (close remaining backend gaps).
-- [ ] Follow through: execute `docs/hosts-first-class-plan.md` (host APIs, packaging, and ergonomics).
+- [ ] Follow through: review `docs/archive/hosts-first-class-plan.md` (background; older host abstractions discussion).
+- [ ] Follow through: execute `docs/host-snapshot-command-buffer.md` (HostFrame snapshot + per-tick command buffers).
 - [ ] Follow through: execute `docs/android-plan.md` (Android runtime build + host proof-of-concept).
 - [ ] Follow through: execute `docs/brickout-android-debug-plan.md` (debug APK + adb asset push workflow).
-- [ ] Follow through: review `docs/self-hosted-compiler-plan.md` (background; superseded by `docs/self-host-gap-closure.md`).
+- [ ] Follow through: review `docs/archive/self-hosted-compiler-plan.md` (background; superseded by `docs/self-host-gap-closure.md`).
 - [ ] Follow through: execute `docs/svg-migration-plan.md` (finish SVG pipeline + validation).
 - [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 - [ ] Maintenance: regularly scan open PRs for merge conflicts and fix by merging `main` into the PR branch (or rebasing) so PRs stay mergeable.

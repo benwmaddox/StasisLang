@@ -62,6 +62,7 @@ Backends:
 - Game-dev iteration workflow: `docs/game-dev-workflow.md`
 - Language spec (semantics, memory rules): `docs/spec.md`
 - Parser/grammar notes (LL(1)): `docs/compilation.md`
+- Host ABI direction (snapshot + command buffer): `docs/host-snapshot-command-buffer.md`
 
 ## Repo layout
 
