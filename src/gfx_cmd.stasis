@@ -215,3 +215,11 @@ function @inline gfx_cmd_submit(): void {
 function @inline gfx_cmd_submit_no_present(): void {
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
+
+function @inline gfx_cmd_line_count(): i32 { return gfx_cmd_i32[GFX_I_LINE_COUNT]; }
+function @inline gfx_cmd_sprite_count(): i32 { return gfx_cmd_i32[GFX_I_SPRITE_COUNT]; }
+function @inline gfx_cmd_text_count(): i32 { return gfx_cmd_i32[GFX_I_TEXT_COUNT]; }
+function @inline gfx_cmd_dropped_lines(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_LINES]; }
+function @inline gfx_cmd_dropped_sprites(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_SPRITES]; }
+function @inline gfx_cmd_dropped_text(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_TEXT]; }
+function @inline gfx_cmd_text_bytes_used(): i32 { return gfx_cmd_i32[GFX_I_TEXT_BYTES_USED]; }
