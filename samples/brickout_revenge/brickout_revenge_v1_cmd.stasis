@@ -1438,7 +1438,7 @@ function update_game(dt: f32, delta_ms: i32): void {
 }
 
 // Drawing functions
-function draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+function @inline draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     // Draw rectangle as 4 lines
     gfx_cmd_line(x, y, x + w, y, r, g, b, a);
     gfx_cmd_line(x + w, y, x + w, y + h, r, g, b, a);
@@ -1473,7 +1473,7 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
     }
 }
 
-function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+function @inline play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     gfx_cmd_line(
         play_snap_x(x1),
         play_snap_y(y1),
@@ -1482,7 +1482,7 @@ function play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32
         red, green, blue, alpha);
 }
 
-function play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+function @inline play_draw_rect(x: f32, y: f32, width: f32, height: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_rect(
         play_snap_x(x),
         play_snap_y(y),
@@ -1500,7 +1500,7 @@ function play_draw_filled_rect(x: f32, y: f32, width: f32, height: f32, red: f32
         red, green, blue, alpha);
 }
 
-function play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
+function @inline play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
     draw_circle(
         play_snap_x(cx),
         play_snap_y(cy),
