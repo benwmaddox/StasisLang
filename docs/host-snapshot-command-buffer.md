@@ -152,16 +152,16 @@ There is already a prototype in `src/host_frame.stasis` (kept in `src/` since st
 Proposed changes to make it "production-shaped":
 
 - Add a small header for versioning and per-tick flags.
-- Add `dt` and a monotonic `frame_index` so systems can be written without relying on wall-clock deltas.
+- Prefer ticks over delta-time: add a monotonic `tick_index` and a fixed `tick_hz` (or `tick_ms`) so simulation can be written in whole ticks.
 - Treat any unused indices as reserved for forward compatibility.
 
 Suggested i32 header (example):
 
 - `HOST_I_MAGIC`: constant (helps detect uninitialized buffers in debug)
 - `HOST_I_VERSION`: increments when layout changes
-- `HOST_I_FRAME_INDEX`: increments once per tick
-- `HOST_I_TIME_MS`: monotonic ms since start (or since epoch; but monotonic is preferred)
-- `HOST_I_DT_MS`: delta in ms since last tick (clamped, deterministic policy)
+- `HOST_I_TICK_INDEX`: increments once per tick
+- `HOST_I_TICK_HZ`: fixed ticks-per-second for the program (or omit if the program treats ticks as abstract)
+- `HOST_I_TIME_MS`: optional monotonic ms since start (for profiling/bench; not required for simulation)
 - `HOST_I_WINDOW_W_PX`, `HOST_I_WINDOW_H_PX`
 - `HOST_I_VIEWPORT_X_PX`, `HOST_I_VIEWPORT_Y_PX`, `HOST_I_VIEWPORT_W_PX`, `HOST_I_VIEWPORT_H_PX`
 - `HOST_I_FLAGS`: bitfield (resized, focus, etc.)
@@ -169,7 +169,6 @@ Suggested i32 header (example):
 
 Suggested f32 header (example):
 
-- `HOST_F_DT_S`: `dt` in seconds for convenience (or omit if redundant)
 - `HOST_F_DPI_SCALE_X`, `HOST_F_DPI_SCALE_Y` (if/when needed)
 
 Pointer layout can stay as-is (id/buttons in i32, positions/deltas in f32).
@@ -265,7 +264,7 @@ Phase 0: Fix resize smoothness in current runtime
 - Centralize resize handling in `runtime/stasis_graphics.c`.
 
 Phase 1: Make HostFrame v1 real
-- Extend `src/host_frame.stasis` with version/flags/dt/frame_index.
+- Extend `src/host_frame.stasis` with version/flags/tick_index/(optional tick_hz).
 - Update `runtime/stasis_graphics.c` `stasis_host_get_frame` to fill them.
 - Add a small sample that prints HostFrame fields and validates invariants.
 
