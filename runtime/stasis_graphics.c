@@ -123,6 +123,11 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
+STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
+STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
+
+/* Forward decls for internal helpers used before their definitions. */
+static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -2126,9 +2131,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
                 SDL_GL_DeleteContext(g_gl_context);
                 g_gl_context = NULL;
             } else {
-                int swap_ok = SDL_GL_SetSwapInterval(1);
+                int want_vsync = 1;
+                const char* vsync_env = getenv("STASIS_GFX_VSYNC");
+                if (vsync_env && vsync_env[0] == '0') {
+                    want_vsync = 0;
+                }
+                int swap_ok = SDL_GL_SetSwapInterval(want_vsync ? 1 : 0);
                 if (swap_ok != 0) {
-                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync): %s", SDL_GetError());
+                    SDL_Log("SDL_GL_SetSwapInterval failed (vsync=%d): %s", want_vsync, SDL_GetError());
                 }
                 glViewport(0, 0, width, height);
                 glDisable(GL_SCISSOR_TEST);
@@ -2540,6 +2550,115 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
     }
 }
 
+/*
+ * Command-buffer submission (v1 prototype).
+ *
+ * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
+ * clear -> lines -> sprites -> present.
+ */
+static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    if (!cmd_i32 || !cmd_f32) return;
+
+    const int32_t magic = cmd_i32[0];
+    const int32_t version = cmd_i32[1];
+    if (magic != 0x47584631 || version != 1) {
+        return;
+    }
+
+    const int32_t flags = cmd_i32[2];
+    const int32_t gfx_cmd_max_lines = MAX_LINES;
+    const int32_t gfx_cmd_max_sprites = 4096;  /* must match MAX_SPRITE_VERTS/6 */
+    const int32_t gfx_cmd_max_text = 2048;
+    const int32_t gfx_cmd_max_text_bytes = 65536;
+
+    int32_t line_count = cmd_i32[3];
+    int32_t sprite_count = cmd_i32[4];
+    int32_t text_count = cmd_i32[7];
+    int32_t text_bytes_used = cmd_i32[9];
+
+    if (line_count < 0) line_count = 0;
+    if (sprite_count < 0) sprite_count = 0;
+    if (text_count < 0) text_count = 0;
+    if (text_bytes_used < 0) text_bytes_used = 0;
+
+    if (line_count > gfx_cmd_max_lines) line_count = gfx_cmd_max_lines;
+    if (sprite_count > gfx_cmd_max_sprites) sprite_count = gfx_cmd_max_sprites;
+    if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
+    if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
+
+    stasis_begin_frame();
+
+    if ((flags & 1) != 0) {
+        stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
+    }
+
+    /* lines: f32 header is 4 (clear rgba), then line payload */
+    if (line_count > 0) {
+        stasis_draw_lines_f32(cmd_f32 + 4, line_count);
+    }
+
+    /* sprites: i32 header is 32, then sprite payload */
+    if (sprite_count > 0) {
+        const int32_t* sprites = cmd_i32 + 32;
+        for (int i = 0; i < sprite_count; i++) {
+            const int base = i * 7;
+            stasis_gfx_draw_sprite_internal(
+                sprites[base + 0],
+                sprites[base + 1],
+                sprites[base + 2],
+                sprites[base + 3],
+                sprites[base + 4],
+                sprites[base + 5],
+                sprites[base + 6],
+                g_debug_hash_enabled);
+        }
+    }
+
+    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
+    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
+        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t* text_meta = cmd_i32 + text_i32_base;
+
+        for (int i = 0; i < text_count; i++) {
+            const int base_i = i * 3;
+            const int font = text_meta[base_i + 0];
+            const int byte_off = text_meta[base_i + 1];
+            const int byte_len = text_meta[base_i + 2];
+
+            if (font <= 0) continue;
+            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_len < 0) continue;
+            if (byte_off + byte_len >= text_bytes_used) continue;
+
+            const char* text = (const char*)(cmd_u8 + byte_off);
+
+            const int base_f = text_f32_base + i * 6;
+            const float x = cmd_f32[base_f + 0];
+            const float y = cmd_f32[base_f + 1];
+            const float r = cmd_f32[base_f + 2];
+            const float g = cmd_f32[base_f + 3];
+            const float b = cmd_f32[base_f + 4];
+            const float a = cmd_f32[base_f + 5];
+
+            stasis_draw_text(font, text, x, y, r, g, b, a);
+        }
+    }
+
+    /* Present only if requested (lets benchmarks exclude swap/vsync). */
+    if ((flags & 2) != 0) {
+        stasis_end_frame();
+    }
+}
+
+STASIS_EXPORT void stasis_gfx_submit(const int32_t* cmd_i32, const float* cmd_f32) {
+    stasis_gfx_submit_v1(cmd_i32, cmd_f32, NULL);
+}
+
+STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    stasis_gfx_submit_v1(cmd_i32, cmd_f32, cmd_u8);
+}
+
 static SpriteEntry* sprite_get(int handle) {
     int idx = handle - 1;
     if (idx < 0 || idx >= MAX_SPRITES) return NULL;
@@ -2866,28 +2985,29 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
  * rot_degrees: rotation in degrees (0-359), around the sprite center
  * a: alpha 0-255
  */
-STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
-                                          int rot_degrees, int a) {
-    gfx_debug_hash_i32(handle);
-    gfx_debug_hash_i32(x);
-    gfx_debug_hash_i32(y);
-    gfx_debug_hash_i32(w);
-    gfx_debug_hash_i32(h);
-    gfx_debug_hash_i32(rot_degrees);
-    gfx_debug_hash_i32(a);
+static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h,
+                                           int rot_degrees, int a, int do_hash) {
+    if (do_hash) {
+        gfx_debug_hash_i32(handle);
+        gfx_debug_hash_i32(x);
+        gfx_debug_hash_i32(y);
+        gfx_debug_hash_i32(w);
+        gfx_debug_hash_i32(h);
+        gfx_debug_hash_i32(rot_degrees);
+        gfx_debug_hash_i32(a);
+    }
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
     if (w <= 0 || h <= 0) return;
 
-    /* Re-rasterize when the requested draw size changes or when explicitly invalidated.
+    /* Re-rasterize only when explicitly invalidated (resize/reload).
      *
-     * This keeps virtual-space sizing (game logic) decoupled from display-space raster size:
-     * the sprite is baked to exactly the pixel size we are about to draw.
+     * Re-baking per draw-size can overflow the atlas when sizes fluctuate frame-to-frame.
+     * Sprites are baked at their load-time max size (max_w/max_h) and drawn scaled.
      */
-    int should_reraster = e->needs_reraster || (w != e->max_w) || (h != e->max_h);
-    if (should_reraster) {
-        if (e->path) sprite_build_into_entry_sized(e, e->path, w, h, 1);
+    if (e->needs_reraster) {
+        if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1);
     }
 
     /* Convert degrees to radians */
@@ -2961,6 +3081,11 @@ STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h
     g_sprite_vert_count += 6;
 }
 
+STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h,
+                                          int rot_degrees, int a) {
+    stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 1);
+}
+
 /*
  * Batched sprite submission.
  * cmds: array of 7*i32 per sprite: handle,x,y,w,h,rot_degrees,a
@@ -2969,14 +3094,15 @@ STASIS_EXPORT void stasis_gfx_draw_sprites_i32(const int32_t* cmds, int sprite_c
     if (!cmds || sprite_count <= 0) return;
     for (int i = 0; i < sprite_count; i++) {
         const int base = i * 7;
-        stasis_gfx_draw_sprite(
+        stasis_gfx_draw_sprite_internal(
             cmds[base + 0],
             cmds[base + 1],
             cmds[base + 2],
             cmds[base + 3],
             cmds[base + 4],
             cmds[base + 5],
-            cmds[base + 6]);
+            cmds[base + 6],
+            g_debug_hash_enabled);
     }
 }
 
@@ -3014,6 +3140,22 @@ STASIS_EXPORT int stasis_get_time_ms(void) {
     }
     return (int)((now.tv_sec * 1000) + (now.tv_nsec / 1000000));
 #endif
+}
+
+/*
+ * Get current time in microseconds (truncated to i32).
+ */
+STASIS_EXPORT int stasis_get_time_us(void) {
+    if (SDL_WasInit(SDL_INIT_TIMER) == 0) {
+        if (SDL_Init(SDL_INIT_TIMER) != 0) {
+            return 0;
+        }
+    }
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    if (freq == 0) return 0;
+    Uint64 counter = SDL_GetPerformanceCounter();
+    Uint64 us = (counter * 1000000ull) / freq;
+    return (int)us;
 }
 
 /*

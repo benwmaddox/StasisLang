@@ -2,6 +2,7 @@ import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
+import "../../src/gfx_cmd.stasis";
 import "../../src/stdlib/audio.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
@@ -17,10 +18,11 @@ import "../../src/stdlib/audio.stasis";
 // - get_time_ms() -> i32: millisecond clock
 // - should_quit() -> bool: polls SDL quit events
 // - begin_frame(), end_frame(): bracket GPU work
-// - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
-// - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
+// - gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
+// - gfx_cmd_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
-// - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
+// - gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
+// - gfx_poll_reload(handle: i32) -> bool
 // - gfx_window_width() -> i32
 // - gfx_window_height() -> i32
 // - gfx_window_resized() -> bool
@@ -1438,17 +1440,17 @@ function update_game(dt: f32, delta_ms: i32): void {
 // Drawing functions
 function @inline draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     // Draw rectangle as 4 lines
-    draw_line(x, y, x + w, y, r, g, b, a);
-    draw_line(x + w, y, x + w, y + h, r, g, b, a);
-    draw_line(x + w, y + h, x, y + h, r, g, b, a);
-    draw_line(x, y + h, x, y, r, g, b, a);
+    gfx_cmd_line(x, y, x + w, y, r, g, b, a);
+    gfx_cmd_line(x + w, y, x + w, y + h, r, g, b, a);
+    gfx_cmd_line(x + w, y + h, x, y + h, r, g, b, a);
+    gfx_cmd_line(x, y + h, x, y, r, g, b, a);
 }
 
 function draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     // Draw filled rectangle with horizontal lines
     let line_y: f32 = y;
     for (line_y = y; line_y < y + h; line_y = line_y + 2.0) {
-        draw_line(x, line_y, x + w, line_y, r, g, b, a);
+        gfx_cmd_line(x, line_y, x + w, line_y, r, g, b, a);
     }
 }
 
@@ -1465,14 +1467,14 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
         let angle: f32 = (fi / seg_f) * 2.0 * PI;
         let px: f32 = cx + cos_fast(angle) * radius;
         let py: f32 = cy + sin_fast(angle) * radius;
-        draw_line(prev_x, prev_y, px, py, r, g, b, a);
+        gfx_cmd_line(prev_x, prev_y, px, py, r, g, b, a);
         prev_x = px;
         prev_y = py;
     }
 }
 
 function @inline play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
-    draw_line(
+    gfx_cmd_line(
         play_snap_x(x1),
         play_snap_y(y1),
         play_snap_x(x2),
@@ -1523,7 +1525,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     let screen_y_i: i32 = f32_to_i32(screen_y);
     let top_left_x: i32 = screen_x_i - (screen_w / 2);
     let top_left_y: i32 = screen_y_i - (screen_h / 2);
-    gfx_draw_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
+    gfx_cmd_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -1638,8 +1640,8 @@ function draw_balls(): void {
                     let bar_w: f32 = half_w * 2.0;
                     let filled_w: f32 = snap_px(bar_w * t);
 
-                    draw_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
-                    draw_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
+                    gfx_cmd_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
+                    gfx_cmd_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
                 }
             }
         }
@@ -1687,13 +1689,13 @@ function draw_digit(digit: i32, x: f32, y: f32, scale: f32): void {
     let left: f32 = x;
     let right: f32 = x + scale;
 
-    if (seg0) { draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0); }
-    if (seg1) { draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0); }
-    if (seg2) { draw_line(right, mid, right, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg3) { draw_line(left, bot, right, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg4) { draw_line(left, mid, left, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg5) { draw_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0); }
-    if (seg6) { draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg0) { gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0); }
+    if (seg1) { gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg2) { gfx_cmd_line(right, mid, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg3) { gfx_cmd_line(left, bot, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg4) { gfx_cmd_line(left, mid, left, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg5) { gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg6) { gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0); }
 }
 
 function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
@@ -1792,10 +1794,10 @@ function hud_glyph_M(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    draw_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_S(x: f32, y: f32, s: f32): void {
@@ -1804,11 +1806,11 @@ function hud_glyph_S(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_L(x: f32, y: f32, s: f32): void {
@@ -1816,8 +1818,8 @@ function hud_glyph_L(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_O(x: f32, y: f32, s: f32): void {
@@ -1825,10 +1827,10 @@ function hud_glyph_O(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_G(x: f32, y: f32, s: f32): void {
@@ -1838,11 +1840,11 @@ function hud_glyph_G(x: f32, y: f32, s: f32): void {
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_I(x: f32, y: f32, s: f32): void {
@@ -1851,9 +1853,9 @@ function hud_glyph_I(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_C(x: f32, y: f32, s: f32): void {
@@ -1861,9 +1863,9 @@ function hud_glyph_C(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_B(x: f32, y: f32, s: f32): void {
@@ -1872,12 +1874,12 @@ function hud_glyph_B(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_A(x: f32, y: f32, s: f32): void {
@@ -1887,9 +1889,9 @@ function hud_glyph_A(x: f32, y: f32, s: f32): void {
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    draw_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_R(x: f32, y: f32, s: f32): void {
@@ -1898,11 +1900,11 @@ function hud_glyph_R(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_K(x: f32, y: f32, s: f32): void {
@@ -1911,9 +1913,9 @@ function hud_glyph_K(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_E(x: f32, y: f32, s: f32): void {
@@ -1922,10 +1924,10 @@ function hud_glyph_E(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_N(x: f32, y: f32, s: f32): void {
@@ -1933,9 +1935,9 @@ function hud_glyph_N(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_U(x: f32, y: f32, s: f32): void {
@@ -1943,9 +1945,9 @@ function hud_glyph_U(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_T(x: f32, y: f32, s: f32): void {
@@ -1954,8 +1956,8 @@ function hud_glyph_T(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    draw_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_H(x: f32, y: f32, s: f32): void {
@@ -1964,9 +1966,9 @@ function hud_glyph_H(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_draw_ms_logic(x: f32, y: f32, s: f32): void {
@@ -2045,7 +2047,7 @@ function ui_pick_menu_slot(px: f32, py: f32, panel_x: f32, panel_y: f32, panel_w
 function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
     draw_filled_rect(x, y, w, h, 0.08, 0.09, 0.12, 0.92);
     draw_rect(x, y, w, h, 0.2, 0.7, 0.9, 0.9);
-    draw_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.7, 0.9, 0.6);
+    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.7, 0.9, 0.6);
     hud_draw_menu(x + UI_MENU_PAD, y + 6.0, 3.0);
 
     let slot_w: f32 = w - UI_MENU_PAD * 2.0;
@@ -2069,7 +2071,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                     if (icon_size > 4.0) {
                         let icon_x: f32 = x + UI_MENU_PAD + slot_w * 0.5;
                         let icon_y: f32 = sy + UI_MENU_SLOT_H * 0.5;
-                        gfx_draw_sprite(icon_handle, f32_to_i32(icon_x), f32_to_i32(icon_y), f32_to_i32(icon_size), f32_to_i32(icon_size), 0, 255);
+                        gfx_cmd_sprite(icon_handle, f32_to_i32(icon_x), f32_to_i32(icon_y), f32_to_i32(icon_size), f32_to_i32(icon_size), 0, 255);
                     }
                 }
                 let selected: bool = false;
@@ -2087,7 +2089,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
 function draw_tech_panel(x: f32, y: f32, w: f32, h: f32): void {
     draw_filled_rect(x, y, w, h, 0.06, 0.08, 0.12, 0.92);
     draw_rect(x, y, w, h, 0.2, 0.6, 0.9, 0.9);
-    draw_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.6, 0.9, 0.6);
+    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.6, 0.9, 0.6);
     hud_draw_tech(x + UI_MENU_PAD, y + 6.0, 3.0);
 
     let cx: f32 = x + w * 0.5;
@@ -2097,10 +2099,10 @@ function draw_tech_panel(x: f32, y: f32, w: f32, h: f32): void {
     let spread: f32 = w * 0.25;
     let radius: f32 = 8.0;
 
-    draw_line(cx, top, cx - spread, mid, 0.4, 0.8, 0.9, 0.8);
-    draw_line(cx, top, cx + spread, mid, 0.4, 0.8, 0.9, 0.8);
-    draw_line(cx - spread, mid, cx - spread, bot, 0.4, 0.8, 0.9, 0.8);
-    draw_line(cx + spread, mid, cx + spread, bot, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx, top, cx - spread, mid, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx, top, cx + spread, mid, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx - spread, mid, cx - spread, bot, 0.4, 0.8, 0.9, 0.8);
+    gfx_cmd_line(cx + spread, mid, cx + spread, bot, 0.4, 0.8, 0.9, 0.8);
 
     draw_circle(cx, top, radius, 0.4, 0.9, 0.9, 0.9);
     draw_circle(cx - spread, mid, radius, 0.4, 0.9, 0.9, 0.9);
@@ -2173,6 +2175,18 @@ function draw_ui(): void {
 }
 
 function draw_frame(): void {
+    // Hot reload during development (no flags for now)
+    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
+    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
+    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
+    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
+    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
+    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
+    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
+    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
+    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
+    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
+
     draw_bricks();
     draw_balls();
     draw_paddle();
@@ -2475,8 +2489,8 @@ function tick(): i32 {
     handle_pointer_input();
     record_tap_pulses();
 
-    begin_frame();
-    clear(0.05, 0.05, 0.15, 1.0);
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.05, 0.05, 0.15, 1.0);
 
     let delta_ms: i32 = compute_delta_ms();
     let delta_f: f32 = i32_to_f32(delta_ms);
@@ -2486,7 +2500,7 @@ function tick(): i32 {
     update_game(dt, delta_ms);
     audio_update();
     draw_frame();
-
+    gfx_cmd_submit_no_present();
     // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
     let frame_end: i32 = get_time_ms();
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;

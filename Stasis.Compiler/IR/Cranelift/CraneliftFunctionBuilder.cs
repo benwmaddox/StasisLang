@@ -750,13 +750,43 @@ public sealed class CraneliftFunctionBuilder
             return false;
         }
 
-        if (func.Body.Statements.Count != 1 || func.Body.Statements[0] is not ReturnStatementSyntax ret || ret.Expression is null)
+        // Restrict v1 inlining to straight-line blocks (no control flow) so we don't
+        // need to rewrite returns/labels in the caller.
+        foreach (var stmt in func.Body.Statements)
         {
+            if (stmt is VariableDeclarationSyntax or ExpressionStatementSyntax or ReturnStatementSyntax)
+            {
+                continue;
+            }
+
             return false;
+        }
+
+        var isVoid = func.ReturnType is null || (func.ReturnType is NamedTypeSyntax named && string.Equals(named.Name, "void", StringComparison.Ordinal));
+        if (!isVoid)
+        {
+            if (func.Body.Statements.Count == 0)
+            {
+                return false;
+            }
+            if (func.Body.Statements[^1] is not ReturnStatementSyntax { Expression: not null })
+            {
+                return false;
+            }
         }
 
         var savedLocals = new List<(string Name, LocalSlot? Slot, TypeSymbol? Type)>();
         _inlineStack.Add(funcName);
+
+        void SaveLocal(string name)
+        {
+            if (savedLocals.Any(s => string.Equals(s.Name, name, StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            savedLocals.Add((name, _locals.TryGetValue(name, out var existing) ? existing : null, _localTypes.TryGetValue(name, out var existingType) ? existingType : null));
+        }
 
         for (int i = 0; i < func.Parameters.Count; i++)
         {
@@ -773,13 +803,56 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
             _instructions.AppendLine($"    store {argValue}, {addr}");
 
-            savedLocals.Add((param.Name.Text, _locals.TryGetValue(param.Name.Text, out var existing) ? existing : null, _localTypes.TryGetValue(param.Name.Text, out var existingType) ? existingType : null));
+            SaveLocal(param.Name.Text);
             _locals[param.Name.Text] = new LocalSlot(addr, clifType);
             _localTypes[param.Name.Text] = paramType;
         }
 
-        result = LowerExpression(ret.Expression);
+        var hasResult = false;
+        result = ZeroI32();
 
+        foreach (var stmt in func.Body.Statements)
+        {
+            switch (stmt)
+            {
+                case VariableDeclarationSyntax varDecl:
+                    SaveLocal(varDecl.Name.Text);
+                    LowerVariableDeclaration(varDecl);
+                    break;
+                case ExpressionStatementSyntax exprStmt:
+                    LowerExpression(exprStmt.Expression);
+                    break;
+                case ReturnStatementSyntax ret:
+                    if (!isVoid)
+                    {
+                        if (ret.Expression is null)
+                        {
+                            _inlineStack.Remove(funcName);
+                            RestoreSavedLocals(savedLocals);
+                            return false;
+                        }
+                        result = LowerExpression(ret.Expression);
+                        hasResult = true;
+                    }
+                    goto done;
+            }
+        }
+
+    done:
+
+        RestoreSavedLocals(savedLocals);
+        _inlineStack.Remove(funcName);
+
+        if (!isVoid && !hasResult)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void RestoreSavedLocals(List<(string Name, LocalSlot? Slot, TypeSymbol? Type)> savedLocals)
+    {
         for (int i = savedLocals.Count - 1; i >= 0; i--)
         {
             var saved = savedLocals[i];
@@ -801,9 +874,6 @@ public sealed class CraneliftFunctionBuilder
                 _localTypes[saved.Name] = saved.Type;
             }
         }
-
-        _inlineStack.Remove(funcName);
-        return true;
     }
 
     private string LowerInlineArgument(ExpressionSyntax argExpr, TypeSymbol paramType)
@@ -989,6 +1059,7 @@ public sealed class CraneliftFunctionBuilder
             "sys_flush" => true,
             "time" => true,
             "get_time_ms" => true,
+            "get_time_us" => true,
             "sleep_ms" => true,
             "audio_is_available" => true,
             "audio_get_sample_rate" => true,
@@ -1018,6 +1089,9 @@ public sealed class CraneliftFunctionBuilder
             "gfx_load_sprite" => true,
             "gfx_draw_sprite" => true,
             "gfx_draw_sprites_i32" => true,
+            "gfx_submit" => true,
+            "gfx_submit_u8" => true,
+            "gfx_poll_reload" => true,
             "gfx_window_width" => true,
             "gfx_window_height" => true,
             "gfx_window_resized" => true,
@@ -1389,6 +1463,8 @@ public sealed class CraneliftFunctionBuilder
                 return LowerTime(arguments);
             case "get_time_ms":
                 return LowerGetTimeMs(arguments);
+            case "get_time_us":
+                return LowerGetTimeUs(arguments);
             case "sleep_ms":
                 return LowerSleepMs(arguments);
             case "audio_is_available":
@@ -1447,6 +1523,12 @@ public sealed class CraneliftFunctionBuilder
                 return LowerGfxDrawSprite(arguments);
             case "gfx_draw_sprites_i32":
                 return LowerGfxDrawSpritesI32(arguments);
+            case "gfx_submit":
+                return LowerGfxSubmit(arguments);
+            case "gfx_submit_u8":
+                return LowerGfxSubmitU8(arguments);
+            case "gfx_poll_reload":
+                return LowerGfxPollReload(arguments);
             case "gfx_window_width":
                 return LowerGfxWindowWidth(arguments);
             case "gfx_window_height":
@@ -2003,6 +2085,18 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string LowerGetTimeUs(IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("get_time_us expects no arguments", new SourceSpan(0, 0)));
+        }
+
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = call %stasis_get_time_us()");
+        return result;
+    }
+
     private string LowerSleepMs(IReadOnlyList<ExpressionSyntax> arguments)
     {
         if (arguments.Count != 1)
@@ -2229,6 +2323,15 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerGfxDrawSpritesI32(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallVoid("stasis_gfx_draw_sprites_i32", "gfx_draw_sprites_i32 expects (cmds: i32[], count: i32).", arguments, 2);
+
+    private string LowerGfxSubmit(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_submit", "gfx_submit expects (cmd_i32: i32[], cmd_f32: f32[]).", arguments, 2);
+
+    private string LowerGfxSubmitU8(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallVoid("stasis_gfx_submit_u8", "gfx_submit_u8 expects (cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[]).", arguments, 3);
+
+    private string LowerGfxPollReload(IReadOnlyList<ExpressionSyntax> arguments) =>
+        LowerExternalCallValue("stasis_gfx_poll_reload", "gfx_poll_reload expects (handle: i32).", arguments, 1);
 
     private string LowerGfxWindowWidth(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_window_width", "gfx_window_width expects no arguments.", arguments, 0);
