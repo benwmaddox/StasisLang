@@ -2,9 +2,17 @@
 
 function init_level_defs(): void {
     brickout_levels_magic = 1;
-    brickout_level_name_0 = "Level 1 - Warmup";
-    brickout_level_name_1 = "Level 2 - Mixed";
-    brickout_level_name_2 = "Level 3 - Swarm";
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 1 - Warmup");
+    from_ascii(brickout_level_name_0, brickout_level_name_tmp, 32);
+
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 2 - Mixed");
+    from_ascii(brickout_level_name_1, brickout_level_name_tmp, 32);
+
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 3 - Swarm");
+    from_ascii(brickout_level_name_2, brickout_level_name_tmp, 32);
 
     brickout_level_initial_scraps[0] = 60;
     brickout_level_initial_scraps[1] = 75;

@@ -24,6 +24,7 @@ global brickout_levels_magic: i32;
 global brickout_level_name_0: utf8[32];
 global brickout_level_name_1: utf8[32];
 global brickout_level_name_2: utf8[32];
+global brickout_level_name_tmp: ascii[64];
 global brickout_level_initial_scraps: i32[3];
 global brickout_level_initial_power_cap: i32[3];
 global brickout_level_event_offset: i32[3];

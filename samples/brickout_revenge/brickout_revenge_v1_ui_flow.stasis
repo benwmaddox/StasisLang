@@ -103,6 +103,7 @@ function handle_pointer_input_game(): void {
                 let ui_y: f32 = state.layout.ui_y;
                 let ui_w: f32 = state.layout.ui_w;
                 let ui_h: f32 = state.layout.ui_h;
+                let handled: i32 = 0;
 
                 // Toggle shop when tapping the handle.
                 let handle_h: f32 = 22.0;
@@ -110,52 +111,55 @@ function handle_pointer_input_game(): void {
                 if (point_in_rect(sx, sy, ui_x, handle_y, ui_w, handle_h)) {
                     if (state.shop_open == 0) { state.shop_open = 1; } else { state.shop_open = 0; }
                     sfx_play(SFX_SELECT);
-                    continue;
+                    handled = 1;
                 }
 
-                if (state.shop_anim < 0.9) {
-                    continue;
+                if (handled == 0) {
+                    if (state.shop_anim < 0.9) {
+                        handled = 1;
+                    }
                 }
 
-                let pad: f32 = UI_PANEL_PAD;
-                let gap: f32 = UI_PANEL_GAP;
-                let panel_y: f32 = shop_visible_y(ui_y, ui_h);
-                let menu_x: f32 = ui_x + pad;
-                let menu_y: f32 = panel_y + pad;
-                let menu_w: f32 = 0.0;
-                let menu_h: f32 = 0.0;
-                let have_menu: bool = false;
-                if (state.layout.ui_mode == 1) {
-                    menu_w = ui_w - pad * 2.0;
-                    menu_h = (ui_h - pad * 2.0 - gap) * 0.5;
-                    have_menu = true;
-                } else {
-                    if (state.layout.ui_mode == 2) {
-                        menu_w = (ui_w - pad * 2.0 - gap) * 0.5;
-                        menu_h = ui_h - pad * 2.0;
+                if (handled == 0) {
+                    let pad: f32 = UI_PANEL_PAD;
+                    let gap: f32 = UI_PANEL_GAP;
+                    let panel_y: f32 = shop_visible_y(ui_y, ui_h);
+                    let menu_x: f32 = ui_x + pad;
+                    let menu_y: f32 = panel_y + pad;
+                    let menu_w: f32 = 0.0;
+                    let menu_h: f32 = 0.0;
+                    let have_menu: bool = false;
+                    if (state.layout.ui_mode == 1) {
+                        menu_w = ui_w - pad * 2.0;
+                        menu_h = (ui_h - pad * 2.0 - gap) * 0.5;
                         have_menu = true;
-                    }
-                }
-
-                if (have_menu && point_in_rect(sx, sy, menu_x, menu_y, menu_w, menu_h)) {
-                    let slot: i32 = ui_pick_menu_slot(sx, sy, menu_x, menu_y, menu_w, menu_h);
-                    let t: BrickType = BrickType.Basic;
-                    if (slot == 0) { t = BrickType.Basic; }
-                    if (slot == 1) { t = BrickType.Armored; }
-                    if (slot == 2) { t = BrickType.Reflector; }
-                    let cost_scraps: i32 = tower_cost_scraps(t);
-                    let cost_power: i32 = tower_cost_power(t);
-                    if (!brickout_can_buy(state.economy.scraps, state.economy.power_used, state.economy.power_cap, cost_scraps, cost_power)) {
-                        sfx_play(SFX_DRAG_INVALID);
-                        continue;
+                    } else {
+                        if (state.layout.ui_mode == 2) {
+                            menu_w = (ui_w - pad * 2.0 - gap) * 0.5;
+                            menu_h = ui_h - pad * 2.0;
+                            have_menu = true;
+                        }
                     }
 
-                    state.selected_tower = t;
-                    state.cursor.brick_type = t;
-                    state.drag_active = 1;
-                    state.drag_pointer_id = pid;
-                    update_drag_from_screen(sx, sy);
-                    sfx_play(SFX_DRAG_START);
+                    if (have_menu && point_in_rect(sx, sy, menu_x, menu_y, menu_w, menu_h)) {
+                        let slot: i32 = ui_pick_menu_slot(sx, sy, menu_x, menu_y, menu_w, menu_h);
+                        let t: BrickType = BrickType.Basic;
+                        if (slot == 0) { t = BrickType.Basic; }
+                        if (slot == 1) { t = BrickType.Armored; }
+                        if (slot == 2) { t = BrickType.Reflector; }
+                        let cost_scraps: i32 = tower_cost_scraps(t);
+                        let cost_power: i32 = tower_cost_power(t);
+                        if (!brickout_can_buy(state.economy.scraps, state.economy.power_used, state.economy.power_cap, cost_scraps, cost_power)) {
+                            sfx_play(SFX_DRAG_INVALID);
+                        } else {
+                            state.selected_tower = t;
+                            state.cursor.brick_type = t;
+                            state.drag_active = 1;
+                            state.drag_pointer_id = pid;
+                            update_drag_from_screen(sx, sy);
+                            sfx_play(SFX_DRAG_START);
+                        }
+                    }
                 }
             }
         }
