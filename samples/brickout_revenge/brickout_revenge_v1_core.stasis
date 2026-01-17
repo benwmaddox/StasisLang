@@ -1,0 +1,151 @@
+import "../../src/stdlib/stdlib.stasis";
+
+// Brickout Revenge v1 - pure core structs/helpers used by the sample and tests.
+// No graphics/audio/host dependencies.
+
+const BRICKOUT_LEVEL_MAX_EVENTS: i32 = 64;
+const BRICKOUT_LEVEL_MAX_SPAWNS_PER_TICK: i32 = 4;
+const BRICKOUT_LEVEL_COUNT: i32 = 3;
+
+enum BrickoutScreen {
+    Menu,
+    Game
+}
+
+enum BrickoutBallPreset {
+    Normal,
+    Heavy,
+    Splitter
+}
+
+const BRICKOUT_LEVEL_EVENT_CAP: i32 = 192; // BRICKOUT_LEVEL_COUNT * BRICKOUT_LEVEL_MAX_EVENTS
+
+global brickout_level_name_0: utf8[32];
+global brickout_level_name_1: utf8[32];
+global brickout_level_name_2: utf8[32];
+global brickout_level_initial_scraps: i32[3];
+global brickout_level_initial_power_cap: i32[3];
+global brickout_level_event_offset: i32[3];
+global brickout_level_event_count: i32[3];
+global brickout_level_event_tick: i32[192];
+global brickout_level_event_preset: BrickoutBallPreset[192];
+global brickout_level_tick: i32;
+global brickout_level_next_event_index: i32;
+global brickout_level_done: i32;
+
+struct BrickoutEconomy {
+    scraps: i32;
+    power_used: i32;
+    power_cap: i32;
+}
+
+global brickout_digits_tmp: u8[12];
+
+function brickout_level_reset(): void {
+    brickout_level_tick = 0;
+    brickout_level_next_event_index = 0;
+    brickout_level_done = 0;
+}
+
+function brickout_level_consume_spawns(level_index: i32, out_presets: BrickoutBallPreset[], out_max: i32): i32 {
+    let count: i32 = 0;
+    if (brickout_level_done != 0) {
+        return 0;
+    }
+
+    let level_count: i32 = brickout_level_event_count[level_index];
+    let level_offset: i32 = brickout_level_event_offset[level_index];
+    let t: i32 = brickout_level_tick;
+    let keep_going: i32 = 1;
+    for (; keep_going == 1; ) {
+        if (brickout_level_next_event_index >= level_count) {
+            keep_going = 0;
+        } else {
+            if (count >= out_max) {
+                keep_going = 0;
+            } else {
+                let global_idx: i32 = level_offset + brickout_level_next_event_index;
+                let ev_tick: i32 = brickout_level_event_tick[global_idx];
+                if (ev_tick != t) {
+                    keep_going = 0;
+                } else {
+                    out_presets[count] = brickout_level_event_preset[global_idx];
+                    count = count + 1;
+                    brickout_level_next_event_index = brickout_level_next_event_index + 1;
+                }
+            }
+        }
+    }
+
+    brickout_level_tick = brickout_level_tick + 1;
+    if (brickout_level_next_event_index >= level_count) {
+        brickout_level_done = 1;
+    }
+    return count;
+}
+
+function brickout_can_buy(scraps: i32, power_used: i32, power_cap: i32, cost_scraps: i32, cost_power: i32): bool {
+    if (cost_scraps > scraps) {
+        return false;
+    }
+    if (power_used + cost_power > power_cap) {
+        return false;
+    }
+    return true;
+}
+
+function brickout_shop_anim_step(anim: f32, open: i32, dt: f32, speed: f32): f32 {
+    let a: f32 = anim;
+    if (open != 0) {
+        a = a + dt * speed;
+    } else {
+        a = a - dt * speed;
+    }
+    if (a < 0.0) { a = 0.0; }
+    if (a > 1.0) { a = 1.0; }
+    return a;
+}
+
+function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
+    let v: i32 = value;
+    if (v == 0) {
+        ascii_append_byte(dst, 48);
+        return;
+    }
+
+    if (v < 0) {
+        ascii_append_byte(dst, 45); // '-'
+        v = 0 - v;
+    }
+
+    let count: i32 = 0;
+    for (; v > 0 && count < 12; ) {
+        let d: i32 = v % 10;
+        brickout_digits_tmp[count] = i32_to_u8_trunc(48 + d);
+        count = count + 1;
+        v = v / 10;
+    }
+
+    let i: i32 = count - 1;
+    for (; i >= 0; i = i - 1) {
+        ascii_append_byte(dst, brickout_digits_tmp[i]);
+    }
+}
+
+function brickout_ascii_write_scraps_power_line(
+    out: utf8[],
+    out_max: i32,
+    tmp_ascii: ascii[],
+    scraps: i32,
+    power_used: i32,
+    power_cap: i32
+): void {
+    ascii_clear(tmp_ascii);
+    ascii_append(tmp_ascii, "Scraps: ");
+    brickout_ascii_append_i32(tmp_ascii, scraps);
+    ascii_append(tmp_ascii, "   Power: ");
+    brickout_ascii_append_i32(tmp_ascii, power_used);
+    ascii_append_byte(tmp_ascii, 47); // '/'
+    brickout_ascii_append_i32(tmp_ascii, power_cap);
+    from_ascii(out, tmp_ascii, out_max);
+}
