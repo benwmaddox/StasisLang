@@ -10,6 +10,12 @@ import "brickout_revenge_v1_ui_flow.stasis";
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
 //
+// Fonts:
+// - `load_font` prerenders a glyph atlas from a TTF.
+// - This default path is Windows-centric; change it if needed.
+const UI_FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const UI_FONT_SIZE_PX: i32 = 24;
+//
 // Live tuning:
 // - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --backend cranelift --graphics`
 // - Edit: `samples/brickout_revenge/data/config.json` (hot-reloaded between ticks)
@@ -335,6 +341,7 @@ struct GameState {
 }
 
 global state: GameState;
+global brickout_ui_font: i32;
 global audio_buf: f32[512];
 global audio_ready: bool;
 global audio_sr: i32;
@@ -948,6 +955,7 @@ function init_game(reset_progress: bool): void {
 function start_level(level_index: i32): void {
     let idx: i32 = clamp_i32(level_index, 0, BRICKOUT_LEVEL_COUNT - 1);
     init_game(true);
+    state.ui_font = brickout_ui_font;
 
     state.screen = BrickoutScreen.Game;
     state.level_index = idx;
@@ -2440,6 +2448,8 @@ function main(): i32 {
         return 1;
     }
 
+    brickout_ui_font = load_font(UI_FONT_PATH, UI_FONT_SIZE_PX);
+
     if (!(BENCH_SKIP_MAXIMIZE == 1)) {
         maximize_window_for_desktop();
     }
@@ -2489,6 +2499,7 @@ function main(): i32 {
         // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
         seed_rng(get_time_ms());
         init_game(true);
+        state.ui_font = brickout_ui_font;
         if (brickout_levels_magic == 0) {
             init_level_defs();
         }
