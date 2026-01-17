@@ -21,6 +21,15 @@ A hybrid auto-battler/tower defense + breakout game where the player builds defe
 - The v1 sample attempts to resize the window to best fit the desktop (either full height or full width) while preserving the virtual aspect ratio and staying >= the virtual size.
 - Brick grid: 6x6; placement requires bricks fully inside the gameplay area.
 
+## Data Files (v1 sample)
+- `samples/brickout_revenge/data/config.json` is used for data binding (hot-reload) in the Cranelift runner.
+- Brickout v1 level scripts can be provided via JSON by setting:
+  - `brickout_levels_magic` to a nonzero value (otherwise the sample falls back to compiled-in defaults).
+  - `brickout_level_name_0`/`brickout_level_name_1`/`brickout_level_name_2` (UTF-8 strings).
+  - `brickout_level_initial_scraps` / `brickout_level_initial_power_cap` (arrays of 3).
+  - `brickout_level_event_tick` / `brickout_level_event_preset` (flat arrays of 192 with fixed partitions: offsets 0, 64, 128).
+  - Preset encoding: 0=Normal, 1=Heavy, 2=Splitter.
+
 ## Core Systems
 
 ### Physics

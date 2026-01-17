@@ -1,6 +1,7 @@
 // Brickout Revenge v1 - level scripting definitions (data-only helpers).
 
 function init_level_defs(): void {
+    brickout_levels_magic = 1;
     brickout_level_name_0 = "Level 1 - Warmup";
     brickout_level_name_1 = "Level 2 - Mixed";
     brickout_level_name_2 = "Level 3 - Swarm";
@@ -92,4 +93,3 @@ function tower_cost_power(t: BrickType): i32 {
     if (t == BrickType.Reflector) { return 2; }
     return 0;
 }
-
