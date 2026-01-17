@@ -5,16 +5,6 @@ function idx(r: i32, c: i32): i32 {
     return r * 9 + c;
 }
 
-function print_cell(value: i32, is_clue: i32): void {
-    // Minimal helper for text-mode grids.
-    // `is_clue` is reserved for future styling.
-    if (value <= 0) {
-        print_char(46); // '.'
-        return;
-    }
-    print_char(48 + value); // '0' + value (expects 1..9)
-}
-
 global puzzle: i32[81];
 global grid: i32[81];
 global clues: i32[81];
