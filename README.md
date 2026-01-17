@@ -39,6 +39,12 @@ Run a sample:
 
 If you have a repo-pinned LLVM toolchain under `.tools/llvm-*/bin`, `env.bat` will prefer it automatically.
 
+To install a pinned LLVM/clang into `.tools/`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-llvm.ps1
+```
+
 ## CLI
 
 Use `.\stasis.bat` (Windows) / `./stasis.sh` (Unix) from the repo root.
