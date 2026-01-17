@@ -2489,7 +2489,9 @@ function main(): i32 {
         // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
         seed_rng(get_time_ms());
         init_game(true);
-        init_level_defs();
+        if (brickout_levels_magic == 0) {
+            init_level_defs();
+        }
         state.screen = BrickoutScreen.Menu;
         state.menu_selected_level = 0;
         state.level_index = 0;

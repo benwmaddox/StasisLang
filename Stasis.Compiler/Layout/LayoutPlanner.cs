@@ -72,10 +72,10 @@ public sealed class LayoutPlanner
         }
         else if (global.Type is ArrayTypeSyntax arrayPrim && arrayPrim.ElementType is NamedTypeSyntax prim)
         {
-            var elemSize = SizeOf(prim);
             var count = int.TryParse(arrayPrim.SizeToken?.Text, out var parsed) ? parsed : 1;
-            var bytes = elemSize * count;
-            _offset = Align(_offset, elemSize);
+            var bytes = SizeOf(arrayPrim);
+            var elemSize = SizeOf(prim);
+            _offset = Align(_offset, elemSize > 0 ? elemSize : 4);
             var fieldType = GetFieldType(prim);
             fields.Add(new FieldLayout(global.Name.Text, _offset, bytes, fieldType, count));
             _offset += bytes;
@@ -139,7 +139,7 @@ public sealed class LayoutPlanner
         return totalBytes;
     }
 
-    private static FieldType GetFieldType(TypeSyntax type)
+    private FieldType GetFieldType(TypeSyntax type)
     {
         var typeName = type switch
         {
@@ -158,7 +158,9 @@ public sealed class LayoutPlanner
             "f32" => FieldType.F32,
             "f64" => FieldType.F64,
             "string" or "utf8" or "ascii" => FieldType.String,
-            _ => FieldType.Unknown
+            _ => _symbols.TryGetValue(typeName, out var sym) && sym.Kind == SymbolKind.Enum
+                ? FieldType.I32
+                : FieldType.Unknown
         };
     }
 

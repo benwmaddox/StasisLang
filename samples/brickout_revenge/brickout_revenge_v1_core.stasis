@@ -20,6 +20,7 @@ enum BrickoutBallPreset {
 
 const BRICKOUT_LEVEL_EVENT_CAP: i32 = 192; // BRICKOUT_LEVEL_COUNT * BRICKOUT_LEVEL_MAX_EVENTS
 
+global brickout_levels_magic: i32;
 global brickout_level_name_0: utf8[32];
 global brickout_level_name_1: utf8[32];
 global brickout_level_name_2: utf8[32];
