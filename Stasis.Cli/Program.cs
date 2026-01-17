@@ -2337,27 +2337,22 @@ static string? GetLatestWindowsSdkLib()
 
 static bool TryFindTool(string name, out string path)
 {
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        // Lightweight override for non-standard installs (no repo-local toolchain required).
+        // Example: set STASIS_CLANG=C:\Program Files\LLVM\bin\clang.exe
+        var overrideVar = $"STASIS_{name.ToUpperInvariant()}";
+        var overridePath = Environment.GetEnvironmentVariable(overrideVar);
+        if (!string.IsNullOrWhiteSpace(overridePath) && File.Exists(overridePath))
+        {
+            path = overridePath;
+            return true;
+        }
+    }
+
     var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
         .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
         .ToList();
-
-    var repoRoot = FindRepoRoot();
-    if (!string.IsNullOrEmpty(repoRoot))
-    {
-        var toolsRoot = Path.Combine(repoRoot, ".tools");
-        if (Directory.Exists(toolsRoot))
-        {
-            foreach (var dir in Directory.GetDirectories(toolsRoot, "llvm-*")
-                         .OrderByDescending(Path.GetFileName))
-            {
-                var bin = Path.Combine(dir, "bin");
-                if (Directory.Exists(bin))
-                {
-                    search.Add(bin);
-                }
-            }
-        }
-    }
 
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
