@@ -2341,6 +2341,24 @@ static bool TryFindTool(string name, out string path)
         .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
         .ToList();
 
+    var repoRoot = FindRepoRoot();
+    if (!string.IsNullOrEmpty(repoRoot))
+    {
+        var toolsRoot = Path.Combine(repoRoot, ".tools");
+        if (Directory.Exists(toolsRoot))
+        {
+            foreach (var dir in Directory.GetDirectories(toolsRoot, "llvm-*")
+                         .OrderByDescending(Path.GetFileName))
+            {
+                var bin = Path.Combine(dir, "bin");
+                if (Directory.Exists(bin))
+                {
+                    search.Add(bin);
+                }
+            }
+        }
+    }
+
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
