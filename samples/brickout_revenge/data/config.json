@@ -2,10 +2,10 @@
   "config": {
     "magic": 1337,
     "screen": {
-      "width": 540,
-      "height": 1080,
-      "w": 540,
-      "h": 1080
+      "width": 360,
+      "height": 720,
+      "w": 360,
+      "h": 720
     },
     "grid": {
       "origin_x": 14.0,
