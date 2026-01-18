@@ -2450,9 +2450,8 @@ function main(): i32 {
 
     brickout_ui_font = load_font(UI_FONT_PATH, UI_FONT_SIZE_PX);
 
-    if (!(BENCH_SKIP_MAXIMIZE == 1)) {
-        maximize_window_for_desktop();
-    }
+    // Keep the window at the configured resolution by default.
+    // (Maximizing is useful for screenshots, but it makes iteration/debugging harder.)
     sync_screen_size();
     print_string("window_px=");
     print_int(state.runtime_screen.w);
