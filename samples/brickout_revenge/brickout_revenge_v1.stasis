@@ -416,8 +416,8 @@ function ensure_config_loaded(): void {
         // Data binding is optional, but the runner may bind only a subset of fields if JSON keys don't match.
         // Ensure window size is always valid even if `screen.w/h` were not populated.
         if (state.config.screen.w < 1 || state.config.screen.h < 1) {
-            state.config.screen.w = 540;
-            state.config.screen.h = 1080;
+            state.config.screen.w = 360;
+            state.config.screen.h = 720;
         }
         return;
     }
@@ -426,8 +426,8 @@ function ensure_config_loaded(): void {
     state.config.magic = 1337;
 
     // Window size (pixels). Virtual resolution is fixed (VIRTUAL_W x VIRTUAL_H) and scaled to fit.
-    state.config.screen.w = 540;
-    state.config.screen.h = 1080;
+    state.config.screen.w = 360;
+    state.config.screen.h = 720;
 
     state.config.grid.origin_x = 50.0;
     state.config.grid.margin_bottom = 50.0;
