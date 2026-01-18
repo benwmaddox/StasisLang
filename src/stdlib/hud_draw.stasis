@@ -1,0 +1,21 @@
+// HUD helpers (drawing).
+// Import explicitly: import "src/stdlib/hud_draw.stasis";
+
+import "graphics.stasis";
+import "hud_text.stasis";
+
+function hud_draw_text_from_ascii(
+    font: i32,
+    tmp: ascii[],
+    out: utf8[],
+    out_max: i32,
+    x: f32,
+    y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32
+): void {
+    hud_text_commit_utf8(out, tmp, out_max);
+    draw_text(font, out, x, y, r, g, b, a);
+}
