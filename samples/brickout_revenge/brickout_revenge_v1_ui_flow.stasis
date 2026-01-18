@@ -202,6 +202,10 @@ function draw_main_menu(): void {
             draw_filled_rect(sx, sy, sw, sh, 0.08, 0.10, 0.14, 0.92);
             draw_rect(sx, sy, sw, sh, 0.3, 0.6, 0.8, 0.85);
         }
+
+        // Always draw a readable level number (works even if the font fails to load).
+        draw_number(i + 1, sx + 10.0, sy + 12.0 * s, 6.0 * s);
+
         if (i == 0) { draw_text(state.ui_font, brickout_level_name_0, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95); }
         if (i == 1) { draw_text(state.ui_font, brickout_level_name_1, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95); }
         if (i == 2) { draw_text(state.ui_font, brickout_level_name_2, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95); }
