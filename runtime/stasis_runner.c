@@ -1278,7 +1278,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Default window policy: start fullscreen if graphics runtime is present. */
+    /* Default window policy: create a small window if graphics runtime is present.
+       Programs can request their preferred size/fullscreen via host_window_request globals. */
     HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
     stasis_init_window_fn init_window = NULL;
     stasis_set_fullscreen_fn set_fullscreen = NULL;
@@ -1288,10 +1289,15 @@ int main(int argc, char **argv)
         init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
         set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
         set_window_size = (stasis_set_window_size_fn)GetProcAddress(gfx, "stasis_set_window_size");
-        if (init_window && set_fullscreen)
+        if (init_window)
         {
-            (void)init_window(1280, 720, "Stasis");
-            (void)set_fullscreen(1);
+            const char *start_fs = getenv("STASIS_START_FULLSCREEN");
+            int want_fullscreen = (start_fs && strcmp(start_fs, "1") == 0) ? 1 : 0;
+            (void)init_window(640, 360, "Stasis");
+            if (want_fullscreen && set_fullscreen)
+            {
+                (void)set_fullscreen(1);
+            }
         }
     }
 
