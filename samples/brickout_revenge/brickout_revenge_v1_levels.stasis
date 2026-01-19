@@ -1,0 +1,103 @@
+// Brickout Revenge v1 - level scripting definitions (data-only helpers).
+
+function init_level_defs(): void {
+    brickout_levels_magic = 1;
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 1 - Warmup");
+    from_ascii(brickout_level_name_0, brickout_level_name_tmp, 32);
+
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 2 - Mixed");
+    from_ascii(brickout_level_name_1, brickout_level_name_tmp, 32);
+
+    ascii_clear(brickout_level_name_tmp);
+    ascii_append(brickout_level_name_tmp, "Level 3 - Swarm");
+    from_ascii(brickout_level_name_2, brickout_level_name_tmp, 32);
+
+    brickout_level_initial_scraps[0] = 60;
+    brickout_level_initial_scraps[1] = 75;
+    brickout_level_initial_scraps[2] = 90;
+
+    brickout_level_initial_power_cap[0] = 10;
+    brickout_level_initial_power_cap[1] = 12;
+    brickout_level_initial_power_cap[2] = 14;
+
+    // Fixed partitions for events so we never need nested arrays.
+    let base0: i32 = 0;
+    let base1: i32 = 64;
+    let base2: i32 = 128;
+    brickout_level_event_offset[0] = base0;
+    brickout_level_event_offset[1] = base1;
+    brickout_level_event_offset[2] = base2;
+
+    // Level 1: slow warmup (normal balls)
+    brickout_level_event_count[0] = 12;
+    brickout_level_event_tick[base0 + 0] = 120; brickout_level_event_preset[base0 + 0] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 1] = 180; brickout_level_event_preset[base0 + 1] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 2] = 240; brickout_level_event_preset[base0 + 2] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 3] = 300; brickout_level_event_preset[base0 + 3] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 4] = 360; brickout_level_event_preset[base0 + 4] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 5] = 420; brickout_level_event_preset[base0 + 5] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 6] = 480; brickout_level_event_preset[base0 + 6] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 7] = 540; brickout_level_event_preset[base0 + 7] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 8] = 600; brickout_level_event_preset[base0 + 8] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 9] = 660; brickout_level_event_preset[base0 + 9] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 10] = 720; brickout_level_event_preset[base0 + 10] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base0 + 11] = 780; brickout_level_event_preset[base0 + 11] = BrickoutBallPreset.Normal;
+
+    // Level 2: mixed pressure (heavy + normal)
+    brickout_level_event_count[1] = 16;
+    brickout_level_event_tick[base1 + 0] = 90; brickout_level_event_preset[base1 + 0] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 1] = 150; brickout_level_event_preset[base1 + 1] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 2] = 210; brickout_level_event_preset[base1 + 2] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base1 + 3] = 270; brickout_level_event_preset[base1 + 3] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 4] = 330; brickout_level_event_preset[base1 + 4] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 5] = 390; brickout_level_event_preset[base1 + 5] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base1 + 6] = 450; brickout_level_event_preset[base1 + 6] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 7] = 510; brickout_level_event_preset[base1 + 7] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 8] = 570; brickout_level_event_preset[base1 + 8] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base1 + 9] = 630; brickout_level_event_preset[base1 + 9] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 10] = 690; brickout_level_event_preset[base1 + 10] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 11] = 750; brickout_level_event_preset[base1 + 11] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base1 + 12] = 810; brickout_level_event_preset[base1 + 12] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 13] = 870; brickout_level_event_preset[base1 + 13] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base1 + 14] = 930; brickout_level_event_preset[base1 + 14] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base1 + 15] = 990; brickout_level_event_preset[base1 + 15] = BrickoutBallPreset.Normal;
+
+    // Level 3: fast and tricky (splitters + heavy)
+    brickout_level_event_count[2] = 20;
+    brickout_level_event_tick[base2 + 0] = 60; brickout_level_event_preset[base2 + 0] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 1] = 105; brickout_level_event_preset[base2 + 1] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base2 + 2] = 150; brickout_level_event_preset[base2 + 2] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 3] = 195; brickout_level_event_preset[base2 + 3] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base2 + 4] = 240; brickout_level_event_preset[base2 + 4] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base2 + 5] = 285; brickout_level_event_preset[base2 + 5] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 6] = 330; brickout_level_event_preset[base2 + 6] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base2 + 7] = 360; brickout_level_event_preset[base2 + 7] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 8] = 420; brickout_level_event_preset[base2 + 8] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base2 + 9] = 450; brickout_level_event_preset[base2 + 9] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 10] = 510; brickout_level_event_preset[base2 + 10] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base2 + 11] = 540; brickout_level_event_preset[base2 + 11] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 12] = 600; brickout_level_event_preset[base2 + 12] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base2 + 13] = 630; brickout_level_event_preset[base2 + 13] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 14] = 690; brickout_level_event_preset[base2 + 14] = BrickoutBallPreset.Normal;
+    brickout_level_event_tick[base2 + 15] = 720; brickout_level_event_preset[base2 + 15] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 16] = 780; brickout_level_event_preset[base2 + 16] = BrickoutBallPreset.Heavy;
+    brickout_level_event_tick[base2 + 17] = 810; brickout_level_event_preset[base2 + 17] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 18] = 870; brickout_level_event_preset[base2 + 18] = BrickoutBallPreset.Splitter;
+    brickout_level_event_tick[base2 + 19] = 930; brickout_level_event_preset[base2 + 19] = BrickoutBallPreset.Heavy;
+}
+
+function tower_cost_scraps(t: BrickType): i32 {
+    if (t == BrickType.Basic) { return 10; }
+    if (t == BrickType.Armored) { return 20; }
+    if (t == BrickType.Reflector) { return 15; }
+    return 0;
+}
+
+function tower_cost_power(t: BrickType): i32 {
+    if (t == BrickType.Basic) { return 1; }
+    if (t == BrickType.Armored) { return 2; }
+    if (t == BrickType.Reflector) { return 2; }
+    return 0;
+}

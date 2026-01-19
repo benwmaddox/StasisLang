@@ -64,4 +64,35 @@ public class LayoutTests
         Assert.Equal(1, global.Size);
         Assert.Equal(0, global.Fields.Single().Offset);
     }
+
+    [Fact]
+    public void Computes_utf8_buffer_layout()
+    {
+        var plan = Plan("""
+            global name: utf8[16];
+            """);
+
+        var global = Assert.Single(plan.Globals);
+        var field = Assert.Single(global.Fields);
+        Assert.Equal("name", global.Name);
+        Assert.Equal(FieldType.String, field.Type);
+        Assert.Equal(16, field.ArrayCount);
+        Assert.Equal(8 + 16, field.Size);
+        Assert.Equal(0, field.Offset);
+    }
+
+    [Fact]
+    public void Treats_enum_as_i32_in_layout()
+    {
+        var plan = Plan("""
+            enum E { A, B }
+            global es: E[3];
+            """);
+
+        var global = Assert.Single(plan.Globals);
+        var field = Assert.Single(global.Fields);
+        Assert.Equal(FieldType.I32, field.Type);
+        Assert.Equal(3, field.ArrayCount);
+        Assert.Equal(12, field.Size);
+    }
 }

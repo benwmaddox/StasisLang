@@ -817,7 +817,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
         var entryName = $"{moduleName}__{entryBase}";
-        var defPath = hotStatePlan?.DefPath ?? dataBindingPlan?.DefPath;
+        var defPath = dataBindingPlan?.DefPath ?? hotStatePlan?.DefPath;
         var args = BuildClangArgsForObject(objPath, dllPath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryName: entryName, isDll: true, windowsDefFilePath: defPath, windowsExports: dllExports);
         var linkStopwatch = Stopwatch.StartNew();
         var exit = RunProcess(clang, args, suppressOutput: true);
@@ -2337,6 +2337,19 @@ static string? GetLatestWindowsSdkLib()
 
 static bool TryFindTool(string name, out string path)
 {
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    {
+        // Lightweight override for non-standard installs (no repo-local toolchain required).
+        // Example: set STASIS_CLANG=C:\Program Files\LLVM\bin\clang.exe
+        var overrideVar = $"STASIS_{name.ToUpperInvariant()}";
+        var overridePath = Environment.GetEnvironmentVariable(overrideVar);
+        if (!string.IsNullOrWhiteSpace(overridePath) && File.Exists(overridePath))
+        {
+            path = overridePath;
+            return true;
+        }
+    }
+
     var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
         .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
         .ToList();
@@ -2772,8 +2785,63 @@ static bool TryGetDataBindingPlan(string sourcePath, LayoutPlan layout, string m
         return false;
     }
 
-    plan = new DataBindingPlan(dataFile, hotPlan.StructMetaPath, hotPlan.DefPath);
+    var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
+    if (state is null)
+    {
+        Console.Error.WriteLine("error: data binding requires a global named 'state'.");
+        return false;
+    }
+
+    var hotDir = Path.Combine(repoRoot, "build", "hotstate");
+    Directory.CreateDirectory(hotDir);
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var bindingStructMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.data.struct-meta.json");
+    var bindingFields = BuildDataBindingFieldList(layout, state, excludeSpriteFields: true, maxFields: 256);
+    EmitStructMetadataJson(bindingStructMetaPath, state, bindingFields);
+
+    plan = new DataBindingPlan(dataFile, bindingStructMetaPath, hotPlan.DefPath);
     return true;
+}
+
+static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, GlobalLayout state, bool excludeSpriteFields, int maxFields)
+{
+    var stateFields = state.Fields
+        .Where(f => !excludeSpriteFields || !f.Name.StartsWith("state__sprites__", StringComparison.Ordinal))
+        .ToArray();
+
+    var configFields = stateFields
+        .Where(f => f.Name.StartsWith("state__config__", StringComparison.Ordinal))
+        .ToArray();
+
+    var otherStateFields = stateFields
+        .Where(f => !f.Name.StartsWith("state__config__", StringComparison.Ordinal))
+        .ToArray();
+
+    var otherGlobals = layout.Globals
+        .Where(g => !string.Equals(g.Name, "state", StringComparison.Ordinal))
+        .SelectMany(g => g.Fields)
+        .ToArray();
+
+    var results = new List<FieldLayout>(Math.Min(maxFields, configFields.Length + otherGlobals.Length + otherStateFields.Length));
+    var seen = new HashSet<string>(StringComparer.Ordinal);
+
+    void Add(FieldLayout field)
+    {
+        if (results.Count >= maxFields)
+        {
+            return;
+        }
+        if (seen.Add(field.Name))
+        {
+            results.Add(field);
+        }
+    }
+
+    foreach (var f in configFields) Add(f);
+    foreach (var f in otherGlobals) Add(f);
+    foreach (var f in otherStateFields) Add(f);
+
+    return results;
 }
 
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
@@ -3009,7 +3077,14 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 var dataFile = FindDataBindingJson(sourcePath, repoRoot);
                 if (!string.IsNullOrEmpty(dataFile))
                 {
-                    runnerArgs += $" --data-bind \"{dataFile}\" \"{plan.StructMetaPath}\"";
+                    var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
+                    if (state is not null)
+                    {
+                        var bindingStructMetaPath = Path.Combine(swapDir, $"{baseName}.{moduleName}.data.struct-meta.json");
+                        var bindingFields = BuildDataBindingFieldList(layout, state, excludeSpriteFields: true, maxFields: 256);
+                        EmitStructMetadataJson(bindingStructMetaPath, state, bindingFields);
+                        runnerArgs += $" --data-bind \"{dataFile}\" \"{bindingStructMetaPath}\"";
+                    }
                     Console.WriteLine($"Data binding: {dataFile}");
                 }
 
@@ -3265,25 +3340,50 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
         }
         File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
 
-        var def = new StringBuilder();
-        def.Append("EXPORTS\n");
-        foreach (var fn in exportedFunctions)
-        {
-            def.Append("  ");
-            def.Append(fn);
-            def.Append('\n');
-        }
-        foreach (var entry in entries)
+        // Emit struct metadata JSON for data binding
+        EmitStructMetadataJson(structMetaPath, state, entries);
+    }
+
+    // The export list is cheap to regenerate and may grow when additional globals are added.
+    var def = new StringBuilder();
+    def.Append("EXPORTS\n");
+    foreach (var fn in exportedFunctions)
+    {
+        def.Append("  ");
+        def.Append(fn);
+        def.Append('\n');
+    }
+
+    var exported = new HashSet<string>(StringComparer.Ordinal);
+    foreach (var entry in entries)
+    {
+        if (exported.Add(entry.Name))
         {
             def.Append("  ");
             def.Append(entry.Name);
             def.Append(" DATA\n");
         }
-        File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
-
-        // Emit struct metadata JSON for data binding
-        EmitStructMetadataJson(structMetaPath, state, entries);
     }
+
+    foreach (var global in layout.Globals)
+    {
+        if (string.Equals(global.Name, "state", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        foreach (var field in global.Fields)
+        {
+            if (exported.Add(field.Name))
+            {
+                def.Append("  ");
+                def.Append(field.Name);
+                def.Append(" DATA\n");
+            }
+        }
+    }
+
+    File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
 
     plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath, structMetaPath);
     return true;
