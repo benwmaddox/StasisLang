@@ -40,6 +40,10 @@ build/*.stasis
 build/*.stasis.*
 build/*.txt
 build/*.log
+build/*.bmp
+artifacts/
+Release/
+Debug/
 build/test_perf_compare.csv
 build/sample_test_compare.csv
 build/test_perf_compare_optimized.csv
