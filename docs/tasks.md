@@ -4,9 +4,7 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 
 ## Inbox
 
-- [ ] Close self-host compiler gap: execute `docs/self-host-gap-closure.md`.
-- [ ] Self-host compiler: implement MIR + incremental compilation plan in `docs/self-host-ir-and-incremental.md`.
-- [ ] Self-host hot swap runner notes: `docs/self-host-hot-swap-runner.md`.
+- [ ] Repo cleanup: remove self-hosted compiler sources/tests/docs; prune low-value samples; delete unused code paths (tracked in this file).
 - [ ] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
 - [x] Command buffers: add bulk append helpers (e.g. append lines from `f32[]`, sprites from `i32[]`) to avoid per-command call overhead.
 - [x] Sys: add bulk copy helpers (`sys_memcpy_u8/i32/f32`) and use them in command-buffer writers.
@@ -39,6 +37,17 @@ This file is a lightweight, persistent checklist of upcoming work. It complement
 - [ ] Stdlib/platform externs: support `@extern` no-body function declarations and implement them per-platform in the host/runtime so available APIs are visible in source.
 - [ ] Maintenance: regularly scan open PRs for merge conflicts and fix by merging `main` into the PR branch (or rebasing) so PRs stay mergeable.
 - [ ] Support compiling Markdown code blocks: allow `stasis build`/`stasis test` to accept `.md` inputs, extract ```stasis fenced blocks (and/or a `stasis` info string), and compile/test them so docs + samples stay valid.
+
+## Repo cleanup (2026-01)
+
+Goal: keep the repo lean and focused on the C# compiler toolchain. Remove the self-hosted compiler experiment and any docs/samples that no longer earn their maintenance cost.
+
+- [x] Remove self-hosted compiler sources under `src/stasis/`.
+- [x] Remove self-hosted compiler Stasis tests under `tests/stasis_*.stasis`.
+- [x] Remove or archive self-host docs (`docs/self-host*.md`) and scrub references elsewhere (`docs/spec.md`, `docs/standard-library.md`, etc.).
+- [x] Prune low-value samples (debug/probe/minimal syntax experiments) and delete any committed binary artifacts.
+- [x] Identify and remove now-unused compiler code paths after deletions (self-host compiler removed; no additional C# dead code found in this pass).
+- [x] Validate: `.\build.bat` and `.\test.bat` pass.
 
 ## 1) Plan: Cross-platform sound output (Handmade Hero-inspired)
 
