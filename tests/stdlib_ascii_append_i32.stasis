@@ -1,0 +1,23 @@
+import "../src/stdlib/stdlib.stasis";
+
+global buf: ascii[64];
+
+test `ascii_append_i32 writes digits`(): bool {
+    ascii_clear(buf);
+    ascii_append_i32(buf, 12345);
+    return ascii_len(buf) == 5
+        && buf[0] == 49
+        && buf[1] == 50
+        && buf[2] == 51
+        && buf[3] == 52
+        && buf[4] == 53;
+}
+
+test `ascii_append_i32 writes negative sign`(): bool {
+    ascii_clear(buf);
+    ascii_append_i32(buf, -7);
+    return ascii_len(buf) == 2
+        && buf[0] == 45
+        && buf[1] == 55;
+}
+
