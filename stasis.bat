@@ -1,5 +1,6 @@
 @echo off
 setlocal
+call "%~dp0env.bat"
 set "SCRIPT_DIR=%~dp0"
 set "CONFIG=Release"
 set "DOTNET_ARGS=--no-restore --configuration %CONFIG%"

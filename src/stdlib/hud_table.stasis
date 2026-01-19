@@ -1,41 +1,15 @@
 // HUD layout helpers for reusable "tables" (rows/columns) over arrays of data.
 // Import explicitly: import "src/stdlib/hud_table.stasis";
 //
-// Goal: make positioning trivial without requiring function pointers.
-// Usage pattern:
-// - Compute a table rect (x/y/w/h) once.
-// - For each row/col, ask for cell x/y/w/h and draw whatever you want.
+// Cranelift note:
+// - The Cranelift backend does not currently support arbitrary struct member access.
+// - This module uses f32[4] rects (x,y,w,h) to stay portable across backends.
 //
-// Example (two columns, N rows):
-//
-//   import "src/stdlib/hud_table.stasis";
-//   import "src/stdlib/hud_draw.stasis";
-//
-//   global tmp: ascii[128];
-//   global out: utf8[128];
-//   global col_w: f32[2];
-//
-//   col_w[0] = 120.0; col_w[1] = 60.0;
-//   let parent: HudRect = hud_rect(0.0, 0.0, 360.0, 720.0);
-//   let tw: f32 = hud_table_width(col_w, 2, 8.0);
-//   let th: f32 = hud_table_height(row_count, 18.0, 4.0);
-//   let table: HudRect = hud_table_place(parent, tw, th, 1, 12.0, 12.0); // top-right
-//
-//   let row: i32 = 0;
-//   for (row = 0; row < row_count; row = row + 1) {
-//       let c0: HudRect = hud_table_cell_rect(table, col_w, 2, 8.0, 18.0, 4.0, 0, row);
-//       let c1: HudRect = hud_table_cell_rect(table, col_w, 2, 8.0, 18.0, 4.0, 1, row);
-//       // user-defined formatting/drawing per row:
-//       // - build tmp ASCII
-//       // - hud_draw_text_from_ascii(font, tmp, out, out.length, c0.x, c0.y, ...)
-//   }
-
-struct HudRect {
-    x: f32;
-    y: f32;
-    w: f32;
-    h: f32;
-}
+// Rect layout: [x, y, w, h]
+const HUD_RECT_X: i32 = 0;
+const HUD_RECT_Y: i32 = 1;
+const HUD_RECT_W: i32 = 2;
+const HUD_RECT_H: i32 = 3;
 
 // Clamp utility (avoid extra imports).
 function hud_clamp_i32(v: i32, min: i32, max: i32): i32 {
@@ -44,20 +18,17 @@ function hud_clamp_i32(v: i32, min: i32, max: i32): i32 {
     return v;
 }
 
-function hud_rect(x: f32, y: f32, w: f32, h: f32): HudRect {
-    let r: HudRect;
-    r.x = x;
-    r.y = y;
-    r.w = w;
-    r.h = h;
-    return r;
+function hud_rect_set(out_r: f32[], x: f32, y: f32, w: f32, h: f32): void {
+    out_r[HUD_RECT_X] = x;
+    out_r[HUD_RECT_Y] = y;
+    out_r[HUD_RECT_W] = w;
+    out_r[HUD_RECT_H] = h;
 }
 
 // Compute the total width of a table given column widths and gaps.
 function hud_table_width(col_w: f32[], col_count: i32, col_gap: f32): f32 {
     let n: i32 = col_count;
     if (n < 0) { n = 0; }
-    if (n > col_w.length) { n = col_w.length; }
     let sum: f32 = 0.0;
     let i: i32 = 0;
     for (i = 0; i < n; i = i + 1) {
@@ -83,53 +54,60 @@ function hud_table_height(row_count: i32, row_h: f32, row_gap: f32): f32 {
 // Place a table anchored within a parent rect.
 // anchor:
 // 0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right, 4=top-center, 5=bottom-center
-function hud_table_place(parent: HudRect, table_w: f32, table_h: f32, anchor: i32, pad_x: f32, pad_y: f32): HudRect {
-    let x: f32 = parent.x + pad_x;
-    let y: f32 = parent.y + pad_y;
+function hud_table_place(out_table: f32[], parent: f32[], table_w: f32, table_h: f32, anchor: i32, pad_x: f32, pad_y: f32): void {
+    let x: f32 = parent[HUD_RECT_X] + pad_x;
+    let y: f32 = parent[HUD_RECT_Y] + pad_y;
 
-    if (anchor == 1) { // top-right
-        x = parent.x + parent.w - pad_x - table_w;
+    if (anchor == 1) {
+        x = parent[HUD_RECT_X] + parent[HUD_RECT_W] - pad_x - table_w;
     }
-    if (anchor == 2) { // bottom-left
-        y = parent.y + parent.h - pad_y - table_h;
+    if (anchor == 2) {
+        y = parent[HUD_RECT_Y] + parent[HUD_RECT_H] - pad_y - table_h;
     }
-    if (anchor == 3) { // bottom-right
-        x = parent.x + parent.w - pad_x - table_w;
-        y = parent.y + parent.h - pad_y - table_h;
+    if (anchor == 3) {
+        x = parent[HUD_RECT_X] + parent[HUD_RECT_W] - pad_x - table_w;
+        y = parent[HUD_RECT_Y] + parent[HUD_RECT_H] - pad_y - table_h;
     }
-    if (anchor == 4) { // top-center
-        x = parent.x + (parent.w - table_w) * 0.5;
-        y = parent.y + pad_y;
+    if (anchor == 4) {
+        x = parent[HUD_RECT_X] + (parent[HUD_RECT_W] - table_w) * 0.5;
     }
-    if (anchor == 5) { // bottom-center
-        x = parent.x + (parent.w - table_w) * 0.5;
-        y = parent.y + parent.h - pad_y - table_h;
+    if (anchor == 5) {
+        x = parent[HUD_RECT_X] + (parent[HUD_RECT_W] - table_w) * 0.5;
+        y = parent[HUD_RECT_Y] + parent[HUD_RECT_H] - pad_y - table_h;
     }
 
-    return hud_rect(x, y, table_w, table_h);
+    hud_rect_set(out_table, x, y, table_w, table_h);
 }
 
-// Get a cell rect (row/col) inside a table.
-function hud_table_cell_rect(table: HudRect, col_w: f32[], col_count: i32, col_gap: f32, row_h: f32, row_gap: f32, col: i32, row: i32): HudRect {
-    let cc: i32 = col_count;
-    if (cc < 0) { cc = 0; }
-    if (cc > col_w.length) { cc = col_w.length; }
-
-    let c: i32 = hud_clamp_i32(col, 0, cc - 1);
-    let r: i32 = row;
-    if (r < 0) { r = 0; }
-
-    let x: f32 = table.x;
+function hud_table_cell_x(table: f32[], col_w: f32[], col_count: i32, col_gap: f32, col: i32): f32 {
+    let c: i32 = hud_clamp_i32(col, 0, col_count - 1);
+    let x: f32 = table[HUD_RECT_X];
     let i: i32 = 0;
     for (i = 0; i < c; i = i + 1) {
         x = x + col_w[i] + col_gap;
     }
+    return x;
+}
 
-    let y: f32 = table.y + i32_to_f32(r) * (row_h + row_gap);
-    let w: f32 = 0.0;
-    if (c >= 0 && c < cc) {
-        w = col_w[c];
-    }
-    let h: f32 = row_h;
-    return hud_rect(x, y, w, h);
+function hud_table_cell_w(col_w: f32[], col_count: i32, col: i32): f32 {
+    let c: i32 = hud_clamp_i32(col, 0, col_count - 1);
+    return col_w[c];
+}
+
+function hud_table_cell_y(table: f32[], row_h: f32, row_gap: f32, row: i32): f32 {
+    let r: i32 = row;
+    if (r < 0) { r = 0; }
+    return table[HUD_RECT_Y] + i32_to_f32(r) * (row_h + row_gap);
+}
+
+function hud_table_cell_h(row_h: f32): f32 {
+    return row_h;
+}
+
+function hud_table_cell_rect(out_cell: f32[], table: f32[], col_w: f32[], col_count: i32, col_gap: f32, row_h: f32, row_gap: f32, col: i32, row: i32): void {
+    let x: f32 = hud_table_cell_x(table, col_w, col_count, col_gap, col);
+    let y: f32 = hud_table_cell_y(table, row_h, row_gap, row);
+    let w: f32 = hud_table_cell_w(col_w, col_count, col);
+    let h: f32 = hud_table_cell_h(row_h);
+    hud_rect_set(out_cell, x, y, w, h);
 }

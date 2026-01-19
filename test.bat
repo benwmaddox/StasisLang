@@ -11,10 +11,12 @@ dotnet test -- RunConfiguration.MaxCpuCount=1
 if errorlevel 1 exit /b 1
 
 set STASIS_SUPPRESS_WARNINGS=1
+set STASIS_DISABLE_ARTIFACT_CACHE=1
 
 set AOT_CLI=%CD%\build\aot\Stasis.Cli.exe
 powershell -NoProfile -Command ^
   "$env:STASIS_SUPPRESS_WARNINGS='1';" ^
+  "$env:STASIS_DISABLE_ARTIFACT_CACHE='1';" ^
   "$env:STASIS_CRANELIFT_AOT='%STASIS_CRANELIFT_AOT%';" ^
   "$aot = '%AOT_CLI%';" ^
   "if (!(Test-Path $aot)) { Write-Error 'AOT CLI not found. Run build.bat first.'; exit 1 }" ^
