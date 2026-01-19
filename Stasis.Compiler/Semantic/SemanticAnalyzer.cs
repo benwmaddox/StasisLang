@@ -460,11 +460,7 @@ public sealed class SemanticAnalyzer
             EnsurePrimitiveLocal(varType, v.Name.Span);
         }
 
-        if (v.Initializer is null)
-        {
-            _diagnostics.Add(new Diagnostic("Local variables must be initialized with a value.", v.Name.Span));
-        }
-        else
+        if (v.Initializer is not null)
         {
             AnalyzeExpression(v.Initializer, scope);
             // Type check: ensure initializer type matches variable type

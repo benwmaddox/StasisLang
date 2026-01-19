@@ -119,12 +119,12 @@ public class TemplateOutputTests
         return (process.ExitCode, stdout.ToString(), stderr.ToString());
     }
 
-    private static bool TryFindLli()
+    private static bool TryFindLlvmTooling()
     {
         var search = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
         foreach (var dir in search)
         {
-            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "lli.exe" : "lli");
+            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
             if (File.Exists(candidate))
             {
                 return true;
@@ -137,7 +137,7 @@ public class TemplateOutputTests
     [Fact]
     public void FactorioLite_ProducesSvgSnapshots()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
@@ -166,7 +166,7 @@ public class TemplateOutputTests
     [Fact]
     public void BreakoutDefense_ProducesSvgSnapshots()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
@@ -195,7 +195,7 @@ public class TemplateOutputTests
     [Fact]
     public void Match3Overlay_ProducesCsvHistogram()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
@@ -221,4 +221,3 @@ public class TemplateOutputTests
         }
     }
 }
-

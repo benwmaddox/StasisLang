@@ -69,19 +69,22 @@ public sealed class ModuleLowerer
                 case ArrayTypeSyntax array:
                     {
                         var elementType = ResolveType(array.ElementType, symbols);
-                        var length = globalLayout is null
-                            ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
-                            : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
 
                         // Special handling for string arrays: use UTF-8 byte buffer
                         if (elementType is PrimitiveTypeSymbol prim && HeaderSizeFor(prim.PrimitiveName) > 0)
                         {
-                            // Fixed-size string: 8-byte header + data bytes
+                            // Fixed-size string: header + data bytes.
+                            // NOTE: Ignore layout sizing here. Layout sizes are in bytes for globals and do not map
+                            // cleanly to "string element" sizes (ascii/utf8 are backed by i8 storage).
+                            var length = ParseArrayLength(array.SizeToken?.Text ?? string.Empty);
                             var headerSize = HeaderSizeFor(prim.PrimitiveName);
                             builder.DefineGlobalArray(global.Name.Text, LLVMTypeRef.Int8, length + (uint)headerSize);
                         }
                         else
                         {
+                            var length = globalLayout is null
+                                ? ParseArrayLength(array.SizeToken?.Text ?? string.Empty)
+                                : (uint)Math.Max(1, globalLayout.Size / SizeOf(elementType));
                             var llvmElem = builder.TypeMapper.Map(elementType);
                             builder.DefineGlobalArray(global.Name.Text, llvmElem, length);
                         }
