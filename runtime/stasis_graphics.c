@@ -4,6 +4,7 @@
  */
 
 #include <SDL.h>
+#include <SDL_image.h>
 #if defined(__ANDROID__) && !defined(STASIS_GRAPHICS_SDL_ONLY)
 #define STASIS_GRAPHICS_SDL_ONLY 1
 #endif
@@ -41,6 +42,11 @@
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvgrast.h"
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static void flush_sprites(void);
+static void render_postfx(void);
+#endif
+
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
     (void)category;
@@ -71,6 +77,10 @@ static int g_window_prev_width = 800;
 static int g_window_prev_height = 600;
 static bool g_window_resized = false;
 static bool g_postfx_enabled = false;
+static bool g_postfx_applied_this_frame = false;
+static bool g_screenshot_taken = false;
+static char g_screenshot_path[1024] = {0};
+static int g_screenshot_exit_after = 0;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
@@ -1655,6 +1665,292 @@ STASIS_EXPORT int stasis_gfx_debug_bake_hash(const char* path) {
     return (int)h32;
 }
 
+static int ends_with_ci(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
+    size_t sl = strlen(s);
+    size_t tl = strlen(suffix);
+    if (tl > sl) return 0;
+    const char* tail = s + (sl - tl);
+    for (size_t i = 0; i < tl; i++) {
+        char a = (char)tolower((unsigned char)tail[i]);
+        char b = (char)tolower((unsigned char)suffix[i]);
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static void premultiply_rgba(unsigned char* pixels, int w, int h) {
+    if (!pixels || w <= 0 || h <= 0) return;
+    const int count = w * h;
+    for (int i = 0; i < count; i++) {
+        unsigned char* p = pixels + i * 4;
+        const unsigned char a = p[3];
+        if (a == 255) continue;
+        if (a == 0) {
+            p[0] = 0; p[1] = 0; p[2] = 0;
+            continue;
+        }
+        p[0] = (unsigned char)((p[0] * a + 127) / 255);
+        p[1] = (unsigned char)((p[1] * a + 127) / 255);
+        p[2] = (unsigned char)((p[2] * a + 127) / 255);
+    }
+}
+
+static int bake_raster_to_rgba_sized(const char* path, int max_w, int max_h,
+                                     unsigned char** out_pixels, int* out_w, int* out_h) {
+    *out_pixels = NULL;
+    *out_w = 0;
+    *out_h = 0;
+
+    if (max_w <= 0 || max_h <= 0) {
+        fprintf(stderr, "bake_raster_to_rgba_sized: invalid max size %dx%d\n", max_w, max_h);
+        return 0;
+    }
+
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        fprintf(stderr, "bake_raster_to_rgba_sized: bad path %s\n", path ? path : "(null)");
+        return 0;
+    }
+
+    SDL_Surface* loaded = IMG_Load(resolved);
+    if (!loaded) {
+        fprintf(stderr, "bake_raster_to_rgba_sized: IMG_Load failed for %s: %s\n", resolved, IMG_GetError());
+        return 0;
+    }
+
+    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(loaded, SDL_PIXELFORMAT_RGBA32, 0);
+    SDL_FreeSurface(loaded);
+    if (!rgba) {
+        fprintf(stderr, "bake_raster_to_rgba_sized: SDL_ConvertSurfaceFormat failed for %s: %s\n", resolved, SDL_GetError());
+        return 0;
+    }
+
+    const int src_w = rgba->w;
+    const int src_h = rgba->h;
+    if (src_w <= 0 || src_h <= 0) {
+        SDL_FreeSurface(rgba);
+        fprintf(stderr, "bake_raster_to_rgba_sized: invalid raster size %dx%d in %s\n", src_w, src_h, resolved);
+        return 0;
+    }
+
+    unsigned char* out = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
+    if (!out) {
+        SDL_FreeSurface(rgba);
+        fprintf(stderr, "bake_raster_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved);
+        return 0;
+    }
+    memset(out, 0, (size_t)max_w * (size_t)max_h * 4u);
+
+    float scale_x = (float)max_w / (float)src_w;
+    float scale_y = (float)max_h / (float)src_h;
+    float scale = (scale_x < scale_y) ? scale_x : scale_y;
+    int content_w = (int)ceilf((float)src_w * scale);
+    int content_h = (int)ceilf((float)src_h * scale);
+    if (content_w < 1) content_w = 1;
+    if (content_h < 1) content_h = 1;
+    if (content_w > max_w) content_w = max_w;
+    if (content_h > max_h) content_h = max_h;
+
+    const int off_x = (max_w - content_w) / 2;
+    const int off_y = (max_h - content_h) / 2;
+
+    const unsigned char* src = (const unsigned char*)rgba->pixels;
+    const int src_stride = rgba->pitch;
+
+    for (int y = 0; y < content_h; y++) {
+        int sy = (int)((float)y / scale);
+        if (sy < 0) sy = 0;
+        if (sy >= src_h) sy = src_h - 1;
+        const unsigned char* src_row = src + (size_t)sy * (size_t)src_stride;
+        unsigned char* dst_row = out + (size_t)(off_y + y) * (size_t)max_w * 4u + (size_t)off_x * 4u;
+        for (int x = 0; x < content_w; x++) {
+            int sx = (int)((float)x / scale);
+            if (sx < 0) sx = 0;
+            if (sx >= src_w) sx = src_w - 1;
+            const unsigned char* sp = src_row + (size_t)sx * 4u;
+            unsigned char* dp = dst_row + (size_t)x * 4u;
+            dp[0] = sp[0];
+            dp[1] = sp[1];
+            dp[2] = sp[2];
+            dp[3] = sp[3];
+        }
+    }
+
+    SDL_FreeSurface(rgba);
+
+    /* Match GL sprite pipeline: premultiplied alpha. */
+    premultiply_rgba(out, max_w, max_h);
+
+    *out_pixels = out;
+    *out_w = max_w;
+    *out_h = max_h;
+    return 1;
+}
+
+static int bake_image_to_rgba_sized(const char* path, int max_w, int max_h,
+                                    unsigned char** out_pixels, int* out_w, int* out_h) {
+    if (ends_with_ci(path, ".svg")) {
+        return bake_svg_to_rgba_sized(path, max_w, max_h, out_pixels, out_w, out_h);
+    }
+    return bake_raster_to_rgba_sized(path, max_w, max_h, out_pixels, out_w, out_h);
+}
+
+static int write_bmp_bgra32(const char* path, int w, int h, const uint8_t* bgra, int is_bottom_up) {
+    if (!path || !*path || w <= 0 || h <= 0 || !bgra) return 0;
+
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        return 0;
+    }
+
+    /* 32bpp BI_RGB BMP (BGRA), no row padding needed. */
+    const uint32_t pixel_bytes = (uint32_t)w * (uint32_t)h * 4u;
+    const uint32_t file_size = 14u + 40u + pixel_bytes;
+
+    uint8_t file_hdr[14];
+    memset(file_hdr, 0, sizeof(file_hdr));
+    file_hdr[0] = 'B';
+    file_hdr[1] = 'M';
+    file_hdr[2] = (uint8_t)(file_size & 0xFFu);
+    file_hdr[3] = (uint8_t)((file_size >> 8) & 0xFFu);
+    file_hdr[4] = (uint8_t)((file_size >> 16) & 0xFFu);
+    file_hdr[5] = (uint8_t)((file_size >> 24) & 0xFFu);
+    file_hdr[10] = 54; /* pixel data offset */
+
+    uint8_t info_hdr[40];
+    memset(info_hdr, 0, sizeof(info_hdr));
+    info_hdr[0] = 40; /* BITMAPINFOHEADER size */
+    info_hdr[4] = (uint8_t)(w & 0xFF);
+    info_hdr[5] = (uint8_t)((w >> 8) & 0xFF);
+    info_hdr[6] = (uint8_t)((w >> 16) & 0xFF);
+    info_hdr[7] = (uint8_t)((w >> 24) & 0xFF);
+
+    /* Use negative height for top-down to match the natural SDL coordinate system. */
+    int32_t signed_h = is_bottom_up ? h : -h;
+    info_hdr[8] = (uint8_t)(signed_h & 0xFF);
+    info_hdr[9] = (uint8_t)((signed_h >> 8) & 0xFF);
+    info_hdr[10] = (uint8_t)((signed_h >> 16) & 0xFF);
+    info_hdr[11] = (uint8_t)((signed_h >> 24) & 0xFF);
+
+    info_hdr[12] = 1; /* planes */
+    info_hdr[14] = 32; /* bpp */
+    /* biCompression=0 (BI_RGB) */
+    info_hdr[20] = (uint8_t)(pixel_bytes & 0xFFu);
+    info_hdr[21] = (uint8_t)((pixel_bytes >> 8) & 0xFFu);
+    info_hdr[22] = (uint8_t)((pixel_bytes >> 16) & 0xFFu);
+    info_hdr[23] = (uint8_t)((pixel_bytes >> 24) & 0xFFu);
+
+    if (fwrite(file_hdr, 1, sizeof(file_hdr), f) != sizeof(file_hdr) ||
+        fwrite(info_hdr, 1, sizeof(info_hdr), f) != sizeof(info_hdr)) {
+        fclose(f);
+        return 0;
+    }
+
+    const uint32_t row_bytes = (uint32_t)w * 4u;
+    if (is_bottom_up) {
+        /* Write rows bottom-up (OpenGL glReadPixels origin). */
+        for (int y = 0; y < h; y++) {
+            const uint8_t* row = bgra + (size_t)y * (size_t)row_bytes;
+            if (fwrite(row, 1, row_bytes, f) != row_bytes) {
+                fclose(f);
+                return 0;
+            }
+        }
+    } else {
+        /* Write rows top-down. */
+        for (int y = 0; y < h; y++) {
+            const uint8_t* row = bgra + (size_t)y * (size_t)row_bytes;
+            if (fwrite(row, 1, row_bytes, f) != row_bytes) {
+                fclose(f);
+                return 0;
+            }
+        }
+    }
+
+    fclose(f);
+    return 1;
+}
+
+STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
+    if (!path || !*path) return 0;
+    if (!g_window) return 0;
+    if (g_window_width <= 0 || g_window_height <= 0) return 0;
+
+    char resolved[1024];
+    const char* out_path = path;
+    if (!is_absolute_path(path)) {
+        if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+            return 0;
+        }
+        out_path = resolved;
+    }
+
+    const int w = g_window_width;
+    const int h = g_window_height;
+    const size_t bytes = (size_t)w * (size_t)h * 4u;
+
+    uint8_t* pixels = (uint8_t*)malloc(bytes);
+    if (!pixels) return 0;
+
+    int ok = 0;
+
+    if (g_use_sdl_renderer) {
+        if (g_renderer) {
+            /* Match end_frame() behavior so the screenshot includes queued lines. */
+            SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+            SDL_Color color;
+            for (int i = 0; i < g_line_count; i++) {
+                color.r = (Uint8)(g_lines[i].r * 255.0f);
+                color.g = (Uint8)(g_lines[i].g * 255.0f);
+                color.b = (Uint8)(g_lines[i].b * 255.0f);
+                color.a = (Uint8)(g_lines[i].a * 255.0f);
+                SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+                SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+            }
+            g_line_count = 0;
+
+            /* SDL_RenderReadPixels reads from the current render target. Call before stasis_end_frame(). */
+            int rc = SDL_RenderReadPixels(g_renderer, NULL, SDL_PIXELFORMAT_BGRA32, pixels, w * 4);
+            if (rc == 0) {
+                ok = write_bmp_bgra32(out_path, w, h, pixels, 0);
+            }
+        }
+        free(pixels);
+        return ok;
+    }
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (g_gl_context) {
+        /* Ensure buffered draws are applied so the screenshot matches what end_frame() will present. */
+        flush_lines();
+        flush_sprites();
+        if (!g_postfx_applied_this_frame) {
+            render_postfx();
+            g_postfx_applied_this_frame = true;
+        }
+        glFlush();
+        glFinish();
+
+        /* Read the back buffer (origin bottom-left). Call before stasis_end_frame(). */
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glReadBuffer(GL_BACK);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) {
+            /* glReadPixels returns bottom-up; BMP header uses top-down (negative height). Flip by writing bottom-up rows and marking as bottom-up. */
+            ok = write_bmp_bgra32(out_path, w, h, pixels, 1);
+        }
+        free(pixels);
+        return ok;
+    }
+#endif
+
+    free(pixels);
+    return 0;
+}
+
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void) {
     if (g_sprite_vert_count == 0) return;
@@ -2087,6 +2383,29 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         return 0;
     }
 
+    /* Enable PNG sprite loading via SDL_image. */
+    int img_flags = IMG_INIT_PNG;
+    int img_inited = IMG_Init(img_flags);
+    if ((img_inited & img_flags) != img_flags) {
+        SDL_Log("IMG_Init failed (got=0x%x want=0x%x): %s", img_inited, img_flags, IMG_GetError());
+        SDL_Quit();
+        return 0;
+    }
+
+    /* Optional screenshot automation via environment variables. */
+    g_screenshot_taken = false;
+    g_screenshot_exit_after = 0;
+    g_screenshot_path[0] = 0;
+    const char* screenshot = SDL_getenv("STASIS_SCREENSHOT_ONCE");
+    if (screenshot && *screenshot) {
+        strncpy(g_screenshot_path, screenshot, sizeof(g_screenshot_path) - 1);
+        g_screenshot_path[sizeof(g_screenshot_path) - 1] = 0;
+        const char* exit_after = SDL_getenv("STASIS_EXIT_AFTER_SCREENSHOT");
+        if (exit_after && exit_after[0] == '1') {
+            g_screenshot_exit_after = 1;
+        }
+    }
+
     const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
     bool want_sdl = (force_sdl && strcmp(force_sdl, "0") != 0);
 #if defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -2412,6 +2731,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
 STASIS_EXPORT void stasis_begin_frame(void) {
     gfx_debug_hash_reset_if_enabled();
     gfx_asset_watch_apply_pending_changes();
+    g_postfx_applied_this_frame = false;
     if (!g_events_pumped_this_frame) {
         stasis_pump_events();
         g_events_pumped_this_frame = 1;
@@ -2440,13 +2760,33 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
             SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
+
+        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
+            /* Capture before present so we read the current render target. */
+            stasis_gfx_dump_bmp(g_screenshot_path);
+            g_screenshot_taken = true;
+            if (g_screenshot_exit_after) {
+                g_should_quit = true;
+            }
+        }
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         flush_lines();
         flush_sprites();
-        render_postfx();
+        if (!g_postfx_applied_this_frame) {
+            render_postfx();
+            g_postfx_applied_this_frame = true;
+        }
+        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
+            /* Capture after all draws (including postfx) but before swap. */
+            stasis_gfx_dump_bmp(g_screenshot_path);
+            g_screenshot_taken = true;
+            if (g_screenshot_exit_after) {
+                g_should_quit = true;
+            }
+        }
         SDL_GL_SwapWindow(g_window);
 #else
         /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
@@ -2795,7 +3135,7 @@ static int sprite_build_into_entry(SpriteEntry* e, const char* path, int allow_r
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h, int allow_reuse_slot) {
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_svg_to_rgba_sized(path, max_w, max_h, &pixels, &w, &h)) {
+    if (!bake_image_to_rgba_sized(path, max_w, max_h, &pixels, &w, &h)) {
         SDL_Log("gfx_load_sprite: failed to bake %s at %dx%d", path, max_w, max_h);
         return 0;
     }

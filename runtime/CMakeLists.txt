@@ -22,6 +22,7 @@ endif()
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC)
     # Find SDL2 (via vcpkg or system)
     find_package(SDL2 CONFIG REQUIRED)
+    find_package(SDL2_image CONFIG REQUIRED)
 
     if(NOT STASIS_GRAPHICS_SDL_ONLY)
         # Find OpenGL and GLEW (desktop backend)
@@ -35,6 +36,7 @@ function(configure_stasis_target target is_static)
     target_link_libraries(${target} PRIVATE
         $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
         $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
+        $<IF:$<TARGET_EXISTS:SDL2_image::SDL2_image>,SDL2_image::SDL2_image,SDL2_image::SDL2_image-static>
     )
 
     if(NOT STASIS_GRAPHICS_SDL_ONLY)
