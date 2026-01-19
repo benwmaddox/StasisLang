@@ -44,6 +44,7 @@ build/*.stasis.*
 build/*.txt
 build/*.log
 build/*.bmp
+build/*.svg
 artifacts/
 Release/
 Debug/
@@ -53,6 +54,9 @@ build/test_perf_compare_optimized.csv
 build/sample_test_compare_optimized.csv
 stasis_sys_static.lib
 build/stasis_sys_static.lib
+stasis_graphics_static.lib
+build/stasis_graphics_static.lib
+samples/stasis_graphics_static.lib
 build/wasm/
 
 # WASM prototype outputs
