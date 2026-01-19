@@ -1,0 +1,21 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/hud_text.stasis";
+
+global tmp: ascii[32];
+global out: utf8[32];
+
+test `hud_text_commit_utf8 updates utf8 lengths`(): bool {
+    hud_text_clear_ascii(tmp);
+    ascii_append(tmp, "HP=");
+    ascii_append_i32(tmp, 42);
+    let n: i32 = hud_text_commit_utf8(out, tmp, 32);
+    return n == 5
+        && utf8_byte_len(out) == 5
+        && utf8_char_len(out) == 5
+        && out[0] == 72
+        && out[1] == 80
+        && out[2] == 61
+        && out[3] == 52
+        && out[4] == 50;
+}
+

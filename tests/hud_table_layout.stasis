@@ -1,0 +1,28 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/hud_table.stasis";
+
+global widths: f32[2];
+
+test `hud_table_width sums widths and gaps`(): bool {
+    widths[0] = 100.0;
+    widths[1] = 60.0;
+    let w: f32 = hud_table_width(widths, 2, 10.0);
+    return f32_to_i32(w) == 170;
+}
+
+test `hud_table_cell_rect computes x offsets`(): bool {
+    widths[0] = 100.0;
+    widths[1] = 60.0;
+
+    let parent: HudRect = hud_rect(0.0, 0.0, 300.0, 200.0);
+    let tw: f32 = hud_table_width(widths, 2, 10.0);
+    let th: f32 = hud_table_height(2, 20.0, 4.0);
+    let table: HudRect = hud_table_place(parent, tw, th, 0, 0.0, 0.0);
+
+    let c0: HudRect = hud_table_cell_rect(table, widths, 2, 10.0, 20.0, 4.0, 0, 0);
+    let c1: HudRect = hud_table_cell_rect(table, widths, 2, 10.0, 20.0, 4.0, 1, 0);
+    return f32_to_i32(c0.x) == 0
+        && f32_to_i32(c1.x) == 110
+        && f32_to_i32(c1.w) == 60;
+}
+
