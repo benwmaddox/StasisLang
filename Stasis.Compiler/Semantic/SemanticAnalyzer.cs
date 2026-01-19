@@ -309,6 +309,7 @@ public sealed class SemanticAnalyzer
         }
 
         AnalyzeBlock(fn.Body, scope);
+        AnalyzeDefiniteAssignment(fn.Parameters, fn.Body);
     }
 
     private void AnalyzeTest(TestDeclarationSyntax test)
@@ -322,6 +323,294 @@ public sealed class SemanticAnalyzer
         }
 
         AnalyzeBlock(test.Body, scope);
+        AnalyzeDefiniteAssignment(test.Parameters, test.Body);
+    }
+
+    private void AnalyzeDefiniteAssignment(IReadOnlyList<ParameterSyntax> parameters, BlockStatementSyntax body)
+    {
+        var scopeStack = new Stack<List<string>>();
+        var nameToIds = new Dictionary<string, Stack<int>>(StringComparer.Ordinal);
+        var assigned = new HashSet<int>();
+        var localCount = 0;
+
+        void PushScope()
+        {
+            scopeStack.Push(new List<string>());
+        }
+
+        void PopScope(HashSet<int> assignedInScope)
+        {
+            var declared = scopeStack.Pop();
+            foreach (var name in declared)
+            {
+                if (!nameToIds.TryGetValue(name, out var stack) || stack.Count == 0)
+                {
+                    continue;
+                }
+
+                var id = stack.Pop();
+                assignedInScope.Remove(id);
+                if (stack.Count == 0)
+                {
+                    nameToIds.Remove(name);
+                }
+            }
+        }
+
+        int DeclareLocal(string name, bool isAssigned, HashSet<int> assignedInScope)
+        {
+            var id = localCount;
+            localCount++;
+
+            if (!nameToIds.TryGetValue(name, out var stack))
+            {
+                stack = new Stack<int>();
+                nameToIds[name] = stack;
+            }
+            stack.Push(id);
+
+            if (scopeStack.Count > 0)
+            {
+                scopeStack.Peek().Add(name);
+            }
+
+            if (isAssigned)
+            {
+                assignedInScope.Add(id);
+            }
+
+            return id;
+        }
+
+        bool TryResolveLocalId(string name, out int id)
+        {
+            if (nameToIds.TryGetValue(name, out var stack) && stack.Count > 0)
+            {
+                id = stack.Peek();
+                return true;
+            }
+
+            id = 0;
+            return false;
+        }
+
+        void NoteRead(string name, SourceSpan span, HashSet<int> assignedInScope)
+        {
+            if (TryResolveLocalId(name, out var id) && !assignedInScope.Contains(id))
+            {
+                _diagnostics.Add(new Diagnostic($"Local '{name}' may be uninitialized here. Assign before reading.", span));
+            }
+        }
+
+        void NoteWriteTarget(ExpressionSyntax target, HashSet<int> assignedInScope)
+        {
+            if (target is IdentifierExpressionSyntax id && TryResolveLocalId(id.Identifier.Text, out var localId))
+            {
+                assignedInScope.Add(localId);
+            }
+        }
+
+        void AnalyzeLValue(ExpressionSyntax expr, HashSet<int> assignedInScope)
+        {
+            switch (expr)
+            {
+                case IdentifierExpressionSyntax:
+                    return;
+                case MemberAccessExpressionSyntax member:
+                    AnalyzeExpr(member.Receiver, assignedInScope);
+                    return;
+                case ArrayAccessExpressionSyntax array:
+                    AnalyzeExpr(array.Receiver, assignedInScope);
+                    AnalyzeExpr(array.Index, assignedInScope);
+                    return;
+                default:
+                    AnalyzeExpr(expr, assignedInScope);
+                    return;
+            }
+        }
+
+        void AnalyzeAssignment(AssignmentExpressionSyntax assignExpr, HashSet<int> assignedInScope)
+        {
+            var op = assignExpr.OperatorToken.Text;
+            if (!string.Equals(op, "=", StringComparison.Ordinal))
+            {
+                // Compound assignment reads the current LHS value.
+                AnalyzeExpr(assignExpr.Left, assignedInScope);
+            }
+
+            AnalyzeExpr(assignExpr.Right, assignedInScope);
+            AnalyzeLValue(assignExpr.Left, assignedInScope);
+            NoteWriteTarget(assignExpr.Left, assignedInScope);
+        }
+
+        void AnalyzeExpr(ExpressionSyntax expr, HashSet<int> assignedInScope)
+        {
+            switch (expr)
+            {
+                case IdentifierExpressionSyntax id:
+                    NoteRead(id.Identifier.Text, id.Span, assignedInScope);
+                    return;
+                case LiteralExpressionSyntax:
+                    return;
+                case ParenthesizedExpressionSyntax paren:
+                    AnalyzeExpr(paren.Expression, assignedInScope);
+                    return;
+                case UnaryExpressionSyntax unary:
+                    AnalyzeExpr(unary.Operand, assignedInScope);
+                    return;
+                case MemberAccessExpressionSyntax member:
+                    AnalyzeExpr(member.Receiver, assignedInScope);
+                    return;
+                case ArrayAccessExpressionSyntax array:
+                    AnalyzeExpr(array.Receiver, assignedInScope);
+                    AnalyzeExpr(array.Index, assignedInScope);
+                    return;
+                case CallExpressionSyntax call:
+                    AnalyzeExpr(call.Callee, assignedInScope);
+                    foreach (var arg in call.Arguments)
+                    {
+                        AnalyzeExpr(arg, assignedInScope);
+                    }
+                    return;
+                case OperatorCallExpressionSyntax opCall:
+                    AnalyzeExpr(opCall.Receiver, assignedInScope);
+                    foreach (var arg in opCall.Arguments)
+                    {
+                        AnalyzeExpr(arg, assignedInScope);
+                    }
+                    return;
+                case AssignmentExpressionSyntax assignExpr:
+                    AnalyzeAssignment(assignExpr, assignedInScope);
+                    return;
+                case BinaryExpressionSyntax bin:
+                    AnalyzeExpr(bin.Left, assignedInScope);
+                    AnalyzeExpr(bin.Right, assignedInScope);
+                    return;
+            }
+        }
+
+        (HashSet<int> Assigned, bool Terminates) AnalyzeStmt(StatementSyntax stmt, HashSet<int> assignedInScope)
+        {
+            switch (stmt)
+            {
+                case VariableDeclarationSyntax v:
+                    {
+                        if (v.Type is null)
+                        {
+                            return (assignedInScope, false);
+                        }
+
+                        // Declaration introduces a new binding (may shadow an outer local).
+                        var hasInit = v.Initializer is not null;
+                        _ = DeclareLocal(v.Name.Text, isAssigned: hasInit, assignedInScope);
+                        if (hasInit)
+                        {
+                            AnalyzeExpr(v.Initializer!, assignedInScope);
+                        }
+                        return (assignedInScope, false);
+                    }
+                case ExpressionStatementSyntax es:
+                    AnalyzeExpr(es.Expression, assignedInScope);
+                    return (assignedInScope, false);
+                case ReturnStatementSyntax ret:
+                    if (ret.Expression is not null)
+                    {
+                        AnalyzeExpr(ret.Expression, assignedInScope);
+                    }
+                    return (assignedInScope, true);
+                case BlockStatementSyntax block:
+                    PushScope();
+                    var (outAssigned, terminates) = AnalyzeBlockDefinite(block, assignedInScope);
+                    PopScope(outAssigned);
+                    return (outAssigned, terminates);
+                case IfStatementSyntax ifs:
+                    AnalyzeExpr(ifs.Condition, assignedInScope);
+                    var thenAssigned = new HashSet<int>(assignedInScope);
+                    PushScope();
+                    var (thenOut, thenTerminates) = AnalyzeBlockDefinite(ifs.ThenBlock, thenAssigned);
+                    PopScope(thenOut);
+
+                    if (ifs.ElseBlock is null)
+                    {
+                        // Then may not run.
+                        return (assignedInScope, false);
+                    }
+
+                    var elseAssigned = new HashSet<int>(assignedInScope);
+                    PushScope();
+                    var (elseOut, elseTerminates) = AnalyzeBlockDefinite(ifs.ElseBlock, elseAssigned);
+                    PopScope(elseOut);
+
+                    thenOut.IntersectWith(elseOut);
+                    return (thenOut, thenTerminates && elseTerminates);
+                case ForStatementSyntax fs:
+                    // Initializer always runs once.
+                    if (fs.Initializer is not null)
+                    {
+                        AnalyzeExpr(fs.Initializer, assignedInScope);
+                    }
+                    if (fs.Condition is not null)
+                    {
+                        AnalyzeExpr(fs.Condition, assignedInScope);
+                    }
+
+                    var bodyAssigned = new HashSet<int>(assignedInScope);
+                    PushScope();
+                    _ = AnalyzeBlockDefinite(fs.Body, bodyAssigned);
+                    PopScope(bodyAssigned);
+
+                    if (fs.Step is not null)
+                    {
+                        AnalyzeExpr(fs.Step, bodyAssigned);
+                    }
+
+                    // Loop may execute zero times; do not carry assignments from body.
+                    return (assignedInScope, false);
+                case ForeachStatementSyntax fes:
+                    AnalyzeExpr(fes.Iterable, assignedInScope);
+
+                    var foreachAssigned = new HashSet<int>(assignedInScope);
+                    PushScope();
+                    _ = DeclareLocal(fes.Iterator.Text, isAssigned: true, foreachAssigned);
+                    if (fes.IndexVariable is not null)
+                    {
+                        _ = DeclareLocal(fes.IndexVariable.Text, isAssigned: true, foreachAssigned);
+                    }
+                    _ = AnalyzeBlockDefinite(fes.Body, foreachAssigned);
+                    PopScope(foreachAssigned);
+
+                    // Loop may execute zero times; do not carry assignments from body.
+                    return (assignedInScope, false);
+            }
+
+            return (assignedInScope, false);
+        }
+
+        (HashSet<int> Assigned, bool Terminates) AnalyzeBlockDefinite(BlockStatementSyntax block, HashSet<int> assignedInScope)
+        {
+            var current = assignedInScope;
+            foreach (var stmt in block.Statements)
+            {
+                var (next, terminates) = AnalyzeStmt(stmt, current);
+                current = next;
+                if (terminates)
+                {
+                    return (current, true);
+                }
+            }
+
+            return (current, false);
+        }
+
+        // Function scope.
+        PushScope();
+        foreach (var param in parameters)
+        {
+            _ = DeclareLocal(param.Name.Text, isAssigned: true, assigned);
+        }
+
+        _ = AnalyzeBlockDefinite(body, assigned);
+        PopScope(assigned);
     }
 
     private void AnalyzeBlock(BlockStatementSyntax block, Dictionary<string, Symbol> scope)

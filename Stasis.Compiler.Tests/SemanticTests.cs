@@ -97,6 +97,79 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_read_of_uninitialized_local()
+    {
+        var source = """
+            function f(): i32 {
+                let x: i32;
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("may be uninitialized", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Allows_read_after_assignment()
+    {
+        var source = """
+            function f(): i32 {
+                let x: i32;
+                x = 2;
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_read_when_only_assigned_in_then_branch()
+    {
+        var source = """
+            function f(flag: bool): i32 {
+                let x: i32;
+                if (flag) {
+                    x = 1;
+                }
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("may be uninitialized", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Allows_read_when_assigned_in_both_branches()
+    {
+        var source = """
+            function f(flag: bool): i32 {
+                let x: i32;
+                if (flag) {
+                    x = 1;
+                } else {
+                    x = 2;
+                }
+                return x;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
     public void Allows_void_return_type()
     {
         var source = """
