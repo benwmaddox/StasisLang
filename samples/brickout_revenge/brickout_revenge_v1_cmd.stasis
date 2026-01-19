@@ -2,6 +2,7 @@ import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
+import "../../src/host_frame.stasis";
 import "../../src/gfx_cmd.stasis";
 import "../../src/stdlib/audio.stasis";
 
@@ -557,12 +558,8 @@ function audio_update(): void {
 }
 
 function sync_screen_size(): void {
-    if (!gfx_window_resized()) {
-        return;
-    }
-
-    let w: i32 = gfx_window_width();
-    let h: i32 = gfx_window_height();
+    let w: i32 = host_window_w_px();
+    let h: i32 = host_window_h_px();
     if (w < 1 || h < 1) {
         return;
     }
@@ -572,10 +569,10 @@ function sync_screen_size(): void {
 }
 
 function update_layout(): void {
-    let vx: f32 = i32_to_f32(input_viewport_x_px());
-    let vy: f32 = i32_to_f32(input_viewport_y_px());
-    let vw: f32 = i32_to_f32(input_viewport_w_px());
-    let vh: f32 = i32_to_f32(input_viewport_h_px());
+    let vx: f32 = i32_to_f32(host_viewport_x_px());
+    let vy: f32 = i32_to_f32(host_viewport_y_px());
+    let vw: f32 = i32_to_f32(host_viewport_w_px());
+    let vh: f32 = i32_to_f32(host_viewport_h_px());
     if (vw < 1.0 || vh < 1.0) {
         return;
     }
@@ -2197,7 +2194,7 @@ function draw_frame(): void {
 
 // Timing
 function compute_delta_ms(): i32 {
-    let current_time: i32 = get_time_ms();
+    let current_time: i32 = host_time_ms();
     let delta_ms: i32 = current_time - state.timers.last_time;
     if (delta_ms < 1) { delta_ms = 1; }
     if (delta_ms > 100) { delta_ms = 100; }
@@ -2227,15 +2224,15 @@ function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
 }
 
 function handle_pointer_input(): void {
-    let count: i32 = input_pointer_count();
+    let count: i32 = host_pointer_count();
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let pid: i32 = input_pointer_id(i);
-        let went_down: bool = input_pointer_went_down(i);
-        let went_up: bool = input_pointer_went_up(i);
-        let is_down: bool = input_pointer_is_down(i);
-        let sx: f32 = input_pointer_x_px(i) + state.layout.viewport_x;
-        let sy: f32 = input_pointer_y_px(i) + state.layout.viewport_y;
+        let pid: i32 = host_pointer_id(i);
+        let went_down: bool = host_pointer_went_down(i) != 0;
+        let went_up: bool = host_pointer_went_up(i) != 0;
+        let is_down: bool = host_pointer_is_down(i) != 0;
+        let sx: f32 = host_pointer_x_px(i) + state.layout.viewport_x;
+        let sy: f32 = host_pointer_y_px(i) + state.layout.viewport_y;
 
         if (state.drag_active != 0) {
             if (pid == state.drag_pointer_id) {
@@ -2306,13 +2303,13 @@ function handle_pointer_input(): void {
 }
 
 function record_tap_pulses(): void {
-    let count: i32 = input_pointer_count();
+    let count: i32 = host_pointer_count();
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let went_down: bool = input_pointer_went_down(i);
+        let went_down: bool = host_pointer_went_down(i) != 0;
         if (went_down) {
-            let x: f32 = input_pointer_x_px(i);
-            let y: f32 = input_pointer_y_px(i);
+            let x: f32 = host_pointer_x_px(i);
+            let y: f32 = host_pointer_y_px(i);
             let vx: f32 = state.layout.viewport_x;
             let vy: f32 = state.layout.viewport_y;
             let j: i32 = 0;
@@ -2395,7 +2392,8 @@ function main(): i32 {
     if (!(BENCH_SKIP_MAXIMIZE == 1)) {
         maximize_window_for_desktop();
     }
-    sync_screen_size();
+    state.runtime_screen.w = state.config.screen.w;
+    state.runtime_screen.h = state.config.screen.h;
     print_string("window_px=");
     print_int(state.runtime_screen.w);
     print_string("x");
@@ -2409,8 +2407,6 @@ function main(): i32 {
         audio_sr = 0;
     }
 
-    state.runtime_screen.w = gfx_window_width();
-    state.runtime_screen.h = gfx_window_height();
     state.layout.viewport_x = 0.0;
     state.layout.viewport_y = 0.0;
     state.layout.viewport_w = i32_to_f32(state.runtime_screen.w);
@@ -2466,11 +2462,9 @@ function tick(): i32 {
         return 1;
     }
 
-    let quit: bool = should_quit();
-    if (quit) {
+    if (host_quit_requested()) {
         state.running = 0;
     }
-
     sync_screen_size();
     update_layout();
     apply_config_live();
@@ -2478,7 +2472,7 @@ function tick(): i32 {
     state.timers.frame_start = get_time_ms();
     let bench_start_us: i32 = get_time_us();
 
-    if (is_key_down(Scancode.Escape)) {
+    if (host_key_down(Scancode.Escape)) {
         state.running = 0;
     }
 
@@ -2500,7 +2494,7 @@ function tick(): i32 {
     update_game(dt, delta_ms);
     audio_update();
     draw_frame();
-    gfx_cmd_submit_no_present();
+    gfx_cmd_mark_present();
     // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
     let frame_end: i32 = get_time_ms();
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;
@@ -2511,8 +2505,6 @@ function tick(): i32 {
     // Store in circular buffer for averaging
     state.frame_timer.sample_index =
         frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
-
-    end_frame();
 
     if (BENCH_AUTO_EXIT == 1) {
         bench_frame = bench_frame + 1;
@@ -2533,6 +2525,21 @@ function tick(): i32 {
             print_int(avg_0p1ms);
             print_string(" frames=");
             print_int(bench_count);
+            print_char(10);
+            print_string("cmd lines=");
+            print_int(gfx_cmd_line_count());
+            print_string(" sprites=");
+            print_int(gfx_cmd_sprite_count());
+            print_string(" text=");
+            print_int(gfx_cmd_text_count());
+            print_string(" dropped_lines=");
+            print_int(gfx_cmd_dropped_lines());
+            print_string(" dropped_sprites=");
+            print_int(gfx_cmd_dropped_sprites());
+            print_string(" dropped_text=");
+            print_int(gfx_cmd_dropped_text());
+            print_string(" text_bytes_used=");
+            print_int(gfx_cmd_text_bytes_used());
             print_char(10);
             state.running = 0;
             return 1;

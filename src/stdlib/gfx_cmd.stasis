@@ -1,5 +1,5 @@
-import "stdlib/graphics.stasis";
-import "stdlib/stdlib.stasis";
+import "graphics.stasis";
+import "stdlib.stasis";
 
 // Graphics command buffer (v1 prototype)
 //
@@ -7,7 +7,7 @@ import "stdlib/stdlib.stasis";
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.
 // - Coordinates: host pixels.
 
-const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
+const GFX_CMD_MAGIC: i32 = 0x47584631; // 'GXF1'
 const GFX_CMD_VERSION: i32 = 1;
 
 // i32 header indices
@@ -44,19 +44,18 @@ const GFX_F_CLEAR_G: i32 = 1;
 const GFX_F_CLEAR_B: i32 = 2;
 const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
-const GFX_F_TEXT_BASE: i32 = 80004;
+const GFX_F_TEXT_BASE: i32 = GFX_F_LINE_BASE + GFX_MAX_LINES * GFX_LINE_STRIDE_F32;
 
-// NOTE: Array sizes must be integer literals in Stasis today.
-// Keep these in sync with the constants above:
-// - i32 count = 32 + (4096*7) + (2048*3) = 34848
-// - f32 count = 4 + (10000*8) + (2048*6) = 92292
-const GFX_I_TEXT_BASE: i32 = 28704;
+const GFX_I_TEXT_BASE: i32 = GFX_I_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_I32;
 
-global gfx_cmd_i32: i32[34848];
-global gfx_cmd_f32: f32[92292];
-global gfx_cmd_u8: u8[65536];
+const GFX_CMD_I32_COUNT: i32 = GFX_I_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_I32;
+const GFX_CMD_F32_COUNT: i32 = GFX_F_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_F32;
 
-function @inline gfx_cmd_begin(): void {
+global gfx_cmd_i32: i32[GFX_CMD_I32_COUNT];
+global gfx_cmd_f32: f32[GFX_CMD_F32_COUNT];
+global gfx_cmd_u8: u8[GFX_TEXT_MAX_BYTES];
+
+function gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
     gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
     gfx_cmd_i32[GFX_I_FLAGS] = 0;
@@ -69,8 +68,8 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = 0;
 }
 
-function @inline gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
+function gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] | GFX_FLAG_CLEAR;
     gfx_cmd_f32[GFX_F_CLEAR_R] = r;
     gfx_cmd_f32[GFX_F_CLEAR_G] = g;
     gfx_cmd_f32[GFX_F_CLEAR_B] = b;
@@ -116,50 +115,6 @@ function gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i3
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = i + 1;
 }
 
-function gfx_cmd_lines_from_f32(lines: f32[], count: i32): void {
-    if (count <= 0) {
-        return;
-    }
-
-    let start: i32 = gfx_cmd_i32[GFX_I_LINE_COUNT];
-    let avail: i32 = GFX_MAX_LINES - start;
-    let n: i32 = count;
-    if (n > avail) {
-        n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_LINES] = gfx_cmd_i32[GFX_I_DROPPED_LINES] + (count - n);
-    }
-    if (n <= 0) {
-        return;
-    }
-
-    let dst: i32 = GFX_F_LINE_BASE + start * GFX_LINE_STRIDE_F32;
-    let total: i32 = n * GFX_LINE_STRIDE_F32;
-    sys_memcpy_f32(gfx_cmd_f32, dst, lines, 0, total);
-    gfx_cmd_i32[GFX_I_LINE_COUNT] = start + n;
-}
-
-function gfx_cmd_sprites_from_i32(cmds: i32[], count: i32): void {
-    if (count <= 0) {
-        return;
-    }
-
-    let start: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
-    let avail: i32 = GFX_MAX_SPRITES - start;
-    let n: i32 = count;
-    if (n > avail) {
-        n = avail;
-        gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + (count - n);
-    }
-    if (n <= 0) {
-        return;
-    }
-
-    let dst: i32 = GFX_I_SPRITE_BASE + start * GFX_SPRITE_STRIDE_I32;
-    let total: i32 = n * GFX_SPRITE_STRIDE_I32;
-    sys_memcpy_i32(gfx_cmd_i32, dst, cmds, 0, total);
-    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = start + n;
-}
-
 function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     let i: i32 = gfx_cmd_i32[GFX_I_TEXT_COUNT];
     if (i >= GFX_MAX_TEXT) {
@@ -178,7 +133,10 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
         return;
     }
 
-    sys_memcpy_u8(gfx_cmd_u8, used, text, 0, byte_len);
+    let j: i32 = 0;
+    for (j = 0; j < byte_len; j = j + 1) {
+        gfx_cmd_u8[used + j] = text[j];
+    }
     gfx_cmd_u8[used + byte_len] = 0;
 
     let base_i: i32 = GFX_I_TEXT_BASE + i * GFX_TEXT_STRIDE_I32;
@@ -198,23 +156,11 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
 }
 
-function @inline gfx_cmd_submit(): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
+function gfx_cmd_submit(): void {
+    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] | GFX_FLAG_PRESENT;
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
 
-function @inline gfx_cmd_submit_no_present(): void {
+function gfx_cmd_submit_no_present(): void {
     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
 }
-
-function @inline gfx_cmd_mark_present(): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
-}
-
-function @inline gfx_cmd_line_count(): i32 { return gfx_cmd_i32[GFX_I_LINE_COUNT]; }
-function @inline gfx_cmd_sprite_count(): i32 { return gfx_cmd_i32[GFX_I_SPRITE_COUNT]; }
-function @inline gfx_cmd_text_count(): i32 { return gfx_cmd_i32[GFX_I_TEXT_COUNT]; }
-function @inline gfx_cmd_dropped_lines(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_LINES]; }
-function @inline gfx_cmd_dropped_sprites(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_SPRITES]; }
-function @inline gfx_cmd_dropped_text(): i32 { return gfx_cmd_i32[GFX_I_DROPPED_TEXT]; }
-function @inline gfx_cmd_text_bytes_used(): i32 { return gfx_cmd_i32[GFX_I_TEXT_BYTES_USED]; }

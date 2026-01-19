@@ -257,6 +257,38 @@ static IReadOnlyList<string> BuildRunnerExports(string moduleName, string mode, 
     return new[] { $"{moduleName}__main" };
 }
 
+static void AddHostAbiDataExports(LayoutPlan layout, List<string> exports)
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    static void AddIfGlobalExists(LayoutPlan layout, List<string> exports, string globalName)
+    {
+        if (layout.Globals.Any(g => string.Equals(g.Name, globalName, StringComparison.Ordinal)))
+        {
+            exports.Add($"{globalName},DATA");
+        }
+    }
+
+    // Bulk host mode: runner pushes HostFrame snapshot into guest memory and reads out command buffers.
+    // Export these globals as DATA so the runner can GetProcAddress them.
+    AddIfGlobalExists(layout, exports, "host_i32");
+    AddIfGlobalExists(layout, exports, "host_f32");
+    AddIfGlobalExists(layout, exports, "host_keys");
+
+    AddIfGlobalExists(layout, exports, "gfx_cmd_i32");
+    AddIfGlobalExists(layout, exports, "gfx_cmd_f32");
+    AddIfGlobalExists(layout, exports, "gfx_cmd_u8");
+
+    // Window requests (optional): guest writes, runner applies (bulk, no guest->host calls).
+    AddIfGlobalExists(layout, exports, "host_req_seq");
+    AddIfGlobalExists(layout, exports, "host_req_flags");
+    AddIfGlobalExists(layout, exports, "host_req_window_w_px");
+    AddIfGlobalExists(layout, exports, "host_req_window_h_px");
+}
+
 if (mode == "format")
 {
     var input = File.ReadAllText(path);
@@ -501,15 +533,25 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 Directory.CreateDirectory(cacheDir);
                 var craneliftTargetTriple = GetCraneliftTargetTriple();
                 var compilerCacheSalt = GetCompilerCacheSalt();
-                var cacheKey = ComputeCraneliftArtifactCacheKey(path, source, mode, backend, moduleName, includeTests, optLevel, enableLto, graphicsLibPath, linkLibraries, useCraneliftRunner, enableGraphics, craneliftTargetTriple, compilerCacheSalt);
+                var hostAbiKey = string.Empty;
+                if (useCraneliftRunner && OperatingSystem.IsWindows())
+                {
+                    var tmp = new List<string>();
+                    AddHostAbiDataExports(layout, tmp);
+                    hostAbiKey = string.Join(';', tmp);
+                }
+                var cacheKey = ComputeCraneliftArtifactCacheKey(path, source, mode, backend, moduleName, includeTests, optLevel, enableLto, graphicsLibPath, linkLibraries, useCraneliftRunner, enableGraphics, craneliftTargetTriple, compilerCacheSalt, hostAbiKey);
                 var cachedClif = Path.Combine(cacheDir, $"{cacheKey}.clif");
                 var cachedObj = Path.Combine(cacheDir, $"{cacheKey}{GetObjectFileExtension()}");
                 var cachedOut = Path.Combine(cacheDir, cacheKey + (useCraneliftRunner ? (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so") : (OperatingSystem.IsWindows() ? ".exe" : string.Empty)));
 
                 var hasTick = mode == "run" && ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                var runnerExports = useCraneliftRunner
+                var exportedFunctions = useCraneliftRunner
                     ? BuildRunnerExports(moduleName, mode, hasTick, includeTests)
                     : Array.Empty<string>();
+                var runnerExports = exportedFunctions;
+                var dllExports = exportedFunctions.ToList();
+                AddHostAbiDataExports(layout, dllExports);
                 DataBindingPlan? dataBindingPlan = null;
                 if (useCraneliftRunner)
                 {
@@ -539,9 +581,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
 
                 if (useCraneliftRunner)
                 {
-                    var exports = runnerExports;
                     var sw = Stopwatch.StartNew();
-                    var ensureExit = EnsureCraneliftCachedRunnerDll(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, dataBindingPlan?.DefPath, exports);
+                    var ensureExit = EnsureCraneliftCachedRunnerDll(cachedClif, cachedObj, cachedOut, moduleName, mode, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, dataBindingPlan?.DefPath, dllExports);
                     sw.Stop();
                     if (logPhaseTiming)
                     {
@@ -620,16 +661,18 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             {
                 HotStatePlan? hotStatePlan = null;
                 var hasTick = ContainsTopLevelFunction(parse.CompilationUnit, "tick");
-                var exports = BuildRunnerExports(moduleName, mode, hasTick, includeTests);
+                var exportedFunctions = BuildRunnerExports(moduleName, mode, hasTick, includeTests);
+                var dllExports = exportedFunctions.ToList();
+                AddHostAbiDataExports(layout, dllExports);
                 if (enableHotState)
                 {
-                    if (!TryCreateHotStatePlan(path, layout, moduleName, exports, excludeSpriteFields: true, out var createdPlan))
+                    if (!TryCreateHotStatePlan(path, layout, moduleName, exportedFunctions, excludeSpriteFields: true, out var createdPlan))
                     {
                         return 1;
                     }
                     hotStatePlan = createdPlan;
                 }
-                if (!TryGetDataBindingPlan(path, layout, moduleName, exports, out var dataBindingPlan))
+                if (!TryGetDataBindingPlan(path, layout, moduleName, exportedFunctions, out var dataBindingPlan))
                 {
                     return 1;
                 }
@@ -639,8 +682,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 long runLink;
                 long runRun;
                 var runExit = useInMemoryClif
-                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
-                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
+                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
+                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
                 if (logPhaseTiming)
                 {
                     aotSpawnMs = runAotSpawn ?? 0;
@@ -887,7 +930,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -902,20 +945,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
             return aotExit;
         }
 
-        IReadOnlyList<string> exports;
-        if (mode == "test")
-        {
-            exports = new[] { $"{moduleName}__run_tests" };
-        }
-        else if (tickHostFps is not null)
-        {
-            exports = new[] { $"{moduleName}__main", $"{moduleName}__tick" };
-        }
-        else
-        {
-            exports = new[] { $"{moduleName}__main" };
-        }
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, exports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -926,7 +956,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
     }
 }
 
-static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -941,20 +971,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
             return aotExit;
         }
 
-        IReadOnlyList<string> exports;
-        if (mode == "test")
-        {
-            exports = new[] { $"{moduleName}__run_tests" };
-        }
-        else if (tickHostFps is not null)
-        {
-            exports = new[] { $"{moduleName}__main", $"{moduleName}__tick" };
-        }
-        else
-        {
-            exports = new[] { $"{moduleName}__main" };
-        }
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, exports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, out linkMs, out runMs);
     }
     finally
     {
@@ -1112,6 +1129,14 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
             if (!string.IsNullOrEmpty(windowsDefFilePath))
             {
                 args.Add($"-Wl,/DEF:\"{windowsDefFilePath}\"");
+                if (windowsExports is { Count: > 0 })
+                {
+                    foreach (var ex in windowsExports)
+                    {
+                        args.Add("-Xlinker");
+                        args.Add($"/EXPORT:{ex}");
+                    }
+                }
             }
             else
             {
@@ -1120,7 +1145,8 @@ static string BuildClangArgsForObject(string objPath, string outputPath, bool is
                     : new[] { exportName };
                 foreach (var ex in exports)
                 {
-                    args.Add($"-Wl,/EXPORT:{ex}");
+                    args.Add("-Xlinker");
+                    args.Add($"/EXPORT:{ex}");
                 }
             }
         }
@@ -2129,7 +2155,7 @@ static string GetCraneliftArtifactCacheDirectory(string mode)
     return Path.Combine(currentDirectory, ".stasis_cache", bucket);
 }
 
-static string ComputeCraneliftArtifactCacheKey(string path, string source, string mode, BackendType backend, string moduleName, bool includeTests, string? optLevel, bool enableLto, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt)
+static string ComputeCraneliftArtifactCacheKey(string path, string source, string mode, BackendType backend, string moduleName, bool includeTests, string? optLevel, bool enableLto, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, bool useCraneliftRunner, bool usesGraphics, string? craneliftTargetTriple, string compilerCacheSalt, string hostAbiKey)
 {
     var fullPath = Path.GetFullPath(path);
     var identity = new StringBuilder();
@@ -2146,6 +2172,7 @@ static string ComputeCraneliftArtifactCacheKey(string path, string source, strin
     identity.Append("usesGraphics=").Append(usesGraphics).Append('\n');
     identity.Append("craneliftTarget=").Append(craneliftTargetTriple ?? string.Empty).Append('\n');
     identity.Append("compilerCacheSalt=").Append(compilerCacheSalt).Append('\n');
+    identity.Append("hostAbiKey=").Append(hostAbiKey).Append('\n');
     identity.Append("path=").Append(fullPath).Append('\n');
     identity.Append("source=").Append(source);
     return ComputeSha256Hex(identity.ToString());
@@ -4344,7 +4371,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                 }
                 else
                 {
-                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, aotTool, moduleName, hotStatePlan: null, dataBindingPlan: null, tickHostFps: null, out _, out _, out _, out _);
+                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, aotTool, moduleName, hotStatePlan: null, dataBindingPlan: null, dllExports: new[] { $"{moduleName}__run_tests" }, tickHostFps: null, out _, out _, out _, out _);
                 }
             }
         }

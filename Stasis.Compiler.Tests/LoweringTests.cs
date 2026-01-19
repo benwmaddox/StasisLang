@@ -261,15 +261,16 @@ public class LoweringTests
     }
 
     [Fact]
-    public void Lowers_gfx_debug_bake_hash_call()
+    public void Gfx_debug_helpers_are_not_builtins()
     {
-        var ir = LowerWithDiagnostics("""
+        var diagnostics = LowerWithDiagnostics("""
             function demo(): i32 {
                 return gfx_debug_bake_hash("samples/brickout_revenge/assets/paddle.svg");
             }
-            """, allowSemanticDiagnostics: true, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false, HeadlessGraphics: false)).Ir;
+            """, allowSemanticDiagnostics: true, options: new LowerOptions(IncludeTests: false, EmitTestHarness: false, HeadlessGraphics: false)).Diagnostics;
 
-        Assert.Contains("stasis_gfx_debug_bake_hash", ir);
+        Assert.NotEmpty(diagnostics);
+        Assert.Contains(diagnostics, d => d.Message.Contains("gfx_debug_bake_hash", StringComparison.Ordinal));
     }
 
     [Fact]

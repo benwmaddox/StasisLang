@@ -133,6 +133,7 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
+STASIS_EXPORT int stasis_should_quit(void);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
@@ -162,6 +163,7 @@ typedef struct {
     SDL_Texture* sdl_tex;
     int used;
     int needs_reraster;  /* flag for window resize */
+    int reload_pending;  /* set when the asset watcher reloads this sprite */
 } SpriteEntry;
 
 static SpriteEntry g_sprites[MAX_SPRITES];
@@ -515,14 +517,18 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
     return g_window ? g_input_frame.viewport_h_px : 0;
 }
 
+STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
+
 /*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
- * Layout is defined in src/stdlib/host_frame.stasis. This is intentionally a simple
+ * Layout is defined in src/host_frame.stasis. This is intentionally a simple
  * "copy out" ABI for native now, and a good fit for WASM later (one import to get a snapshot).
  */
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
+
+    static int32_t g_host_tick_index = 0;
 
     /* i32 header */
     out_i32[0] = stasis_get_time_ms();
@@ -534,8 +540,20 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[6] = g_input_frame.viewport_h_px;
     out_i32[7] = g_input_frame.pointer_count;
     out_i32[8] = g_input_frame.dropped_pointers;
+    out_i32[9] = stasis_should_quit();
 
-    for (int i = 9; i < 16; i++) out_i32[i] = 0;
+    out_i32[10] = g_host_tick_index++;
+
+    out_i32[11] = g_window_resized ? 1 : 0;
+    g_window_resized = false;
+
+    int screen_w = 0;
+    int screen_h = 0;
+    stasis_get_desktop_size(&screen_w, &screen_h);
+    out_i32[12] = screen_w;
+    out_i32[13] = screen_h;
+
+    for (int i = 14; i < 16; i++) out_i32[i] = 0;
 
     const int i32_base = 16;
     const int i32_stride = 4;
@@ -2653,10 +2671,6 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     if (height) *height = h;
 }
 
-STASIS_EXPORT void get_desktop_size(int* width, int* height) {
-    stasis_get_desktop_size(width, height);
-}
-
 /*
  * Set window size (windowed mode).
  * width/height are in pixels.
@@ -2685,10 +2699,6 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 #else
     SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
 #endif
-}
-
-STASIS_EXPORT void set_window_size(int width, int height) {
-    stasis_set_window_size(width, height);
 }
 
 /*
@@ -2985,6 +2995,37 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
     }
 
+    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
+    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
+        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t* text_meta = cmd_i32 + text_i32_base;
+
+        for (int i = 0; i < text_count; i++) {
+            const int base_i = i * 3;
+            const int font = text_meta[base_i + 0];
+            const int byte_off = text_meta[base_i + 1];
+            const int byte_len = text_meta[base_i + 2];
+
+            if (font <= 0) continue;
+            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_len < 0) continue;
+            if (byte_off + byte_len >= text_bytes_used) continue;
+
+            const char* text = (const char*)(cmd_u8 + byte_off);
+
+            const int base_f = text_f32_base + i * 6;
+            const float x = cmd_f32[base_f + 0];
+            const float y = cmd_f32[base_f + 1];
+            const float r = cmd_f32[base_f + 2];
+            const float g = cmd_f32[base_f + 3];
+            const float b = cmd_f32[base_f + 4];
+            const float a = cmd_f32[base_f + 5];
+
+            stasis_draw_text(font, text, x, y, r, g, b, a);
+        }
+    }
+
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
     if ((flags & 2) != 0) {
         stasis_end_frame();
@@ -3004,6 +3045,14 @@ static SpriteEntry* sprite_get(int handle) {
     if (idx < 0 || idx >= MAX_SPRITES) return NULL;
     if (!g_sprites[idx].used) return NULL;
     return &g_sprites[idx];
+}
+
+STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
+    SpriteEntry* e = sprite_get(handle);
+    if (!e) return 0;
+    if (!e->reload_pending) return 0;
+    e->reload_pending = 0;
+    return 1;
 }
 
 static int sprite_find_by_path(const char* path) {
@@ -3265,6 +3314,8 @@ static void gfx_asset_watch_apply_pending_changes(void) {
 
         if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1)) {
             SDL_Log("gfx_watch: reload failed for %s", e->path);
+        } else {
+            e->reload_pending = 1;
         }
     }
 #endif
@@ -3457,6 +3508,21 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
     if (!g_keyboard_state) return 0;
     if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return 0;
     return g_keyboard_state[scancode] ? 1 : 0;
+}
+
+/*
+ * Bulk keyboard snapshot: copy SDL keyboard state into caller-provided buffer.
+ * Returns number of bytes written.
+ */
+STASIS_EXPORT int stasis_host_get_keyboard_state(uint8_t* out_u8, int max_bytes) {
+    if (!out_u8 || max_bytes <= 0) return 0;
+    SDL_PumpEvents();
+    int len = 0;
+    const uint8_t* state = SDL_GetKeyboardState(&len);
+    if (!state || len <= 0) return 0;
+    int n = len < max_bytes ? len : max_bytes;
+    memcpy(out_u8, state, (size_t)n);
+    return n;
 }
 
 /*

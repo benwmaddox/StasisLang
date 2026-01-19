@@ -1263,6 +1263,15 @@ public sealed class ModuleLowerer
             "sys_delete_file",
             "sys_time_ms",
             "sys_flush",
+            "sys_memcpy_u8",
+            "sys_memcpy_i32",
+            "sys_memcpy_f32",
+            "sys_memmove_u8",
+            "sys_memmove_i32",
+            "sys_memmove_f32",
+            "sys_memset_u8",
+            "sys_memset_i32",
+            "sys_memset_f32",
 
             // Legacy math (to be renamed)
             "sin",
@@ -1288,53 +1297,10 @@ public sealed class ModuleLowerer
 
             // Legacy graphics (external runtime)
             "init_window",
-            "begin_frame",
-            "end_frame",
-            "clear",
-            "draw_line",
-            "draw_lines_f32",
-            "host_get_frame",
             "gfx_load_sprite",
-            "gfx_draw_sprite",
-            "gfx_draw_sprites_i32",
-            "gfx_submit",
-            "gfx_submit_u8",
             "gfx_poll_reload",
-            "gfx_window_width",
-            "gfx_window_height",
-            "gfx_window_resized",
-            "gfx_debug_bake_hash",
-            "gfx_debug_enable_hash",
-            "gfx_debug_get_frame_hash",
-            "set_postfx",
-            "is_key_down",
-            "should_quit",
-            "get_window_size",
-            "set_fullscreen",
             "load_font",
-            "draw_text",
             "measure_text",
-            "list_directory",
-            "dir_list_entry_is_dir",
-            "dir_list_entry_copy_name",
-
-            // Input snapshot (mouse + touch)
-            "input_pointer_count",
-            "input_pointer_id",
-            "input_pointer_is_down",
-            "input_pointer_went_down",
-            "input_pointer_went_up",
-            "input_pointer_x_px",
-            "input_pointer_y_px",
-            "input_pointer_dx_px",
-            "input_pointer_dy_px",
-            "input_pointer_x_n",
-            "input_pointer_y_n",
-            "input_dropped_pointers",
-            "input_viewport_x_px",
-            "input_viewport_y_px",
-            "input_viewport_w_px",
-            "input_viewport_h_px",
 
             // Legacy audio (external runtime)
             "audio_is_available",
@@ -2942,6 +2908,348 @@ public sealed class ModuleLowerer
                             fn = _moduleBuilder.Module.AddFunction("stasis_sys_flush", fnType);
 
                         return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "sys_flush.call");
+                    }
+
+                case "sys_memcpy_u8":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memcpy_u8 expects (dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memcpy_u8 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memcpy_u8");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memcpy_u8", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_memcpy_u8.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_memcpy_u8.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memcpy_u8.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memcpy_i32":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memcpy_i32 expects (dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memcpy_i32 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memcpy_i32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memcpy_i32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "sys_memcpy_i32.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "sys_memcpy_i32.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memcpy_i32.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memcpy_f32":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memcpy_f32 expects (dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memcpy_f32 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memcpy_f32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memcpy_f32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "sys_memcpy_f32.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "sys_memcpy_f32.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memcpy_f32.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memmove_u8":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memmove_u8 expects (dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memmove_u8 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memmove_u8");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memmove_u8", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_memmove_u8.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_memmove_u8.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memmove_u8.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memmove_i32":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memmove_i32 expects (dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memmove_i32 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memmove_i32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memmove_i32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "sys_memmove_i32.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "sys_memmove_i32.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memmove_i32.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memmove_f32":
+                    {
+                        if (args.Count != 5)
+                        {
+                            AddDiagnostic("sys_memmove_f32 expects (dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        var srcPtr = LowerArrayPointer(builder, args[2], locals);
+                        if (dstPtr.Handle == IntPtr.Zero || srcPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memmove_f32 expects array arguments (dst, src).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var srcIndex = LowerExpression(builder, args[3], locals);
+                        var count = LowerExpression(builder, args[4], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memmove_f32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memmove_f32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "sys_memmove_f32.dst");
+                        var srcCast = builder.BuildBitCast(srcPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "sys_memmove_f32.src");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, srcCast, srcIndex, count }, "sys_memmove_f32.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memset_u8":
+                    {
+                        if (args.Count != 4)
+                        {
+                            AddDiagnostic("sys_memset_u8 expects (dst: u8[], dst_index: i32, value: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        if (dstPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memset_u8 expects array argument (dst).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var value = LowerExpression(builder, args[2], locals);
+                        var count = LowerExpression(builder, args[3], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_u8");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_u8", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "sys_memset_u8.dst");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, value, count }, "sys_memset_u8.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memset_i32":
+                    {
+                        if (args.Count != 4)
+                        {
+                            AddDiagnostic("sys_memset_i32 expects (dst: i32[], dst_index: i32, value: i32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        if (dstPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memset_i32 expects array argument (dst).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var value = LowerExpression(builder, args[2], locals);
+                        var count = LowerExpression(builder, args[3], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_i32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_i32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "sys_memset_i32.dst");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, value, count }, "sys_memset_i32.call");
+                        return ConstI32(0);
+                    }
+
+                case "sys_memset_f32":
+                    {
+                        if (args.Count != 4)
+                        {
+                            AddDiagnostic("sys_memset_f32 expects (dst: f32[], dst_index: i32, value: f32, count: i32).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstPtr = LowerArrayPointer(builder, args[0], locals);
+                        if (dstPtr.Handle == IntPtr.Zero)
+                        {
+                            AddDiagnostic("sys_memset_f32 expects array argument (dst).", span);
+                            return ConstI32(0);
+                        }
+
+                        var dstIndex = LowerExpression(builder, args[1], locals);
+                        var value = LowerExpression(builder, args[2], locals);
+                        var count = LowerExpression(builder, args[3], locals);
+
+                        var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_f32");
+                        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                            new[]
+                            {
+                                LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                                LLVMTypeRef.Int32,
+                                LLVMTypeRef.Float,
+                                LLVMTypeRef.Int32
+                            }, false);
+                        if (fn.Handle == IntPtr.Zero)
+                            fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_f32", fnType);
+
+                        var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "sys_memset_f32.dst");
+                        builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, value, count }, "sys_memset_f32.call");
+                        return ConstI32(0);
                     }
                 case "sin":
                 case "cos":

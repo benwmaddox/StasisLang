@@ -2,6 +2,8 @@
 // Import explicitly: import "src/stdlib/stdlib.stasis";
 // For runtime bindings: import "src/stdlib/graphics.stasis" and/or "src/stdlib/audio.stasis".
 
+import "memory.stasis";
+
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }
