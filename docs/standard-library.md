@@ -448,7 +448,7 @@ gfx_should_quit(): bool
 
 ## Implementation Priority
 
-### Phase 1: Essential (Self-Hosting Foundation)
+### Phase 1: Essential (Foundation)
 
 - [x] `ascii_*` module (all functions)
 - [x] `str_*` module (core: len, copy, append, compare, find)

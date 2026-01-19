@@ -214,13 +214,12 @@ public class ExecutionTests
         var source = """
             function main(): i32 {
                 let ok: bool = init_window(640, 480, "Stasis");
-                begin_frame();
-                clear(0.0, 0.0, 0.0, 1.0);
-                draw_line(-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-                let down: bool = is_key_down(32);
+                let sprite: i32 = gfx_load_sprite("dummy", 64, 64);
+                let reloaded: bool = gfx_poll_reload(sprite);
+                let font: i32 = load_font("dummy", 16);
+                let w: f32 = measure_text(font, "hello");
                 let t: i32 = get_time_ms();
                 sleep_ms(0);
-                end_frame();
                 return 0;
             }
             """;
