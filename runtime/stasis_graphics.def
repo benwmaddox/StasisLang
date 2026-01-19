@@ -60,6 +60,8 @@ EXPORTS
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash
+    stasis_gfx_dump_bmp
+    gfx_dump_bmp=stasis_gfx_dump_bmp
     stasis_load_font
     stasis_draw_text
     stasis_measure_text
