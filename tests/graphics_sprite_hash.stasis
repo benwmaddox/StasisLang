@@ -1,0 +1,34 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+
+test `drawing a sprite changes frame hash`(): bool {
+    let ok: bool = init_window(64, 64, "stasis_sprite_hash_test");
+    if (!ok) {
+        // If the host can't create a window/context, treat as a non-render host.
+        // (This keeps non-graphics environments from failing unrelated suites.)
+        return true;
+    }
+
+    let handle: i32 = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 32, 32);
+    if (handle == 0) {
+        return false;
+    }
+
+    gfx_debug_enable_hash(1);
+
+    begin_frame();
+    clear(0.0, 0.0, 0.0, 1.0);
+    let h0: i32 = gfx_debug_get_frame_hash();
+    end_frame();
+
+    begin_frame();
+    clear(0.0, 0.0, 0.0, 1.0);
+    gfx_draw_sprite(handle, 8, 8, 32, 32, 0, 255);
+    let h1: i32 = gfx_debug_get_frame_hash();
+    end_frame();
+
+    gfx_debug_enable_hash(0);
+
+    return h0 != h1;
+}
+

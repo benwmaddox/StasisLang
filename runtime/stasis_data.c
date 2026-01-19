@@ -258,8 +258,186 @@ static void* get_symbol_addr(const char* name) {
 #endif
 }
 
-static void apply_scalar_value_to_dest(FieldType type, void* dest, cJSON* value) {
-    if (!dest || !value) return;
+static int count_utf8_codepoints_strict(const uint8_t* bytes, int byte_len, int* ok) {
+    if (ok) *ok = 1;
+    if (!bytes || byte_len <= 0) return 0;
+
+    int count = 0;
+    int i = 0;
+    while (i < byte_len) {
+        uint8_t b0 = bytes[i];
+        if (b0 < 0x80) {
+            count++;
+            i++;
+            continue;
+        }
+
+        int needed = 0;
+        if ((b0 & 0xE0) == 0xC0) needed = 1;
+        else if ((b0 & 0xF0) == 0xE0) needed = 2;
+        else if ((b0 & 0xF8) == 0xF0) needed = 3;
+        else {
+            if (ok) *ok = 0;
+            return 0;
+        }
+
+        if (i + needed >= byte_len) {
+            if (ok) *ok = 0;
+            return 0;
+        }
+
+        for (int j = 1; j <= needed; j++) {
+            uint8_t bx = bytes[i + j];
+            if ((bx & 0xC0) != 0x80) {
+                if (ok) *ok = 0;
+                return 0;
+            }
+        }
+
+        count++;
+        i += 1 + needed;
+    }
+
+    return count;
+}
+
+static void copy_utf8_bounded(const char* src, uint8_t* dst, int dst_max_bytes, int* out_bytes, int* out_chars) {
+    if (out_bytes) *out_bytes = 0;
+    if (out_chars) *out_chars = 0;
+    if (!dst || dst_max_bytes <= 0) return;
+
+    if (!src || !*src) {
+        return;
+    }
+
+    const uint8_t* s = (const uint8_t*)src;
+    int i = 0;
+    int chars = 0;
+    while (i < dst_max_bytes) {
+        uint8_t b0 = s[i];
+        if (b0 == 0) break;
+        if (b0 < 0x80) {
+            dst[i] = b0;
+            i++;
+            chars++;
+            continue;
+        }
+
+        int needed = 0;
+        if ((b0 & 0xE0) == 0xC0) needed = 1;
+        else if ((b0 & 0xF0) == 0xE0) needed = 2;
+        else if ((b0 & 0xF8) == 0xF0) needed = 3;
+        else {
+            break;
+        }
+
+        if (i + needed >= dst_max_bytes) {
+            break;
+        }
+
+        int ok = 1;
+        for (int j = 1; j <= needed; j++) {
+            uint8_t bx = s[i + j];
+            if (bx == 0 || (bx & 0xC0) != 0x80) {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok) break;
+
+        for (int j = 0; j <= needed; j++) {
+            dst[i + j] = s[i + j];
+        }
+        i += 1 + needed;
+        chars++;
+    }
+
+    if (out_bytes) *out_bytes = i;
+    if (out_chars) *out_chars = chars;
+}
+
+static void copy_ascii_bounded(const char* src, uint8_t* dst, int dst_max_bytes, int* out_bytes) {
+    if (out_bytes) *out_bytes = 0;
+    if (!dst || dst_max_bytes <= 0) return;
+
+    if (!src || !*src) {
+        return;
+    }
+
+    int i = 0;
+    while (i < dst_max_bytes) {
+        uint8_t b = (uint8_t)src[i];
+        if (b == 0) break;
+        if (b >= 0x80) break;
+        dst[i] = b;
+        i++;
+    }
+
+    if (out_bytes) *out_bytes = i;
+}
+
+static void apply_string_value_to_dest(const FieldMeta* field, void* dest, cJSON* value) {
+    if (!field || !dest || !value) return;
+    if (!cJSON_IsString(value)) return;
+
+    /* We only support fixed-size string buffers (ascii[N], utf8[N]) for now. */
+    if (field->array_count <= 1 || field->size <= 0) return;
+    if (field->array_count > field->size) return;
+
+    int header_bytes = field->size - field->array_count;
+    if (header_bytes != 4 && header_bytes != 8) {
+        return;
+    }
+
+    uint8_t* base = (uint8_t*)dest;
+    uint8_t* payload = base + header_bytes;
+    int payload_cap = field->array_count;
+    if (payload_cap <= 0) return;
+
+    int max_copy = payload_cap - 1;
+    if (max_copy < 0) max_copy = 0;
+
+    if (header_bytes == 4) {
+        int copy_len = 0;
+        copy_ascii_bounded(value->valuestring, payload, max_copy, &copy_len);
+        if (copy_len >= 0 && copy_len < payload_cap) {
+            payload[copy_len] = 0;
+        } else if (payload_cap > 0) {
+            payload[payload_cap - 1] = 0;
+            copy_len = payload_cap - 1;
+        }
+        *((int32_t*)base) = (int32_t)copy_len;
+        return;
+    }
+
+    /* UTF-8: [byte_len:i32][char_len:i32][u8[N]] */
+    int copy_bytes = 0;
+    int copy_chars = 0;
+    copy_utf8_bounded(value->valuestring, payload, max_copy, &copy_bytes, &copy_chars);
+
+    if (copy_bytes >= 0 && copy_bytes < payload_cap) {
+        payload[copy_bytes] = 0;
+    } else if (payload_cap > 0) {
+        payload[payload_cap - 1] = 0;
+        copy_bytes = payload_cap - 1;
+    }
+
+    /* Double-check char count on the bytes we actually wrote. */
+    int ok = 1;
+    int recounted = count_utf8_codepoints_strict(payload, copy_bytes, &ok);
+    if (ok) {
+        copy_chars = recounted;
+    } else {
+        copy_chars = copy_bytes;
+    }
+
+    *((int32_t*)base) = (int32_t)copy_bytes;
+    *((int32_t*)(base + 4)) = (int32_t)copy_chars;
+}
+
+static void apply_scalar_value_to_dest(const FieldMeta* field, void* dest, cJSON* value) {
+    if (!field || !dest || !value) return;
+    FieldType type = field->type;
 
     switch (type) {
         case FIELD_TYPE_BOOL:
@@ -307,7 +485,7 @@ static void apply_scalar_value_to_dest(FieldType type, void* dest, cJSON* value)
             break;
 
         case FIELD_TYPE_STRING:
-            /* String handling would need special care for buffer size */
+            apply_string_value_to_dest(field, dest, value);
             break;
 
         default:
@@ -352,7 +530,7 @@ static void apply_field_value(FieldMeta* field, cJSON* value) {
         return;
     }
 
-    apply_scalar_value_to_dest(field->type, dest, value);
+    apply_scalar_value_to_dest(field, dest, value);
 }
 
 /* Load and apply JSON data file to bound memory via symbol lookup */
@@ -438,7 +616,7 @@ static int apply_data_file(DataBinding* binding) {
                                     if (!cJSON_IsObject(obj)) continue;
                                     cJSON* v = cJSON_GetObjectItem(obj, leaf);
                                     if (!v) continue;
-                                    apply_scalar_value_to_dest(field->type, (uint8_t*)dest + (j * elem_bytes), v);
+                                    apply_scalar_value_to_dest(field, (uint8_t*)dest + (j * elem_bytes), v);
                                 }
                             }
                         }
@@ -457,11 +635,11 @@ static int apply_data_file(DataBinding* binding) {
                 for (int j = 0; j < limit; j++) {
                     cJSON* v = cJSON_GetArrayItem(value, j);
                     if (!v) continue;
-                    apply_scalar_value_to_dest(field->type, (uint8_t*)dest + (j * elem_bytes), v);
+                    apply_scalar_value_to_dest(field, (uint8_t*)dest + (j * elem_bytes), v);
                 }
             }
         } else {
-            apply_scalar_value_to_dest(field->type, dest, value);
+            apply_scalar_value_to_dest(field, dest, value);
         }
     }
 
