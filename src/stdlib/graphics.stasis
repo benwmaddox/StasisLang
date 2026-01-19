@@ -25,6 +25,7 @@ extern function gfx_window_resized(): bool;
 extern function gfx_debug_bake_hash(path: string): i32;
 extern function gfx_debug_enable_hash(enabled: i32): void;
 extern function gfx_debug_get_frame_hash(): i32;
+extern function gfx_dump_bmp(path: string): i32;
 extern function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void;
 extern function is_key_down(scancode: i32): bool;
 extern function should_quit(): bool;

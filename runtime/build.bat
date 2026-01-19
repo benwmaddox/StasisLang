@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+pushd "%~dp0"
 call "%~dp0..\env.bat"
 
 echo Building Stasis Graphics Runtime Library (static+shared)...
@@ -38,9 +39,9 @@ if "%VCPKG_TRIPLET%"=="" (
     set VCPKG_TRIPLET=x64-windows-static
 )
 
-:: Install SDL2 + GLEW for the chosen triplet
-echo Checking for SDL2/GLEW with triplet %VCPKG_TRIPLET%...
-%VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% glew:%VCPKG_TRIPLET% --recurse
+:: Install SDL2 + SDL2_image + GLEW for the chosen triplet
+echo Checking for SDL2/SDL2_image/GLEW with triplet %VCPKG_TRIPLET%...
+%VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% sdl2-image:%VCPKG_TRIPLET% glew:%VCPKG_TRIPLET% --recurse
 if %ERRORLEVEL% neq 0 (
     echo Error: vcpkg install failed.
     exit /b 1
@@ -118,6 +119,8 @@ if exist "%CD%\\bin\\Release\\stasis_runner.exe" (
     copy /Y "%CD%\\bin\\Release\\stasis_runner.exe" "%CD%\\..\\.." >NUL 2>&1
     copy /Y "%CD%\\bin\\Release\\stasis_runner.exe" "%CD%\\..\\..\\build" >NUL 2>&1
 )
+
+popd
 
 echo.
 echo Copying static dependency libs to build\\Release for single-exe links...
