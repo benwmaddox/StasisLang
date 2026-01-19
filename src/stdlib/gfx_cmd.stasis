@@ -1,7 +1,7 @@
 import "graphics.stasis";
 import "stdlib.stasis";
 
-// Graphics command buffer (v1 prototype)
+// Graphics command buffer (v1)
 //
 // Policy:
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.

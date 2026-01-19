@@ -758,37 +758,6 @@ public sealed class ModuleLowerer
         return (fn, fnType);
     }
 
-    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugBakeHash(LlvmModuleBuilder builder)
-    {
-        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_bake_hash");
-        var i8Ptr = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
-        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, new[] { i8Ptr }, false);
-        if (fn.Handle != IntPtr.Zero)
-            return (fn, fnType);
-        fn = builder.Module.AddFunction("stasis_gfx_debug_bake_hash", fnType);
-        return (fn, fnType);
-    }
-
-    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugEnableHash(LlvmModuleBuilder builder)
-    {
-        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_enable_hash");
-        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, new[] { LLVMTypeRef.Int32 }, false);
-        if (fn.Handle != IntPtr.Zero)
-            return (fn, fnType);
-        fn = builder.Module.AddFunction("stasis_gfx_debug_enable_hash", fnType);
-        return (fn, fnType);
-    }
-
-    private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisGfxDebugGetFrameHash(LlvmModuleBuilder builder)
-    {
-        var fn = builder.Module.GetNamedFunction("stasis_gfx_debug_get_frame_hash");
-        var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Int32, Array.Empty<LLVMTypeRef>(), false);
-        if (fn.Handle != IntPtr.Zero)
-            return (fn, fnType);
-        fn = builder.Module.AddFunction("stasis_gfx_debug_get_frame_hash", fnType);
-        return (fn, fnType);
-    }
-
     private static (LLVMValueRef Fn, LLVMTypeRef Type) GetOrDeclareStasisIsKeyDown(LlvmModuleBuilder builder)
     {
         var fn = builder.Module.GetNamedFunction("stasis_is_key_down");
@@ -3784,53 +3753,6 @@ public sealed class ModuleLowerer
 
                         var (fn2, fnType2) = GetOrDeclareStasisGfxWindowResized(_moduleBuilder);
                         return builder.BuildCall2(fnType2, fn2, Array.Empty<LLVMValueRef>(), "gfx_window_resized.call");
-                    }
-                case "gfx_debug_bake_hash":
-                    {
-                        if (args.Count != 1)
-                        {
-                            AddDiagnostic("gfx_debug_bake_hash expects a path string.", span);
-                            return ConstI32(0);
-                        }
-
-                        var path = LowerExpression(builder, args[0], locals);
-
-                        if (_headlessGraphics)
-                            return ConstI32(0);
-
-                        var (fn, fnType) = GetOrDeclareStasisGfxDebugBakeHash(_moduleBuilder);
-                        return builder.BuildCall2(fnType, fn, new[] { path }, "gfx_debug_bake_hash.call");
-                    }
-                case "gfx_debug_enable_hash":
-                    {
-                        if (args.Count != 1)
-                        {
-                            AddDiagnostic("gfx_debug_enable_hash expects (enabled).", span);
-                            return ConstI32(0);
-                        }
-
-                        var enabled = LowerExpression(builder, args[0], locals);
-
-                        if (_headlessGraphics)
-                            return ConstI32(0);
-
-                        var (fn, fnType) = GetOrDeclareStasisGfxDebugEnableHash(_moduleBuilder);
-                        builder.BuildCall2(fnType, fn, new[] { enabled }, "");
-                        return ConstI32(0);
-                    }
-                case "gfx_debug_get_frame_hash":
-                    {
-                        if (args.Count != 0)
-                        {
-                            AddDiagnostic("gfx_debug_get_frame_hash expects no arguments.", span);
-                            return ConstI32(0);
-                        }
-
-                        if (_headlessGraphics)
-                            return ConstI32(0);
-
-                        var (fn, fnType) = GetOrDeclareStasisGfxDebugGetFrameHash(_moduleBuilder);
-                        return builder.BuildCall2(fnType, fn, Array.Empty<LLVMValueRef>(), "gfx_debug_get_frame_hash.call");
                     }
                 case "set_postfx":
                     {

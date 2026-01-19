@@ -517,23 +517,6 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_gfx_window_resized", CraneliftTypeMapper.ClifType.I32);
         }
 
-        if (builtins.Contains("gfx_debug_bake_hash"))
-        {
-            builder.DeclareExternal("stasis_gfx_debug_bake_hash", CraneliftTypeMapper.ClifType.I32,
-                CraneliftTypeMapper.ClifType.R64);
-        }
-
-        if (builtins.Contains("gfx_debug_enable_hash"))
-        {
-            builder.DeclareExternal("stasis_gfx_debug_enable_hash", CraneliftTypeMapper.ClifType.Void,
-                CraneliftTypeMapper.ClifType.I32);
-        }
-
-        if (builtins.Contains("gfx_debug_get_frame_hash"))
-        {
-            builder.DeclareExternal("stasis_gfx_debug_get_frame_hash", CraneliftTypeMapper.ClifType.I32);
-        }
-
         if (builtins.Contains("is_key_down"))
         {
             builder.DeclareExternal("stasis_is_key_down", CraneliftTypeMapper.ClifType.I32,

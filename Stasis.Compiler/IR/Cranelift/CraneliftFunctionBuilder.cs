@@ -2246,15 +2246,6 @@ public sealed class CraneliftFunctionBuilder
     private string LowerGfxWindowResized(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_gfx_window_resized", "gfx_window_resized expects no arguments.", arguments, 0);
 
-    private string LowerGfxDebugBakeHash(IReadOnlyList<ExpressionSyntax> arguments) =>
-        LowerExternalCallValue("stasis_gfx_debug_bake_hash", "gfx_debug_bake_hash expects (path: string).", arguments, 1);
-
-    private string LowerGfxDebugEnableHash(IReadOnlyList<ExpressionSyntax> arguments) =>
-        LowerExternalCallVoid("stasis_gfx_debug_enable_hash", "gfx_debug_enable_hash expects (enabled: i32).", arguments, 1);
-
-    private string LowerGfxDebugGetFrameHash(IReadOnlyList<ExpressionSyntax> arguments) =>
-        LowerExternalCallValue("stasis_gfx_debug_get_frame_hash", "gfx_debug_get_frame_hash expects no arguments.", arguments, 0);
-
     private string LowerIsKeyDown(IReadOnlyList<ExpressionSyntax> arguments) =>
         LowerExternalCallValue("stasis_is_key_down", "is_key_down expects (scancode: i32).", arguments, 1);
 

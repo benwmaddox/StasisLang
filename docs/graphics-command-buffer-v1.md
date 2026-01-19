@@ -1,6 +1,6 @@
-# Graphics Command Buffer (Prototype v1)
+# Graphics Command Buffer (v1)
 
-This document explains how the prototype graphics command buffer works in practice, how it is laid out in memory, and how it is intended to evolve.
+This document explains how the graphics command buffer works in practice, how it is laid out in memory, and how it is intended to evolve.
 
 ## Why a command buffer?
 
@@ -93,7 +93,7 @@ In the runtime, the base offsets are currently:
 - `text_i32_base = 32 + (max_sprites * 7)`
 - `text_f32_base = 4 + (max_lines * 8)`
 
-The current prototype uses fixed maxima (see `runtime/stasis_graphics.c`):
+The current v1 uses fixed maxima (see `runtime/stasis_graphics.c`):
 
 - `max_lines = MAX_LINES`
 - `max_sprites = 4096`
@@ -120,12 +120,7 @@ This "present bit" exists so benchmarks can exclude swap/vsync while still exerc
 - Avoid per-draw-size sprite rerasterization in the host; draw sizes can fluctuate by 1px frame-to-frame and overflow the atlas.
 - Prefer a single `submit()` per tick; if you need multi-pass, that should become multiple streams/passes in the layout (still deterministic).
 
-## Benchmarks
+## Practical verification
 
-- `samples/render_command_buffer_bench_submit.stasis` compares:
-  - per-call `draw_line` (many host calls)
-  - batched `draw_lines_f32` (1 host call)
-  - `gfx_cmd_submit_*` (1 host call; can measure build vs prebuilt)
-- `samples/render_heavy_submit_bench.stasis` compares the same submission styles with both lines and sprites, so the signal is large enough to see on native.
-
-For more stable timing than `get_time_ms()`, use `get_time_us()` (added to the runtime bindings).
+- For a small example that emits commands without relying on per-tick host calls, see `samples/gfx_cmd_smoke.stasis`.
+- For larger end-to-end usage, see `samples/brickout_revenge/brickout_revenge_v1.stasis`.

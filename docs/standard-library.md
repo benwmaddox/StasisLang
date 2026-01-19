@@ -430,18 +430,43 @@ game_circle_contains_point(
 
 ---
 
-## Module: `gfx_` (Graphics - External Runtime)
+## Module: `graphics` (Graphics - Runtime Bindings + Command Buffers)
 
-These are implemented in `runtime/stasis_graphics.c`, not as compiler built-ins.
+Import:
 
 ```stasis
-gfx_init(width: i32, height: i32, title: utf8[]): bool
-gfx_begin_frame()
-gfx_end_frame()
-gfx_clear(r: f32, g: f32, b: f32, a: f32)
-gfx_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
-gfx_is_key_down(scancode: i32): bool
-gfx_should_quit(): bool
+import "src/stdlib/graphics.stasis";
+```
+
+Notes:
+- Inputs/state are read from `src/host_frame.stasis` (written by the host once per tick).
+- Rendering is written into `src/gfx_cmd.stasis` command buffers (read/executed by the host after `tick()`).
+- `extern` calls are reserved for startup/asset loading and tooling (not per-tick hot paths).
+
+Common API surface:
+
+```stasis
+// Startup / assets
+init_window(width: i32, height: i32, title: string): bool
+set_window_size(width: i32, height: i32): void
+set_fullscreen(enabled: i32): i32
+gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32
+gfx_poll_reload(handle: i32): bool
+gfx_dump_bmp(path: string): i32
+load_font(path: string, size: i32): i32
+measure_text(font: i32, text: string): f32
+
+// Per-tick draw helpers (write into command buffers)
+begin_frame(): void
+end_frame(): void
+clear(r: f32, g: f32, b: f32, a: f32): void
+draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void
+gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void
+draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void
+
+// Snapshot wrappers
+is_key_down(scancode: i32): bool
+should_quit(): bool
 ```
 
 ---

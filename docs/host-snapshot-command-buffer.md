@@ -202,7 +202,7 @@ In this direction, these legacy calls should not cross the host boundary at all:
 
 ### 1) HostFrame snapshot (already prototyped)
 
-There is already a prototype in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:
+There is already a v1 layout in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:
 
 - `extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;`
 - `STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32)`

@@ -1,4 +1,4 @@
-// Host frame snapshot (prototype)
+// Host frame snapshot (v1)
 //
 // Practical hybrid approach:
 // - Reads: host writes a single deterministic snapshot once per tick via bulk host mode.
@@ -6,7 +6,7 @@
 // Usage:
 // - Read everything from `host_i32[]` / `host_f32[]` accessors below for the rest of the tick.
 //
-// NOTE: This is a prototype layout. Treat all unused indices as reserved.
+// NOTE: Treat all unused indices as reserved.
 
 const HOST_MAX_POINTERS: i32 = 8;
 

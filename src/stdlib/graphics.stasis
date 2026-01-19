@@ -23,13 +23,9 @@ extern function gfx_dump_bmp(path: string): i32;
 extern function load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
 
-// Deprecated controls/debug: kept as stubs so older samples compile; host-owned behavior should move to snapshot/commands.
+// Postfx control (host-owned). Prefer reading these values from global state after `tick()` rather than calling into the host on hot paths.
 function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void {
 }
-
-function gfx_debug_bake_hash(path: string): i32 { return 0; }
-function gfx_debug_enable_hash(enabled: i32): void { }
-function gfx_debug_get_frame_hash(): i32 { return 0; }
 
 function get_desktop_size(out_w: i32[], out_h: i32[]): void {
     out_w[0] = host_screen_w_px();

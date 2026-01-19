@@ -118,16 +118,15 @@ Run:
 .\stasis.bat run .\samples\input_pointers.stasis --backend llvm --graphics
 ```
 
-### Render submission benchmark (per-call vs batched vs command buffer)
+### Command buffer smoke
 
 Features:
-- Compares many host calls (`draw_line`) vs one batched call (`draw_lines_f32`) vs one command-buffer submit (`gfx_submit_*`)
-- Uses debug hash to validate all paths submit identical draw streams
+- Minimal command buffer usage (write commands; host submits after `tick()`)
 - See `docs/graphics-command-buffer-v1.md` for the command buffer layout
 
 Run:
 ```bat
-.\stasis.bat run .\samples\render_command_buffer_bench_submit.stasis --backend cranelift --graphics
+.\stasis.bat run .\samples\gfx_cmd_smoke.stasis --backend cranelift --graphics
 ```
 
 ## Console / IO demos
@@ -142,13 +141,6 @@ Run:
 Run tests:
 ```bat
 .\stasis.bat test .\samples\sudoku.stasis --backend llvm
-```
-
-### Guess (console IO + RNG)
-
-Run:
-```bat
-.\stasis.bat run .\samples\sudoku.stasis --backend llvm
 ```
 
 ## Compiler / language feature samples (quick)
