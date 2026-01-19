@@ -142,9 +142,67 @@ During migration, it is fine to keep the existing extern-call API for simple sam
 
 This section describes a v1-shaped ABI. It is intentionally conservative: fixed-size buffers, versioning, and "copy out" semantics.
 
+### 0) Boundary contract (v1 minimal surface area)
+
+The bulk-host model aims for a tiny, stable boundary:
+
+- Per tick:
+  - Host writes input/state snapshots into guest memory.
+  - Host calls `tick()`.
+  - Host reads command buffers from guest memory and executes them.
+- No Stasis->host calls are required on hot paths.
+
+#### Required exports (guest -> host)
+
+Functions:
+- `tick() -> void` (required; called exactly once per tick).
+
+Data (fixed-size globals):
+- `host_i32: i32[HOST_I32_COUNT]` (written by host, read by guest).
+- `host_f32: f32[HOST_F32_COUNT]` (written by host, read by guest).
+- `host_keys: u8[512]` (written by host, read by guest).
+- `gfx_cmd_i32: i32[...]` (written by guest, read by host).
+- `gfx_cmd_f32: f32[...]` (written by guest, read by host).
+- `gfx_cmd_u8: u8[...]` (written by guest, read by host).
+
+Notes:
+- Sizes/indices/strides are part of the ABI. They must be treated like a struct layout and versioned.
+- Ownership is strict: host never writes `gfx_cmd_*`, guest never writes `host_*` (except in tests/mocks).
+
+#### Window policy (recommended)
+
+- Default: host starts in fullscreen (desktop) without the guest creating a window.
+- Guest may request windowed/fullscreen by writing `host_req_*` globals (typically during `main()`):
+  - `host_req_seq: i32` (monotonic; bump to apply changes)
+  - `host_req_flags: i32` (`WINDOWED=1`, `FULLSCREEN=2`)
+  - `host_req_window_w_px: i32`, `host_req_window_h_px: i32` (used when `WINDOWED`)
+- Host should expose both window and screen size in HostFrame so programs can lay out UI deterministically.
+
+#### Versioning and validation
+
+To avoid silent corruption, the host should validate at least:
+- `host_i32[HOST_I_MAGIC]` / `host_i32[HOST_I_VERSION]` (if/when added to the layout).
+- `gfx_cmd_i32[GFX_I_MAGIC]` / `gfx_cmd_i32[GFX_I_VERSION]` (already present).
+
+On mismatch: fail fast with a clear diagnostic (layout mismatch is not recoverable without a compat path).
+
+#### What does NOT belong in the per-tick host ABI
+
+These can exist as tooling/sys helpers without being part of the game-host tick boundary:
+- `sys_*` (argv/file I/O/spawn/time) helpers.
+
+These should be treated as legacy compatibility surfaces (keep for now, but plan to remove from hot paths):
+- Window/input query calls (`gfx_window_*`, `input_*`, `is_key_down`, `should_quit`, etc.).
+- Per-draw externs (`draw_line`, `gfx_draw_sprite`, `draw_text`, etc.).
+- Per-tick submit/present calls from Stasis (`gfx_submit*`, `end_frame`, etc.).
+
+In this direction, these legacy calls should not cross the host boundary at all:
+- They should not be compiler built-ins that lower to runtime hooks.
+- If retained at all, they should be pure Stasis wrappers over `host_*` + `gfx_cmd_*` (or removed entirely once samples migrate).
+
 ### 1) HostFrame snapshot (already prototyped)
 
-There is already a prototype in `src/stdlib/host_frame.stasis`, and a native implementation in `runtime/stasis_graphics.c`:
+There is already a prototype in `src/host_frame.stasis` (kept in `src/` since stdlib modules currently cannot declare globals), and a native implementation in `runtime/stasis_graphics.c`:
 
 - `extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;`
 - `STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32)`
@@ -152,16 +210,16 @@ There is already a prototype in `src/stdlib/host_frame.stasis`, and a native imp
 Proposed changes to make it "production-shaped":
 
 - Add a small header for versioning and per-tick flags.
-- Add `dt` and a monotonic `frame_index` so systems can be written without relying on wall-clock deltas.
+- Prefer ticks over delta-time: add a monotonic `tick_index` and a fixed `tick_hz` (or `tick_ms`) so simulation can be written in whole ticks.
 - Treat any unused indices as reserved for forward compatibility.
 
 Suggested i32 header (example):
 
 - `HOST_I_MAGIC`: constant (helps detect uninitialized buffers in debug)
 - `HOST_I_VERSION`: increments when layout changes
-- `HOST_I_FRAME_INDEX`: increments once per tick
-- `HOST_I_TIME_MS`: monotonic ms since start (or since epoch; but monotonic is preferred)
-- `HOST_I_DT_MS`: delta in ms since last tick (clamped, deterministic policy)
+- `HOST_I_TICK_INDEX`: increments once per tick
+- `HOST_I_TICK_HZ`: fixed ticks-per-second for the program (or omit if the program treats ticks as abstract)
+- `HOST_I_TIME_MS`: optional monotonic ms since start (for profiling/bench; not required for simulation)
 - `HOST_I_WINDOW_W_PX`, `HOST_I_WINDOW_H_PX`
 - `HOST_I_VIEWPORT_X_PX`, `HOST_I_VIEWPORT_Y_PX`, `HOST_I_VIEWPORT_W_PX`, `HOST_I_VIEWPORT_H_PX`
 - `HOST_I_FLAGS`: bitfield (resized, focus, etc.)
@@ -169,7 +227,6 @@ Suggested i32 header (example):
 
 Suggested f32 header (example):
 
-- `HOST_F_DT_S`: `dt` in seconds for convenience (or omit if redundant)
 - `HOST_F_DPI_SCALE_X`, `HOST_F_DPI_SCALE_Y` (if/when needed)
 
 Pointer layout can stay as-is (id/buttons in i32, positions/deltas in f32).
@@ -265,7 +322,7 @@ Phase 0: Fix resize smoothness in current runtime
 - Centralize resize handling in `runtime/stasis_graphics.c`.
 
 Phase 1: Make HostFrame v1 real
-- Extend `src/stdlib/host_frame.stasis` with version/flags/dt/frame_index.
+- Extend `src/host_frame.stasis` with version/flags/tick_index/(optional tick_hz).
 - Update `runtime/stasis_graphics.c` `stasis_host_get_frame` to fill them.
 - Add a small sample that prints HostFrame fields and validates invariants.
 

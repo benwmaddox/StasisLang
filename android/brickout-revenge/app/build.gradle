@@ -6,7 +6,7 @@ android {
 
     defaultConfig {
         applicationId "com.stasis.brickoutrevenge"
-        minSdkVersion 21
+        minSdkVersion 28
         targetSdkVersion 34
         versionCode 1
         versionName "0.0.0"

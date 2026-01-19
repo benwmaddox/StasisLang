@@ -237,6 +237,102 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             builder.DeclareExternal("stasis_sys_flush", CraneliftTypeMapper.ClifType.I32);
         }
 
+        if (builtins.Contains("sys_memcpy_u8"))
+        {
+            builder.DeclareExternal("stasis_sys_memcpy_u8", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memcpy_i32"))
+        {
+            builder.DeclareExternal("stasis_sys_memcpy_i32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memcpy_f32"))
+        {
+            builder.DeclareExternal("stasis_sys_memcpy_f32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memmove_u8"))
+        {
+            builder.DeclareExternal("stasis_sys_memmove_u8", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memmove_i32"))
+        {
+            builder.DeclareExternal("stasis_sys_memmove_i32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memmove_f32"))
+        {
+            builder.DeclareExternal("stasis_sys_memmove_f32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.R64, // src
+                CraneliftTypeMapper.ClifType.I32, // src_index
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memset_u8"))
+        {
+            builder.DeclareExternal("stasis_sys_memset_u8", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.I32, // value (byte)
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memset_i32"))
+        {
+            builder.DeclareExternal("stasis_sys_memset_i32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.I32, // value
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
+        if (builtins.Contains("sys_memset_f32"))
+        {
+            builder.DeclareExternal("stasis_sys_memset_f32", CraneliftTypeMapper.ClifType.Void,
+                CraneliftTypeMapper.ClifType.R64, // dst
+                CraneliftTypeMapper.ClifType.I32, // dst_index
+                CraneliftTypeMapper.ClifType.F32, // value
+                CraneliftTypeMapper.ClifType.I32  // count
+            );
+        }
+
         if (builtins.Contains("time"))
         {
             // time(tloc: *i64) -> i64
@@ -398,6 +494,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 CraneliftTypeMapper.ClifType.R64,
                 CraneliftTypeMapper.ClifType.R64,
                 CraneliftTypeMapper.ClifType.R64);
+        }
+
+        if (builtins.Contains("gfx_poll_reload"))
+        {
+            builder.DeclareExternal("stasis_gfx_poll_reload", CraneliftTypeMapper.ClifType.I32,
+                CraneliftTypeMapper.ClifType.I32);
         }
 
         if (builtins.Contains("gfx_window_width"))
@@ -1303,24 +1405,14 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             or "sys_argc" or "sys_argv"
             or "sys_read_file" or "sys_list_dir" or "sys_write_file" or "sys_file_exists" or "sys_file_size" or "sys_file_mtime_ms"
             or "sys_exec" or "sys_spawn" or "sys_sleep_ms"
+            or "sys_memcpy_u8" or "sys_memcpy_i32" or "sys_memcpy_f32"
+            or "sys_memmove_u8" or "sys_memmove_i32" or "sys_memmove_f32"
+            or "sys_memset_u8" or "sys_memset_i32" or "sys_memset_f32"
             or "time" or "get_time_ms" or "get_time_us" or "sleep_ms"
             or "audio_is_available" or "audio_get_sample_rate" or "audio_get_channels"
             or "audio_get_queued_frames" or "audio_get_underruns" or "audio_push_f32_interleaved"
             or "sin" or "cos" or "sin_fast" or "cos_fast"
-            or "init_window" or "begin_frame" or "end_frame" or "clear" or "draw_line" or "draw_lines_f32"
-            or "gfx_load_sprite" or "gfx_draw_sprite" or "gfx_draw_sprites_i32" or "gfx_submit"
-            or "gfx_submit_u8"
-            or "gfx_window_width" or "gfx_window_height" or "gfx_window_resized"
-            or "gfx_debug_bake_hash" or "gfx_debug_enable_hash" or "gfx_debug_get_frame_hash"
-            or "is_key_down" or "should_quit" or "get_window_size" or "set_fullscreen"
-            or "load_font" or "draw_text" or "measure_text" or "set_postfx"
-            or "list_directory" or "dir_list_entry_is_dir" or "dir_list_entry_copy_name"
-            or "input_pointer_count" or "input_pointer_id" or "input_pointer_is_down"
-            or "input_pointer_went_down" or "input_pointer_went_up"
-            or "input_pointer_x_px" or "input_pointer_y_px" or "input_pointer_dx_px" or "input_pointer_dy_px"
-            or "input_pointer_x_n" or "input_pointer_y_n"
-            or "input_dropped_pointers"
-            or "input_viewport_x_px" or "input_viewport_y_px" or "input_viewport_w_px" or "input_viewport_h_px"
+            or "init_window" or "gfx_load_sprite" or "gfx_poll_reload" or "load_font" or "measure_text"
             or "char_is_digit" or "char_is_alpha" or "char_is_alnum" or "char_is_space"
             or "char_is_upper" or "char_is_lower" or "char_is_hex" or "char_is_print"
             or "char_to_upper" or "char_to_lower" or "char_to_digit" or "char_from_digit"

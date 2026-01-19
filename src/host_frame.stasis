@@ -1,15 +1,11 @@
-import "graphics.stasis";
-
 // Host frame snapshot (prototype)
 //
 // Practical hybrid approach:
-// - Reads: host writes a single deterministic snapshot once per tick via `host_get_frame`.
-// - Writes/effects: rendering/audio remain explicit command calls (draw_line/gfx_draw_sprite/etc).
+// - Reads: host writes a single deterministic snapshot once per tick via bulk host mode.
 //
 // Usage:
-// - Call `host_frame_refresh()` once at the start of your tick.
 // - Read everything from `host_i32[]` / `host_f32[]` accessors below for the rest of the tick.
-
+//
 // NOTE: This is a prototype layout. Treat all unused indices as reserved.
 
 const HOST_MAX_POINTERS: i32 = 8;
@@ -24,6 +20,11 @@ const HOST_I_VIEWPORT_W_PX: i32 = 5;
 const HOST_I_VIEWPORT_H_PX: i32 = 6;
 const HOST_I_POINTER_COUNT: i32 = 7;
 const HOST_I_DROPPED_POINTERS: i32 = 8;
+const HOST_I_QUIT_REQUESTED: i32 = 9;
+const HOST_I_TICK_INDEX: i32 = 10;
+const HOST_I_RESIZED: i32 = 11;
+const HOST_I_SCREEN_W_PX: i32 = 12;
+const HOST_I_SCREEN_H_PX: i32 = 13;
 const HOST_I_POINTER_BASE: i32 = 16; // reserve space for future fields before pointers
 const HOST_I_POINTER_STRIDE: i32 = 4; // id, is_down, went_down, went_up
 const HOST_I32_COUNT: i32 = 64;
@@ -33,15 +34,11 @@ const HOST_F_POINTER_BASE: i32 = 0;
 const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
 const HOST_F32_COUNT: i32 = 64;
 
-global host_i32: i32[HOST_I32_COUNT];
-global host_f32: f32[HOST_F32_COUNT];
+global host_i32: i32[64];
+global host_f32: f32[64];
+global host_keys: u8[512];
 
-extern function host_get_frame(out_i32: i32[], out_f32: f32[]): void;
-
-function host_frame_refresh(): void {
-    host_get_frame(host_i32, host_f32);
-}
-
+function host_tick_index(): i32 { return host_i32[HOST_I_TICK_INDEX]; }
 function host_time_ms(): i32 { return host_i32[HOST_I_TIME_MS]; }
 function host_window_w_px(): i32 { return host_i32[HOST_I_WINDOW_W_PX]; }
 function host_window_h_px(): i32 { return host_i32[HOST_I_WINDOW_H_PX]; }
@@ -51,6 +48,15 @@ function host_viewport_w_px(): i32 { return host_i32[HOST_I_VIEWPORT_W_PX]; }
 function host_viewport_h_px(): i32 { return host_i32[HOST_I_VIEWPORT_H_PX]; }
 function host_pointer_count(): i32 { return host_i32[HOST_I_POINTER_COUNT]; }
 function host_dropped_pointers(): i32 { return host_i32[HOST_I_DROPPED_POINTERS]; }
+function host_quit_requested(): bool { return host_i32[HOST_I_QUIT_REQUESTED] != 0; }
+function host_resized(): bool { return host_i32[HOST_I_RESIZED] != 0; }
+function host_screen_w_px(): i32 { return host_i32[HOST_I_SCREEN_W_PX]; }
+function host_screen_h_px(): i32 { return host_i32[HOST_I_SCREEN_H_PX]; }
+
+function host_key_down(scancode: i32): bool {
+    if (scancode < 0 || scancode >= 512) { return false; }
+    return host_keys[scancode] != 0;
+}
 
 function host_pointer_id(index: i32): i32 {
     return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 0];
@@ -91,4 +97,3 @@ function host_pointer_x_n(index: i32): f32 {
 function host_pointer_y_n(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 5];
 }
-

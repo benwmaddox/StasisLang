@@ -18,6 +18,30 @@
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
+typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
+typedef int (*stasis_host_get_keyboard_state_fn)(uint8_t *out_u8, int max_bytes);
+typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
+typedef int (*stasis_set_fullscreen_fn)(int enabled);
+typedef void (*stasis_set_window_size_fn)(int width, int height);
+
+static int stasis_env_flag(const char *name, int default_value)
+{
+    const char *v = getenv(name);
+    if (!v || !v[0])
+    {
+        return default_value;
+    }
+    if (v[0] == '0')
+    {
+        return 0;
+    }
+    if (v[0] == '1')
+    {
+        return 1;
+    }
+    return default_value;
+}
 
 #ifndef _WIN32
 static void stasis_sleep_us(long long usec)
@@ -1254,6 +1278,23 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Default window policy: start fullscreen if graphics runtime is present. */
+    HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+    stasis_init_window_fn init_window = NULL;
+    stasis_set_fullscreen_fn set_fullscreen = NULL;
+    stasis_set_window_size_fn set_window_size = NULL;
+    if (gfx)
+    {
+        init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
+        set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
+        set_window_size = (stasis_set_window_size_fn)GetProcAddress(gfx, "stasis_set_window_size");
+        if (init_window && set_fullscreen)
+        {
+            (void)init_window(1280, 720, "Stasis");
+            (void)set_fullscreen(1);
+        }
+    }
+
     stasis_state_symbol *syms = NULL;
     uint32_t sym_count = 0;
     uint32_t total_bytes = 0;
@@ -1363,6 +1404,64 @@ int main(int argc, char **argv)
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
         long long target_us = 1000000LL / (long long)fps;
+
+        /* Bulk host mode: host writes HostFrame globals and submits command buffers. */
+        const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
+        int bulk_active = 0;
+        int32_t *host_i32 = NULL;
+        float *host_f32 = NULL;
+        uint8_t *host_keys = NULL;
+        int32_t *gfx_cmd_i32 = NULL;
+        float *gfx_cmd_f32 = NULL;
+        uint8_t *gfx_cmd_u8 = NULL;
+
+        stasis_host_get_frame_fn host_get_frame = NULL;
+        stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
+        stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
+        int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
+        int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
+        int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
+        int32_t *host_req_window_h_px = (int32_t *)GetProcAddress(lib, "host_req_window_h_px");
+        int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
+
+        if (bulk_enabled)
+        {
+            host_i32 = (int32_t *)GetProcAddress(lib, "host_i32");
+            host_f32 = (float *)GetProcAddress(lib, "host_f32");
+            host_keys = (uint8_t *)GetProcAddress(lib, "host_keys");
+            gfx_cmd_i32 = (int32_t *)GetProcAddress(lib, "gfx_cmd_i32");
+            gfx_cmd_f32 = (float *)GetProcAddress(lib, "gfx_cmd_f32");
+            gfx_cmd_u8 = (uint8_t *)GetProcAddress(lib, "gfx_cmd_u8");
+
+            HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+            if (gfx)
+            {
+                host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
+                host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)GetProcAddress(gfx, "stasis_host_get_keyboard_state");
+                gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
+            }
+
+            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_get_frame && gfx_submit_u8)
+            {
+                bulk_active = 1;
+            }
+        }
+
+        /* Apply any request the program made during main(). */
+        if (bulk_active && host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+        {
+            last_req_seq = *host_req_seq;
+            const int flags = *host_req_flags;
+            if ((flags & 1) != 0 && set_window_size && host_req_window_w_px && host_req_window_h_px)
+            {
+                (void)set_fullscreen(0);
+                set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+            }
+            else if ((flags & 2) != 0)
+            {
+                (void)set_fullscreen(1);
+            }
+        }
 
         LARGE_INTEGER last;
         QueryPerformanceCounter(&last);
@@ -1530,11 +1629,48 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
+            if (bulk_active)
+            {
+                host_get_frame(host_i32, host_f32);
+                if (host_get_keyboard_state && host_keys)
+                {
+                    (void)host_get_keyboard_state(host_keys, 512);
+                }
+
+                /* Exit if host requested quit (avoid requiring guest queries). */
+                if (host_i32[9] != 0)
+                {
+                    result = 0;
+                    break;
+                }
+
+                /* Apply window requests (if any). */
+                if (host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+                {
+                    last_req_seq = *host_req_seq;
+                    const int flags = *host_req_flags;
+                    if ((flags & 1) != 0 && set_window_size && host_req_window_w_px && host_req_window_h_px)
+                    {
+                        (void)set_fullscreen(0);
+                        set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+                    }
+                    else if ((flags & 2) != 0)
+                    {
+                        (void)set_fullscreen(1);
+                    }
+                }
+            }
+
             int tick_result = tick();
             if (tick_result != 0)
             {
                 result = tick_result == 1 ? 0 : tick_result;
                 break;
+            }
+
+            if (bulk_active)
+            {
+                gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
             }
 
             LARGE_INTEGER now;
