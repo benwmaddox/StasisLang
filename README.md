@@ -49,6 +49,7 @@ Common commands:
 - `.\stasis.bat test --all --backend cranelift`
 - `.\stasis.bat run .\samples\basic.stasis --emit-ir > out.ll`
 - `.\stasis.bat run .\samples\basic.stasis --watch` (opt-in dev loop)
+- Capture screenshots of windowed demos (writes to `artifacts/screenshots/` and opens the folder): `powershell -ExecutionPolicy Bypass -File .\scripts\capture_sample_screenshots.ps1`
 
 Backends:
 
