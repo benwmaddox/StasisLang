@@ -22,6 +22,9 @@ _ReSharper.Caches/
 .stasis_cache/
 .tools/
 
+# Local-only artifacts (screenshots, recordings, etc.)
+artifacts/
+
 # Build artifacts
 *.dll
 *.exe
