@@ -10,7 +10,7 @@ Stasis is a low-level but ergonomic language designed for predictable compilatio
 
 Toolchain direction:
 - Stage 0 (bootstrap): a C# frontend (LLVMSharp) used for development and bootstrapping.
-- Stage 1 (self-host): a standalone `stasis` CLI written in Stasis that emits textual LLVM IR or Cranelift CLIF and runs without .NET at runtime.
+- Stage 1: improve the C# toolchain UX and stability (fast edit-run loop, clear diagnostics, deterministic outputs).
 
 The core design pillars are:
 
@@ -139,7 +139,7 @@ ascii[N]   // ASCII-only string buffers with a single length header
 
 ### System/host helpers (`sys_*`)
 
-These are host-provided helpers intended for tooling and self-hosted programs (compilers, asset pipelines, etc.).
+These are host-provided helpers intended for tooling (compilers, asset pipelines, etc.).
 
 - `sys_argc() -> i32`
 - `sys_argv(idx: i32, out: utf8[N], out_cap: i32) -> i32` (returns bytes written, `-1` on failure)

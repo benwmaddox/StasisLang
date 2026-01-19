@@ -119,12 +119,12 @@ public class TemplateOutputTests
         return (process.ExitCode, stdout.ToString(), stderr.ToString());
     }
 
-    private static bool TryFindLli()
+    private static bool TryFindLlvmTooling()
     {
         var search = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
         foreach (var dir in search)
         {
-            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "lli.exe" : "lli");
+            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
             if (File.Exists(candidate))
             {
                 return true;
@@ -134,23 +134,69 @@ public class TemplateOutputTests
         return false;
     }
 
+    private static void EnsureBuildDirExists(string repoRoot)
+    {
+        Directory.CreateDirectory(Path.Combine(repoRoot, "build"));
+    }
+
+    private static bool TryFindSysLibrary(string repoRoot, out string path)
+    {
+        var candidates = OperatingSystem.IsWindows()
+            ? new[] { "stasis_sys_static.lib" }
+            : new[] { "libstasis_sys_static.a" };
+
+        var searchPaths = new[]
+        {
+            Path.Combine(repoRoot, "runtime", "build", "Release"),
+            Path.Combine(repoRoot, "runtime", "build", "Debug"),
+            Path.Combine(repoRoot, "runtime", "build"),
+            Path.Combine(repoRoot, "runtime"),
+            Path.Combine(repoRoot, "build"),
+            repoRoot
+        };
+
+        foreach (var dir in searchPaths)
+        {
+            foreach (var name in candidates)
+            {
+                var candidate = Path.Combine(dir, name);
+                if (File.Exists(candidate))
+                {
+                    path = candidate;
+                    return true;
+                }
+            }
+        }
+
+        path = string.Empty;
+        return false;
+    }
+
     [Fact]
     public void FactorioLite_ProducesSvgSnapshots()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
 
         var root = GetRepoRoot();
+        EnsureBuildDirExists(root);
         var outPath = Path.Combine(root, "build", "factorio_lite_200.svg");
 
         if (File.Exists(outPath)) File.Delete(outPath);
 
         try
         {
+            if (!TryFindSysLibrary(root, out _))
+            {
+                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/factorio_lite.stasis", "--backend", "llvm", "--emit-ir");
+                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
+                return;
+            }
+
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/factorio_lite.stasis", "--backend", "llvm");
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
             Assert.True(File.Exists(outPath), $"Expected '{outPath}' to be created.\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
             var svg = File.ReadAllText(outPath);
@@ -166,20 +212,28 @@ public class TemplateOutputTests
     [Fact]
     public void BreakoutDefense_ProducesSvgSnapshots()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
 
         var root = GetRepoRoot();
+        EnsureBuildDirExists(root);
         var outPath = Path.Combine(root, "build", "breakout_defense_200.svg");
 
         if (File.Exists(outPath)) File.Delete(outPath);
 
         try
         {
+            if (!TryFindSysLibrary(root, out _))
+            {
+                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/breakout_defense.stasis", "--backend", "llvm", "--emit-ir");
+                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
+                return;
+            }
+
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/breakout_defense.stasis", "--backend", "llvm");
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
             Assert.True(File.Exists(outPath), $"Expected '{outPath}' to be created.\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
             var svg = File.ReadAllText(outPath);
@@ -195,20 +249,28 @@ public class TemplateOutputTests
     [Fact]
     public void Match3Overlay_ProducesCsvHistogram()
     {
-        if (!TryFindLli())
+        if (!TryFindLlvmTooling())
         {
             return;
         }
 
         var root = GetRepoRoot();
+        EnsureBuildDirExists(root);
         var outPath = Path.Combine(root, "build", "match3_combo_hist.csv");
 
         if (File.Exists(outPath)) File.Delete(outPath);
 
         try
         {
+            if (!TryFindSysLibrary(root, out _))
+            {
+                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/match3_overlay.stasis", "--backend", "llvm", "--emit-ir");
+                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
+                return;
+            }
+
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/match3_overlay.stasis", "--backend", "llvm");
-            Assert.Equal(0, exitCode);
+            Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
             Assert.True(File.Exists(outPath), $"Expected '{outPath}' to be created.\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
             var csv = File.ReadAllText(outPath);
@@ -221,4 +283,3 @@ public class TemplateOutputTests
         }
     }
 }
-

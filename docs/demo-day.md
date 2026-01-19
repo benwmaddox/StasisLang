@@ -148,7 +148,7 @@ Run tests:
 
 Run:
 ```bat
-.\stasis.bat run .\samples\guess.stasis --backend llvm
+.\stasis.bat run .\samples\sudoku.stasis --backend llvm
 ```
 
 ## Compiler / language feature samples (quick)
