@@ -933,7 +933,7 @@ function init_game(reset_progress: bool): void {
     state.frame_timer.sample_index = 0;
 
     // Game state
-    state.phase = Phase.Battle;
+    state.phase = Phase.Setup;
     state.balls_spawned = 0;
     state.running = 1;
     brickout_level_reset();
@@ -1496,6 +1496,22 @@ function check_brick_collisions(): void {
 function handle_setup_input(): void {
     // Arrow keys move cursor
     // (simplified - in full version would track key press/release)
+}
+
+function brickout_try_start_battle(): void {
+    if (state.phase != Phase.Setup) {
+        return;
+    }
+
+    if (count_active_bricks() < 1) {
+        sfx_play(SFX_DRAG_INVALID);
+        return;
+    }
+
+    sfx_play(SFX_SELECT);
+    brickout_level_reset();
+    state.balls_spawned = 0;
+    state.phase = Phase.Battle;
 }
 
 // Update game logic
@@ -2313,6 +2329,26 @@ function draw_ui(): void {
 
     // Wave indicator in top-right
     draw_number(state.wave, play_to_screen_x(sw - 60.0), play_to_screen_y(10.0), 8.0 * s);
+
+    if (state.phase == Phase.Setup) {
+        let btn_x: f32 = sw - 112.0;
+        let btn_y: f32 = 62.0;
+        let btn_w: f32 = 96.0;
+        let btn_h: f32 = 28.0;
+        let bx: f32 = play_to_screen_x(btn_x);
+        let by: f32 = play_to_screen_y(btn_y);
+        let bw: f32 = play_to_screen_len(btn_w);
+        let bh: f32 = play_to_screen_len(btn_h);
+        draw_filled_rect(bx, by, bw, bh, 0.08, 0.12, 0.18, 0.95);
+        draw_rect(bx, by, bw, bh, 0.25, 0.75, 0.95, 0.95);
+        draw_text(state.ui_font, "START", bx + 22.0 * s, by + 6.0 * s, 0.95, 0.95, 0.95, 0.95);
+
+        if (count_active_bricks() < 1) {
+            draw_text(state.ui_font, "Place a tower first", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.95, 0.6, 0.3, 0.95);
+        } else {
+            draw_text(state.ui_font, "Setup: place towers", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.8, 0.9, 1.0, 0.9);
+        }
+    }
 
     // Average frame time in bottom-left (in milliseconds with 1 decimal)
     let avg_time_tenths: i32 = frame_timer_avg_tenths(state.frame_timer.samples_ms);
