@@ -65,6 +65,7 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 #endif
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
+STASIS_EXPORT int stasis_get_time_us(void);
 
 /* Global state */
 static SDL_Window* g_window = NULL;
@@ -579,9 +580,10 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[16] = 0; /* tick_hz: unknown */
     out_i32[17] = focused;
     out_i32[18] = minimized;
+    out_i32[19] = stasis_get_time_us();
 
     /* Reserved */
-    for (int i = 19; i < 32; i++) out_i32[i] = 0;
+    for (int i = 20; i < 32; i++) out_i32[i] = 0;
 
     /* Keyboard state: one i32 per scancode (0/1). */
     int num_keys = 0;
