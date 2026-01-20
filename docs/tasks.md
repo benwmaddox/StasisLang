@@ -42,5 +42,5 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 
 ### Tooling / DX
 
-- [ ] Support compiling Markdown code blocks: allow `stasis build/test` on `.md` by extracting ```stasis fenced blocks so docs stay valid.
+- [x] Support compiling Markdown code blocks: allow `stasis build/test` on `.md` by extracting ```stasis fenced blocks so docs stay valid.
 - [ ] Maintenance: regularly scan open PRs for conflicts and keep them mergeable (merge `main` into branches or rebase).
