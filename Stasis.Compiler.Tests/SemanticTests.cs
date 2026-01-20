@@ -97,6 +97,20 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_non_extern_function_declaration_without_body()
+    {
+        var source = """
+            function f(): i32;
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("missing a body", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Flags_read_of_uninitialized_local()
     {
         var source = """

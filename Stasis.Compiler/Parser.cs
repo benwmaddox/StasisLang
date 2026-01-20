@@ -179,17 +179,27 @@ public sealed class Parser
         }
 
         var functionKeyword = Consume(TokenKind.FunctionKeyword, "Expected 'function'.");
-        var attributes = new List<Token>();
+        var attributes = new List<FunctionAttributeSyntax>();
         while (Match(TokenKind.At))
         {
-            var attr = Consume(TokenKind.Identifier, "Expected attribute name after '@'.");
+            var attrName = ConsumeOneOf("Expected attribute name after '@'.", TokenKind.Identifier, TokenKind.ExternKeyword);
+            Token? openParen = null;
+            Token? value = null;
+            Token? closeParen = null;
+            if (Match(TokenKind.LParen))
+            {
+                openParen = Previous;
+                value = Consume(TokenKind.StringLiteral, "Expected string literal attribute value.");
+                closeParen = Consume(TokenKind.RParen, "Expected ')' after attribute value.");
+            }
+
             if (attributes.Count < 10)
             {
-                attributes.Add(attr);
+                attributes.Add(new FunctionAttributeSyntax(attrName, openParen, value, closeParen));
             }
             else
             {
-                _diagnostics.Add(new Diagnostic("Functions may have at most 10 attributes.", attr.Span));
+                _diagnostics.Add(new Diagnostic("Functions may have at most 10 attributes.", attrName.Span));
             }
         }
         var name = Consume(TokenKind.Identifier, "Expected function name.");
@@ -206,6 +216,11 @@ public sealed class Parser
         {
             var semicolon = Consume(TokenKind.Semicolon, "Expected ';' after extern function declaration.");
             return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, Body: null, Semicolon: semicolon);
+        }
+
+        if (Match(TokenKind.Semicolon))
+        {
+            return new FunctionDeclarationSyntax(exportKeyword, externKeyword, functionKeyword, attributes, name, parameters, returnType, Body: null, Semicolon: Previous);
         }
 
         var body = ParseBlock();

@@ -713,7 +713,9 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var isExtern = IsExternFunction(funcName);
-        var callName = IsBuiltinFunction(funcName) ? funcName : (isExtern ? funcName : MangleFunctionName(funcName));
+        var callName = IsBuiltinFunction(funcName)
+            ? funcName
+            : (isExtern ? GetExternCallName(funcName) : MangleFunctionName(funcName));
         var argList = string.Join(", ", args);
         if (IsVoidFunction(funcName))
         {
@@ -1663,7 +1665,39 @@ public sealed class CraneliftFunctionBuilder
         return call;
     }
     private bool IsExternFunction(string name) =>
-        _functions.TryGetValue(name, out var func) && func.IsExtern;
+        _functions.TryGetValue(name, out var func) && (func.IsExtern || HasExternAttribute(func));
+
+    private string GetExternCallName(string name)
+    {
+        if (!_functions.TryGetValue(name, out var func))
+        {
+            return name;
+        }
+
+        var linkName = func.Attributes
+            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
+            .StringValue;
+
+        if (!string.IsNullOrWhiteSpace(linkName))
+        {
+            return UnquoteStringLiteral(linkName);
+        }
+
+        return name;
+    }
+
+    private static string UnquoteStringLiteral(string text)
+    {
+        if (text.Length >= 2 && text[0] == '"' && text[^1] == '"')
+        {
+            return text.Substring(1, text.Length - 2);
+        }
+
+        return text;
+    }
+
+    private static bool HasExternAttribute(FunctionDeclarationSyntax func) =>
+        func.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
 
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 
