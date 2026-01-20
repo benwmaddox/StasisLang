@@ -1,0 +1,33 @@
+struct ClearInner {
+    a: i32;
+    b: u8[4];
+}
+
+struct ClearOuter {
+    x: i32;
+    inner: ClearInner;
+    bytes: u8[8];
+}
+
+global clear_arr: u8[8];
+global clear_state: ClearOuter;
+
+test `array clear zeros bytes`() {
+    clear_arr[0] = 1;
+    clear_arr[7] = 2;
+    clear_arr.clear();
+    return clear_arr[0] == 0 && clear_arr[7] == 0;
+}
+
+test `struct clear zeros fields`() {
+    clear_state.x = 7;
+    clear_state.inner.a = 9;
+    clear_state.inner.b[2] = 3;
+    clear_state.bytes[1] = 5;
+    clear_state.clear();
+    return clear_state.x == 0
+        && clear_state.inner.a == 0
+        && clear_state.inner.b[2] == 0
+        && clear_state.bytes[1] == 0;
+}
+

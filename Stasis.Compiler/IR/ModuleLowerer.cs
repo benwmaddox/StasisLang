@@ -2087,6 +2087,19 @@ public sealed class ModuleLowerer
 
         private LLVMValueRef LowerCall(LLVMBuilderRef builder, CallExpressionSyntax call, Dictionary<string, LocalBinding> locals)
         {
+            if (call.Callee is MemberAccessExpressionSyntax member &&
+                string.Equals(member.Member.Text, "clear", StringComparison.Ordinal))
+            {
+                if (call.Arguments.Count != 0)
+                {
+                    AddDiagnostic("clear() takes no arguments.", call.Span);
+                    return ConstI32(0);
+                }
+
+                LowerClear(builder, member.Receiver, locals, call.Span);
+                return ConstI32(0);
+            }
+
             if (call.Callee is not IdentifierExpressionSyntax id)
             {
                 AddDiagnostic("Only simple function calls are supported.", call.Span);
@@ -2152,6 +2165,300 @@ public sealed class ModuleLowerer
 
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{id.Identifier.Text}.call");
             return callValue;
+        }
+
+        private void LowerClear(LLVMBuilderRef builder, ExpressionSyntax receiver, Dictionary<string, LocalBinding> locals, SourceSpan span)
+        {
+            var receiverType = ResolveExpressionType(receiver);
+            if (receiverType is ArrayTypeSymbol array)
+            {
+                LowerClearArray(builder, receiver, array, locals, span);
+                return;
+            }
+
+            if (receiverType is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                var baseName = receiver switch
+                {
+                    IdentifierExpressionSyntax id => TryResolveGlobalName(id.Identifier.Text),
+                    MemberAccessExpressionSyntax member => BuildFlattenedMemberPath(member),
+                    _ => null
+                };
+
+                if (string.IsNullOrEmpty(baseName))
+                {
+                    AddDiagnostic("clear() receiver must be a global or global field.", receiver.Span);
+                    return;
+                }
+
+                LowerClearStruct(builder, baseName!, structDecl, span);
+                return;
+            }
+
+            AddDiagnostic("clear() is only supported for zeroable fixed arrays and structs.", receiver.Span);
+        }
+
+        private void LowerClearArray(LLVMBuilderRef builder, ExpressionSyntax receiver, ArrayTypeSymbol array, Dictionary<string, LocalBinding> locals, SourceSpan span)
+        {
+            if (array.Size <= 0)
+            {
+                AddDiagnostic("clear() requires a fixed-size array.", receiver.Span);
+                return;
+            }
+
+            if (array.ElementType is not PrimitiveTypeSymbol prim ||
+                prim.PrimitiveName is not ("u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool"))
+            {
+                AddDiagnostic("clear() only supports arrays of zeroable primitive elements.", receiver.Span);
+                return;
+            }
+
+            var dstPtr = LowerArrayPointer(builder, receiver, locals);
+            if (dstPtr.Handle == IntPtr.Zero)
+            {
+                AddDiagnostic("clear() requires an array receiver.", receiver.Span);
+                return;
+            }
+
+            var count = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)array.Size, true);
+
+            if (prim.PrimitiveName is "u8" or "bool")
+            {
+                EmitSysMemsetU8(builder, dstPtr, ConstI32(0), ConstI32(0), count);
+                return;
+            }
+
+            if (prim.PrimitiveName is "u16")
+            {
+                // Treat u16 as i32 element-wise for clearing: write zeros with scalar stores in a loop.
+                // (u16 has no dedicated sys_memset helper.)
+                EmitClearLoop(builder, dstPtr, LLVMTypeRef.Int16, count);
+                return;
+            }
+
+            if (prim.PrimitiveName is "u32" or "i32")
+            {
+                EmitSysMemsetI32(builder, dstPtr, ConstI32(0), ConstI32(0), count);
+                return;
+            }
+
+            if (prim.PrimitiveName is "f32")
+            {
+                EmitSysMemsetF32(builder, dstPtr, ConstI32(0), LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0), count);
+                return;
+            }
+
+            // f64: clear via loop (no dedicated helper).
+            EmitClearLoop(builder, dstPtr, LLVMTypeRef.Double, count);
+        }
+
+        private void LowerClearStruct(LLVMBuilderRef builder, string baseName, StructDeclarationSyntax structDecl, SourceSpan span)
+        {
+            foreach (var field in structDecl.Fields)
+            {
+                var fieldName = $"{baseName}_{field.Identifier.Text}";
+
+                switch (field.Type)
+                {
+                    case NamedTypeSyntax namedField when _structs.TryGetValue(namedField.Name, out var nestedStruct):
+                        LowerClearStruct(builder, fieldName, nestedStruct, span);
+                        continue;
+                    case ArrayTypeSyntax arrayType when arrayType.ElementType is NamedTypeSyntax nestedNamed &&
+                                                       _structs.TryGetValue(nestedNamed.Name, out var nestedStructArray):
+                        {
+                            if (!int.TryParse(arrayType.SizeToken?.Text ?? string.Empty, out var count) || count <= 0)
+                            {
+                                AddDiagnostic("clear() requires fixed-size arrays inside structs.", field.Span);
+                                continue;
+                            }
+
+                            foreach (var nestedField in nestedStructArray.Fields)
+                            {
+                                if (nestedField.Type is not NamedTypeSyntax leafNamed)
+                                {
+                                    AddDiagnostic("clear() only supports scalar fields inside struct arrays.", nestedField.Span);
+                                    continue;
+                                }
+
+                                var leafType = ResolveType(leafNamed, _symbols);
+                                if (leafType is not PrimitiveTypeSymbol leafPrim ||
+                                    leafPrim.PrimitiveName is not ("u8" or "bool" or "u16" or "u32" or "i32" or "f32" or "f64"))
+                                {
+                                    AddDiagnostic("clear() only supports zeroable primitive fields inside struct arrays.", nestedField.Span);
+                                    continue;
+                                }
+
+                                var leafGlobal = $"{fieldName}_{nestedField.Identifier.Text}";
+                                EmitClearGlobalArray(builder, leafGlobal, leafPrim, count, nestedField.Span);
+                            }
+
+                            continue;
+                        }
+                    case ArrayTypeSyntax arrayType:
+                        {
+                            if (arrayType.ElementType is not NamedTypeSyntax elemNamed)
+                            {
+                                AddDiagnostic("clear() only supports primitive arrays.", field.Span);
+                                continue;
+                            }
+
+                            var elemType = ResolveType(elemNamed, _symbols);
+                            if (elemType is not PrimitiveTypeSymbol elemPrim ||
+                                elemPrim.PrimitiveName is not ("u8" or "bool" or "u16" or "u32" or "i32" or "f32" or "f64"))
+                            {
+                                AddDiagnostic("clear() only supports arrays of zeroable primitives.", field.Span);
+                                continue;
+                            }
+
+                            if (!int.TryParse(arrayType.SizeToken?.Text ?? string.Empty, out var count) || count <= 0)
+                            {
+                                AddDiagnostic("clear() requires fixed-size arrays.", field.Span);
+                                continue;
+                            }
+
+                            EmitClearGlobalArray(builder, fieldName, elemPrim, count, field.Span);
+                            continue;
+                        }
+                }
+
+                // Scalar field
+                var fieldType = ResolveType(field.Type, _symbols);
+                if (fieldType is not PrimitiveTypeSymbol fieldPrim ||
+                    fieldPrim.PrimitiveName is not ("u8" or "bool" or "u16" or "u32" or "i32" or "f32" or "f64"))
+                {
+                    AddDiagnostic("clear() only supports zeroable primitive scalar fields.", field.Span);
+                    continue;
+                }
+
+                var global = _moduleBuilder.Module.GetNamedGlobal(fieldName);
+                if (global.Handle == IntPtr.Zero)
+                {
+                    AddDiagnostic($"Missing global backing for '{fieldName}'.", field.Span);
+                    continue;
+                }
+
+                var zero = LLVMValueRef.CreateConstNull(global.TypeOf.ElementType);
+                builder.BuildStore(zero, global);
+            }
+        }
+
+        private void EmitClearGlobalArray(LLVMBuilderRef builder, string globalName, PrimitiveTypeSymbol elemPrim, int count, SourceSpan span)
+        {
+            var global = _moduleBuilder.Module.GetNamedGlobal(globalName);
+            if (global.Handle == IntPtr.Zero)
+            {
+                AddDiagnostic($"Missing array global '{globalName}'.", span);
+                return;
+            }
+
+            var arrayType = global.TypeOf.ElementType;
+            var ptr = builder.BuildGEP2(arrayType, global, new[] { ConstI32(0), ConstI32(0) }, $"{globalName}.ptr");
+            var countVal = LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)Math.Max(0, count), true);
+
+            if (elemPrim.PrimitiveName is "u8" or "bool")
+            {
+                EmitSysMemsetU8(builder, ptr, ConstI32(0), ConstI32(0), countVal);
+                return;
+            }
+            if (elemPrim.PrimitiveName is "u32" or "i32")
+            {
+                EmitSysMemsetI32(builder, ptr, ConstI32(0), ConstI32(0), countVal);
+                return;
+            }
+            if (elemPrim.PrimitiveName is "f32")
+            {
+                EmitSysMemsetF32(builder, ptr, ConstI32(0), LLVMValueRef.CreateConstReal(LLVMTypeRef.Float, 0.0), countVal);
+                return;
+            }
+
+            // u16/f64: fallback loop
+            var elemTy = elemPrim.PrimitiveName == "u16"
+                ? LLVMTypeRef.Int16
+                : LLVMTypeRef.Double;
+            EmitClearLoop(builder, ptr, elemTy, countVal);
+        }
+
+        private void EmitSysMemsetU8(LLVMBuilderRef builder, LLVMValueRef dstPtr, LLVMValueRef dstIndex, LLVMValueRef valueI32, LLVMValueRef count)
+        {
+            var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_u8");
+            var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                new[]
+                {
+                    LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0),
+                    LLVMTypeRef.Int32,
+                    LLVMTypeRef.Int32,
+                    LLVMTypeRef.Int32
+                }, false);
+            if (fn.Handle == IntPtr.Zero)
+                fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_u8", fnType);
+
+            var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0), "clear.memset_u8.dst");
+            builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, valueI32, count }, string.Empty);
+        }
+
+        private void EmitSysMemsetI32(LLVMBuilderRef builder, LLVMValueRef dstPtr, LLVMValueRef dstIndex, LLVMValueRef valueI32, LLVMValueRef count)
+        {
+            var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_i32");
+            var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                new[]
+                {
+                    LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0),
+                    LLVMTypeRef.Int32,
+                    LLVMTypeRef.Int32,
+                    LLVMTypeRef.Int32
+                }, false);
+            if (fn.Handle == IntPtr.Zero)
+                fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_i32", fnType);
+
+            var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Int32, 0), "clear.memset_i32.dst");
+            builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, valueI32, count }, string.Empty);
+        }
+
+        private void EmitSysMemsetF32(LLVMBuilderRef builder, LLVMValueRef dstPtr, LLVMValueRef dstIndex, LLVMValueRef valueF32, LLVMValueRef count)
+        {
+            var fn = _moduleBuilder.Module.GetNamedFunction("stasis_sys_memset_f32");
+            var fnType = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void,
+                new[]
+                {
+                    LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0),
+                    LLVMTypeRef.Int32,
+                    LLVMTypeRef.Float,
+                    LLVMTypeRef.Int32
+                }, false);
+            if (fn.Handle == IntPtr.Zero)
+                fn = _moduleBuilder.Module.AddFunction("stasis_sys_memset_f32", fnType);
+
+            var dstCast = builder.BuildBitCast(dstPtr, LLVMTypeRef.CreatePointer(LLVMTypeRef.Float, 0), "clear.memset_f32.dst");
+            builder.BuildCall2(fnType, fn, new[] { dstCast, dstIndex, valueF32, count }, string.Empty);
+        }
+
+        private void EmitClearLoop(LLVMBuilderRef builder, LLVMValueRef basePtr, LLVMTypeRef elemType, LLVMValueRef countI32)
+        {
+            var function = builder.InsertBlock.Parent;
+            var idxAlloca = builder.BuildAlloca(LLVMTypeRef.Int32, "clear.i");
+            builder.BuildStore(ConstI32(0), idxAlloca);
+
+            var condBlock = AppendBlock(function, NextBlockName("clear.cond"));
+            var bodyBlock = AppendBlock(function, NextBlockName("clear.body"));
+            var endBlock = AppendBlock(function, NextBlockName("clear.end"));
+
+            builder.BuildBr(condBlock);
+            builder.PositionAtEnd(condBlock);
+            var idx = builder.BuildLoad2(LLVMTypeRef.Int32, idxAlloca, "clear.i.load");
+            var cond = builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, idx, countI32, "clear.i.lt");
+            builder.BuildCondBr(cond, bodyBlock, endBlock);
+
+            builder.PositionAtEnd(bodyBlock);
+            var elemPtrType = LLVMTypeRef.CreatePointer(elemType, 0);
+            var typedBase = builder.BuildBitCast(basePtr, elemPtrType, "clear.base");
+            var elemPtr = builder.BuildGEP2(elemType, typedBase, new[] { idx }, "clear.elem");
+            var zero = LLVMValueRef.CreateConstNull(elemType);
+            builder.BuildStore(zero, elemPtr);
+            var next = builder.BuildAdd(idx, ConstI32(1), "clear.i.next");
+            builder.BuildStore(next, idxAlloca);
+            builder.BuildBr(condBlock);
+
+            builder.PositionAtEnd(endBlock);
         }
 
         private bool TryInlineCall(
