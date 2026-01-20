@@ -34,6 +34,7 @@ const HOST_I_TICK_HZ: i32 = 16; // 0 if unknown / not provided
 // Convenience mirrors (avoid bitwise ops in Stasis source).
 const HOST_I_WINDOW_FOCUSED: i32 = 17;
 const HOST_I_WINDOW_MINIMIZED: i32 = 18;
+const HOST_I_TIME_US: i32 = 19;
 
 // Keyboard state (SDL scancodes), one i32 per scancode (0/1).
 const HOST_I_KEY_BASE: i32 = 32;
@@ -71,6 +72,7 @@ function host_flags(): i32 { return host_i32[HOST_I_FLAGS]; }
 function host_tick_hz(): i32 { return host_i32[HOST_I_TICK_HZ]; }
 function host_window_focused(): bool { return host_i32[HOST_I_WINDOW_FOCUSED] != 0; }
 function host_window_minimized(): bool { return host_i32[HOST_I_WINDOW_MINIMIZED] != 0; }
+function host_time_us(): i32 { return host_i32[HOST_I_TIME_US]; }
 
 function host_key_down(scancode: i32): bool {
     if (scancode < 0 || scancode >= 512) { return false; }
