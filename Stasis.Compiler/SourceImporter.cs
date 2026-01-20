@@ -60,7 +60,7 @@ public static class SourceImporter
                 if (TryParseImportLine(line, out var importPath))
                 {
                     var baseDir = Path.GetDirectoryName(fullPath) ?? string.Empty;
-                    var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
+                    var resolvedPath = ResolveImportPathWithPlatformFallback(baseDir, importPath);
                     if (!File.Exists(resolvedPath))
                     {
                         diagnostics.Add(new Diagnostic($"Import not found: {importPath}", new SourceSpan(lineStart, lineLength), fullPath));
@@ -151,6 +151,60 @@ public static class SourceImporter
         }
 
         return new SourceImportResultWithMap(source, expandedText, trimmedSegments);
+    }
+
+    private static string ResolveImportPathWithPlatformFallback(string baseDir, string importPath)
+    {
+        var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
+        if (File.Exists(resolvedPath))
+        {
+            return resolvedPath;
+        }
+
+        if (!string.Equals(Path.GetExtension(resolvedPath), ".stasis", StringComparison.OrdinalIgnoreCase))
+        {
+            return resolvedPath;
+        }
+
+        var platform = GetPlatformTag();
+        if (string.IsNullOrEmpty(platform))
+        {
+            return resolvedPath;
+        }
+
+        var dir = Path.GetDirectoryName(resolvedPath) ?? string.Empty;
+        var baseName = Path.GetFileNameWithoutExtension(resolvedPath);
+        var platformPath = Path.Combine(dir, $"{baseName}.{platform}.stasis");
+        if (File.Exists(platformPath))
+        {
+            return platformPath;
+        }
+
+        return resolvedPath;
+    }
+
+    private static string GetPlatformTag()
+    {
+        var overrideTag = Environment.GetEnvironmentVariable("STASIS_PLATFORM");
+        if (!string.IsNullOrWhiteSpace(overrideTag))
+        {
+            return overrideTag.Trim().ToLowerInvariant();
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return "windows";
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            return "linux";
+        }
+        if (OperatingSystem.IsMacOS())
+        {
+            return "macos";
+        }
+
+        return string.Empty;
     }
 
     private static bool IsStdlibPath(string fullPath)
