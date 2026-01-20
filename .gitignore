@@ -30,6 +30,7 @@ artifacts/
 *.exe
 *.so
 *.dylib
+*.exp
 **/stasis_graphics.lib
 runtime/build/
 runtime/build_sys/
