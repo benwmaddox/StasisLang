@@ -476,6 +476,26 @@ function @inline name(param: Type): ReturnType { ... }
 - Parameters are primitive or references (struct indices, slices, etc.).
 - All struct/array data resides in global memory.
 
+### Extern declarations
+
+Functions declared without a body must be explicitly marked as extern:
+
+```
+extern function sleep_ms(ms: i32): void;
+```
+
+The attribute form is also supported:
+
+```
+function @extern sleep_ms(ms: i32): void;
+```
+
+To call a different underlying symbol name, provide a link name:
+
+```
+function @extern("stasis_sleep_ms") sleep_ms(ms: i32): void;
+```
+
 ---
 
 # **10. Globals**

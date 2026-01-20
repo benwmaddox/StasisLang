@@ -103,6 +103,41 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_extern_attribute_no_body_declaration()
+    {
+        var source = """
+            function @extern foo(x: i32): i32;
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        Assert.False(func.IsExtern);
+        Assert.Null(func.Body);
+        Assert.NotNull(func.Semicolon);
+        var attr = Assert.Single(func.Attributes);
+        Assert.Equal("extern", attr.Text);
+        Assert.Null(attr.StringValue);
+    }
+
+    [Fact]
+    public void Parses_extern_attribute_with_link_name()
+    {
+        var source = """
+            function @extern("stasis_custom_name") foo(): i32;
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
+        var attr = Assert.Single(func.Attributes);
+        Assert.Equal("extern", attr.Text);
+        Assert.Equal("\"stasis_custom_name\"", attr.StringValue);
+    }
+
+    [Fact]
     public void Parses_link_directive()
     {
         var source = """
