@@ -1063,9 +1063,6 @@ public sealed class CraneliftFunctionBuilder
             "sys_memmove_u8" => true,
             "sys_memmove_i32" => true,
             "sys_memmove_f32" => true,
-            "sys_memset_u8" => true,
-            "sys_memset_i32" => true,
-            "sys_memset_f32" => true,
             "time" => true,
             "get_time_ms" => true,
             "get_time_us" => true,
@@ -1439,12 +1436,6 @@ public sealed class CraneliftFunctionBuilder
                 return LowerExternalCallVoid("stasis_sys_memmove_i32", "sys_memmove_i32 expects (dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32).", arguments, 5);
             case "sys_memmove_f32":
                 return LowerExternalCallVoid("stasis_sys_memmove_f32", "sys_memmove_f32 expects (dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32).", arguments, 5);
-            case "sys_memset_u8":
-                return LowerExternalCallVoid("stasis_sys_memset_u8", "sys_memset_u8 expects (dst: u8[], dst_index: i32, value: i32, count: i32).", arguments, 4);
-            case "sys_memset_i32":
-                return LowerExternalCallVoid("stasis_sys_memset_i32", "sys_memset_i32 expects (dst: i32[], dst_index: i32, value: i32, count: i32).", arguments, 4);
-            case "sys_memset_f32":
-                return LowerExternalCallVoid("stasis_sys_memset_f32", "sys_memset_f32 expects (dst: f32[], dst_index: i32, value: f32, count: i32).", arguments, 4);
             case "time":
                 return LowerTime(arguments);
             case "get_time_ms":

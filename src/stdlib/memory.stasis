@@ -39,7 +39,10 @@ function mem_set_u8(dst: u8[], dst_cap: i32, dst_index: i32, value: u8, count: i
     let n: i32 = count;
     if (n > rem) { n = rem; }
     if (n <= 0) { return 0; }
-    sys_memset_u8(dst, dst_index, u8_to_i32(value), n);
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        dst[dst_index + i] = value;
+    }
     return n;
 }
 
@@ -80,7 +83,10 @@ function mem_set_i32(dst: i32[], dst_cap: i32, dst_index: i32, value: i32, count
     let n: i32 = count;
     if (n > rem) { n = rem; }
     if (n <= 0) { return 0; }
-    sys_memset_i32(dst, dst_index, value, n);
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        dst[dst_index + i] = value;
+    }
     return n;
 }
 
@@ -121,7 +127,10 @@ function mem_set_f32(dst: f32[], dst_cap: i32, dst_index: i32, value: f32, count
     let n: i32 = count;
     if (n > rem) { n = rem; }
     if (n <= 0) { return 0; }
-    sys_memset_f32(dst, dst_index, value, n);
+    let i: i32 = 0;
+    for (i = 0; i < n; i = i + 1) {
+        dst[dst_index + i] = value;
+    }
     return n;
 }
 
