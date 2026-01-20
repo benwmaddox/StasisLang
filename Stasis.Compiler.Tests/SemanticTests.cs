@@ -440,4 +440,40 @@ public class SemanticTests
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Cannot compare"));
     }
 
+    [Fact]
+    public void Allows_clear_on_global_array_and_struct()
+    {
+        var source = """
+            struct Inner { a: i32; b: u8[4]; }
+            struct Outer { x: i32; inner: Inner; bytes: u8[8]; }
+            global arr: u8[8];
+            global state: Outer;
+            function f(): void {
+                arr.clear();
+                state.clear();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_clear_on_local()
+    {
+        var source = """
+            function f(): void {
+                let buf: u8[4];
+                buf.clear();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("only supported on globals", StringComparison.OrdinalIgnoreCase));
+    }
+
 }
