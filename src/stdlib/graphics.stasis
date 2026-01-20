@@ -25,6 +25,10 @@ extern function gfx_dump_bmp(path: string): i32;
 extern function load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
 
+// Cache text into a host-side glyph run; intended for startup/init, not per-tick.
+function @extern("stasis_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
+function @extern("stasis_gfx_measure_text_cached") gfx_measure_text_cached(run_handle: i32): f32;
+
 // Deprecated controls/debug: kept as stubs so older samples compile; host-owned behavior should move to snapshot/commands.
 function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void {
 }
@@ -94,6 +98,10 @@ function gfx_draw_sprites_i32(cmds: i32[], count: i32): void {
 
 function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_text(font, text, x, y, r, g, b, a);
+}
+
+function draw_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_text_cached(font, run_handle, x, y, r, g, b, a);
 }
 
 function gfx_window_width(): i32 { return host_window_w_px(); }

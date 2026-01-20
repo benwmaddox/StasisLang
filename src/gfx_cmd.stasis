@@ -243,6 +243,35 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
 }
 
+// Write a text draw referencing a cached glyph run (no per-frame UTF-8 bytes copied).
+// The runtime interprets `byte_offset < 0` as a cached text handle.
+function gfx_cmd_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    let i: i32 = gfx_cmd_i32[GFX_I_TEXT_COUNT];
+    if (i >= GFX_MAX_TEXT) {
+        gfx_cmd_i32[GFX_I_DROPPED_TEXT] = gfx_cmd_i32[GFX_I_DROPPED_TEXT] + 1;
+        return;
+    }
+    if (run_handle <= 0) {
+        gfx_cmd_i32[GFX_I_DROPPED_TEXT] = gfx_cmd_i32[GFX_I_DROPPED_TEXT] + 1;
+        return;
+    }
+
+    let base_i: i32 = GFX_I_TEXT_BASE + i * GFX_TEXT_STRIDE_I32;
+    gfx_cmd_i32[base_i + 0] = font;
+    gfx_cmd_i32[base_i + 1] = 0 - run_handle; // negative => cached run handle
+    gfx_cmd_i32[base_i + 2] = 0;
+
+    let base_f: i32 = GFX_F_TEXT_BASE + i * GFX_TEXT_STRIDE_F32;
+    gfx_cmd_f32[base_f + 0] = x;
+    gfx_cmd_f32[base_f + 1] = y;
+    gfx_cmd_f32[base_f + 2] = r;
+    gfx_cmd_f32[base_f + 3] = g;
+    gfx_cmd_f32[base_f + 4] = b;
+    gfx_cmd_f32[base_f + 5] = a;
+
+    gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
+}
+
 function gfx_cmd_set_line_count(count: i32): void {
     if (count < 0) { count = 0; }
     if (count > GFX_MAX_LINES) { count = GFX_MAX_LINES; }
