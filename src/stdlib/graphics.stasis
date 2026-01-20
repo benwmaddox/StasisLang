@@ -12,9 +12,11 @@ import "../gfx_cmd.stasis";
 import "../host_window_request.stasis";
 
 extern function time(): i32;
-extern function get_time_ms(): i32;
-extern function get_time_us(): i32;
 extern function sleep_ms(ms: i32): void;
+
+// Hot-path reads are HostFrame snapshot-only (no host calls).
+function get_time_ms(): i32 { return host_time_ms(); }
+function get_time_us(): i32 { return host_time_us(); }
 
 // Startup / assets (host calls; avoid in hot paths)
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
