@@ -9,7 +9,7 @@ public sealed record FunctionDeclarationSyntax(
     Token? ExportKeyword,
     Token? ExternKeyword,
     Token FunctionKeyword,
-    IReadOnlyList<Token> Attributes,
+    IReadOnlyList<FunctionAttributeSyntax> Attributes,
     Token Name,
     IReadOnlyList<ParameterSyntax> Parameters,
     TypeSyntax? ReturnType,

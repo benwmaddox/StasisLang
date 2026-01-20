@@ -125,7 +125,9 @@ FunctionDecl     -> ExportOpt ExternOpt
 ```
 AttributeListOpt -> Attribute AttributeListOpt
                   | <empty>
-Attribute        -> "@" Identifier
+Attribute        -> "@" Identifier AttributeValueOpt
+AttributeValueOpt -> "(" StringLiteral ")"
+                   | <empty>
 ```
 
 ```
