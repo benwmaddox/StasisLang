@@ -12,7 +12,7 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 
 ### Graphics Command Buffers
 
-- [ ] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
+- [x] Command buffers: keep persistent prebuilt streams (only rewrite dirty ranges; avoid rebuilding every tick).
 - [ ] Command buffers: optimize runtime submit fast paths (avoid per-sprite overhead when debug hashing is off; build VBOs directly from streams).
 - [ ] Command buffers: evolve text output toward cached glyph runs (avoid per-frame UTF-8 copies + parsing).
 
