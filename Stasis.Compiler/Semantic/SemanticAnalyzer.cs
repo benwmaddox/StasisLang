@@ -41,6 +41,7 @@ public sealed class SemanticAnalyzer
         DeclareGlobals(compilationUnit);
         DeclareConstants(compilationUnit);
         DeclareFunctions(compilationUnit);
+        ValidateFunctionDeclarations(compilationUnit);
 
         foreach (var decl in compilationUnit.Declarations)
         {
@@ -56,6 +57,29 @@ public sealed class SemanticAnalyzer
         }
 
         return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
+    }
+
+    private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
+    {
+        foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
+        {
+            var hasExternAttr = fn.Attributes.Any(a => string.Equals(a.Text, "extern", StringComparison.Ordinal));
+
+            if (fn.Body is null)
+            {
+                if (!fn.IsExtern && !hasExternAttr)
+                {
+                    _diagnostics.Add(new Diagnostic($"Function '{fn.Name.Text}' is missing a body. Add a body or mark it as extern.", fn.Name.Span));
+                }
+            }
+            else
+            {
+                if (hasExternAttr)
+                {
+                    _diagnostics.Add(new Diagnostic($"Function '{fn.Name.Text}' has a body and cannot be marked @extern.", fn.Name.Span));
+                }
+            }
+        }
     }
 
     private void DeclareBuiltIns()

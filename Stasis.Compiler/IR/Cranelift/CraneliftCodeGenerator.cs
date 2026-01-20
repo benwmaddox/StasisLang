@@ -758,7 +758,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!func.IsExtern)
+            if (!func.IsExtern && !HasExternAttribute(func))
             {
                 continue;
             }
@@ -778,6 +778,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
+            var externName = GetExternLinkName(func) ?? func.Name.Text;
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);
@@ -786,8 +787,30 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 .Select(p => NormalizeFunctionType(builder.TypeMapper.Map(ResolveType(p.Type, symbols))))
                 .ToArray();
 
-            builder.DeclareExternal(func.Name.Text, returnType, paramTypes);
+            builder.DeclareExternal(externName, returnType, paramTypes);
         }
+    }
+
+    private static bool HasExternAttribute(FunctionDeclarationSyntax func) =>
+        func.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
+
+    private static string? GetExternLinkName(FunctionDeclarationSyntax func)
+    {
+        var raw = func.Attributes
+            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
+            .StringValue;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            return raw.Substring(1, raw.Length - 2);
+        }
+
+        return raw;
     }
 
     private static void EmitGlobals(
