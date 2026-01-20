@@ -1,0 +1,46 @@
+struct ClearInner {
+    a: i32;
+    b: u8[4];
+}
+
+struct ClearOuter {
+    x: i32;
+    inner: ClearInner;
+    bytes: u8[8];
+}
+
+struct ClearUnit {
+    hp: i32;
+    energy: u8;
+}
+
+global clear_arr: u8[8];
+global clear_state: ClearOuter;
+global clear_units: ClearUnit[2];
+
+test `array clear zeros bytes`() {
+    clear_arr[0] = 1;
+    clear_arr[7] = 2;
+    clear_arr.clear();
+    return clear_arr[0] == 0 && clear_arr[7] == 0;
+}
+
+test `struct clear zeros fields`() {
+    clear_state.x = 7;
+    clear_state.inner.a = 9;
+    clear_state.inner.b[2] = 3;
+    clear_state.bytes[1] = 5;
+    clear_state.clear();
+    return clear_state.x == 0
+        && clear_state.inner.a == 0
+        && clear_state.inner.b[2] == 0
+        && clear_state.bytes[1] == 0;
+}
+
+test `struct array clear zeros soa fields`() {
+    clear_units[0].hp = 7;
+    clear_units[1].energy = 9;
+    clear_units.clear();
+    return clear_units[0].hp == 0
+        && clear_units[1].energy == 0;
+}

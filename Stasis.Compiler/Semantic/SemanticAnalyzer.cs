@@ -821,6 +821,11 @@ public sealed class SemanticAnalyzer
                 {
                     AnalyzeExpression(arg, scope);
                 }
+                if (c.Callee is MemberAccessExpressionSyntax member &&
+                    string.Equals(member.Member.Text, "clear", StringComparison.Ordinal))
+                {
+                    ValidateClearCall(c, member, scope);
+                }
                 break;
             case OperatorCallExpressionSyntax op:
                 AnalyzeExpression(op.Receiver, scope);
@@ -856,6 +861,82 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(bin.Right, scope);
                 ValidateBinary(bin, scope);
                 break;
+        }
+    }
+
+    private void ValidateClearCall(CallExpressionSyntax call, MemberAccessExpressionSyntax member, Dictionary<string, Symbol> scope)
+    {
+        if (call.Arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("clear() takes no arguments.", call.Span));
+            return;
+        }
+
+        // Require the root receiver to be a global (globals + global struct fields). Avoids ambiguous semantics for locals.
+        var root = member.Receiver;
+        while (root is MemberAccessExpressionSyntax m)
+        {
+            root = m.Receiver;
+        }
+
+        if (root is not IdentifierExpressionSyntax id)
+        {
+            _diagnostics.Add(new Diagnostic("clear() receiver must be a global or global field.", member.Receiver.Span));
+            return;
+        }
+
+        if (scope.TryGetValue(id.Identifier.Text, out var localSym) && localSym.Kind == SymbolKind.Local)
+        {
+            _diagnostics.Add(new Diagnostic("clear() is only supported on globals and global struct fields.", member.Receiver.Span));
+            return;
+        }
+
+        if (!_symbols.TryGetValue(id.Identifier.Text, out var globalSym) || globalSym.Kind != SymbolKind.Global)
+        {
+            _diagnostics.Add(new Diagnostic("clear() receiver must be a global or global field.", member.Receiver.Span));
+            return;
+        }
+
+        var recvType = ResolveExpressionType(member.Receiver, scope);
+        if (recvType is null)
+        {
+            _diagnostics.Add(new Diagnostic("clear() receiver type could not be resolved.", member.Receiver.Span));
+            return;
+        }
+
+        var ok = recvType switch
+        {
+            ArrayTypeSymbol arr => arr.Size > 0 && IsZeroableForClear(arr),
+            NamedTypeSymbol named when _structs.ContainsKey(named.TypeName) => IsZeroableForClear(named),
+            _ => false
+        };
+
+        if (!ok)
+        {
+            _diagnostics.Add(new Diagnostic($"clear() is only supported for zeroable fixed arrays and structs; got '{FormatType(recvType)}'.", member.Receiver.Span));
+        }
+    }
+
+    private bool IsZeroableForClear(TypeSymbol type)
+    {
+        switch (type)
+        {
+            case PrimitiveTypeSymbol prim:
+                return prim.PrimitiveName is "bool" or "u8" or "u16" or "u32" or "i32" or "f32" or "f64";
+            case ArrayTypeSymbol arr:
+                return arr.Size > 0 && IsZeroableForClear(arr.ElementType);
+            case NamedTypeSymbol named when _structs.TryGetValue(named.TypeName, out var structDecl):
+                foreach (var field in structDecl.Fields)
+                {
+                    var fieldType = ResolveType(field.Type);
+                    if (fieldType is null || !IsZeroableForClear(fieldType))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            default:
+                return false;
         }
     }
 
