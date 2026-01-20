@@ -25,18 +25,32 @@ const HOST_I_TICK_INDEX: i32 = 10;
 const HOST_I_RESIZED: i32 = 11;
 const HOST_I_SCREEN_W_PX: i32 = 12;
 const HOST_I_SCREEN_H_PX: i32 = 13;
-const HOST_I_POINTER_BASE: i32 = 16; // reserve space for future fields before pointers
+
+// vNext header
+const HOST_I_VERSION: i32 = 14;
+const HOST_I_FLAGS: i32 = 15;
+const HOST_I_TICK_HZ: i32 = 16; // 0 if unknown / not provided
+
+// Convenience mirrors (avoid bitwise ops in Stasis source).
+const HOST_I_WINDOW_FOCUSED: i32 = 17;
+const HOST_I_WINDOW_MINIMIZED: i32 = 18;
+
+// Keyboard state (SDL scancodes), one i32 per scancode (0/1).
+const HOST_I_KEY_BASE: i32 = 32;
+const HOST_I_KEY_COUNT: i32 = 512;
+
+// Reserve space for future fields before pointers.
+const HOST_I_POINTER_BASE: i32 = 544; // HOST_I_KEY_BASE + HOST_I_KEY_COUNT
 const HOST_I_POINTER_STRIDE: i32 = 4; // id, is_down, went_down, went_up
-const HOST_I32_COUNT: i32 = 64;
+const HOST_I32_COUNT: i32 = 768;
 
 // f32 layout
 const HOST_F_POINTER_BASE: i32 = 0;
 const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
 const HOST_F32_COUNT: i32 = 64;
 
-global host_i32: i32[64];
+global host_i32: i32[768];
 global host_f32: f32[64];
-global host_keys: u8[512];
 
 function host_tick_index(): i32 { return host_i32[HOST_I_TICK_INDEX]; }
 function host_time_ms(): i32 { return host_i32[HOST_I_TIME_MS]; }
@@ -52,10 +66,15 @@ function host_quit_requested(): bool { return host_i32[HOST_I_QUIT_REQUESTED] !=
 function host_resized(): bool { return host_i32[HOST_I_RESIZED] != 0; }
 function host_screen_w_px(): i32 { return host_i32[HOST_I_SCREEN_W_PX]; }
 function host_screen_h_px(): i32 { return host_i32[HOST_I_SCREEN_H_PX]; }
+function host_version(): i32 { return host_i32[HOST_I_VERSION]; }
+function host_flags(): i32 { return host_i32[HOST_I_FLAGS]; }
+function host_tick_hz(): i32 { return host_i32[HOST_I_TICK_HZ]; }
+function host_window_focused(): bool { return host_i32[HOST_I_WINDOW_FOCUSED] != 0; }
+function host_window_minimized(): bool { return host_i32[HOST_I_WINDOW_MINIMIZED] != 0; }
 
 function host_key_down(scancode: i32): bool {
     if (scancode < 0 || scancode >= 512) { return false; }
-    return host_keys[scancode] != 0;
+    return host_i32[HOST_I_KEY_BASE + scancode] != 0;
 }
 
 function host_pointer_id(index: i32): i32 {

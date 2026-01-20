@@ -6,8 +6,8 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 
 ### Runtime / Host
 
-- [ ] HostFrame vNext: add `version`, `flags`, `tick_index`, and optional `tick_hz` so `tick()` can be snapshot-only.
-- [ ] HostFrame: add keyboard state + quit/focus flags so programs can avoid `is_key_down`/`should_quit` imports.
+- [x] HostFrame vNext: add `version`, `flags`, `tick_index`, and optional `tick_hz` so `tick()` can be snapshot-only.
+- [x] HostFrame: add keyboard state + quit/focus flags so programs can avoid `is_key_down`/`should_quit` imports.
 - [ ] Host ABI cleanup: route hot-path reads through `host_*` globals; remove per-tick query calls from samples.
 
 ### Graphics Command Buffers

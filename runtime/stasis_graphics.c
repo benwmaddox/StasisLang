@@ -531,6 +531,9 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
+    const int32_t host_version = 1;
+    const int i32_key_base = 32;
+    const int i32_key_count = 512;
 
     /* i32 header */
     out_i32[0] = stasis_get_time_ms();
@@ -555,9 +558,39 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[12] = screen_w;
     out_i32[13] = screen_h;
 
-    for (int i = 14; i < 16; i++) out_i32[i] = 0;
+    /* vNext */
+    out_i32[14] = host_version;
 
-    const int i32_base = 16;
+    int32_t flags = 0;
+    if (out_i32[9] != 0) flags |= 1; /* quit requested */
+    if (out_i32[11] != 0) flags |= 8; /* resized */
+
+    int32_t focused = 0;
+    int32_t minimized = 0;
+    if (g_window) {
+        const Uint32 wf = SDL_GetWindowFlags(g_window);
+        focused = ((wf & SDL_WINDOW_INPUT_FOCUS) != 0) ? 1 : 0;
+        minimized = ((wf & SDL_WINDOW_MINIMIZED) != 0) ? 1 : 0;
+        if (focused) flags |= 2;
+        if (minimized) flags |= 4;
+    }
+
+    out_i32[15] = flags;
+    out_i32[16] = 0; /* tick_hz: unknown */
+    out_i32[17] = focused;
+    out_i32[18] = minimized;
+
+    /* Reserved */
+    for (int i = 19; i < 32; i++) out_i32[i] = 0;
+
+    /* Keyboard state: one i32 per scancode (0/1). */
+    int num_keys = 0;
+    const Uint8* keys = SDL_GetKeyboardState(&num_keys);
+    for (int i = 0; i < i32_key_count; i++) {
+        out_i32[i32_key_base + i] = (keys && i < num_keys && keys[i]) ? 1 : 0;
+    }
+
+    const int i32_base = i32_key_base + i32_key_count;
     const int i32_stride = 4;
     const int f32_base = 0;
     const int f32_stride = 6;
@@ -576,7 +609,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
         out_f32[f32_base + i * f32_stride + 5] = p->y_n;
     }
 
-    for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 64; i++) out_i32[i] = 0;
+    for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 768; i++) out_i32[i] = 0;
     for (int i = f32_base + STASIS_MAX_POINTERS * f32_stride; i < 64; i++) out_f32[i] = 0.0f;
 }
 
