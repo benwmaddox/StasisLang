@@ -105,6 +105,18 @@ function handle_pointer_input_game(): void {
                 let ui_h: f32 = state.layout.ui_h;
                 let handled: i32 = 0;
 
+                if (state.phase == Phase.Setup) {
+                    let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
+                    if (in_virtual) {
+                        let wx: f32 = screen_to_play_x(sx);
+                        let wy: f32 = screen_to_play_y(sy);
+                        if (point_in_rect(wx, wy, VIRTUAL_W - 112.0, 62.0, 96.0, 28.0)) {
+                            brickout_try_start_battle();
+                            handled = 1;
+                        }
+                    }
+                }
+
                 // Toggle shop when tapping the handle.
                 let handle_h: f32 = 22.0;
                 let handle_y: f32 = ui_y + ui_h - handle_h;
