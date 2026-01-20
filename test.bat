@@ -7,7 +7,7 @@ set STASIS_CRANELIFT_AOT=%CD%\tools\cranelift-aot\target\release\stasis-cranelif
 set STASIS_CRANELIFT_AOT_SERVER=1
 set STASIS_CRANELIFT_RUNNER_SERVER=1
 
-dotnet test -- RunConfiguration.MaxCpuCount=1
+dotnet test Stasis.sln -c Release -- RunConfiguration.MaxCpuCount=1
 if errorlevel 1 exit /b 1
 
 set STASIS_SUPPRESS_WARNINGS=1

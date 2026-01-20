@@ -182,6 +182,25 @@ Named via:
 struct Player { ... }
 ```
 
+### clear()
+
+`clear()` is a convenience operation for bulk-zeroing global state. It is *not* a general-purpose memory primitive and does not expose `memset` to user code.
+
+Rules:
+
+- `clear()` takes no arguments: `some_global.clear()`.
+- The receiver must be a global or a global struct field (not a local).
+- Supported receivers:
+  - Fixed-size arrays of zeroable primitives (`u8/u16/u32/i32/f32/f64/bool`)
+  - Struct globals whose fields recursively consist of those fixed-size arrays and zeroable primitives
+  - Global arrays of structs where the struct fields are zeroable primitives (clears all backing storage)
+
+AoS vs SoA (important):
+
+- Stasis *syntax* can look AoS (e.g. `global units: Unit[8]; units[i].hp = 1;`) but the compiler lowers global arrays of structs to SoA storage (separate arrays per field).
+- `units.clear()` means: clear the entire SoA backing storage for `units` (each field array), not "loop the AoS and assign a default struct".
+- Global struct instances (e.g. `global state: GameState;`) are also lowered to flattened globals per field; `state.clear()` clears all backing globals for the instance.
+
 ### Enum Types
 
 ```

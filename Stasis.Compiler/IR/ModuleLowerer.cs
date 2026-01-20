@@ -2206,6 +2206,45 @@ public sealed class ModuleLowerer
                 return;
             }
 
+            if (array.ElementType is NamedTypeSymbol elemNamed && _structs.TryGetValue(elemNamed.TypeName, out var structDecl))
+            {
+                // Global AoS struct array lowers to SoA field arrays (e.g., global units: Unit[8] -> Unit_hp[], Unit_x[], ...).
+                // This is a compiler storage detail; clear() means "zero all backing SoA arrays".
+                foreach (var field in structDecl.Fields)
+                {
+                    var fieldType = ResolveType(field.Type, _symbols);
+                    if (fieldType is null)
+                    {
+                        continue;
+                    }
+
+                    // Only zeroable primitive scalars/arrays-of-primitive are supported for now.
+                    if (fieldType is PrimitiveTypeSymbol primField &&
+                        primField.PrimitiveName is ("u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool"))
+                    {
+                        var backingGlobal = $"{elemNamed.TypeName}_{field.Identifier.Text}";
+                        EmitClearGlobalArray(builder, backingGlobal, primField, array.Size, field.Span);
+                        continue;
+                    }
+
+                    if (fieldType is ArrayTypeSymbol arrField &&
+                        arrField.Size > 0 &&
+                        arrField.ElementType is PrimitiveTypeSymbol primElem &&
+                        primElem.PrimitiveName is ("u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool"))
+                    {
+                        // Array fields inside struct arrays are laid out as a byte buffer in the global lowering.
+                        // Treat as u8 backing for clearing.
+                        var backingGlobal = $"{elemNamed.TypeName}_{field.Identifier.Text}";
+                        EmitClearGlobalArray(builder, backingGlobal, new PrimitiveTypeSymbol("u8"), array.Size * arrField.Size, field.Span);
+                        continue;
+                    }
+
+                    AddDiagnostic("clear() only supports struct arrays with zeroable primitive fields.", field.Span);
+                }
+
+                return;
+            }
+
             if (array.ElementType is not PrimitiveTypeSymbol prim ||
                 prim.PrimitiveName is not ("u8" or "u16" or "u32" or "i32" or "f32" or "f64" or "bool"))
             {

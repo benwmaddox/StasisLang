@@ -750,6 +750,24 @@ public sealed class CraneliftFunctionBuilder
                 return ZeroI32();
             }
 
+            if (array.ElementType is NamedTypeSymbol elemNamed && _structs.TryGetValue(elemNamed.TypeName, out var elemStructDecl))
+            {
+                // Global AoS struct array lowers to SoA field arrays (e.g., global units: Unit[8] -> Unit__hp[], Unit__x[], ...).
+                foreach (var field in elemStructDecl.Fields)
+                {
+                    var fieldType = ResolveType(field.Type);
+                    if (fieldType is PrimitiveTypeSymbol primField && IsZeroablePrimitive(primField.PrimitiveName))
+                    {
+                        var backingGlobal = $"{elemNamed.TypeName}__{field.Identifier.Text}";
+                        EmitClearGlobalArray(backingGlobal, primField.PrimitiveName, array.Size);
+                        continue;
+                    }
+
+                    _diagnostics.Add(new Diagnostic("clear() only supports struct arrays with zeroable primitive fields.", field.Span));
+                }
+                return ZeroI32();
+            }
+
             if (array.ElementType is not PrimitiveTypeSymbol prim || !IsZeroablePrimitive(prim.PrimitiveName))
             {
                 _diagnostics.Add(new Diagnostic("clear() only supports arrays of zeroable primitives.", receiver.Span));
