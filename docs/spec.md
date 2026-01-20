@@ -519,6 +519,7 @@ Global arrays of struct references become SoA automatically.
   - If multiple imports introduce the same member name, unqualified references are ambiguous and should produce a diagnostic.
 - Imports are transitive for compilation: the build graph includes the imported file and recursively includes its imports.
 - Compiled via signature-first pass.
+- Platform variants: if an import resolves to `name.stasis` and that file does not exist, the importer will fall back to `name.{platform}.stasis` (e.g. `name.windows.stasis`).
 
 ---
 
