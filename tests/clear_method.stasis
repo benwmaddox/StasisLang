@@ -9,8 +9,14 @@ struct ClearOuter {
     bytes: u8[8];
 }
 
+struct ClearUnit {
+    hp: i32;
+    energy: u8;
+}
+
 global clear_arr: u8[8];
 global clear_state: ClearOuter;
+global clear_units: ClearUnit[2];
 
 test `array clear zeros bytes`() {
     clear_arr[0] = 1;
@@ -31,3 +37,10 @@ test `struct clear zeros fields`() {
         && clear_state.bytes[1] == 0;
 }
 
+test `struct array clear zeros soa fields`() {
+    clear_units[0].hp = 7;
+    clear_units[1].energy = 9;
+    clear_units.clear();
+    return clear_units[0].hp == 0
+        && clear_units[1].energy == 0;
+}
