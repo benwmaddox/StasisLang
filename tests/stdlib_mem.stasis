@@ -4,6 +4,8 @@ global mem_src: u8[8];
 global mem_dst: u8[8];
 global mem_a: u8[4];
 global mem_b: u8[4];
+global mem_overlap: u8[8];
+global mem_i32: i32[4];
 
 test `mem_copy copies bytes`() {
     mem_src[0] = 1;
@@ -31,6 +33,30 @@ test `mem_set writes value`() {
         && mem_dst[1] == 7
         && mem_dst[2] == 7
         && mem_dst[3] == 7;
+}
+
+test `mem_copy handles overlap`() {
+    mem_overlap[0] = 1;
+    mem_overlap[1] = 2;
+    mem_overlap[2] = 3;
+    mem_overlap[3] = 4;
+    mem_overlap[4] = 5;
+    mem_overlap[5] = 6;
+    mem_overlap[6] = 7;
+    mem_overlap[7] = 8;
+
+    // Copy right by one (overlap).
+    mem_copy_u8(mem_overlap, 8, 1, mem_overlap, 8, 0, 7);
+    return mem_overlap[1] == 1
+        && mem_overlap[2] == 2
+        && mem_overlap[3] == 3
+        && mem_overlap[7] == 7;
+}
+
+test `mem_set_i32 writes values`() {
+    mem_set_i32(mem_i32, 4, 0, 42, 4);
+    return mem_i32[0] == 42
+        && mem_i32[3] == 42;
 }
 
 test `mem_zero clears bytes`() {

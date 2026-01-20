@@ -100,9 +100,6 @@ public sealed class SemanticAnalyzer
         AddSymbol("sys_memmove_u8", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("sys_memmove_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
         AddSymbol("sys_memmove_f32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("sys_memset_u8", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("sys_memset_i32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
-        AddSymbol("sys_memset_f32", SymbolKind.Function, new VoidTypeSymbol(), new SourceSpan(0, 0));
 
         // Legacy math functions (to be renamed to math_*)
         AddSymbol("sin", SymbolKind.Function, new PrimitiveTypeSymbol("f32"), new SourceSpan(0, 0));
@@ -404,9 +401,17 @@ public sealed class SemanticAnalyzer
 
         void NoteWriteTarget(ExpressionSyntax target, HashSet<int> assignedInScope)
         {
-            if (target is IdentifierExpressionSyntax id && TryResolveLocalId(id.Identifier.Text, out var localId))
+            switch (target)
             {
-                assignedInScope.Add(localId);
+                case IdentifierExpressionSyntax id when TryResolveLocalId(id.Identifier.Text, out var localId):
+                    assignedInScope.Add(localId);
+                    return;
+                case MemberAccessExpressionSyntax member:
+                    NoteWriteTarget(member.Receiver, assignedInScope);
+                    return;
+                case ArrayAccessExpressionSyntax array:
+                    NoteWriteTarget(array.Receiver, assignedInScope);
+                    return;
             }
         }
 
@@ -417,10 +422,13 @@ public sealed class SemanticAnalyzer
                 case IdentifierExpressionSyntax:
                     return;
                 case MemberAccessExpressionSyntax member:
-                    AnalyzeExpr(member.Receiver, assignedInScope);
+                    // Writing through a receiver does not require the receiver local to be "definitely assigned"
+                    // (e.g. `buf[i] = ...`, `s.field = ...`). Treat the receiver as an lvalue base.
+                    AnalyzeLValue(member.Receiver, assignedInScope);
                     return;
                 case ArrayAccessExpressionSyntax array:
-                    AnalyzeExpr(array.Receiver, assignedInScope);
+                    // Same rule as member access: the receiver is an lvalue base.
+                    AnalyzeLValue(array.Receiver, assignedInScope);
                     AnalyzeExpr(array.Index, assignedInScope);
                     return;
                 default:
