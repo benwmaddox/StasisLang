@@ -139,6 +139,20 @@ function Find-NewProcessIdByName([string]$processName, [int[]]$existingPids, [in
     return -1
 }
 
+function Find-PreferredProcessIdByName([string]$processName, [int[]]$existingPids, [int]$timeoutMs = 15000) {
+    $procId = Find-NewProcessIdByName -processName $processName -existingPids $existingPids -timeoutMs $timeoutMs
+    if ($procId -gt 0) { return $procId }
+
+    $procs = Get-Process -Name $processName -ErrorAction SilentlyContinue
+    if ($null -eq $procs -or $procs.Count -eq 0) { return -1 }
+
+    # If the host is running in server mode, a new process may not spawn.
+    # Fall back to the newest existing process (best effort).
+    $newest = $procs | Sort-Object StartTime -Descending | Select-Object -First 1
+    if ($null -eq $newest) { return -1 }
+    return $newest.Id
+}
+
 function Save-ClientScreenshot([IntPtr]$hWnd, [string]$path) {
     $rect = New-Object Win32+RECT
     if (-not [Win32]::GetClientRect($hWnd, [ref]$rect)) {
@@ -252,7 +266,7 @@ function Run-And-Screenshot([string]$root, [string]$relativeStasisPath) {
             # Prefer PID-based discovery (more reliable for fullscreen/borderless windows).
             $runnerPid = -1
             if ($Backend -ieq "cranelift") {
-                $runnerPid = Find-NewProcessIdByName -processName "stasis_runner" -existingPids $existingRunnerPids -timeoutMs 120000
+                $runnerPid = Find-PreferredProcessIdByName -processName "stasis_runner" -existingPids $existingRunnerPids -timeoutMs 120000
             }
 
             $hWnd = Wait-ForWindow -expectedTitle $title -maybePid $runnerPid -timeoutMs ($WindowTimeoutSeconds * 1000)
@@ -358,30 +372,30 @@ $cliProj = Join-Path $root "Stasis.Cli\\Stasis.Cli.csproj"
 Write-Host "Building CLI: $cliProj ($Configuration)"
 & dotnet build --nologo --configuration $Configuration $cliProj | Out-Null
 
-$files = @()
+$targetFiles = @()
 if ($Files.Count -gt 0) {
-    $files += $Files
+    $targetFiles += $Files
 } else {
     if (Get-Command rg -ErrorAction SilentlyContinue) {
-        $files += (rg -l 'init_window\(' samples examples | Where-Object { $_ -like "*.stasis" } | Sort-Object)
+        $targetFiles += (rg -l 'init_window\(' samples examples | Where-Object { $_ -like "*.stasis" } | Sort-Object)
     } else {
         $candidates = Get-ChildItem -Path (Join-Path $root "samples"), (Join-Path $root "examples") -Recurse -Filter "*.stasis" -ErrorAction SilentlyContinue
         foreach ($c in $candidates) {
             if (Select-String -Path $c.FullName -Pattern "init_window(" -SimpleMatch -Quiet) {
-                $files += $c.FullName.Substring($root.Length).TrimStart("\\" , "/")
+                $targetFiles += $c.FullName.Substring($root.Length).TrimStart("\\" , "/")
             }
         }
-        $files = $files | Sort-Object
+        $targetFiles = $targetFiles | Sort-Object
     }
 }
 
-if ($files.Count -eq 0) {
+if ($targetFiles.Count -eq 0) {
     throw "No windowed .stasis samples found (init_window)."
 }
 
 $saved = @()
 $failures = @()
-foreach ($f in $files) {
+foreach ($f in $targetFiles) {
     try {
         $p = Run-And-Screenshot -root $root -relativeStasisPath $f
         if ($p) { $saved += $p }

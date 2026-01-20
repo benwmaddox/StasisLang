@@ -64,6 +64,8 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 #define STASIS_EXPORT __attribute__((visibility("default")))
 #endif
 
+STASIS_EXPORT void stasis_set_window_size(int width, int height);
+
 /* Global state */
 static SDL_Window* g_window = NULL;
 static SDL_GLContext g_gl_context = NULL;
@@ -2394,6 +2396,14 @@ STASIS_EXPORT int stasis_get_startup_test_success(void) {
  * Returns 1 on success, 0 on failure
  */
 STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
+    if (g_window) {
+        if (title && *title) {
+            SDL_SetWindowTitle(g_window, title);
+        }
+        stasis_set_window_size(width, height);
+        return 1;
+    }
+
     SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
