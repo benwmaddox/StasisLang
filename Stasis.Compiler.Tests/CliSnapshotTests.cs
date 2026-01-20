@@ -136,15 +136,32 @@ public class CliSnapshotTests
 
     private static ProcessStartInfo CreateCliStartInfo(string cliProj, string root, string configuration, string[] args)
     {
+        // Use `dotnet <dll>` instead of `dotnet run` so we don't execute the generated apphost .exe.
+        // Some Windows environments enforce Application Control policies that can block running newly-built exe files.
+        var dll = FindCliDll(root, configuration);
         return new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --no-build --configuration {configuration} --project \"{cliProj}\" -- {string.Join(" ", args)}",
+            Arguments = $"\"{dll}\" {string.Join(" ", args)}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             WorkingDirectory = root
         };
+    }
+
+    private static string FindCliDll(string root, string configuration)
+    {
+        var baseDir = Path.Combine(root, CliProject, "bin", configuration);
+        if (!Directory.Exists(baseDir))
+        {
+            throw new InvalidOperationException($"CLI build output not found: {baseDir}");
+        }
+
+        var candidates = Directory.GetFiles(baseDir, $"{CliProject}.dll", SearchOption.AllDirectories);
+        var preferred = candidates.FirstOrDefault(p => p.Contains($"{Path.DirectorySeparatorChar}net9.0{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+        return preferred ?? candidates.FirstOrDefault()
+            ?? throw new InvalidOperationException($"CLI dll not found under: {baseDir}");
     }
 
     private static void EnsureCliBuilt(string cliProj, string root, string configuration)

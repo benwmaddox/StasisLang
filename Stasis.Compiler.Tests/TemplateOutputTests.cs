@@ -88,10 +88,13 @@ public class TemplateOutputTests
 
         EnsureCliBuilt(cliProj, root, config);
 
+        // Use `dotnet <dll>` instead of `dotnet run` so we don't execute the generated apphost .exe.
+        // Some Windows environments enforce Application Control policies that can block running newly-built exe files.
+        var cliDll = FindCliDll(root, config);
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --no-build --configuration {config} --project \"{cliProj}\" -- {string.Join(" ", args)}",
+            Arguments = $"\"{cliDll}\" {string.Join(" ", args)}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -117,6 +120,20 @@ public class TemplateOutputTests
         process.WaitForExit();
 
         return (process.ExitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static string FindCliDll(string root, string configuration)
+    {
+        var baseDir = Path.Combine(root, CliProject, "bin", configuration);
+        if (!Directory.Exists(baseDir))
+        {
+            throw new InvalidOperationException($"CLI build output not found: {baseDir}");
+        }
+
+        var candidates = Directory.GetFiles(baseDir, $"{CliProject}.dll", SearchOption.AllDirectories);
+        var preferred = candidates.FirstOrDefault(p => p.Contains($"{Path.DirectorySeparatorChar}net9.0{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase));
+        return preferred ?? candidates.FirstOrDefault()
+            ?? throw new InvalidOperationException($"CLI dll not found under: {baseDir}");
     }
 
     private static bool TryFindLlvmTooling()
