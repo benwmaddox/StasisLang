@@ -668,6 +668,12 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerCall(CallExpressionSyntax call)
     {
+        if (call.Callee is MemberAccessExpressionSyntax member &&
+            string.Equals(member.Member.Text, "clear", StringComparison.Ordinal))
+        {
+            return LowerClearCall(member.Receiver, call.Arguments);
+        }
+
         // Get function name
         string funcName;
         if (call.Callee is IdentifierExpressionSyntax id)
@@ -720,6 +726,297 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {result} = call %{callName}({argList})");
 
         return result;
+    }
+
+    private string LowerClearCall(ExpressionSyntax receiver, IReadOnlyList<ExpressionSyntax> arguments)
+    {
+        if (arguments.Count != 0)
+        {
+            _diagnostics.Add(new Diagnostic("clear() takes no arguments.", receiver.Span));
+            return ZeroI32();
+        }
+
+        if (!TryResolveClearGlobalPrefix(receiver, out var prefix, out var receiverType))
+        {
+            _diagnostics.Add(new Diagnostic("clear() receiver must be a global or global field.", receiver.Span));
+            return ZeroI32();
+        }
+
+        if (receiverType is ArrayTypeSymbol array)
+        {
+            if (array.Size <= 0)
+            {
+                _diagnostics.Add(new Diagnostic("clear() requires a fixed-size array.", receiver.Span));
+                return ZeroI32();
+            }
+
+            if (array.ElementType is NamedTypeSymbol elemNamed && _structs.TryGetValue(elemNamed.TypeName, out var elemStructDecl))
+            {
+                // Global AoS struct array lowers to SoA field arrays (e.g., global units: Unit[8] -> Unit__hp[], Unit__x[], ...).
+                foreach (var field in elemStructDecl.Fields)
+                {
+                    var fieldType = ResolveType(field.Type);
+                    if (fieldType is PrimitiveTypeSymbol primField && IsZeroablePrimitive(primField.PrimitiveName))
+                    {
+                        var backingGlobal = $"{elemNamed.TypeName}__{field.Identifier.Text}";
+                        EmitClearGlobalArray(backingGlobal, primField.PrimitiveName, array.Size);
+                        continue;
+                    }
+
+                    _diagnostics.Add(new Diagnostic("clear() only supports struct arrays with zeroable primitive fields.", field.Span));
+                }
+                return ZeroI32();
+            }
+
+            if (array.ElementType is not PrimitiveTypeSymbol prim || !IsZeroablePrimitive(prim.PrimitiveName))
+            {
+                _diagnostics.Add(new Diagnostic("clear() only supports arrays of zeroable primitives.", receiver.Span));
+                return ZeroI32();
+            }
+
+            EmitClearGlobalArray(prefix, prim.PrimitiveName, array.Size);
+            return ZeroI32();
+        }
+
+        if (receiverType is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            EmitClearStruct(prefix, structDecl);
+            return ZeroI32();
+        }
+
+        _diagnostics.Add(new Diagnostic("clear() is only supported for zeroable fixed arrays and structs.", receiver.Span));
+        return ZeroI32();
+    }
+
+    private bool TryResolveClearGlobalPrefix(ExpressionSyntax receiver, out string prefix, out TypeSymbol? receiverType)
+    {
+        prefix = string.Empty;
+        receiverType = GetExpressionType(receiver);
+
+        if (receiver is IdentifierExpressionSyntax id)
+        {
+            if (_locals.ContainsKey(id.Identifier.Text))
+            {
+                return false;
+            }
+
+            prefix = id.Identifier.Text;
+            return _symbols.TryGetValue(prefix, out var sym) && sym.Kind == SymbolKind.Global;
+        }
+
+        if (receiver is MemberAccessExpressionSyntax member)
+        {
+            if (!TryResolveFlattenedMember(member, out var flattened, out _))
+            {
+                return false;
+            }
+
+            var root = (ExpressionSyntax)member;
+            while (root is MemberAccessExpressionSyntax m)
+            {
+                root = m.Receiver;
+            }
+
+            if (root is not IdentifierExpressionSyntax rootId)
+            {
+                return false;
+            }
+
+            if (_locals.ContainsKey(rootId.Identifier.Text))
+            {
+                return false;
+            }
+
+            if (!_symbols.TryGetValue(rootId.Identifier.Text, out var sym) || sym.Kind != SymbolKind.Global)
+            {
+                return false;
+            }
+
+            prefix = flattened;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsZeroablePrimitive(string name) =>
+        name is "bool" or "u8" or "u16" or "u32" or "i32" or "f32" or "f64";
+
+    private void EmitClearStruct(string prefix, StructDeclarationSyntax structDecl)
+    {
+        foreach (var field in structDecl.Fields)
+        {
+            var fieldPrefix = $"{prefix}__{field.Identifier.Text}";
+
+            if (field.Type is NamedTypeSyntax namedField && _structs.TryGetValue(namedField.Name, out var nestedStruct))
+            {
+                EmitClearStruct(fieldPrefix, nestedStruct);
+                continue;
+            }
+
+            if (field.Type is ArrayTypeSyntax arrayType)
+            {
+                if (!int.TryParse(arrayType.SizeToken?.Text ?? string.Empty, out var count) || count <= 0)
+                {
+                    _diagnostics.Add(new Diagnostic("clear() requires fixed-size arrays inside structs.", field.Span));
+                    continue;
+                }
+
+                if (arrayType.ElementType is NamedTypeSyntax elemNamed && _structs.TryGetValue(elemNamed.Name, out var elemStruct))
+                {
+                    foreach (var nestedField in elemStruct.Fields)
+                    {
+                        if (nestedField.Type is not NamedTypeSyntax nestedLeaf)
+                        {
+                            _diagnostics.Add(new Diagnostic("clear() only supports scalar fields inside struct arrays.", nestedField.Span));
+                            continue;
+                        }
+
+                        var leafType = ResolveType(nestedLeaf);
+                        if (leafType is not PrimitiveTypeSymbol leafPrim || !IsZeroablePrimitive(leafPrim.PrimitiveName))
+                        {
+                            _diagnostics.Add(new Diagnostic("clear() only supports zeroable primitive fields inside struct arrays.", nestedField.Span));
+                            continue;
+                        }
+
+                        var leafGlobal = $"{fieldPrefix}__{nestedField.Identifier.Text}";
+                        EmitClearGlobalArray(leafGlobal, leafPrim.PrimitiveName, count);
+                    }
+                    continue;
+                }
+
+                if (arrayType.ElementType is not NamedTypeSyntax primNamed)
+                {
+                    _diagnostics.Add(new Diagnostic("clear() only supports primitive arrays.", field.Span));
+                    continue;
+                }
+
+                var elemType = ResolveType(primNamed);
+                if (elemType is not PrimitiveTypeSymbol elemPrim || !IsZeroablePrimitive(elemPrim.PrimitiveName))
+                {
+                    _diagnostics.Add(new Diagnostic("clear() only supports arrays of zeroable primitives.", field.Span));
+                    continue;
+                }
+
+                EmitClearGlobalArray(fieldPrefix, elemPrim.PrimitiveName, count);
+                continue;
+            }
+
+            var scalarType = ResolveType(field.Type);
+            if (scalarType is not PrimitiveTypeSymbol scalarPrim || !IsZeroablePrimitive(scalarPrim.PrimitiveName))
+            {
+                _diagnostics.Add(new Diagnostic("clear() only supports zeroable primitive scalar fields.", field.Span));
+                continue;
+            }
+
+            EmitClearGlobalScalar(fieldPrefix, scalarPrim.PrimitiveName);
+        }
+    }
+
+    private void EmitClearGlobalScalar(string globalName, string primName)
+    {
+        var addr = NewValue();
+        _instructions.AppendLine($"    {addr} = global_value {globalName}");
+
+        if (primName is "f32")
+        {
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f32const 0.0");
+            _instructions.AppendLine($"    store {zero}, {addr}");
+            return;
+        }
+
+        if (primName is "f64")
+        {
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f64const 0.0");
+            _instructions.AppendLine($"    store {zero}, {addr}");
+            return;
+        }
+
+        var zeroI32 = ZeroI32();
+        var storeType = primName switch
+        {
+            "u8" or "bool" => CraneliftTypeMapper.ClifType.I8,
+            "u16" => CraneliftTypeMapper.ClifType.I16,
+            _ => CraneliftTypeMapper.ClifType.I32
+        };
+        var value = ReduceI32ToSmallInt(zeroI32, storeType);
+        _instructions.AppendLine($"    store {value}, {addr}");
+    }
+
+    private void EmitClearGlobalArray(string globalName, string primName, int count)
+    {
+        var clifElemType = primName switch
+        {
+            "u8" or "bool" => CraneliftTypeMapper.ClifType.I8,
+            "u16" => CraneliftTypeMapper.ClifType.I16,
+            "u32" or "i32" => CraneliftTypeMapper.ClifType.I32,
+            "f32" => CraneliftTypeMapper.ClifType.F32,
+            "f64" => CraneliftTypeMapper.ClifType.F64,
+            _ => CraneliftTypeMapper.ClifType.I32
+        };
+
+        var baseAddr = NewValue();
+        _instructions.AppendLine($"    {baseAddr} = global_value {globalName}");
+
+        var idxSlot = NewValue();
+        _instructions.AppendLine($"    {idxSlot} = stack_slot.i32");
+        var zeroI32 = ZeroI32();
+        _instructions.AppendLine($"    store {zeroI32}, {idxSlot}");
+
+        var condBlock = NewBlock();
+        var bodyBlock = NewBlock();
+        var endBlock = NewBlock();
+
+        _instructions.AppendLine($"    jump {condBlock}");
+
+        _instructions.AppendLine($"{condBlock}:");
+        var idx = NewValue();
+        _instructions.AppendLine($"    {idx} = load.i32 {idxSlot}");
+        var len = NewValue();
+        _instructions.AppendLine($"    {len} = iconst.i32 {count}");
+        var cond = NewValue();
+        _instructions.AppendLine($"    {cond} = icmp slt {idx}, {len}");
+        _instructions.AppendLine($"    brif {cond}, {bodyBlock}, {endBlock}");
+
+        _instructions.AppendLine($"{bodyBlock}:");
+
+        var elemSize = GetTypeSize(clifElemType);
+        var elemSizeVal = NewValue();
+        _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
+        var idxI64 = NewValue();
+        _instructions.AppendLine($"    {idxI64} = sextend.i64 {idx}");
+        var offset = NewValue();
+        _instructions.AppendLine($"    {offset} = imul {idxI64}, {elemSizeVal}");
+        var addr = NewValue();
+        _instructions.AppendLine($"    {addr} = iadd {baseAddr}, {offset}");
+
+        if (clifElemType == CraneliftTypeMapper.ClifType.F32)
+        {
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f32const 0.0");
+            _instructions.AppendLine($"    store {zero}, {addr}");
+        }
+        else if (clifElemType == CraneliftTypeMapper.ClifType.F64)
+        {
+            var zero = NewValue();
+            _instructions.AppendLine($"    {zero} = f64const 0.0");
+            _instructions.AppendLine($"    store {zero}, {addr}");
+        }
+        else
+        {
+            var value = ReduceI32ToSmallInt(zeroI32, clifElemType);
+            _instructions.AppendLine($"    store {value}, {addr}");
+        }
+
+        var next = NewValue();
+        var one = ConstI32(1);
+        _instructions.AppendLine($"    {next} = iadd {idx}, {one}");
+        _instructions.AppendLine($"    store {next}, {idxSlot}");
+        _instructions.AppendLine($"    jump {condBlock}");
+
+        _instructions.AppendLine($"{endBlock}:");
     }
 
     private bool TryInlineCall(CallExpressionSyntax call, string funcName, out string result)
