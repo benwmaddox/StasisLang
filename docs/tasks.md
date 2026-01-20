@@ -46,6 +46,8 @@ Goal: keep the repo lean and focused on the C# compiler toolchain. Remove the se
 - [x] Remove self-hosted compiler Stasis tests under `tests/stasis_*.stasis`.
 - [x] Remove or archive self-host docs (`docs/self-host*.md`) and scrub references elsewhere (`docs/spec.md`, `docs/standard-library.md`, etc.).
 - [x] Prune low-value samples (debug/probe/minimal syntax experiments) and delete any committed binary artifacts.
+- [x] Remove accidentally committed MSVC byproducts (`stasis_graphics.lib/.exp`, `build/stasis_graphics_static.lib`) and local editor config (`.claude/settings.local.json`).
+- [x] Remove obsolete self-host comparison scripts (`tools/compare-*.ps1`) and drop stale archived docs (`docs/archive/`).
 - [x] Identify and remove now-unused compiler code paths after deletions (self-host compiler removed; no additional C# dead code found in this pass).
 - [x] Validate: `.\build.bat` and `.\test.bat` pass.
 
