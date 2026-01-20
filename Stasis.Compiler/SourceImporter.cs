@@ -34,6 +34,11 @@ public static class SourceImporter
             return new SourceImportResultWithMap(source, string.Empty, Array.Empty<SourceImportSegment>());
         }
 
+        if (string.Equals(Path.GetExtension(fullPath), ".md", StringComparison.OrdinalIgnoreCase))
+        {
+            source = MarkdownStasisExtractor.Extract(source);
+        }
+
         if (IsStdlibPath(fullPath))
         {
             EnsureStdlibHasNoGlobals(fullPath, source, diagnostics);
