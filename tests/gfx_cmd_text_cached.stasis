@@ -1,0 +1,18 @@
+import "../src/gfx_cmd.stasis";
+import "../src/stdlib/stdlib.stasis";
+
+test `cached text does not consume text bytes`(): bool {
+    gfx_cmd_begin();
+    gfx_cmd_text_cached(1, 7, 10.0, 20.0, 1.0, 1.0, 1.0, 1.0);
+
+    if (gfx_cmd_text_count() != 1) { return false; }
+    if (gfx_cmd_text_bytes_used() != 0) { return false; }
+
+    let base_i: i32 = GFX_I_TEXT_BASE + 0 * GFX_TEXT_STRIDE_I32;
+    if (gfx_cmd_i32[base_i + 0] != 1) { return false; }
+    if (gfx_cmd_i32[base_i + 1] != -7) { return false; }
+    if (gfx_cmd_i32[base_i + 2] != 0) { return false; }
+
+    return true;
+}
+
