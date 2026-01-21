@@ -3174,7 +3174,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
             var prevOkCount = Volatile.Read(ref runnerHotSwapOkCount);
             var swapText = hotDll + "\n" + plan.MapPath;
-            File.WriteAllText(swapFile, swapText, Encoding.ASCII);
+            WriteAllTextAtomic(swapFile, swapText, Encoding.ASCII);
             swapWriteMs = phase.ElapsedMilliseconds;
             swTotal.Stop();
             timingLine =
@@ -3248,8 +3248,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 return 0;
             }
 
-            Console.Error.WriteLine($"error: runner exited with code {runner.ExitCode}");
-            return 1;
+            Console.Error.WriteLine($"warning: runner exited with code {runner.ExitCode}; waiting for changes to restart.");
+            runner = null;
         }
 
         try
@@ -3365,7 +3365,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
             map.Append(entry.Size);
             map.Append('\n');
         }
-        File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
+        WriteAllTextAtomic(mapPath, map.ToString(), Encoding.ASCII);
 
         // Emit struct metadata JSON for data binding
         EmitStructMetadataJson(structMetaPath, state, entries);
@@ -3410,7 +3410,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
         }
     }
 
-    File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
+    WriteAllTextAtomic(defPath, def.ToString(), Encoding.ASCII);
 
     plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath, structMetaPath);
     return true;
@@ -3630,6 +3630,53 @@ static Process StartWatchChild(string exePath, string[] args)
 
 static string QuoteArg(string arg) =>
     arg.Contains(' ') ? $"\"{arg}\"" : arg;
+
+static void WriteAllTextAtomic(string path, string contents, Encoding encoding, int attempts = 10, int sleepMs = 5)
+{
+    var dir = Path.GetDirectoryName(path);
+    if (!string.IsNullOrEmpty(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+
+    var tmp = path + ".tmp";
+    File.WriteAllText(tmp, contents, encoding);
+
+    // Best-effort atomic replace on Windows; retry to handle brief sharing violations (e.g. runner polling swap files).
+    for (var i = 0; i < attempts; i++)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows() && File.Exists(path))
+            {
+                File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(tmp, path, overwrite: true);
+            }
+            return;
+        }
+        catch (IOException) when (i + 1 < attempts)
+        {
+            Thread.Sleep(sleepMs);
+        }
+        catch (UnauthorizedAccessException) when (i + 1 < attempts)
+        {
+            Thread.Sleep(sleepMs);
+        }
+    }
+
+    // Fall back: last attempt, let exceptions propagate for visibility.
+    if (OperatingSystem.IsWindows() && File.Exists(path))
+    {
+        File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+    }
+    else
+    {
+        File.Move(tmp, path, overwrite: true);
+    }
+}
 
 static void WriteIrOutput(string ir, string? outputPath)
 {
