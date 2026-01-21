@@ -21,7 +21,7 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 - [x] Sys/memory: bulk move + safe wrappers (`mem_copy_*`, `mem_set_*`) exist.
 - [x] Sys/memory: keep bulk clears (`memset`) as a compiler/runtime detail (avoid exposing `sys_memset_*` to user code).
 - [x] Stdlib/platform externs: support `@extern` no-body declarations (and optional link name) so APIs are visible in source.
-- [ ] Stdlib/platform externs: wire up per-platform stdlib selection (so extern-backed APIs can vary by platform).
+- [x] Stdlib/platform externs: wire up per-platform stdlib selection (so extern-backed APIs can vary by platform).
 
 ### Game Dev Readiness
 

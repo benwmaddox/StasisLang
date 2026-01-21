@@ -78,4 +78,38 @@ public class SourceImporterTests
             tempDir.Delete(true);
         }
     }
+
+    [Fact]
+    public void ExpandImports_FallsBackToPlatformSpecificFile()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("stasis_imports");
+        try
+        {
+            var platform = OperatingSystem.IsWindows() ? "windows"
+                : OperatingSystem.IsLinux() ? "linux"
+                : OperatingSystem.IsMacOS() ? "macos"
+                : "unknown";
+
+            if (platform == "unknown")
+            {
+                return;
+            }
+
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var importedPath = Path.Combine(tempDir.FullName, $"lib.{platform}.stasis");
+            File.WriteAllText(importedPath, "function helper(): i32 { return 2; }");
+            File.WriteAllText(entryPath, "import \"lib.stasis\";\nfunction main(): i32 { return helper(); }");
+
+            var diagnostics = new List<Diagnostic>();
+            var source = File.ReadAllText(entryPath);
+            var result = SourceImporter.ExpandImports(entryPath, source, diagnostics);
+
+            Assert.Empty(diagnostics);
+            Assert.Contains("function helper()", result.ExpandedSource);
+        }
+        finally
+        {
+            tempDir.Delete(true);
+        }
+    }
 }
