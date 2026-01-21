@@ -145,6 +145,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 
 /* Forward decls for internal helpers used before their definitions. */
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
+static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -2051,6 +2052,84 @@ static void flush_sprites(void) {
     g_sprite_vert_count = 0;
 }
 
+/* Fast path for command-buffer sprite submission.
+ *
+ * When debug hashing is disabled and most sprites are unrotated, we avoid per-sprite trig
+ * and reduce function-call overhead by writing vertices directly from the stream.
+ *
+ * NOTE: rotation != 0 falls back to the general path.
+ */
+static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count) {
+    if (!cmds || sprite_count <= 0) return;
+
+    if (g_use_sdl_renderer) {
+        for (int i = 0; i < sprite_count; i++) {
+            const int base = i * 7;
+            stasis_gfx_draw_sprite_internal(
+                cmds[base + 0],
+                cmds[base + 1],
+                cmds[base + 2],
+                cmds[base + 3],
+                cmds[base + 4],
+                cmds[base + 5],
+                cmds[base + 6],
+                0);
+        }
+        return;
+    }
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    for (int i = 0; i < sprite_count; i++) {
+        const int base = i * 7;
+        const int handle = cmds[base + 0];
+        const int x = cmds[base + 1];
+        const int y = cmds[base + 2];
+        const int w = cmds[base + 3];
+        const int h = cmds[base + 4];
+        const int rot_degrees = cmds[base + 5];
+        const int a = cmds[base + 6];
+
+        if (w <= 0 || h <= 0) continue;
+        if (handle <= 0 || handle > MAX_SPRITES) continue;
+
+        SpriteEntry* e = &g_sprites[handle - 1];
+        if (!e->used) continue;
+
+        if (e->needs_reraster) {
+            if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1);
+        }
+
+        if (rot_degrees != 0) {
+            stasis_gfx_draw_sprite_internal(handle, x, y, w, h, rot_degrees, a, 0);
+            continue;
+        }
+
+        if (g_sprite_vert_count + 6 > MAX_SPRITE_VERTS) {
+            flush_sprites();
+        }
+
+        const float af = (float)a / 255.0f;
+        const float u0 = e->u0, v0 = e->v0, u1 = e->u1, v1 = e->v1;
+        const float x0 = (float)x;
+        const float y0 = (float)y;
+        const float x1p = (float)(x + w);
+        const float y1p = (float)(y + h);
+
+        SpriteVertex* v = &g_sprite_vertices[g_sprite_vert_count];
+        v[0] = (SpriteVertex){ x0,  y0,  u0, v0, af, af, af, af };
+        v[1] = (SpriteVertex){ x1p, y0,  u1, v0, af, af, af, af };
+        v[2] = (SpriteVertex){ x1p, y1p, u1, v1, af, af, af, af };
+        v[3] = (SpriteVertex){ x1p, y1p, u1, v1, af, af, af, af };
+        v[4] = (SpriteVertex){ x0,  y1p, u0, v1, af, af, af, af };
+        v[5] = (SpriteVertex){ x0,  y0,  u0, v0, af, af, af, af };
+        g_sprite_vert_count += 6;
+    }
+#else
+    (void)cmds;
+    (void)sprite_count;
+#endif
+}
+
 static const char* kFallbackPostfxVert =
 "#version 120\n"
 "varying vec2 v_uv;\n"
@@ -2998,17 +3077,21 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     /* sprites: i32 header is 32, then sprite payload */
     if (sprite_count > 0) {
         const int32_t* sprites = cmd_i32 + 32;
-        for (int i = 0; i < sprite_count; i++) {
-            const int base = i * 7;
-            stasis_gfx_draw_sprite_internal(
-                sprites[base + 0],
-                sprites[base + 1],
-                sprites[base + 2],
-                sprites[base + 3],
-                sprites[base + 4],
-                sprites[base + 5],
-                sprites[base + 6],
-                g_debug_hash_enabled);
+        if (!g_debug_hash_enabled && !g_use_sdl_renderer) {
+            stasis_gfx_draw_sprites_i32_fast(sprites, sprite_count);
+        } else {
+            for (int i = 0; i < sprite_count; i++) {
+                const int base = i * 7;
+                stasis_gfx_draw_sprite_internal(
+                    sprites[base + 0],
+                    sprites[base + 1],
+                    sprites[base + 2],
+                    sprites[base + 3],
+                    sprites[base + 4],
+                    sprites[base + 5],
+                    sprites[base + 6],
+                    g_debug_hash_enabled);
+            }
         }
     }
 
