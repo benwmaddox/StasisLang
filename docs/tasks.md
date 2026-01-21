@@ -27,7 +27,7 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 
 - [ ] P0: stdlib modules (`game_math`, `game_draw`, `game_collision`) + canonical UTF-8 buffer helpers (remove samples writing headers directly).
 - [x] P1: input helpers (keys went_down/up + mapping).
-- [ ] P1: viewport/camera helpers.
+- [x] P1: viewport/camera helpers.
 - [ ] P1: draw batching helpers.
 - [ ] P2: audio mixer layer (one-shots + loops) and more templates/examples.
 
