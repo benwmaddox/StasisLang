@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Stasis.Compiler\Stasis.Compiler.csproj" />
+    <ProjectReference Include="..\Stasis.Cli\Stasis.Cli.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
