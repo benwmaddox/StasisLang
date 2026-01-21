@@ -69,6 +69,9 @@ EXPORTS
     stasis_load_font
     stasis_draw_text
     stasis_measure_text
+    stasis_gfx_cache_text
+    stasis_gfx_draw_text_cached
+    stasis_gfx_measure_text_cached
     stasis_list_directory
     stasis_list_directory_struct
     stasis_copy_dir_entry_name

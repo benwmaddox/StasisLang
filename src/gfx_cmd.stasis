@@ -56,6 +56,7 @@ global gfx_cmd_i32: i32[34848];
 global gfx_cmd_f32: f32[92292];
 global gfx_cmd_u8: u8[65536];
 
+// Begin a new frame, resetting all counts (typical immediate-mode usage).
 function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
     gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
@@ -67,6 +68,20 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_TEXT] = 0;
     gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = 0;
+}
+
+// Begin a new frame without clearing counts/streams (persistent-mode usage).
+//
+// Intended usage:
+// - Prebuild streams once (set counts + write entries).
+// - Each tick call `gfx_cmd_begin_persistent()`, patch only changed entries, and `gfx_cmd_mark_present()`.
+function @inline gfx_cmd_begin_persistent(): void {
+    gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;
+    gfx_cmd_i32[GFX_I_VERSION] = GFX_CMD_VERSION;
+    gfx_cmd_i32[GFX_I_FLAGS] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_LINES] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = 0;
+    gfx_cmd_i32[GFX_I_DROPPED_TEXT] = 0;
 }
 
 function @inline gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
@@ -116,6 +131,20 @@ function gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i3
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = i + 1;
 }
 
+function gfx_cmd_set_sprite_at(index: i32, handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
+    if (index < 0 || index >= GFX_MAX_SPRITES) {
+        return;
+    }
+    let base: i32 = GFX_I_SPRITE_BASE + index * GFX_SPRITE_STRIDE_I32;
+    gfx_cmd_i32[base + 0] = handle;
+    gfx_cmd_i32[base + 1] = x;
+    gfx_cmd_i32[base + 2] = y;
+    gfx_cmd_i32[base + 3] = w;
+    gfx_cmd_i32[base + 4] = h;
+    gfx_cmd_i32[base + 5] = rot_deg;
+    gfx_cmd_i32[base + 6] = a;
+}
+
 function gfx_cmd_lines_from_f32(lines: f32[], count: i32): void {
     if (count <= 0) {
         return;
@@ -160,6 +189,22 @@ function gfx_cmd_sprites_from_i32(cmds: i32[], count: i32): void {
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = start + n;
 }
 
+function gfx_cmd_set_line_at(index: i32, x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
+    if (index < 0 || index >= GFX_MAX_LINES) {
+        return;
+    }
+
+    let base: i32 = GFX_F_LINE_BASE + index * GFX_LINE_STRIDE_F32;
+    gfx_cmd_f32[base + 0] = x1;
+    gfx_cmd_f32[base + 1] = y1;
+    gfx_cmd_f32[base + 2] = x2;
+    gfx_cmd_f32[base + 3] = y2;
+    gfx_cmd_f32[base + 4] = r;
+    gfx_cmd_f32[base + 5] = g;
+    gfx_cmd_f32[base + 6] = b;
+    gfx_cmd_f32[base + 7] = a;
+}
+
 function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     let i: i32 = gfx_cmd_i32[GFX_I_TEXT_COUNT];
     if (i >= GFX_MAX_TEXT) {
@@ -196,6 +241,59 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
 
     gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = used + byte_len + 1;
     gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
+}
+
+// Write a text draw referencing a cached glyph run (no per-frame UTF-8 bytes copied).
+// The runtime interprets `byte_offset < 0` as a cached text handle.
+function gfx_cmd_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    let i: i32 = gfx_cmd_i32[GFX_I_TEXT_COUNT];
+    if (i >= GFX_MAX_TEXT) {
+        gfx_cmd_i32[GFX_I_DROPPED_TEXT] = gfx_cmd_i32[GFX_I_DROPPED_TEXT] + 1;
+        return;
+    }
+    if (run_handle <= 0) {
+        gfx_cmd_i32[GFX_I_DROPPED_TEXT] = gfx_cmd_i32[GFX_I_DROPPED_TEXT] + 1;
+        return;
+    }
+
+    let base_i: i32 = GFX_I_TEXT_BASE + i * GFX_TEXT_STRIDE_I32;
+    gfx_cmd_i32[base_i + 0] = font;
+    gfx_cmd_i32[base_i + 1] = 0 - run_handle; // negative => cached run handle
+    gfx_cmd_i32[base_i + 2] = 0;
+
+    let base_f: i32 = GFX_F_TEXT_BASE + i * GFX_TEXT_STRIDE_F32;
+    gfx_cmd_f32[base_f + 0] = x;
+    gfx_cmd_f32[base_f + 1] = y;
+    gfx_cmd_f32[base_f + 2] = r;
+    gfx_cmd_f32[base_f + 3] = g;
+    gfx_cmd_f32[base_f + 4] = b;
+    gfx_cmd_f32[base_f + 5] = a;
+
+    gfx_cmd_i32[GFX_I_TEXT_COUNT] = i + 1;
+}
+
+function gfx_cmd_set_line_count(count: i32): void {
+    if (count < 0) { count = 0; }
+    if (count > GFX_MAX_LINES) { count = GFX_MAX_LINES; }
+    gfx_cmd_i32[GFX_I_LINE_COUNT] = count;
+}
+
+function gfx_cmd_set_sprite_count(count: i32): void {
+    if (count < 0) { count = 0; }
+    if (count > GFX_MAX_SPRITES) { count = GFX_MAX_SPRITES; }
+    gfx_cmd_i32[GFX_I_SPRITE_COUNT] = count;
+}
+
+function gfx_cmd_set_text_count(count: i32): void {
+    if (count < 0) { count = 0; }
+    if (count > GFX_MAX_TEXT) { count = GFX_MAX_TEXT; }
+    gfx_cmd_i32[GFX_I_TEXT_COUNT] = count;
+}
+
+function gfx_cmd_set_text_bytes_used(bytes_used: i32): void {
+    if (bytes_used < 0) { bytes_used = 0; }
+    if (bytes_used > GFX_TEXT_MAX_BYTES) { bytes_used = GFX_TEXT_MAX_BYTES; }
+    gfx_cmd_i32[GFX_I_TEXT_BYTES_USED] = bytes_used;
 }
 
 function @inline gfx_cmd_submit(): void {

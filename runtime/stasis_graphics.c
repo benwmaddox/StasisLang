@@ -66,6 +66,9 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
 STASIS_EXPORT int stasis_get_time_us(void);
+STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
+STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
+STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
 
 /* Global state */
 static SDL_Window* g_window = NULL;
@@ -3010,7 +3013,8 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
+    if (text_count > 0) {
         const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
         const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
         const int32_t* text_meta = cmd_i32 + text_i32_base;
@@ -3022,7 +3026,20 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
             const int byte_len = text_meta[base_i + 2];
 
             if (font <= 0) continue;
-            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_off < 0) {
+                const int run = -byte_off;
+                const int base_f = text_f32_base + i * 6;
+                const float x = cmd_f32[base_f + 0];
+                const float y = cmd_f32[base_f + 1];
+                const float r = cmd_f32[base_f + 2];
+                const float g = cmd_f32[base_f + 3];
+                const float b = cmd_f32[base_f + 4];
+                const float a = cmd_f32[base_f + 5];
+                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
+                continue;
+            }
+            if (!cmd_u8 || text_bytes_used <= 0) continue;
+            if (byte_off >= text_bytes_used) continue;
             if (byte_len < 0) continue;
             if (byte_off + byte_len >= text_bytes_used) continue;
 
@@ -3041,7 +3058,8 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    if (cmd_u8 && text_count > 0 && text_bytes_used > 0) {
+    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
+    if (text_count > 0) {
         const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
         const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
         const int32_t* text_meta = cmd_i32 + text_i32_base;
@@ -3053,7 +3071,20 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
             const int byte_len = text_meta[base_i + 2];
 
             if (font <= 0) continue;
-            if (byte_off < 0 || byte_off >= text_bytes_used) continue;
+            if (byte_off < 0) {
+                const int run = -byte_off;
+                const int base_f = text_f32_base + i * 6;
+                const float x = cmd_f32[base_f + 0];
+                const float y = cmd_f32[base_f + 1];
+                const float r = cmd_f32[base_f + 2];
+                const float g = cmd_f32[base_f + 3];
+                const float b = cmd_f32[base_f + 4];
+                const float a = cmd_f32[base_f + 5];
+                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
+                continue;
+            }
+            if (!cmd_u8 || text_bytes_used <= 0) continue;
+            if (byte_off >= text_bytes_used) continue;
             if (byte_len < 0) continue;
             if (byte_off + byte_len >= text_bytes_used) continue;
 
@@ -4019,6 +4050,223 @@ STASIS_EXPORT void stasis_copy_dir_entry_name(const unsigned char* names, int32_
 }
 
 /* ===== FONT RENDERING WITH STB_TRUETYPE ===== */
+
+/* ===== CACHED TEXT RUNS (glyph quads) ===== */
+
+typedef struct {
+    float x0, y0, x1, y1;
+    float s0, t0, s1, t1;
+} StasisTextQuad;
+
+typedef struct {
+    int active;
+    int font_handle;
+    uint32_t hash;
+    int text_off;
+    int text_len;
+    int quad_off;
+    int quad_count;
+    float width;
+    float height;
+} StasisTextRun;
+
+#define STASIS_MAX_TEXT_RUNS 1024
+#define STASIS_TEXT_RUN_MAX_BYTES 262144
+#define STASIS_TEXT_RUN_MAX_QUADS 65536
+
+static StasisTextRun g_text_runs[STASIS_MAX_TEXT_RUNS];
+static unsigned char g_text_run_bytes[STASIS_TEXT_RUN_MAX_BYTES];
+static int g_text_run_bytes_used = 0;
+static StasisTextQuad g_text_run_quads[STASIS_TEXT_RUN_MAX_QUADS];
+static int g_text_run_quads_used = 0;
+
+static uint32_t fnv1a_u32(const unsigned char* data, int len) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < len; i++) {
+        h ^= (uint32_t)data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, const char* text, int len) {
+    int free_slot = -1;
+    for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
+        if (!g_text_runs[i].active) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (g_text_runs[i].font_handle != font_handle) continue;
+        if (g_text_runs[i].hash != hash) continue;
+        if (g_text_runs[i].text_len != len) continue;
+        if (g_text_runs[i].text_off < 0 || g_text_runs[i].text_off + len >= STASIS_TEXT_RUN_MAX_BYTES) continue;
+        if (memcmp(g_text_run_bytes + g_text_runs[i].text_off, text, (size_t)len) == 0) {
+            return i;
+        }
+    }
+    return free_slot;
+}
+
+/* Cache a text run and return a 1-based handle (0 on failure). */
+STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
+    if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
+    if (!text) return 0;
+    StasisFont* font = &g_fonts[font_handle - 1];
+    if (!font->active) return 0;
+
+    const int len = (int)strlen(text);
+    if (len <= 0) return 0;
+    if (len > 8192) return 0; /* hard cap per cached run */
+
+    const uint32_t hash = fnv1a_u32((const unsigned char*)text, len);
+    const int slot = stasis_find_or_alloc_text_run_slot(font_handle, hash, text, len);
+    if (slot < 0) return 0;
+    if (g_text_runs[slot].active) {
+        return slot + 1;
+    }
+
+    const int bytes_needed = len + 1;
+    if (g_text_run_bytes_used + bytes_needed > STASIS_TEXT_RUN_MAX_BYTES) return 0;
+
+    const int text_off = g_text_run_bytes_used;
+    memcpy(g_text_run_bytes + text_off, text, (size_t)len);
+    g_text_run_bytes[text_off + len] = 0;
+    g_text_run_bytes_used += bytes_needed;
+
+    const int quad_off = g_text_run_quads_used;
+    int quad_count = 0;
+
+    float pos_x = 0.0f;
+    float pos_y = 0.0f;
+    float max_x = 0.0f;
+    float max_y = 0.0f;
+    const float start_x = 0.0f;
+
+    for (int i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+            pos_x = start_x;
+            pos_y += (float)font->font_size;
+            continue;
+        }
+        if (ch < FONT_FIRST_CHAR || ch >= FONT_FIRST_CHAR + FONT_NUM_CHARS) continue;
+
+        if (quad_off + quad_count >= STASIS_TEXT_RUN_MAX_QUADS) {
+            return 0;
+        }
+
+        stbtt_aligned_quad quad;
+        stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+            (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
+
+        StasisTextQuad* out = &g_text_run_quads[quad_off + quad_count];
+        out->x0 = quad.x0;
+        out->y0 = quad.y0;
+        out->x1 = quad.x1;
+        out->y1 = quad.y1;
+        out->s0 = quad.s0;
+        out->t0 = quad.t0;
+        out->s1 = quad.s1;
+        out->t1 = quad.t1;
+
+        if (quad.x1 > max_x) max_x = quad.x1;
+        if (quad.y1 > max_y) max_y = quad.y1;
+        quad_count++;
+    }
+
+    g_text_run_quads_used += quad_count;
+
+    StasisTextRun* run = &g_text_runs[slot];
+    run->active = 1;
+    run->font_handle = font_handle;
+    run->hash = hash;
+    run->text_off = text_off;
+    run->text_len = len;
+    run->quad_off = quad_off;
+    run->quad_count = quad_count;
+    run->width = max_x;
+    run->height = max_y;
+
+    return slot + 1;
+}
+
+static void stasis_draw_text_cached_internal(int run_handle, float x, float y, float r, float g, float b, float a) {
+    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return;
+    StasisTextRun* run = &g_text_runs[run_handle - 1];
+    if (!run->active) return;
+    if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return;
+
+    StasisFont* font = &g_fonts[run->font_handle - 1];
+    if (!font->active) return;
+
+    if (g_use_sdl_renderer) {
+        if (!font->sdl_texture || !g_renderer) return;
+
+        SDL_SetTextureBlendMode(font->sdl_texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureColorMod(font->sdl_texture,
+            (Uint8)(r < 0.0f ? 0 : (r > 1.0f ? 255 : (int)(r * 255.0f))),
+            (Uint8)(g < 0.0f ? 0 : (g > 1.0f ? 255 : (int)(g * 255.0f))),
+            (Uint8)(b < 0.0f ? 0 : (b > 1.0f ? 255 : (int)(b * 255.0f))));
+        SDL_SetTextureAlphaMod(font->sdl_texture,
+            (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f))));
+
+        for (int i = 0; i < run->quad_count; i++) {
+            StasisTextQuad* q = &g_text_run_quads[run->quad_off + i];
+            SDL_Rect src;
+            src.x = (int)(q->s0 * (float)FONT_ATLAS_SIZE);
+            src.y = (int)(q->t0 * (float)FONT_ATLAS_SIZE);
+            src.w = (int)((q->s1 - q->s0) * (float)FONT_ATLAS_SIZE);
+            src.h = (int)((q->t1 - q->t0) * (float)FONT_ATLAS_SIZE);
+
+            SDL_FRect dst;
+            dst.x = x + q->x0;
+            dst.y = y + q->y0;
+            dst.w = q->x1 - q->x0;
+            dst.h = q->y1 - q->y0;
+
+            if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
+                SDL_RenderCopyF(g_renderer, font->sdl_texture, &src, &dst);
+            }
+        }
+        return;
+    }
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glColor4f(r, g, b, a);
+
+    glBegin(GL_QUADS);
+    for (int i = 0; i < run->quad_count; i++) {
+        StasisTextQuad* q = &g_text_run_quads[run->quad_off + i];
+        glTexCoord2f(q->s0, q->t0); glVertex2f(x + q->x0, y + q->y0);
+        glTexCoord2f(q->s1, q->t0); glVertex2f(x + q->x1, y + q->y0);
+        glTexCoord2f(q->s1, q->t1); glVertex2f(x + q->x1, y + q->y1);
+        glTexCoord2f(q->s0, q->t1); glVertex2f(x + q->x0, y + q->y1);
+    }
+    glEnd();
+
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(1, 1, 1, 1);
+#endif
+}
+
+STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a) {
+    stasis_draw_text_cached_internal(run_handle, x, y, r, g, b, a);
+}
+
+STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle) {
+    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return 0.0f;
+    StasisTextRun* run = &g_text_runs[run_handle - 1];
+    if (!run->active) return 0.0f;
+    return run->width;
+}
 
 /* Load a TrueType font from disk */
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
