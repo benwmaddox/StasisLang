@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Cache NuGet
         uses: actions/cache@v4
         with:
@@ -39,6 +42,45 @@ jobs:
 
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
+
+      - name: Install clang (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Install clang (windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm -y --no-progress
+
+      - name: Build cranelift-aot (rust)
+        run: cargo build -p stasis-cranelift-aot --release
+        working-directory: tools/cranelift-aot
+
+      - name: Build cranelift-jit-runner (rust)
+        run: cargo build -p stasis-cranelift-jit-runner --release
+        working-directory: tools/cranelift-jit-runner
+
+      - name: Build stasis_runner (headless)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S runtime -B runtime/build_ci -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
+          cmake --build runtime/build_ci --config Release
+          mkdir -p build
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp runtime/build_ci/bin/Release/stasis_runner.exe ./stasis_runner.exe
+            cp runtime/build_ci/bin/Release/stasis_runner.exe ./build/stasis_runner.exe
+          else
+            # For non-multi-config generators, the binary lives under bin/.
+            if [ -f runtime/build_ci/bin/stasis_runner ]; then
+              cp runtime/build_ci/bin/stasis_runner ./stasis_runner
+              cp runtime/build_ci/bin/stasis_runner ./build/stasis_runner
+            else
+              cp runtime/build_ci/bin/Release/stasis_runner ./stasis_runner
+              cp runtime/build_ci/bin/Release/stasis_runner ./build/stasis_runner
+            fi
+          fi
 
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
