@@ -67,53 +67,46 @@ public sealed class HotSwapIntegrationTests
                 () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
                 timeout: TimeSpan.FromMinutes(3));
 
-            // Ensure the child runner process is actually running before injecting swap events.
-            await WaitForAnyLineAsync(
-                proc,
-                () =>
-                {
-                    try
-                    {
-                        return Process.GetProcessesByName("stasis_runner")
-                            .Any(p => p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5));
-                    }
-                    catch
-                    {
-                        return false;
-                    }
-                },
-                timeout: TimeSpan.FromSeconds(30));
-
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
             var badSwapPath = OperatingSystem.IsWindows()
                 ? @"Z:\this\does\not\exist.swap.dll"
                 : "/this/does/not/exist.swap.so";
             File.WriteAllText(swapFile, badSwapPath + "\n", System.Text.Encoding.ASCII);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () =>
-                {
-                    if (!File.Exists(swapFile))
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
                     {
-                        return true; // runner consumed it
-                    }
-                    if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
-                    {
-                        return false;
-                    }
-                    var ok = false;
-                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
-                    {
-                        ok |= errText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
-                    }
-                    if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
-                    {
-                        ok |= outText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
-                    }
-                    return ok;
-                },
-                timeout: TimeSpan.FromSeconds(30));
+                        if (!File.Exists(swapFile))
+                        {
+                            return true; // runner consumed it
+                        }
+                        if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
+                        {
+                            return false;
+                        }
+                        var ok = false;
+                        if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
+                        {
+                            ok |= errText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                        }
+                        if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
+                        {
+                            ok |= outText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                        }
+                        return ok;
+                    },
+                    timeout: TimeSpan.FromSeconds(30));
+            }
+            catch (XunitException)
+            {
+                var runnerErr = File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText) ? errText : "<missing>";
+                var runnerOut = File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText) ? outText : "<missing>";
+                throw new XunitException(
+                    $"timeout waiting for runner to consume bad swap or report warning.\n\nrunner.err.log:\n{runnerErr}\n\nrunner.out.log:\n{runnerOut}\n");
+            }
 
             if (proc.HasExited)
             {
