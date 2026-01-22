@@ -21,6 +21,23 @@ typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
 typedef int (*stasis_host_get_keyboard_state_fn)(uint8_t *out_u8, int max_bytes);
 typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
+typedef void (*stasis_host_bulk_apply_requests_fn)(
+    const int32_t *host_req_seq,
+    const int32_t *host_req_flags,
+    const int32_t *host_req_window_w_px,
+    const int32_t *host_req_window_h_px);
+typedef int (*stasis_host_bulk_step_fn)(
+    int32_t *host_i32,
+    float *host_f32,
+    int32_t *gfx_cmd_i32,
+    float *gfx_cmd_f32,
+    uint8_t *gfx_cmd_u8,
+    const int32_t *host_req_seq,
+    const int32_t *host_req_flags,
+    const int32_t *host_req_window_w_px,
+    const int32_t *host_req_window_h_px,
+    stasis_tick_fn tick_fn);
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
@@ -781,6 +798,146 @@ static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap
     return 0;
 }
 
+static void stasis_rebind_bulk_pointers(
+    HMODULE dll,
+    int bulk_enabled,
+    int *bulk_active,
+    int32_t **host_i32,
+    float **host_f32,
+    uint8_t **host_keys,
+    int32_t **gfx_cmd_i32,
+    float **gfx_cmd_f32,
+    uint8_t **gfx_cmd_u8,
+    stasis_host_get_frame_fn *host_get_frame,
+    stasis_host_get_keyboard_state_fn *host_get_keyboard_state,
+    stasis_gfx_submit_u8_fn *gfx_submit_u8,
+    stasis_host_bulk_init_fn *host_bulk_init,
+    stasis_host_bulk_apply_requests_fn *host_bulk_apply_requests,
+    stasis_host_bulk_step_fn *host_bulk_step,
+    int32_t **host_req_seq,
+    int32_t **host_req_flags,
+    int32_t **host_req_window_w_px,
+    int32_t **host_req_window_h_px,
+    int32_t *last_req_seq)
+{
+    if (bulk_active)
+    {
+        *bulk_active = 0;
+    }
+    if (host_i32)
+    {
+        *host_i32 = NULL;
+    }
+    if (host_f32)
+    {
+        *host_f32 = NULL;
+    }
+    if (host_keys)
+    {
+        *host_keys = NULL;
+    }
+    if (gfx_cmd_i32)
+    {
+        *gfx_cmd_i32 = NULL;
+    }
+    if (gfx_cmd_f32)
+    {
+        *gfx_cmd_f32 = NULL;
+    }
+    if (gfx_cmd_u8)
+    {
+        *gfx_cmd_u8 = NULL;
+    }
+
+    if (host_req_seq)
+    {
+        *host_req_seq = (int32_t *)GetProcAddress(dll, "host_req_seq");
+    }
+    if (host_req_flags)
+    {
+        *host_req_flags = (int32_t *)GetProcAddress(dll, "host_req_flags");
+    }
+    if (host_req_window_w_px)
+    {
+        *host_req_window_w_px = (int32_t *)GetProcAddress(dll, "host_req_window_w_px");
+    }
+    if (host_req_window_h_px)
+    {
+        *host_req_window_h_px = (int32_t *)GetProcAddress(dll, "host_req_window_h_px");
+    }
+    if (last_req_seq)
+    {
+        *last_req_seq = host_req_seq && *host_req_seq ? **host_req_seq : 0;
+    }
+
+    if (!bulk_enabled)
+    {
+        return;
+    }
+
+    if (host_i32)
+    {
+        *host_i32 = (int32_t *)GetProcAddress(dll, "host_i32");
+    }
+    if (host_f32)
+    {
+        *host_f32 = (float *)GetProcAddress(dll, "host_f32");
+    }
+    if (host_keys)
+    {
+        *host_keys = (uint8_t *)GetProcAddress(dll, "host_keys");
+    }
+    if (gfx_cmd_i32)
+    {
+        *gfx_cmd_i32 = (int32_t *)GetProcAddress(dll, "gfx_cmd_i32");
+    }
+    if (gfx_cmd_f32)
+    {
+        *gfx_cmd_f32 = (float *)GetProcAddress(dll, "gfx_cmd_f32");
+    }
+    if (gfx_cmd_u8)
+    {
+        *gfx_cmd_u8 = (uint8_t *)GetProcAddress(dll, "gfx_cmd_u8");
+    }
+
+    HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+    if (gfx)
+    {
+        if (host_get_frame)
+        {
+            *host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
+        }
+        if (host_get_keyboard_state)
+        {
+            *host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)GetProcAddress(gfx, "stasis_host_get_keyboard_state");
+        }
+        if (gfx_submit_u8)
+        {
+            *gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
+        }
+        if (host_bulk_init)
+        {
+            *host_bulk_init = (stasis_host_bulk_init_fn)GetProcAddress(gfx, "stasis_host_bulk_init");
+        }
+        if (host_bulk_apply_requests)
+        {
+            *host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)GetProcAddress(gfx, "stasis_host_bulk_apply_requests");
+        }
+        if (host_bulk_step)
+        {
+            *host_bulk_step = (stasis_host_bulk_step_fn)GetProcAddress(gfx, "stasis_host_bulk_step");
+        }
+    }
+
+    if (bulk_active && host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+    {
+        if (*host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 && (*host_bulk_step || (*host_get_frame && *gfx_submit_u8)))
+        {
+            *bulk_active = 1;
+        }
+    }
+}
+
 static DWORD WINAPI hot_exit_thread(LPVOID user_data)
 {
     stasis_hot_exit_args *args = (stasis_hot_exit_args *)user_data;
@@ -1400,6 +1557,29 @@ int main(int argc, char **argv)
         tick_sym = GetProcAddress(lib, tick_name);
     }
 
+    /* Host window request globals are used by bulk mode (defined in src/host_window_request.stasis). */
+    int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
+    int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
+    int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
+    int32_t *host_req_window_h_px = (int32_t *)GetProcAddress(lib, "host_req_window_h_px");
+
+    /* Bulk host loop API (stasis_graphics.dll). */
+    stasis_host_bulk_init_fn host_bulk_init = NULL;
+    stasis_host_bulk_apply_requests_fn host_bulk_apply_requests = NULL;
+    stasis_host_bulk_step_fn host_bulk_step = NULL;
+    if (GetModuleHandleA("stasis_graphics.dll"))
+    {
+        HMODULE gfx_bulk = GetModuleHandleA("stasis_graphics.dll");
+        host_bulk_init = (stasis_host_bulk_init_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_init");
+        host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_apply_requests");
+        host_bulk_step = (stasis_host_bulk_step_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_step");
+    }
+    if (host_bulk_init)
+    {
+        /* Capture baseline seq before main(). */
+        host_bulk_init(host_req_seq);
+    }
+
     stasis_try_set_sys_args(lib, argc, argv);
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
@@ -1424,10 +1604,6 @@ int main(int argc, char **argv)
         stasis_host_get_frame_fn host_get_frame = NULL;
         stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
-        int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
-        int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
-        int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
-        int32_t *host_req_window_h_px = (int32_t *)GetProcAddress(lib, "host_req_window_h_px");
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
         if (bulk_enabled)
@@ -1447,14 +1623,18 @@ int main(int argc, char **argv)
                 gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
             }
 
-            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_get_frame && gfx_submit_u8)
+            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
             {
                 bulk_active = 1;
             }
         }
 
         /* Apply any request the program made during main(). */
-        if (bulk_active && host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+        if (bulk_active && host_bulk_apply_requests)
+        {
+            host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+        }
+        else if (bulk_active && host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
         {
             last_req_seq = *host_req_seq;
             const int flags = *host_req_flags;
@@ -1483,7 +1663,23 @@ int main(int argc, char **argv)
                         if (read_swap_file(swap_file_path, new_path, sizeof(new_path), map_path, sizeof(map_path)) == 0)
                         {
                             DeleteFileA(swap_file_path);
-                            if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+
+                            if (!file_exists(new_path))
+                            {
+                                fprintf(stderr, "HOTSWAP warning: DLL not found: %s\n", new_path);
+                                fflush(stderr);
+                                continue;
+                            }
+
+                            stasis_state_symbol *next_syms = syms;
+                            uint32_t next_sym_count = sym_count;
+                            uint32_t next_total_bytes = total_bytes;
+                            uint64_t next_map_hash = map_hash;
+                            char next_map_buf[2048];
+                            const char *next_map_path = state_map_path;
+                            int next_map_owned = 0;
+
+                            if (map_path[0] != '\0' && (!state_map_path || strcmp(map_path, state_map_path) != 0))
                             {
                                 uint64_t new_hash = 0;
                                 uint32_t new_count = 0;
@@ -1491,15 +1687,18 @@ int main(int argc, char **argv)
                                 stasis_state_symbol *new_syms = NULL;
                                 if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
                                 {
-                                    free_state_map(&syms, &sym_count);
-                                    syms = new_syms;
-                                    sym_count = new_count;
-                                    total_bytes = new_total;
-                                    map_hash = new_hash;
-                                    strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
-                                    state_map_buf[sizeof(state_map_buf) - 1] = '\0';
-                                    state_map_path = state_map_buf;
-                                    fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                    next_syms = new_syms;
+                                    next_sym_count = new_count;
+                                    next_total_bytes = new_total;
+                                    next_map_hash = new_hash;
+                                    strncpy(next_map_buf, map_path, sizeof(next_map_buf) - 1);
+                                    next_map_buf[sizeof(next_map_buf) - 1] = '\0';
+                                    next_map_path = next_map_buf;
+                                    next_map_owned = 1;
+                                }
+                                else
+                                {
+                                    fprintf(stderr, "HOTSWAP warning: failed to read state map: %s\n", map_path);
                                     fflush(stderr);
                                 }
                             }
@@ -1508,57 +1707,69 @@ int main(int argc, char **argv)
                             LARGE_INTEGER sw_t0;
                             LARGE_INTEGER sw_t1;
                             QueryPerformanceFrequency(&sw_freq);
-                            char fixed_path[2048];
-                            const char *load_path = new_path;
-                            HMODULE old_lib = lib;
 
-                            if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
-                            {
-                                FreeLibrary(old_lib);
-                                old_lib = NULL;
-                                if (!move_file_replace_retry(new_path, fixed_path, 50, 5))
-                                {
-                                    fprintf(stderr, "warning: failed to move hot-swap DLL to %s (err=%lu)\n", fixed_path, GetLastError());
-                                    load_path = new_path;
-                                }
-                                else
-                                {
-                                    load_path = fixed_path;
-                                }
-                            }
-
-                            fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                            fprintf(stderr, "HOTSWAP loading: %s\n", new_path);
                             fflush(stderr);
 
                             uint8_t *buffer = NULL;
                             uint32_t missing_save = 0;
                             uint32_t missing_restore = 0;
+                            uint32_t truncated = 0;
                             long long save_us = 0;
                             long long load_us = 0;
                             long long tick_us = 0;
                             long long restore_us = 0;
-                            if (state_map_path)
+                            if (next_map_path)
                             {
-                                buffer = (uint8_t *)malloc(total_bytes);
+                                buffer = (uint8_t *)malloc(next_total_bytes);
                                 if (!buffer)
                                 {
-                                    fprintf(stderr, "error: out of memory\n");
-                                    result = 1;
-                                    break;
+                                    fprintf(stderr, "HOTSWAP warning: out of memory\n");
+                                    fflush(stderr);
+                                    if (next_map_owned)
+                                    {
+                                        stasis_state_symbol *tmp_syms = next_syms;
+                                        uint32_t tmp_count = next_sym_count;
+                                        free_state_map(&tmp_syms, &tmp_count);
+                                    }
+                                    continue;
                                 }
+                                memset(buffer, 0, next_total_bytes);
+
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                                for (uint32_t i = 0; i < next_sym_count; i++)
                                 {
-                                    free(buffer);
-                                    result = 1;
-                                    break;
+                                    const char *name = next_syms[i].name;
+                                    FARPROC addr = GetProcAddress(lib, name);
+                                    if (!addr)
+                                    {
+                                        missing_save++;
+                                        continue;
+                                    }
+
+                                    uint32_t old_size = next_syms[i].size;
+                                    for (uint32_t j = 0; j < sym_count; j++)
+                                    {
+                                        if (strcmp(syms[j].name, name) == 0)
+                                        {
+                                            old_size = syms[j].size;
+                                            break;
+                                        }
+                                    }
+
+                                    uint32_t copy_n = old_size < next_syms[i].size ? old_size : next_syms[i].size;
+                                    if (copy_n < next_syms[i].size)
+                                    {
+                                        truncated++;
+                                    }
+                                    memcpy(buffer + next_syms[i].offset, (void *)addr, copy_n);
                                 }
                                 QueryPerformanceCounter(&sw_t1);
                                 save_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             }
 
                             QueryPerformanceCounter(&sw_t0);
-                            HMODULE new_lib = stasis_load_program_library(load_path);
+                            HMODULE new_lib = stasis_load_program_library(new_path);
                             QueryPerformanceCounter(&sw_t1);
                             load_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_lib)
@@ -1573,10 +1784,16 @@ int main(int argc, char **argv)
                                                msg,
                                                (DWORD)sizeof(msg),
                                                NULL);
-                                fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", load_path, err, msg);
+                                fprintf(stderr, "HOTSWAP warning: failed to load %s (err=%lu %s)\n", new_path, err, msg);
+                                fflush(stderr);
                                 free(buffer);
-                                result = 1;
-                                break;
+                                if (next_map_owned)
+                                {
+                                    stasis_state_symbol *tmp_syms = next_syms;
+                                    uint32_t tmp_count = next_sym_count;
+                                    free_state_map(&tmp_syms, &tmp_count);
+                                }
+                                continue;
                             }
 
                             QueryPerformanceCounter(&sw_t0);
@@ -1585,31 +1802,40 @@ int main(int argc, char **argv)
                             tick_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                             if (!new_tick_sym)
                             {
-                                fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
+                                fprintf(stderr, "HOTSWAP warning: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                                fflush(stderr);
                                 FreeLibrary(new_lib);
                                 free(buffer);
-                                result = 1;
-                                break;
+                                if (next_map_owned)
+                                {
+                                    stasis_state_symbol *tmp_syms = next_syms;
+                                    uint32_t tmp_count = next_sym_count;
+                                    free_state_map(&tmp_syms, &tmp_count);
+                                }
+                                continue;
                             }
 
                             if (buffer)
                             {
                                 QueryPerformanceCounter(&sw_t0);
-                                if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
+                                for (uint32_t i = 0; i < next_sym_count; i++)
                                 {
-                                    FreeLibrary(new_lib);
-                                    free(buffer);
-                                    result = 1;
-                                    break;
+                                    FARPROC addr = GetProcAddress(new_lib, next_syms[i].name);
+                                    if (!addr)
+                                    {
+                                        missing_restore++;
+                                        continue;
+                                    }
+                                    memcpy((void *)addr, buffer + next_syms[i].offset, next_syms[i].size);
                                 }
                                 QueryPerformanceCounter(&sw_t1);
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
-                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, next_total_bytes, next_sym_count);
                                 fflush(stderr);
-                                if (missing_save > 0 || missing_restore > 0)
+                                if (missing_save > 0 || missing_restore > 0 || truncated > 0)
                                 {
-                                    fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                                    fprintf(stderr, "HOTSWAP warning: state migration issues (missing save=%u restore=%u truncated=%u); consider restarting to resync state.\n", missing_save, missing_restore, truncated);
                                     fflush(stderr);
                                 }
                             }
@@ -1619,13 +1845,50 @@ int main(int argc, char **argv)
                                 fflush(stderr);
                             }
 
-                            if (old_lib)
-                            {
-                                FreeLibrary(old_lib);
-                            }
+                            FreeLibrary(lib);
                             lib = new_lib;
                             tick = (stasis_tick_fn)new_tick_sym;
                             stasis_try_set_sys_args(lib, argc, argv);
+                            stasis_rebind_bulk_pointers(
+                                lib,
+                                bulk_enabled,
+                                &bulk_active,
+                                &host_i32,
+                                &host_f32,
+                                &host_keys,
+                                &gfx_cmd_i32,
+                                &gfx_cmd_f32,
+                                &gfx_cmd_u8,
+                                &host_get_frame,
+                                &host_get_keyboard_state,
+                                &gfx_submit_u8,
+                                &host_bulk_init,
+                                &host_bulk_apply_requests,
+                                &host_bulk_step,
+                                &host_req_seq,
+                                &host_req_flags,
+                                &host_req_window_w_px,
+                                &host_req_window_h_px,
+                                &last_req_seq);
+
+                            if (host_bulk_init)
+                            {
+                                host_bulk_init(host_req_seq);
+                            }
+
+                            if (next_map_owned)
+                            {
+                                free_state_map(&syms, &sym_count);
+                                syms = next_syms;
+                                sym_count = next_sym_count;
+                                total_bytes = next_total_bytes;
+                                map_hash = next_map_hash;
+                                strncpy(state_map_buf, next_map_path, sizeof(state_map_buf) - 1);
+                                state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                                state_map_path = state_map_buf;
+                                fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                                fflush(stderr);
+                            }
 
                             /* Update DLL handle for data binding system */
                             stasis_data_set_dll(new_lib);
@@ -1635,7 +1898,26 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
-            if (bulk_active)
+            if (bulk_active && host_bulk_step)
+            {
+                int step_result = host_bulk_step(
+                    host_i32,
+                    host_f32,
+                    gfx_cmd_i32,
+                    gfx_cmd_f32,
+                    gfx_cmd_u8,
+                    host_req_seq,
+                    host_req_flags,
+                    host_req_window_w_px,
+                    host_req_window_h_px,
+                    tick);
+                if (step_result != 0)
+                {
+                    result = step_result == 1 ? 0 : step_result;
+                    break;
+                }
+            }
+            else if (bulk_active)
             {
                 host_get_frame(host_i32, host_f32);
                 if (host_get_keyboard_state && host_keys)
@@ -1650,8 +1932,11 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                /* Apply window requests (if any). */
-                if (host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+                if (host_bulk_apply_requests)
+                {
+                    host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+                }
+                else if (host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
                 {
                     last_req_seq = *host_req_seq;
                     const int flags = *host_req_flags;
@@ -1665,18 +1950,24 @@ int main(int argc, char **argv)
                         (void)set_fullscreen(1);
                     }
                 }
-            }
 
-            int tick_result = tick();
-            if (tick_result != 0)
-            {
-                result = tick_result == 1 ? 0 : tick_result;
-                break;
-            }
+                int tick_result = tick();
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
 
-            if (bulk_active)
-            {
                 gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+            }
+            else
+            {
+                int tick_result = tick();
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
             }
 
             LARGE_INTEGER now;
@@ -1878,7 +2169,22 @@ int main(int argc, char **argv)
                 {
                     unlink(swap_file_path);
 
-                    if (map_path[0] != '\0' && strcmp(map_path, state_map_path) != 0)
+                    if (!file_exists(new_path))
+                    {
+                        fprintf(stderr, "HOTSWAP warning: library not found: %s\n", new_path);
+                        fflush(stderr);
+                        continue;
+                    }
+
+                    stasis_state_symbol *next_syms = syms;
+                    uint32_t next_sym_count = sym_count;
+                    uint32_t next_total_bytes = total_bytes;
+                    uint64_t next_map_hash = map_hash;
+                    char next_map_buf[2048];
+                    const char *next_map_path = state_map_path;
+                    int next_map_owned = 0;
+
+                    if (map_path[0] != '\0' && (!state_map_path || strcmp(map_path, state_map_path) != 0))
                     {
                         uint64_t new_hash = 0;
                         uint32_t new_count = 0;
@@ -1886,58 +2192,79 @@ int main(int argc, char **argv)
                         stasis_state_symbol *new_syms = NULL;
                         if (read_state_map(map_path, &new_hash, &new_syms, &new_count, &new_total) == 0)
                         {
-                            free_state_map(&syms, &sym_count);
-                            syms = new_syms;
-                            sym_count = new_count;
-                            total_bytes = new_total;
-                            map_hash = new_hash;
-                            strncpy(state_map_buf, map_path, sizeof(state_map_buf) - 1);
-                            state_map_buf[sizeof(state_map_buf) - 1] = '\0';
-                            state_map_path = state_map_buf;
-                            fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                            next_syms = new_syms;
+                            next_sym_count = new_count;
+                            next_total_bytes = new_total;
+                            next_map_hash = new_hash;
+                            strncpy(next_map_buf, map_path, sizeof(next_map_buf) - 1);
+                            next_map_buf[sizeof(next_map_buf) - 1] = '\0';
+                            next_map_path = next_map_buf;
+                            next_map_owned = 1;
+                        }
+                        else
+                        {
+                            fprintf(stderr, "HOTSWAP warning: failed to read state map: %s\n", map_path);
                             fflush(stderr);
                         }
                     }
 
-                    char fixed_path[2048];
-                    const char *load_path = new_path;
-                    if (try_make_fixed_swap_path(new_path, fixed_path, sizeof(fixed_path)))
-                    {
-                        unlink(fixed_path);
-                        if (rename(new_path, fixed_path) == 0)
-                        {
-                            load_path = fixed_path;
-                        }
-                    }
-
-                    fprintf(stderr, "HOTSWAP loading: %s\n", load_path);
+                    fprintf(stderr, "HOTSWAP loading: %s\n", new_path);
                     fflush(stderr);
 
                     uint8_t *buffer = NULL;
                     uint32_t missing_save = 0;
                     uint32_t missing_restore = 0;
+                    uint32_t truncated = 0;
                     long long save_us = 0;
                     long long load_us = 0;
                     long long tick_us = 0;
                     long long restore_us = 0;
-                    if (state_map_path)
+                    if (next_map_path)
                     {
-                        buffer = (uint8_t *)malloc(total_bytes);
+                        buffer = (uint8_t *)malloc(next_total_bytes);
                         if (!buffer)
                         {
-                            fprintf(stderr, "error: out of memory\n");
-                            result = 1;
-                            break;
+                            fprintf(stderr, "HOTSWAP warning: out of memory\n");
+                            fflush(stderr);
+                            if (next_map_owned)
+                            {
+                                stasis_state_symbol *tmp_syms = next_syms;
+                                uint32_t tmp_count = next_sym_count;
+                                free_state_map(&tmp_syms, &tmp_count);
+                            }
+                            continue;
                         }
+                        memset(buffer, 0, next_total_bytes);
 
                         struct timespec t0;
                         struct timespec t1;
                         clock_gettime(CLOCK_MONOTONIC, &t0);
-                        if (copy_state_to_buffer(lib, syms, sym_count, buffer, total_bytes, 1, &missing_save) != 0)
+                        for (uint32_t i = 0; i < next_sym_count; i++)
                         {
-                            free(buffer);
-                            result = 1;
-                            break;
+                            const char *name = next_syms[i].name;
+                            void *addr = dlsym(lib, name);
+                            if (!addr)
+                            {
+                                missing_save++;
+                                continue;
+                            }
+
+                            uint32_t old_size = next_syms[i].size;
+                            for (uint32_t j = 0; j < sym_count; j++)
+                            {
+                                if (strcmp(syms[j].name, name) == 0)
+                                {
+                                    old_size = syms[j].size;
+                                    break;
+                                }
+                            }
+
+                            uint32_t copy_n = old_size < next_syms[i].size ? old_size : next_syms[i].size;
+                            if (copy_n < next_syms[i].size)
+                            {
+                                truncated++;
+                            }
+                            memcpy(buffer + next_syms[i].offset, addr, copy_n);
                         }
                         clock_gettime(CLOCK_MONOTONIC, &t1);
                         save_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
@@ -1946,15 +2273,21 @@ int main(int argc, char **argv)
                     struct timespec t0;
                     struct timespec t1;
                     clock_gettime(CLOCK_MONOTONIC, &t0);
-                    void *new_lib = dlopen(load_path, RTLD_NOW);
+                    void *new_lib = dlopen(new_path, RTLD_NOW);
                     clock_gettime(CLOCK_MONOTONIC, &t1);
                     load_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                     if (!new_lib)
                     {
-                        fprintf(stderr, "error: failed to load %s: %s\n", load_path, dlerror());
+                        fprintf(stderr, "HOTSWAP warning: failed to load %s: %s\n", new_path, dlerror());
+                        fflush(stderr);
                         free(buffer);
-                        result = 1;
-                        break;
+                        if (next_map_owned)
+                        {
+                            stasis_state_symbol *tmp_syms = next_syms;
+                            uint32_t tmp_count = next_sym_count;
+                            free_state_map(&tmp_syms, &tmp_count);
+                        }
+                        continue;
                     }
 
                     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -1963,31 +2296,40 @@ int main(int argc, char **argv)
                     tick_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                     if (!new_tick_sym)
                     {
-                        fprintf(stderr, "error: tick entrypoint %s not found in %s\n", tick_name, load_path);
+                        fprintf(stderr, "HOTSWAP warning: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                        fflush(stderr);
                         dlclose(new_lib);
                         free(buffer);
-                        result = 1;
-                        break;
+                        if (next_map_owned)
+                        {
+                            stasis_state_symbol *tmp_syms = next_syms;
+                            uint32_t tmp_count = next_sym_count;
+                            free_state_map(&tmp_syms, &tmp_count);
+                        }
+                        continue;
                     }
 
                     if (buffer)
                     {
                         clock_gettime(CLOCK_MONOTONIC, &t0);
-                        if (copy_state_from_buffer(new_lib, syms, sym_count, buffer, total_bytes, 1, &missing_restore) != 0)
+                        for (uint32_t i = 0; i < next_sym_count; i++)
                         {
-                            dlclose(new_lib);
-                            free(buffer);
-                            result = 1;
-                            break;
+                            void *addr = dlsym(new_lib, next_syms[i].name);
+                            if (!addr)
+                            {
+                                missing_restore++;
+                                continue;
+                            }
+                            memcpy(addr, buffer + next_syms[i].offset, next_syms[i].size);
                         }
                         clock_gettime(CLOCK_MONOTONIC, &t1);
                         restore_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                         free(buffer);
-                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, total_bytes, sym_count);
+                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, next_total_bytes, next_sym_count);
                         fflush(stderr);
-                        if (missing_save > 0 || missing_restore > 0)
+                        if (missing_save > 0 || missing_restore > 0 || truncated > 0)
                         {
-                            fprintf(stderr, "HOTSWAP warning: state layout changed (missing save=%u restore=%u); consider restarting to resync state.\n", missing_save, missing_restore);
+                            fprintf(stderr, "HOTSWAP warning: state migration issues (missing save=%u restore=%u truncated=%u); consider restarting to resync state.\n", missing_save, missing_restore, truncated);
                             fflush(stderr);
                         }
                     }
@@ -2002,6 +2344,20 @@ int main(int argc, char **argv)
                     tick = (stasis_tick_fn)new_tick_sym;
                     stasis_try_set_sys_args(lib, argc, argv);
                     stasis_data_set_dll(new_lib);
+
+                    if (next_map_owned)
+                    {
+                        free_state_map(&syms, &sym_count);
+                        syms = next_syms;
+                        sym_count = next_sym_count;
+                        total_bytes = next_total_bytes;
+                        map_hash = next_map_hash;
+                        strncpy(state_map_buf, next_map_path, sizeof(state_map_buf) - 1);
+                        state_map_buf[sizeof(state_map_buf) - 1] = '\0';
+                        state_map_path = state_map_buf;
+                        fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
+                        fflush(stderr);
+                    }
                 }
             }
 

@@ -1,0 +1,44 @@
+// Key input helpers.
+//
+// Notes:
+// - The host provides current key state via HostFrame (see `src/host_frame.stasis`).
+// - These helpers let user code keep an explicit previous snapshot (no hidden globals).
+
+import "../host_frame.stasis";
+import "memory.stasis";
+
+const GAME_INPUT_KEY_COUNT: i32 = 512;
+
+// Returns true if the key is currently down (HostFrame snapshot).
+function input_key_down(scancode: i32): bool {
+    return host_key_down(scancode);
+}
+
+// Returns true if the key was down in the previous snapshot buffer.
+function input_key_down_prev(prev_keys: i32[], scancode: i32): bool {
+    if (scancode < 0 || scancode >= GAME_INPUT_KEY_COUNT) { return false; }
+    return prev_keys[scancode] != 0;
+}
+
+// Returns true if the key transitioned up->down this tick.
+function input_key_went_down(prev_keys: i32[], scancode: i32): bool {
+    if (scancode < 0 || scancode >= GAME_INPUT_KEY_COUNT) { return false; }
+    return host_key_down(scancode) && prev_keys[scancode] == 0;
+}
+
+// Returns true if the key transitioned down->up this tick.
+function input_key_went_up(prev_keys: i32[], scancode: i32): bool {
+    if (scancode < 0 || scancode >= GAME_INPUT_KEY_COUNT) { return false; }
+    return !host_key_down(scancode) && prev_keys[scancode] != 0;
+}
+
+// Copies the current HostFrame keyboard snapshot into `prev_keys`.
+//
+// `prev_cap` should be 512 for a full snapshot; smaller caps are allowed (copy is clamped).
+function input_keys_commit(prev_keys: i32[], prev_cap: i32): void {
+    let n: i32 = prev_cap;
+    if (n > GAME_INPUT_KEY_COUNT) { n = GAME_INPUT_KEY_COUNT; }
+    if (n <= 0) { return; }
+    mem_copy_i32(prev_keys, prev_cap, 0, host_i32, HOST_I32_COUNT, HOST_I_KEY_BASE, n);
+}
+

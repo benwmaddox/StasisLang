@@ -1240,6 +1240,37 @@ static bool TryFindCraneliftAot(out string path)
     return TryFindTool("stasis-cranelift-aot", out path);
 }
 
+static bool TryFindCraneliftJitRunner(out string path)
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_JIT_RUNNER_EXE");
+    if (!string.IsNullOrEmpty(env) && File.Exists(env))
+    {
+        path = env;
+        return true;
+    }
+
+    var repoRoot = FindRepoRoot();
+    if (!string.IsNullOrEmpty(repoRoot))
+    {
+        var exeName = OperatingSystem.IsWindows() ? "stasis-cranelift-jit-runner.exe" : "stasis-cranelift-jit-runner";
+        var release = Path.Combine(repoRoot, "tools", "cranelift-jit-runner", "target", "release", exeName);
+        if (File.Exists(release))
+        {
+            path = release;
+            return true;
+        }
+
+        var debug = Path.Combine(repoRoot, "tools", "cranelift-jit-runner", "target", "debug", exeName);
+        if (File.Exists(debug))
+        {
+            path = debug;
+            return true;
+        }
+    }
+
+    return TryFindTool("stasis-cranelift-jit-runner", out path);
+}
+
 static bool TryFindCraneliftRunner(out string path)
 {
     var env = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER_EXE");
@@ -2740,9 +2771,44 @@ static string BuildDefaultOutputPath(string sourcePath)
 static string GetHotExitFilePath(string sourcePath, string moduleName)
 {
     var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-    var hotDir = Path.Combine(repoRoot, "build", "hotstate");
+    var hotDir = GetHotStateDir(repoRoot);
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
     return Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
+}
+
+static string GetHotStateDir(string repoRoot)
+{
+    static string? GetEnvPath(string key)
+    {
+        var value = Environment.GetEnvironmentVariable(key);
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    var env =
+        GetEnvPath("STASIS_HOTSTATE_DIR") ??
+        GetEnvPath("STASIS_HOTSWAP_DIR");
+    if (!string.IsNullOrWhiteSpace(env))
+    {
+        return Path.GetFullPath(env);
+    }
+
+    return Path.Combine(repoRoot, "build", "hotstate");
+}
+
+static int GetHotSwapDelayMs()
+{
+    var env = Environment.GetEnvironmentVariable("STASIS_HOTSWAP_DELAY_MS");
+    if (string.IsNullOrWhiteSpace(env))
+    {
+        return 0;
+    }
+
+    if (!int.TryParse(env, out var ms))
+    {
+        return 0;
+    }
+
+    return Math.Max(0, ms);
 }
 
 static string? FindDataBindingJson(string sourcePath, string repoRoot)
@@ -2890,9 +2956,9 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     }
 
     var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-    var swapFile = Path.Combine(repoRoot, "build", "hotstate", $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
+    var swapDir = GetHotStateDir(repoRoot);
+    var swapFile = Path.Combine(swapDir, $"{Path.GetFileNameWithoutExtension(sourcePath)}.{moduleName}.swap");
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
-    var swapDir = Path.Combine(repoRoot, "build", "hotstate");
     var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
     var swapDllA = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapA{swapExt}");
     var swapDllB = Path.Combine(swapDir, $"{baseName}.{moduleName}.swapB{swapExt}");
@@ -3077,6 +3143,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             var linkArgs = BuildClangArgsForObject(hotObjPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, linkLibraries, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
             if (OperatingSystem.IsWindows())
             {
+                if (Environment.GetEnvironmentVariable("STASIS_HOTSWAP_USE_LLD") == "1")
+                {
+                    linkArgs += " -fuse-ld=lld";
+                }
                 // Hot-swap speed: skip expensive pruning/dedup; we don't care about DLL size for dev.
                 linkArgs += " -Wl,/OPT:NOREF -Wl,/OPT:NOICF -Wl,/DEBUG:NONE";
             }
@@ -3100,6 +3170,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             {
                 var entry = $"{moduleName}__main";
                 var runnerArgs = $"\"{hotDll}\" {entry} --state-map \"{plan.MapPath}\" --swap-file \"{swapFile}\" --fps {fps}";
+                if (Environment.GetEnvironmentVariable("STASIS_RUNNER_DIAG") == "1")
+                {
+                    runnerArgs += " --diag-hotswap";
+                }
 
                 var dataFile = FindDataBindingJson(sourcePath, repoRoot);
                 if (!string.IsNullOrEmpty(dataFile))
@@ -3173,8 +3247,17 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             }
 
             var prevOkCount = Volatile.Read(ref runnerHotSwapOkCount);
+            var swapDelayMs = GetHotSwapDelayMs();
+            if (swapDelayMs > 0)
+            {
+                if (Environment.GetEnvironmentVariable("STASIS_RUNNER_DIAG") == "1")
+                {
+                    Console.Error.WriteLine($"HOTSWAP diag: delaying swap trigger by {swapDelayMs}ms");
+                }
+                Thread.Sleep(swapDelayMs);
+            }
             var swapText = hotDll + "\n" + plan.MapPath;
-            File.WriteAllText(swapFile, swapText, Encoding.ASCII);
+            WriteAllTextAtomic(swapFile, swapText, Encoding.ASCII);
             swapWriteMs = phase.ElapsedMilliseconds;
             swTotal.Stop();
             timingLine =
@@ -3248,8 +3331,8 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 return 0;
             }
 
-            Console.Error.WriteLine($"error: runner exited with code {runner.ExitCode}");
-            return 1;
+            Console.Error.WriteLine($"warning: runner exited with code {runner.ExitCode}; waiting for changes to restart.");
+            runner = null;
         }
 
         try
@@ -3283,6 +3366,363 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     {
         runner.Kill(entireProcessTree: true);
         runner.WaitForExit();
+    }
+
+    return 0;
+}
+
+static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindCraneliftJitRunner(out var runnerPath))
+    {
+        Console.Error.WriteLine("error: stasis-cranelift-jit-runner not found. Build it with `cargo build -p stasis-cranelift-jit-runner` (in tools/cranelift-jit-runner) or set STASIS_CRANELIFT_JIT_RUNNER_EXE.");
+        return 1;
+    }
+
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var hotDir = GetHotStateDir(repoRoot);
+    Directory.CreateDirectory(hotDir);
+
+    var runnerOutLog = Path.Combine(hotDir, $"{baseName}.{moduleName}.runner.out.log");
+    var runnerErrLog = Path.Combine(hotDir, $"{baseName}.{moduleName}.runner.err.log");
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    Process? runner = null;
+
+    static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+                while (!token.IsCancellationRequested)
+                {
+                    var line = reader.ReadLine();
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    onLine?.Invoke(line);
+                    writer.WriteLine(line);
+                }
+            }
+            catch
+            {
+                // Best-effort logging.
+            }
+        }, token);
+    }
+
+    static async Task<string?> ReadLineWithTimeout(StreamReader reader, int timeoutMs, CancellationToken token)
+    {
+        var readTask = Task.Run(() => reader.ReadLine(), token);
+        var done = await Task.WhenAny(readTask, Task.Delay(timeoutMs, token));
+        if (done == readTask)
+        {
+            return await readTask;
+        }
+        return null;
+    }
+
+    static void WriteUtf8(Stream stream, string s)
+    {
+        var bytes = Encoding.UTF8.GetBytes(s);
+        stream.Write(bytes, 0, bytes.Length);
+    }
+
+    async Task<(bool ok, int latencyMs, string? response)> SendSwapAndWaitForAck(string clif, int timeoutMs)
+    {
+        if (runner is null || runner.HasExited)
+        {
+            return (false, -1, "runner not running");
+        }
+
+        var sw = Stopwatch.StartNew();
+        var clifBytes = Encoding.UTF8.GetByteCount(clif);
+        WriteUtf8(runner.StandardInput.BaseStream, $"SWAP {clifBytes}\n");
+        WriteUtf8(runner.StandardInput.BaseStream, clif);
+        runner.StandardInput.BaseStream.Flush();
+
+        var resp = await ReadLineWithTimeout(runner.StandardOutput, timeoutMs, cts.Token);
+        sw.Stop();
+
+        if (resp is not null)
+        {
+            try
+            {
+                await File.AppendAllTextAsync(runnerOutLog, resp + Environment.NewLine, Encoding.UTF8, cts.Token);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        if (resp is null)
+        {
+            return (false, -1, null);
+        }
+
+        return (resp.StartsWith("OK", StringComparison.Ordinal), (int)sw.ElapsedMilliseconds, resp);
+    }
+
+    async Task<bool> EnsureRunnerStarted(string initialClif)
+    {
+        if (runner is not null && !runner.HasExited)
+        {
+            return true;
+        }
+
+        try
+        {
+            if (File.Exists(runnerOutLog)) File.Delete(runnerOutLog);
+            if (File.Exists(runnerErrLog)) File.Delete(runnerErrLog);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = runnerPath,
+            Arguments = $"--server --fps {fps}",
+            UseShellExecute = false,
+            WorkingDirectory = repoRoot,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        runner = Process.Start(psi);
+        if (runner is null)
+        {
+            Console.Error.WriteLine("error: failed to start stasis-cranelift-jit-runner.");
+            return false;
+        }
+
+        StartLogPump(
+            runner.StandardError,
+            runnerErrLog,
+            cts.Token);
+
+        // Wait for READY
+        var ready = await ReadLineWithTimeout(runner.StandardOutput, 10000, cts.Token);
+        if (!string.Equals(ready?.Trim(), "READY", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine("error: jit runner did not print READY.");
+            return false;
+        }
+        await File.AppendAllTextAsync(runnerOutLog, ready + Environment.NewLine, Encoding.UTF8, cts.Token);
+
+        var entry = $"{moduleName}__main";
+        var tick = $"{moduleName}__tick";
+        var moduleBytes = Encoding.UTF8.GetByteCount(moduleName);
+        var entryBytes = Encoding.UTF8.GetByteCount(entry);
+        var tickBytes = Encoding.UTF8.GetByteCount(tick);
+        var clifBytes = Encoding.UTF8.GetByteCount(initialClif);
+
+        WriteUtf8(runner.StandardInput.BaseStream, $"INIT {moduleBytes} {entryBytes} {tickBytes} {clifBytes}\n");
+        WriteUtf8(runner.StandardInput.BaseStream, moduleName);
+        WriteUtf8(runner.StandardInput.BaseStream, entry);
+        WriteUtf8(runner.StandardInput.BaseStream, tick);
+        WriteUtf8(runner.StandardInput.BaseStream, initialClif);
+        runner.StandardInput.BaseStream.Flush();
+
+        // Larger programs (e.g. Brickout) can take a while to JIT on the first load.
+        // Larger programs (e.g. Brickout) can take a while to JIT on the first load,
+        // especially on cold caches / under AV scanning. Keep this high to avoid false timeouts.
+        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 600000, cts.Token);
+        if (initResp is null)
+        {
+            Console.Error.WriteLine("error: jit runner init timed out.");
+            return false;
+        }
+        await File.AppendAllTextAsync(runnerOutLog, initResp + Environment.NewLine, Encoding.UTF8, cts.Token);
+        if (!initResp.StartsWith("OK", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"error: jit runner init failed: {initResp}");
+            return false;
+        }
+
+        return true;
+    }
+
+    int BuildClif(out string clif, out long lowerMs)
+    {
+        var sw = Stopwatch.StartNew();
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        if (importDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+
+        var parse = Parser.Parse(source);
+        if (parse.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+
+        var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
+        var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
+        if (linkDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+
+        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        if (sema.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+
+        if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
+        {
+            Console.Error.WriteLine("error: tick hot-swap mode requires a top-level `function tick()`.");
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        var options = new CodeGenerationOptions(
+            ModuleName: moduleName,
+            IncludeTests: false,
+            EmitTestHarness: false,
+            HeadlessGraphics: !usesGraphics,
+            AllowReachabilityFallback: true);
+
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
+        var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        sw.Stop();
+        lowerMs = sw.ElapsedMilliseconds;
+        if (result.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            Console.WriteLine(result.Ir);
+            clif = string.Empty;
+            return 1;
+        }
+
+        clif = result.Ir;
+        return 0;
+    }
+
+    var initialRc = BuildClif(out var initialClif, out var initialLowerMs);
+    if (initialRc != 0)
+    {
+        Console.Error.WriteLine("warning: initial build failed; waiting for changes.");
+    }
+    else
+    {
+        if (!EnsureRunnerStarted(initialClif).GetAwaiter().GetResult())
+        {
+            return 1;
+        }
+        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
+    }
+
+    var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
+    var fileName = Path.GetFileName(sourcePath);
+    using var watcher = new FileSystemWatcher(dir, fileName)
+    {
+        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+    };
+
+    using var changeSignal = new ManualResetEventSlim(false);
+    void OnChange(object? _, FileSystemEventArgs __) => changeSignal.Set();
+    watcher.Changed += OnChange;
+    watcher.Created += OnChange;
+    watcher.Renamed += OnChange;
+    watcher.EnableRaisingEvents = true;
+
+    while (!cts.IsCancellationRequested)
+    {
+        changeSignal.Wait(TimeSpan.FromMilliseconds(100), cts.Token);
+        if (!changeSignal.IsSet)
+        {
+            continue;
+        }
+        changeSignal.Reset();
+
+        // Debounce quick successive writes
+        Thread.Sleep(50);
+
+        var swTotal = Stopwatch.StartNew();
+        var rc = BuildClif(out var clif, out var lowerMs);
+        if (rc != 0)
+        {
+            continue;
+        }
+
+        if (runner is null || runner.HasExited)
+        {
+            if (!EnsureRunnerStarted(clif).GetAwaiter().GetResult())
+            {
+                return 1;
+            }
+            continue;
+        }
+
+        var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
+        Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+        if (!swapOk)
+        {
+            Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
+            try
+            {
+                runner?.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // ignore
+            }
+            runner = null;
+            continue;
+        }
+
+        swTotal.Stop();
+        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
+    }
+
+    try
+    {
+        if (runner is not null && !runner.HasExited)
+        {
+            WriteUtf8(runner.StandardInput.BaseStream, "QUIT\n");
+            runner.StandardInput.BaseStream.Flush();
+            runner.WaitForExit(1000);
+        }
+    }
+    catch
+    {
+        // ignore
     }
 
     return 0;
@@ -3341,7 +3781,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     }
 
     var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
-    var hotDir = Path.Combine(repoRoot, "build", "hotstate");
+    var hotDir = GetHotStateDir(repoRoot);
     Directory.CreateDirectory(hotDir);
 
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
@@ -3365,7 +3805,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
             map.Append(entry.Size);
             map.Append('\n');
         }
-        File.WriteAllText(mapPath, map.ToString(), Encoding.ASCII);
+        WriteAllTextAtomic(mapPath, map.ToString(), Encoding.ASCII);
 
         // Emit struct metadata JSON for data binding
         EmitStructMetadataJson(structMetaPath, state, entries);
@@ -3410,7 +3850,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
         }
     }
 
-    File.WriteAllText(defPath, def.ToString(), Encoding.ASCII);
+    WriteAllTextAtomic(defPath, def.ToString(), Encoding.ASCII);
 
     plan = new HotStatePlan(mapPath, snapshotPath, defPath, hotExitPath, structMetaPath);
     return true;
@@ -3476,6 +3916,10 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
         DetectsTickUsage(File.ReadAllText(fullPath)))
     {
+        if (Environment.GetEnvironmentVariable("STASIS_CRANELIFT_JIT_RUNNER") == "1" && TryFindCraneliftJitRunner(out _))
+        {
+            return WatchCraneliftTickJitSwap(fullPath, moduleName, tickHostFps, optLevel, enableGraphics, graphicsLibPath);
+        }
         return WatchCraneliftTickHotSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);
     }
 
@@ -3630,6 +4074,53 @@ static Process StartWatchChild(string exePath, string[] args)
 
 static string QuoteArg(string arg) =>
     arg.Contains(' ') ? $"\"{arg}\"" : arg;
+
+static void WriteAllTextAtomic(string path, string contents, Encoding encoding, int attempts = 10, int sleepMs = 5)
+{
+    var dir = Path.GetDirectoryName(path);
+    if (!string.IsNullOrEmpty(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+
+    var tmp = path + ".tmp";
+    File.WriteAllText(tmp, contents, encoding);
+
+    // Best-effort atomic replace on Windows; retry to handle brief sharing violations (e.g. runner polling swap files).
+    for (var i = 0; i < attempts; i++)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows() && File.Exists(path))
+            {
+                File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(tmp, path, overwrite: true);
+            }
+            return;
+        }
+        catch (IOException) when (i + 1 < attempts)
+        {
+            Thread.Sleep(sleepMs);
+        }
+        catch (UnauthorizedAccessException) when (i + 1 < attempts)
+        {
+            Thread.Sleep(sleepMs);
+        }
+    }
+
+    // Fall back: last attempt, let exceptions propagate for visibility.
+    if (OperatingSystem.IsWindows() && File.Exists(path))
+    {
+        File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+    }
+    else
+    {
+        File.Move(tmp, path, overwrite: true);
+    }
+}
 
 static void WriteIrOutput(string ir, string? outputPath)
 {
