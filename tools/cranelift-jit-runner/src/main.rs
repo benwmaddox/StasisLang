@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -13,7 +14,10 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_module::{default_libcall_names, DataDescription, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_native;
+use libloading::Library;
 use target_lexicon::Triple;
+
+mod stasis_clif;
 
 #[derive(Parser)]
 #[command(name = "stasis-cranelift-jit-runner")]
@@ -60,6 +64,63 @@ pub extern "C" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn stasis_sys_memcpy_u8(dst: i64, dst_index: i32, src: i64, src_index: i32, count: i32)
+{
+    if count <= 0
+    {
+        return;
+    }
+
+    unsafe {
+        let dst = (dst as *mut u8).wrapping_add(dst_index.max(0) as usize);
+        let src = (src as *const u8).wrapping_add(src_index.max(0) as usize);
+        std::ptr::copy_nonoverlapping(src, dst, count as usize);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sinf(x: f32) -> f32
+{
+    x.sin()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cosf(x: f32) -> f32
+{
+    x.cos()
+}
+
+fn try_load_stasis_graphics_symbols(jit_builder: &mut JITBuilder) -> Option<Library>
+{
+    // In repo/dev runs, the CLI starts the runner with WorkingDirectory=repoRoot,
+    // so loading by name resolves `.\stasis_graphics.dll` on Windows.
+    let lib = unsafe { Library::new("stasis_graphics.dll") }.ok()?;
+
+    // Register the subset currently needed by Brickout v1 (expand as needed).
+    for name in [
+        "stasis_init_window",
+        "stasis_gfx_load_sprite",
+        "stasis_load_font",
+        "stasis_get_time_ms",
+        "stasis_get_time_us",
+        "stasis_audio_is_available",
+        "stasis_audio_get_sample_rate",
+        "stasis_audio_get_queued_frames",
+        "stasis_audio_push_f32_interleaved",
+    ]
+    {
+        unsafe {
+            if let Ok(sym) = lib.get::<*const c_void>(name.as_bytes())
+            {
+                jit_builder.symbol(name, *sym as *const u8);
+            }
+        }
+    }
+
+    Some(lib)
+}
+
 enum Request
 {
     Init {
@@ -91,9 +152,19 @@ fn run_server(fps: u32) -> Result<()>
         {
             Request::Init { module_name, entry_name, tick_name, clif } =>
             {
-                let mut new_instance = JitInstance::compile(&module_name, &entry_name, &tick_name, &clif)
-                    .context("failed to compile initial CLIF")?;
-                let rc = unsafe { (new_instance.entry_fn)() };
+                let compile_result = JitInstance::compile(&module_name, &entry_name, &tick_name, &clif);
+                let mut new_instance = match compile_result
+                {
+                    Ok(v) => v,
+                    Err(e) =>
+                    {
+                        writeln!(stdout, "ERR init compile failed: {:#}", e)?;
+                        stdout.flush()?;
+                        continue;
+                    }
+                };
+
+                let rc = (new_instance.entry_fn)();
                 if rc != 0
                 {
                     writeln!(stdout, "ERR entry returned {rc}")?;
@@ -143,8 +214,17 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     let save_us = t0.elapsed().as_micros() as u64;
 
                     let t1 = Instant::now();
-                    let mut new_instance = JitInstance::compile(&instance.module_name, &instance.entry_name, &instance.tick_name, &clif)
-                        .context("failed to compile swapped CLIF")?;
+                    let mut new_instance = match JitInstance::compile(&instance.module_name, &instance.entry_name, &instance.tick_name, &clif)
+                    {
+                        Ok(v) => v,
+                        Err(e) =>
+                        {
+                            eprintln!("HOTSWAP error: {:#}", e);
+                            writeln!(stdout, "ERR swap compile failed")?;
+                            stdout.flush()?;
+                            continue;
+                        }
+                    };
                     let compile_us = t1.elapsed().as_micros() as u64;
 
                     let t2 = Instant::now();
@@ -291,6 +371,8 @@ struct JitInstance
     module_name: String,
     entry_name: String,
     tick_name: String,
+    #[allow(dead_code)]
+    graphics_lib: Option<Library>,
     module: JITModule,
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
@@ -313,10 +395,15 @@ impl JitInstance
         let mut jit_builder = JITBuilder::with_isa(isa, default_libcall_names());
         jit_builder.symbol("printf", stasis_printf3 as *const u8);
         jit_builder.symbol("stasis_printf3", stasis_printf3 as *const u8);
+        jit_builder.symbol("stasis_sys_memcpy_u8", stasis_sys_memcpy_u8 as *const u8);
+        jit_builder.symbol("sinf", sinf as *const u8);
+        jit_builder.symbol("cosf", cosf as *const u8);
+
+        let graphics_lib = try_load_stasis_graphics_symbols(&mut jit_builder);
 
         let mut module = JITModule::new(jit_builder);
 
-        let parsed = parse_stasis_clif(clif, default_cc).context("failed to parse stasis CLIF")?;
+        let parsed = stasis_clif::parse_stasis_clif(clif, default_cc).context("failed to parse stasis CLIF")?;
 
         let mut data_ptrs = HashMap::new();
         let mut state_globals = Vec::new();
@@ -331,8 +418,8 @@ impl JitInstance
             let mut data_desc = DataDescription::new();
             match &g.init_data
             {
-                GlobalInitData::Zero => data_desc.define_zeroinit(g.size_bytes),
-                GlobalInitData::String(bytes) => data_desc.define(bytes.clone().into_boxed_slice()),
+                stasis_clif::GlobalInitData::Zero => data_desc.define_zeroinit(g.size_bytes),
+                stasis_clif::GlobalInitData::String(bytes) => data_desc.define(bytes.clone().into_boxed_slice()),
             }
             module
                 .define_data(id, &data_desc)
@@ -365,7 +452,7 @@ impl JitInstance
         for f in parsed.functions
         {
             let mut context = module.make_context();
-            context.func = build_function_ir(&mut module, &function_ids, &data_ids, &f)
+            context.func = stasis_clif::build_function_ir(&mut module, &function_ids, &data_ids, &f)
                 .with_context(|| format!("failed to build IR for {}", f.name))?;
             let id = *function_ids.get(&f.name).context("missing function id")?;
             module
@@ -392,6 +479,7 @@ impl JitInstance
             module_name: module_name.to_string(),
             entry_name: entry_name.to_string(),
             tick_name: tick_name.to_string(),
+            graphics_lib,
             module,
             entry_fn: unsafe { std::mem::transmute(entry_ptr) },
             tick_fn: unsafe { std::mem::transmute(tick_ptr) },

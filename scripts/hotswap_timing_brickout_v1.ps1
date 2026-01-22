@@ -32,6 +32,7 @@ Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
 
 $sampleBase = [System.IO.Path]::GetFileNameWithoutExtension($sample)
 $runnerErrLog = Join-Path $hotDir ("{0}.brick.runner.err.log" -f $sampleBase)
+Remove-Item $runnerErrLog -ErrorAction SilentlyContinue
 
 function Read-TextFileShared {
     param([string]$Path)
@@ -128,13 +129,17 @@ if (-not $env:STASIS_CLANG) {
 
 $proc = Start-Process -FilePath (Join-Path $root "stasis.bat") -ArgumentList $cliArgs -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 try {
-    if (-not (Wait-ForText -Path $errLog -Needle "HOTRELOAD phases(ms):" -TimeoutMs 180000)) {
+    $initialTimeoutMs = if ($Mode -eq "jit") { 600000 } else { 180000 }
+    if (-not (Wait-ForText -Path $errLog -Needle "HOTRELOAD phases(ms):" -TimeoutMs $initialTimeoutMs)) {
         throw "Timed out waiting for initial HOTRELOAD output."
     }
 
+    $swapLog = if ($Mode -eq "jit") { $outLog } else { $runnerErrLog }
+    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP ok:" }
+
     $prevSwapCount = 0
-    if (Test-Path $runnerErrLog) {
-        try { $prevSwapCount = ([regex]::Matches((Read-TextFileShared $runnerErrLog), "HOTSWAP ok:")).Count } catch {}
+    if (Test-Path $swapLog) {
+        try { $prevSwapCount = ([regex]::Matches((Read-TextFileShared $swapLog), [regex]::Escape($swapNeedle))).Count } catch {}
     }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
@@ -143,14 +148,14 @@ try {
         $sampleTouched = $true
         Start-Sleep -Milliseconds $SleepAfterEditMs
 
-        $ok = Wait-ForText -Path $runnerErrLog -Needle "HOTSWAP ok:" -TimeoutMs $SwapTimeoutMs
+        $ok = Wait-ForText -Path $swapLog -Needle $swapNeedle -TimeoutMs $SwapTimeoutMs
         if (-not $ok) {
-            throw "Timed out waiting for HOTSWAP ok: after edit $i."
+            throw "Timed out waiting for hot-swap signal after edit $i."
         }
 
-        $count = ([regex]::Matches((Read-TextFileShared $runnerErrLog), "HOTSWAP ok:")).Count
+        $count = ([regex]::Matches((Read-TextFileShared $swapLog), [regex]::Escape($swapNeedle))).Count
         if ($count -le $prevSwapCount) {
-            throw "HOTSWAP ok: did not advance after edit $i (count=$count prev=$prevSwapCount)."
+            throw "Hot-swap signal did not advance after edit $i (count=$count prev=$prevSwapCount)."
         }
         $prevSwapCount = $count
     }
@@ -158,6 +163,7 @@ try {
 finally {
     try { if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force } } catch {}
     try { Get-Process stasis_runner -ErrorAction SilentlyContinue | Stop-Process -Force } catch {}
+    try { Get-Process stasis-cranelift-jit-runner -ErrorAction SilentlyContinue | Stop-Process -Force } catch {}
     if ($sampleTouched) {
         try { Set-Content -Path $sample -Value $originalSample -Encoding ascii } catch {}
     }
