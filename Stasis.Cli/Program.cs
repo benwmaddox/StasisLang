@@ -3505,6 +3505,14 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("STASIS_JIT_HEARTBEAT_MS")))
+        {
+            psi.EnvironmentVariables["STASIS_JIT_HEARTBEAT_MS"] = "1000";
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("STASIS_JIT_WATCHDOG_MS")))
+        {
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "10000";
+        }
 
         runner = Process.Start(psi);
         if (runner is null)
