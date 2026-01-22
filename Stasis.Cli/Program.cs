@@ -3530,7 +3530,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         runner.StandardInput.BaseStream.Flush();
 
         // Larger programs (e.g. Brickout) can take a while to JIT on the first load.
-        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 120000, cts.Token);
+        // Larger programs (e.g. Brickout) can take a while to JIT on the first load,
+        // especially on cold caches / under AV scanning. Keep this high to avoid false timeouts.
+        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 600000, cts.Token);
         if (initResp is null)
         {
             Console.Error.WriteLine("error: jit runner init timed out.");
