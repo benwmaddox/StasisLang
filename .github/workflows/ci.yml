@@ -65,20 +65,27 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cmake -S runtime -B runtime/build_ci -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
-          cmake --build runtime/build_ci --config Release
+          cmake -S runtime -B runtime/build -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=ON
+          cmake --build runtime/build --config Release
           mkdir -p build
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp runtime/build_ci/bin/Release/stasis_runner.exe ./stasis_runner.exe
-            cp runtime/build_ci/bin/Release/stasis_runner.exe ./build/stasis_runner.exe
+            cp runtime/build/bin/Release/stasis_runner.exe ./stasis_runner.exe
+            cp runtime/build/bin/Release/stasis_runner.exe ./build/stasis_runner.exe
+            cp runtime/build/Release/stasis_sys_static.lib ./stasis_sys_static.lib
+            cp runtime/build/Release/stasis_sys_static.lib ./build/stasis_sys_static.lib
           else
             # For non-multi-config generators, the binary lives under bin/.
-            if [ -f runtime/build_ci/bin/stasis_runner ]; then
-              cp runtime/build_ci/bin/stasis_runner ./stasis_runner
-              cp runtime/build_ci/bin/stasis_runner ./build/stasis_runner
+            if [ -f runtime/build/bin/stasis_runner ]; then
+              cp runtime/build/bin/stasis_runner ./stasis_runner
+              cp runtime/build/bin/stasis_runner ./build/stasis_runner
             else
-              cp runtime/build_ci/bin/Release/stasis_runner ./stasis_runner
-              cp runtime/build_ci/bin/Release/stasis_runner ./build/stasis_runner
+              cp runtime/build/bin/Release/stasis_runner ./stasis_runner
+              cp runtime/build/bin/Release/stasis_runner ./build/stasis_runner
+            fi
+
+            if [ -f runtime/build/Release/libstasis_sys_static.a ]; then
+              cp runtime/build/Release/libstasis_sys_static.a ./libstasis_sys_static.a
+              cp runtime/build/Release/libstasis_sys_static.a ./build/libstasis_sys_static.a
             fi
           fi
 
