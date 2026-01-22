@@ -3507,7 +3507,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             });
 
         // Wait for READY
-        var ready = await ReadLineWithTimeout(runner.StandardOutput, 5000, cts.Token);
+        var ready = await ReadLineWithTimeout(runner.StandardOutput, 10000, cts.Token);
         if (!string.Equals(ready?.Trim(), "READY", StringComparison.Ordinal))
         {
             Console.Error.WriteLine("error: jit runner did not print READY.");
@@ -3529,7 +3529,8 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         WriteUtf8(runner.StandardInput.BaseStream, initialClif);
         runner.StandardInput.BaseStream.Flush();
 
-        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 20000, cts.Token);
+        // Larger programs (e.g. Brickout) can take a while to JIT on the first load.
+        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 120000, cts.Token);
         if (initResp is null)
         {
             Console.Error.WriteLine("error: jit runner init timed out.");
@@ -3682,7 +3683,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         runner.StandardInput.BaseStream.Flush();
 
         // Wait for runner stderr "HOTSWAP ok:" (existing timing behavior)
-        var swapLatencyMs = WaitForRunnerHotSwapOkCount(() => Volatile.Read(ref runnerHotSwapOkCount), prevOk, timeoutMs: 20000);
+        var swapLatencyMs = WaitForRunnerHotSwapOkCount(() => Volatile.Read(ref runnerHotSwapOkCount), prevOk, timeoutMs: 120000);
         Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
 
         swTotal.Stop();
