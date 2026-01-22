@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -211,6 +211,27 @@ enum Request
     Quit,
 }
 
+struct SwapJob
+{
+    id: u64,
+    module_name: String,
+    entry_name: String,
+    tick_name: String,
+    clif: String,
+}
+
+enum SwapOutcome
+{
+    Ok { instance: JitInstance, compile_us: u64 },
+    Err { message: String },
+}
+
+struct SwapResult
+{
+    id: u64,
+    outcome: SwapOutcome,
+}
+
 fn run_server(fps: u32) -> Result<()>
 {
     let mut stdout = io::stdout();
@@ -296,20 +317,14 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
     let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));
     let tick_counter = Arc::new(AtomicU64::new(0));
-    let busy = Arc::new(AtomicBool::new(false));
+    let swap_counter = Arc::new(AtomicU64::new(0));
 
     if watchdog_ms > 0
     {
         let last_progress_ms = Arc::clone(&last_progress_ms);
         let tick_counter = Arc::clone(&tick_counter);
-        let busy = Arc::clone(&busy);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(250));
-            if busy.load(Ordering::Relaxed)
-            {
-                continue;
-            }
-
             let last_ms = last_progress_ms.load(Ordering::Relaxed);
             let now = now_ms();
             if now.saturating_sub(last_ms) > watchdog_ms
@@ -323,6 +338,53 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         });
     }
+
+    let heartbeat_ms: u64 = std::env::var("STASIS_JIT_HEARTBEAT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    if heartbeat_ms > 0
+    {
+        let tick_counter = Arc::clone(&tick_counter);
+        let swap_counter = Arc::clone(&swap_counter);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(heartbeat_ms.max(50)));
+            eprintln!(
+                "HEARTBEAT ticks={} swaps={}",
+                tick_counter.load(Ordering::Relaxed),
+                swap_counter.load(Ordering::Relaxed)
+            );
+        });
+    }
+
+    // Compile swaps off-thread so the tick loop stays responsive (UI/events continue to pump).
+    let (swap_job_tx, swap_job_rx) = mpsc::channel::<SwapJob>();
+    let (swap_result_tx, swap_result_rx) = mpsc::channel::<SwapResult>();
+    thread::spawn(move || {
+        while let Ok(job) = swap_job_rx.recv()
+        {
+            let t0 = Instant::now();
+            let outcome = match JitInstance::compile(&job.module_name, &job.entry_name, &job.tick_name, &job.clif)
+            {
+                Ok(instance) => SwapOutcome::Ok { instance, compile_us: t0.elapsed().as_micros() as u64 },
+                Err(e) => SwapOutcome::Err { message: format!("{:#}", e) },
+            };
+            let _ = swap_result_tx.send(SwapResult { id: job.id, outcome });
+        }
+    });
+
+    // Drop old instances off-thread as well (tearing down the previous JIT module can be expensive).
+    let (drop_tx, drop_rx) = mpsc::channel::<JitInstance>();
+    thread::spawn(move || {
+        while let Ok(v) = drop_rx.recv()
+        {
+            drop(v);
+        }
+    });
+
+    let mut next_swap_id: u64 = 1;
+    let mut pending_swap_id: Option<u64> = None;
 
     // Bulk host mode: create a default window if the graphics runtime is present.
     if instance.bulk_active
@@ -353,31 +415,26 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     {
         last_progress_ms.store(now_ms(), Ordering::Relaxed);
 
-        while let Ok(req) = rx.try_recv()
+        while let Ok(result) = swap_result_rx.try_recv()
         {
-            match req
+            // If multiple results arrive (shouldn't happen with the watch protocol), apply the latest matching swap.
+            if pending_swap_id != Some(result.id)
             {
-                Request::Swap { clif } =>
+                // Drop compiled instances we didn't apply.
+                if let SwapOutcome::Ok { instance: compiled, .. } = result.outcome
                 {
-                    busy.store(true, Ordering::Relaxed);
+                    let _ = drop_tx.send(compiled);
+                }
+                continue;
+            }
+
+            match result.outcome
+            {
+                SwapOutcome::Ok { instance: mut new_instance, compile_us } =>
+                {
                     let t0 = Instant::now();
                     let (missing_save, save_bytes) = instance.save_state();
                     let save_us = t0.elapsed().as_micros() as u64;
-
-                    let t1 = Instant::now();
-                    let mut new_instance = match JitInstance::compile(&instance.module_name, &instance.entry_name, &instance.tick_name, &clif)
-                    {
-                        Ok(v) => v,
-                        Err(e) =>
-                        {
-                            busy.store(false, Ordering::Relaxed);
-                            eprintln!("HOTSWAP error: {:#}", e);
-                            writeln!(stdout, "ERR swap compile failed")?;
-                            stdout.flush()?;
-                            continue;
-                        }
-                    };
-                    let compile_us = t1.elapsed().as_micros() as u64;
 
                     let t2 = Instant::now();
                     let missing_restore = new_instance.restore_state(save_bytes);
@@ -397,11 +454,60 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         );
                     }
 
-                    *instance = new_instance;
-                    writeln!(stdout, "OK")?;
+                    let old = std::mem::replace(instance, new_instance);
+                    let _ = drop_tx.send(old);
+                    swap_counter.fetch_add(1, Ordering::Relaxed);
+
+                    writeln!(
+                        stdout,
+                        "OK id={} save_us={} compile_us={} restore_us={}",
+                        result.id, save_us, compile_us, restore_us
+                    )?;
                     stdout.flush()?;
-                    busy.store(false, Ordering::Relaxed);
-                    last_progress_ms.store(now_ms(), Ordering::Relaxed);
+                }
+                SwapOutcome::Err { message } =>
+                {
+                    eprintln!("HOTSWAP error: {}", message);
+                    writeln!(stdout, "ERR swap compile failed: {}", message.replace('\n', " "))?;
+                    stdout.flush()?;
+                }
+            }
+
+            pending_swap_id = None;
+            last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        }
+
+        while let Ok(req) = rx.try_recv()
+        {
+            match req
+            {
+                Request::Swap { clif } =>
+                {
+                    if pending_swap_id.is_some()
+                    {
+                        writeln!(stdout, "ERR swap already pending")?;
+                        stdout.flush()?;
+                        continue;
+                    }
+
+                    let id = next_swap_id;
+                    next_swap_id = next_swap_id.saturating_add(1);
+                    pending_swap_id = Some(id);
+
+                    eprintln!("HOTSWAP queued: id={} bytes={}", id, clif.len());
+                    let job = SwapJob {
+                        id,
+                        module_name: instance.module_name.clone(),
+                        entry_name: instance.entry_name.clone(),
+                        tick_name: instance.tick_name.clone(),
+                        clif,
+                    };
+                    if swap_job_tx.send(job).is_err()
+                    {
+                        pending_swap_id = None;
+                        writeln!(stdout, "ERR swap worker unavailable")?;
+                        stdout.flush()?;
+                    }
                 }
                 Request::Quit =>
                 {
@@ -671,6 +777,10 @@ struct JitInstance
     host_req_window_w_px: Option<*mut i32>,
     host_req_window_h_px: Option<*mut i32>,
 }
+
+// SAFETY: JitInstance contains raw pointers to JIT-owned memory. We only move whole instances
+// across threads (via channels) and ensure the active instance is used on a single thread at a time.
+unsafe impl Send for JitInstance {}
 
 impl JitInstance
 {
