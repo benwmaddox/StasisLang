@@ -1492,11 +1492,11 @@ public sealed class SemanticAnalyzer
 
     private TypeSymbol? ResolveMemberAccessType(MemberAccessExpressionSyntax member, IReadOnlyDictionary<string, Symbol> scope)
     {
-        var chain = new List<string>();
+        var chain = new List<(string Name, SourceSpan Span)>();
         ExpressionSyntax current = member;
         while (current is MemberAccessExpressionSyntax m)
         {
-            chain.Add(m.Member.Text);
+            chain.Add((m.Member.Text, m.Member.Span));
             current = m.Receiver;
         }
 
@@ -1514,23 +1514,27 @@ public sealed class SemanticAnalyzer
         var currentType = rootSym.Type;
         chain.Reverse();
 
-        foreach (var memberName in chain)
+        foreach (var (memberName, memberSpan) in chain)
         {
             if (currentType is not NamedTypeSymbol named)
             {
-                return null;
+                var got = currentType is null ? "unknown" : FormatType(currentType);
+                _diagnostics.Add(new Diagnostic($"Member access '.{memberName}' requires a struct type; got '{got}'.", memberSpan));
+                return new PrimitiveTypeSymbol("i32");
             }
 
             if (!_structs.TryGetValue(named.TypeName, out var structDecl))
             {
                 // Not a struct type (could be an enum or unknown)
-                return null;
+                _diagnostics.Add(new Diagnostic($"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'.", memberSpan));
+                return new PrimitiveTypeSymbol("i32");
             }
 
             var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, memberName, StringComparison.Ordinal));
             if (field is null)
             {
-                return null;
+                _diagnostics.Add(new Diagnostic($"Unknown field '{memberName}' on struct '{named.TypeName}'.", memberSpan));
+                return new PrimitiveTypeSymbol("i32");
             }
 
             currentType = ResolveType(field.Type);

@@ -43,25 +43,12 @@ struct GlobalState {
 global state : GlobalState;
 
 
-function draw_drag_preview(): void {
-    if (state.drag_active == 0) { return; }
-    if (!grid_in_bounds(state.drag_grid_x, state.drag_grid_y)) { return; }
-    let x: f32 = grid_to_world_x(state.drag_grid_x);
-    let y: f32 = grid_to_world_y(state.drag_grid_y);
-    let w: f32 = state.config.brick.width;
-    let h: f32 = state.config.brick.height;
-    let r: f32 = 0.2;
-    let g: f32 = 0.8;
-    let b: f32 = 0.3;
-    let a: f32 = 0.4;
-    if (state.drag_valid == 0) {
-        r = 0.9; g = 0.2; b = 0.2; a = 0.45;
-    }
-    play_draw_filled_rect(x, y, w, h, r, g, b, 0.12);
-    play_draw_rect(x, y, w, h, r, g, b, a);
+function draw_drag_preview(): void 
+{
+  return;
 }
 
-function main(): i32 {
+export function main(): i32 {
     // Require JSON data binding: this sample expects to be run under the native runner so
     // `samples/brickout_revenge/data/config.json` is applied to `state.config` before main().
     // if (state.config.magic != 1337) {
@@ -99,8 +86,12 @@ function main(): i32 {
         state.initialized = true;
     }
 
-    state.timers.last_time = get_time_ms();
+
     return 0;
+}
+
+function swap(){
+
 }
 
 function draw_level() {
