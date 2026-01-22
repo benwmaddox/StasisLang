@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,16 @@ fn main() -> Result<()>
     }
 
     bail!("non-server mode not implemented (use --server)");
+}
+
+fn now_ms() -> u64
+{
+    // Best-effort wall clock timestamp (used only for the hang watchdog).
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    {
+        Ok(d) => d.as_millis() as u64,
+        Err(_) => 0,
+    }
 }
 
 #[cfg(windows)]
@@ -277,6 +289,41 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let target_dt = if fps == 0 { Duration::from_millis(16) } else { Duration::from_secs_f64(1.0 / (fps as f64)) };
     let mut last = Instant::now();
 
+    let watchdog_ms: u64 = std::env::var("STASIS_JIT_WATCHDOG_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));
+    let tick_counter = Arc::new(AtomicU64::new(0));
+    let busy = Arc::new(AtomicBool::new(false));
+
+    if watchdog_ms > 0
+    {
+        let last_progress_ms = Arc::clone(&last_progress_ms);
+        let tick_counter = Arc::clone(&tick_counter);
+        let busy = Arc::clone(&busy);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(250));
+            if busy.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+
+            let last_ms = last_progress_ms.load(Ordering::Relaxed);
+            let now = now_ms();
+            if now.saturating_sub(last_ms) > watchdog_ms
+            {
+                eprintln!(
+                    "error: jit runner watchdog fired (no tick progress for {}ms; ticks={}); exiting so watch can restart.",
+                    now.saturating_sub(last_ms),
+                    tick_counter.load(Ordering::Relaxed)
+                );
+                std::process::exit(124);
+            }
+        });
+    }
+
     // Bulk host mode: create a default window if the graphics runtime is present.
     if instance.bulk_active
     {
@@ -291,17 +338,28 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
+        let uses_bulk_step = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
+        if uses_bulk_step
+        {
+            eprintln!("HOST bulk: active (stasis_host_bulk_step)");
+        }
+        else
+        {
+            eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
+        }
     }
 
     loop
     {
+        last_progress_ms.store(now_ms(), Ordering::Relaxed);
+
         while let Ok(req) = rx.try_recv()
         {
             match req
             {
                 Request::Swap { clif } =>
                 {
+                    busy.store(true, Ordering::Relaxed);
                     let t0 = Instant::now();
                     let (missing_save, save_bytes) = instance.save_state();
                     let save_us = t0.elapsed().as_micros() as u64;
@@ -312,6 +370,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         Ok(v) => v,
                         Err(e) =>
                         {
+                            busy.store(false, Ordering::Relaxed);
                             eprintln!("HOTSWAP error: {:#}", e);
                             writeln!(stdout, "ERR swap compile failed")?;
                             stdout.flush()?;
@@ -341,6 +400,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     *instance = new_instance;
                     writeln!(stdout, "OK")?;
                     stdout.flush()?;
+                    busy.store(false, Ordering::Relaxed);
+                    last_progress_ms.store(now_ms(), Ordering::Relaxed);
                 }
                 Request::Quit =>
                 {
@@ -383,6 +444,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     );
                     if rc != 0
                     {
+                        eprintln!("HOST bulk: step returned {rc}; exiting.");
                         return Ok(());
                     }
                 }
@@ -407,6 +469,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                 let rc = (instance.tick_fn)();
                 if rc != 0
                 {
+                    eprintln!("tick returned {rc}; exiting.");
                     return Ok(());
                 }
 
@@ -424,9 +487,13 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             let rc = (instance.tick_fn)();
             if rc != 0
             {
+                eprintln!("tick returned {rc}; exiting.");
                 return Ok(());
             }
         }
+
+        tick_counter.fetch_add(1, Ordering::Relaxed);
+        last_progress_ms.store(now_ms(), Ordering::Relaxed);
 
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(last);

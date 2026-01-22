@@ -11,6 +11,8 @@ call "%SCRIPT_DIR%env.bat" >nul 2>nul
 
 rem Dev defaults: prefer no-disk Cranelift JIT hot-swap for faster iteration.
 set "STASIS_CRANELIFT_JIT_RUNNER=1"
+rem If the JIT runner becomes unresponsive, exit so the watch loop can restart it.
+if not defined STASIS_JIT_WATCHDOG_MS set "STASIS_JIT_WATCHDOG_MS=15000"
 if not defined STASIS_CRANELIFT_JIT_RUNNER_EXE (
   if exist "%SCRIPT_DIR%tools\cranelift-jit-runner\target\release\stasis-cranelift-jit-runner.exe" (
     set "STASIS_CRANELIFT_JIT_RUNNER_EXE=%SCRIPT_DIR%tools\cranelift-jit-runner\target\release\stasis-cranelift-jit-runner.exe"
