@@ -138,7 +138,18 @@ public class TemplateOutputTests
 
     private static bool TryFindLlvmTooling()
     {
-        var search = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
+        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            search.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            search.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
         foreach (var dir in search)
         {
             var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
@@ -192,10 +203,7 @@ public class TemplateOutputTests
     [Fact]
     public void FactorioLite_ProducesSvgSnapshots()
     {
-        if (!TryFindLlvmTooling())
-        {
-            return;
-        }
+        Assert.True(TryFindLlvmTooling(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var root = GetRepoRoot();
         EnsureBuildDirExists(root);
@@ -205,12 +213,7 @@ public class TemplateOutputTests
 
         try
         {
-            if (!TryFindSysLibrary(root, out _))
-            {
-                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/factorio_lite.stasis", "--backend", "llvm", "--emit-ir");
-                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
-                return;
-            }
+            Assert.True(TryFindSysLibrary(root, out _), "Missing sys runtime library. CI should build the runtime sys library.");
 
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/factorio_lite.stasis", "--backend", "llvm");
             Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
@@ -229,10 +232,7 @@ public class TemplateOutputTests
     [Fact]
     public void BreakoutDefense_ProducesSvgSnapshots()
     {
-        if (!TryFindLlvmTooling())
-        {
-            return;
-        }
+        Assert.True(TryFindLlvmTooling(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var root = GetRepoRoot();
         EnsureBuildDirExists(root);
@@ -242,12 +242,7 @@ public class TemplateOutputTests
 
         try
         {
-            if (!TryFindSysLibrary(root, out _))
-            {
-                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/breakout_defense.stasis", "--backend", "llvm", "--emit-ir");
-                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
-                return;
-            }
+            Assert.True(TryFindSysLibrary(root, out _), "Missing sys runtime library. CI should build the runtime sys library.");
 
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/breakout_defense.stasis", "--backend", "llvm");
             Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
@@ -266,10 +261,7 @@ public class TemplateOutputTests
     [Fact]
     public void Match3Overlay_ProducesCsvHistogram()
     {
-        if (!TryFindLlvmTooling())
-        {
-            return;
-        }
+        Assert.True(TryFindLlvmTooling(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var root = GetRepoRoot();
         EnsureBuildDirExists(root);
@@ -279,12 +271,7 @@ public class TemplateOutputTests
 
         try
         {
-            if (!TryFindSysLibrary(root, out _))
-            {
-                var (buildExit, buildStdout, buildStderr) = RunCli("build", "examples/templates/match3_overlay.stasis", "--backend", "llvm", "--emit-ir");
-                Assert.True(buildExit == 0, $"Template failed to compile (exit={buildExit}).\nstdout:\n{buildStdout}\nstderr:\n{buildStderr}");
-                return;
-            }
+            Assert.True(TryFindSysLibrary(root, out _), "Missing sys runtime library. CI should build the runtime sys library.");
 
             var (exitCode, stdout, stderr) = RunCli("run", "examples/templates/match3_overlay.stasis", "--backend", "llvm");
             Assert.True(exitCode == 0, $"Template run failed (exit={exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");

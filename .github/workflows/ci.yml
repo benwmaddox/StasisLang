@@ -43,20 +43,30 @@ jobs:
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
 
-      - name: Install clang-18 (ubuntu)
+      - name: Install LLVM 18 tooling (ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18
+          sudo apt-get install -y clang-18 lld-18 llvm-18
           mkdir -p .tools/llvm-18/bin
-          ln -sf /usr/bin/clang-18 .tools/llvm-18/bin/clang
-          ln -sf /usr/bin/clang++-18 .tools/llvm-18/bin/clang++
-          echo "${PWD}/.tools/llvm-18/bin" >> "$GITHUB_PATH"
-          .tools/llvm-18/bin/clang --version
+          ln -sf "$(command -v clang-18)" .tools/llvm-18/bin/clang
+          ln -sf "$(command -v clang++-18)" .tools/llvm-18/bin/clang++
+          if command -v lli-18 >/dev/null 2>&1; then
+            ln -sf "$(command -v lli-18)" .tools/llvm-18/bin/lli
+          elif [ -x /usr/lib/llvm-18/bin/lli ]; then
+            ln -sf /usr/lib/llvm-18/bin/lli .tools/llvm-18/bin/lli
+          fi
+          echo "PATH=${PWD}/.tools/llvm-18/bin:${PATH}" >> "$GITHUB_ENV"
+          echo "clang: $(command -v clang)"
+          clang --version
+          echo "lli: $(command -v lli || true)"
+          lli --version || true
 
       - name: Install clang (windows)
         if: runner.os == 'Windows'
-        run: choco install llvm -y --no-progress
+        run: |
+          choco install llvm -y --no-progress
+          echo "C:\\Program Files\\LLVM\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build cranelift-aot (rust)
         run: cargo build -p stasis-cranelift-aot --release
