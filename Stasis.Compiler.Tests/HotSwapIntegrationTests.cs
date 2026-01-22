@@ -414,6 +414,154 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
+    [HotSwapFact]
+    public async Task WatchTickJitSwap_DataBind_DoesNotRaceStructMeta()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_databind");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_databind_watch.stasis");
+        var dataDir = Path.Combine(tempDir.FullName, "data");
+        Directory.CreateDirectory(dataDir);
+        var jsonPath = Path.Combine(dataDir, "config.json");
+
+        // Minimal program: define a config field and a tick loop.
+        // Data binding should apply config.foo from config.json to state__config__foo.
+        File.WriteAllText(stasisPath, """
+            global state: struct {
+                config: struct {
+                    foo: i32;
+                };
+            };
+
+            function main(): i32 {
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """, System.Text.Encoding.ASCII);
+
+        File.WriteAllText(jsonPath, """
+            {
+              "config": {
+                "foo": 123
+              }
+            }
+            """, System.Text.Encoding.ASCII);
+
+        var moduleName = "brick";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+        var baseName = Path.GetFileNameWithoutExtension(stasisPath);
+        var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
+        var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerOutLog);
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe!;
+            psi.EnvironmentVariables["STASIS_JIT_HEARTBEAT_MS"] = "0";
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "15000";
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(2));
+
+            // The CLI should not report a bind failure, and the runner logs should not contain ERR databind...
+            // We don't want the CLI to report a bind failure (this was caused by a non-atomic struct-meta write).
+            Assert.False(errLines.AnyContains("jit runner data bind failed"), "CLI reported jit runner data bind failed.");
+
+            // Give the runner a moment to process the BIND message and flush logs.
+            await Task.Delay(250);
+
+            if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outLog))
+            {
+                Assert.DoesNotContain("ERR databind", outLog, StringComparison.OrdinalIgnoreCase);
+            }
+            if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errLog))
+            {
+                Assert.DoesNotContain("DATABIND error:", errLog, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+
+            // Best-effort: cleanup fresh jit runner processes.
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = AppContext.BaseDirectory;
