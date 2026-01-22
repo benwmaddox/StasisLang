@@ -253,6 +253,9 @@ impl DataBinding
     {
         let meta_bytes = std::fs::read(&struct_meta_path)
             .with_context(|| format!("failed to read struct meta: {struct_meta_path}"))?;
+        let meta_bytes = meta_bytes
+            .strip_prefix(&[0xEF, 0xBB, 0xBF])
+            .unwrap_or(meta_bytes.as_slice());
         let meta: StructMetaFile =
             serde_json::from_slice(&meta_bytes).with_context(|| format!("failed to parse struct meta: {struct_meta_path}"))?;
         if meta.version != 1
