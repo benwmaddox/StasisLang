@@ -1,5 +1,8 @@
 LIBRARY stasis_graphics
 EXPORTS
+    stasis_host_bulk_init
+    stasis_host_bulk_apply_requests
+    stasis_host_bulk_step
     stasis_init_window
     stasis_get_window_size
     stasis_get_desktop_size

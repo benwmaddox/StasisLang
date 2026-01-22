@@ -7,10 +7,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use cranelift_codegen::ir::{AbiParam, Signature};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_codegen::isa::CallConv;
 use cranelift_module::{default_libcall_names, DataDescription, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_native;
@@ -96,6 +94,22 @@ struct GraphicsApi
     _lib: Library,
     host_get_frame: Option<unsafe extern "C" fn(*mut i32, *mut f32)>,
     gfx_submit_u8: Option<unsafe extern "C" fn(*mut i32, *mut f32, *mut u8)>,
+    host_bulk_init: Option<unsafe extern "C" fn(*const i32)>,
+    host_bulk_apply_requests: Option<unsafe extern "C" fn(*const i32, *const i32, *const i32, *const i32)>,
+    host_bulk_step: Option<
+        unsafe extern "C" fn(
+            *mut i32,
+            *mut f32,
+            *mut i32,
+            *mut f32,
+            *mut u8,
+            *const i32,
+            *const i32,
+            *const i32,
+            *const i32,
+            extern "C" fn() -> i32,
+        ) -> i32,
+    >,
     set_window_size: Option<unsafe extern "C" fn(i32, i32)>,
     set_fullscreen: Option<unsafe extern "C" fn(i32) -> i32>,
     init_window: Option<unsafe extern "C" fn(i32, i32, *const i8) -> i32>,
@@ -118,6 +132,9 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
     for name in [
         "stasis_host_get_frame",
         "stasis_gfx_submit_u8",
+        "stasis_host_bulk_init",
+        "stasis_host_bulk_apply_requests",
+        "stasis_host_bulk_step",
         "stasis_set_window_size",
         "stasis_set_fullscreen",
         "stasis_init_window",
@@ -142,6 +159,25 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
     let api = GraphicsApi {
         host_get_frame: try_get_fn::<unsafe extern "C" fn(*mut i32, *mut f32)>(&lib, "stasis_host_get_frame"),
         gfx_submit_u8: try_get_fn::<unsafe extern "C" fn(*mut i32, *mut f32, *mut u8)>(&lib, "stasis_gfx_submit_u8"),
+        host_bulk_init: try_get_fn::<unsafe extern "C" fn(*const i32)>(&lib, "stasis_host_bulk_init"),
+        host_bulk_apply_requests: try_get_fn::<unsafe extern "C" fn(*const i32, *const i32, *const i32, *const i32)>(
+            &lib,
+            "stasis_host_bulk_apply_requests",
+        ),
+        host_bulk_step: try_get_fn::<
+            unsafe extern "C" fn(
+                *mut i32,
+                *mut f32,
+                *mut i32,
+                *mut f32,
+                *mut u8,
+                *const i32,
+                *const i32,
+                *const i32,
+                *const i32,
+                extern "C" fn() -> i32,
+            ) -> i32,
+        >(&lib, "stasis_host_bulk_step"),
         set_window_size: try_get_fn::<unsafe extern "C" fn(i32, i32)>(&lib, "stasis_set_window_size"),
         set_fullscreen: try_get_fn::<unsafe extern "C" fn(i32) -> i32>(&lib, "stasis_set_fullscreen"),
         init_window: try_get_fn::<unsafe extern "C" fn(i32, i32, *const i8) -> i32>(&lib, "stasis_init_window"),
@@ -173,8 +209,6 @@ fn run_server(fps: u32) -> Result<()>
     let (tx, rx) = mpsc::channel::<Request>();
     spawn_request_reader(tx)?;
 
-    let mut instance: Option<JitInstance> = None;
-
     loop
     {
         let req = rx.recv().context("request channel closed")?;
@@ -194,6 +228,19 @@ fn run_server(fps: u32) -> Result<()>
                     }
                 };
 
+                // Initialize bulk host request tracking before main(), matching stasis_runner behavior.
+                if new_instance.bulk_active
+                {
+                    if let (Some(g), Some(init), Some(req_seq)) =
+                        (new_instance.graphics.as_ref(), new_instance.graphics.as_ref().and_then(|x| x.host_bulk_init), new_instance.host_req_seq)
+                    {
+                        let _ = g;
+                        unsafe {
+                            init(req_seq as *const i32);
+                        }
+                    }
+                }
+
                 let rc = (new_instance.entry_fn)();
                 if rc != 0
                 {
@@ -206,7 +253,6 @@ fn run_server(fps: u32) -> Result<()>
                 stdout.flush()?;
 
                 let tick_loop_result = run_tick_loop(fps, &mut new_instance, &rx, &mut stdout);
-                instance = Some(new_instance);
                 return tick_loop_result;
             }
             Request::Swap { .. } =>
@@ -245,8 +291,6 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        // Apply any request the program made during main().
-        apply_window_requests(instance);
         eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
     }
 
@@ -314,43 +358,73 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
         if instance.bulk_active
         {
-            // Update HostFrame snapshot and apply any window requests.
-            if let (Some(host_get_frame), Some(host_i32), Some(host_f32)) =
-                (instance.graphics.as_ref().and_then(|x| x.host_get_frame), instance.host_i32, instance.host_f32)
+            if let (Some(host_bulk_step), Some(host_i32), Some(host_f32), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
+                (
+                    instance.graphics.as_ref().and_then(|x| x.host_bulk_step),
+                    instance.host_i32,
+                    instance.host_f32,
+                    instance.gfx_cmd_i32,
+                    instance.gfx_cmd_f32,
+                    instance.gfx_cmd_u8,
+                )
             {
                 unsafe {
-                    host_get_frame(host_i32, host_f32);
-                }
-            }
-
-            // Exit if host requested quit (avoid requiring guest queries).
-            if let Some(host_i32) = instance.host_i32
-            {
-                unsafe {
-                    if *host_i32.add(9) != 0
+                    let rc = host_bulk_step(
+                        host_i32,
+                        host_f32,
+                        cmd_i32,
+                        cmd_f32,
+                        cmd_u8,
+                        instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                        instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                        instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                        instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                        instance.tick_fn,
+                    );
+                    if rc != 0
                     {
                         return Ok(());
                     }
                 }
             }
-
-            apply_window_requests(instance);
-        }
-
-        let rc = (instance.tick_fn)();
-        if rc != 0
-        {
-            return Ok(());
-        }
-
-        if instance.bulk_active
-        {
-            if let (Some(gfx_submit_u8), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
-                (instance.graphics.as_ref().and_then(|x| x.gfx_submit_u8), instance.gfx_cmd_i32, instance.gfx_cmd_f32, instance.gfx_cmd_u8)
+            else
             {
-                unsafe {
-                    gfx_submit_u8(cmd_i32, cmd_f32, cmd_u8);
+                // Legacy bulk mode: mimic stasis_runner behavior using host_get_frame + submit.
+                if let (Some(host_get_frame), Some(host_i32), Some(host_f32)) =
+                    (instance.graphics.as_ref().and_then(|x| x.host_get_frame), instance.host_i32, instance.host_f32)
+                {
+                    unsafe {
+                        host_get_frame(host_i32, host_f32);
+                        if *host_i32.add(9) != 0
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
+
+                apply_window_requests(instance);
+
+                let rc = (instance.tick_fn)();
+                if rc != 0
+                {
+                    return Ok(());
+                }
+
+                if let (Some(gfx_submit_u8), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
+                    (instance.graphics.as_ref().and_then(|x| x.gfx_submit_u8), instance.gfx_cmd_i32, instance.gfx_cmd_f32, instance.gfx_cmd_u8)
+                {
+                    unsafe {
+                        gfx_submit_u8(cmd_i32, cmd_f32, cmd_u8);
+                    }
+                }
+            }
+        }
+        else
+        {
+            let rc = (instance.tick_fn)();
+            if rc != 0
+            {
+                return Ok(());
             }
         }
 
@@ -366,9 +440,23 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
 fn apply_window_requests(instance: &mut JitInstance)
 {
-    // Matches src/host_window_request.stasis:
-    // - HOST_REQ_FLAG_WINDOWED = 1
-    // - HOST_REQ_FLAG_FULLSCREEN = 2
+    // Prefer the shared implementation in stasis_graphics.dll when available.
+    if let Some(g) = instance.graphics.as_ref()
+    {
+        if let Some(apply) = g.host_bulk_apply_requests
+        {
+            unsafe {
+                apply(
+                    instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                    instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                    instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                    instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                );
+            }
+            return;
+        }
+    }
+
     const HOST_REQ_FLAG_WINDOWED: i32 = 1;
     const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
 
@@ -377,19 +465,17 @@ fn apply_window_requests(instance: &mut JitInstance)
         return;
     }
 
-    let Some(req_seq) = instance.host_req_seq else { return };
-    let Some(req_flags) = instance.host_req_flags else { return };
-
+    let (Some(req_seq), Some(req_flags)) = (instance.host_req_seq, instance.host_req_flags) else { return };
     let Some(g) = instance.graphics.as_ref() else { return };
     let Some(set_fullscreen) = g.set_fullscreen else { return };
 
     unsafe {
         let seq = *req_seq;
-        if seq == instance.last_req_seq
+        // Best-effort: legacy path doesn't track last seq reliably; apply any non-zero request.
+        if seq == 0
         {
             return;
         }
-        instance.last_req_seq = seq;
 
         let flags = *req_flags;
         if (flags & HOST_REQ_FLAG_WINDOWED) != 0
@@ -500,13 +586,13 @@ struct JitInstance
     entry_name: String,
     tick_name: String,
     graphics: Option<GraphicsApi>,
-    module: JITModule,
+    _module: JITModule,
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
     state_globals: Vec<(String, usize)>,
     data_ptrs: HashMap<String, *mut u8>,
 
-    // Bulk host mode (matches stasis_runner behavior): host writes HostFrame globals and submits gfx_cmd buffers.
+    // Bulk host mode: host writes HostFrame globals and submits gfx_cmd buffers (via stasis_graphics bulk API).
     bulk_active: bool,
     host_i32: Option<*mut i32>,
     host_f32: Option<*mut f32>,
@@ -517,7 +603,6 @@ struct JitInstance
     host_req_flags: Option<*mut i32>,
     host_req_window_w_px: Option<*mut i32>,
     host_req_window_h_px: Option<*mut i32>,
-    last_req_seq: i32,
 }
 
 impl JitInstance
@@ -619,22 +704,16 @@ impl JitInstance
         let host_req_window_w_px = data_ptrs.get("host_req_window_w_px").copied().map(|p| p as *mut i32);
         let host_req_window_h_px = data_ptrs.get("host_req_window_h_px").copied().map(|p| p as *mut i32);
 
-        let mut last_req_seq = 0i32;
-        if let Some(p) = host_req_seq
-        {
-            unsafe {
-                last_req_seq = *p;
-            }
-        }
-
         let bulk_active =
-            graphics.as_ref().and_then(|g| g.host_get_frame).is_some()
-            && graphics.as_ref().and_then(|g| g.gfx_submit_u8).is_some()
-            && host_i32.is_some()
+            host_i32.is_some()
             && host_f32.is_some()
             && gfx_cmd_i32.is_some()
             && gfx_cmd_f32.is_some()
-            && gfx_cmd_u8.is_some();
+            && gfx_cmd_u8.is_some()
+            && (
+                graphics.as_ref().and_then(|g| g.host_bulk_step).is_some()
+                || (graphics.as_ref().and_then(|g| g.host_get_frame).is_some() && graphics.as_ref().and_then(|g| g.gfx_submit_u8).is_some())
+            );
 
         let entry_id = *function_ids.get(entry_name).with_context(|| format!("missing entry function {entry_name}"))?;
         let tick_id = *function_ids.get(tick_name).with_context(|| format!("missing tick function {tick_name}"))?;
@@ -647,7 +726,7 @@ impl JitInstance
             entry_name: entry_name.to_string(),
             tick_name: tick_name.to_string(),
             graphics,
-            module,
+            _module: module,
             entry_fn: unsafe { std::mem::transmute(entry_ptr) },
             tick_fn: unsafe { std::mem::transmute(tick_ptr) },
             state_globals,
@@ -662,7 +741,6 @@ impl JitInstance
             host_req_flags,
             host_req_window_w_px,
             host_req_window_h_px,
-            last_req_seq,
         })
     }
 
@@ -729,6 +807,9 @@ fn build_flags(opt_level: &str, target: &Triple) -> Result<settings::Flags>
 
     Ok(settings::Flags::new(flag_builder))
 }
+
+/*
+Legacy CLIF parser prototype (deprecated). Kept for reference only.
 
 #[derive(Clone)]
 struct ParsedModule
@@ -1221,3 +1302,4 @@ fn build_function_ir<M: Module>(
     }
     Ok(func)
 }
+*/
