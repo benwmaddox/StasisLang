@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $sample = Join-Path $root "samples\hotstate_tick_watch.stasis"
 $outLog = Join-Path $root "build\ci_hotswap_timing.out.log"
 $errLog = Join-Path $root "build\ci_hotswap_timing.err.log"
@@ -14,10 +14,16 @@ if (-not (Test-Path $sample)) {
 
 $runnerExe = $env:STASIS_CRANELIFT_RUNNER_EXE
 if (-not $runnerExe) {
-    $candidate = Join-Path $root "runtime\build\bin\Release\stasis_runner.exe"
-    if (Test-Path $candidate) {
-        $runnerExe = $candidate
-        $env:STASIS_CRANELIFT_RUNNER_EXE = $runnerExe
+    foreach ($candidate in @(
+        (Join-Path $root "stasis_runner.exe"),
+        (Join-Path $root "runtime\\build\\bin\\Release\\stasis_runner.exe"),
+        (Join-Path $root "build\\stasis_runner.exe")
+    )) {
+        if (Test-Path $candidate) {
+            $runnerExe = $candidate
+            $env:STASIS_CRANELIFT_RUNNER_EXE = $runnerExe
+            break
+        }
     }
 }
 
