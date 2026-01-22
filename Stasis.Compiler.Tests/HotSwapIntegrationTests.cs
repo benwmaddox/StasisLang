@@ -566,6 +566,101 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
+    [HotSwapFact]
+    public async Task WatchTickHotSwap_ReportsSemanticErrors_AndKeepsRunning()
+    {
+        var repoRoot = FindRepoRoot();
+        var samplePath = Path.Combine(repoRoot, "samples", "hotstate_tick_watch.stasis");
+        Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
+
+        var cliDll = FindCliDll(repoRoot);
+        var runnerExe = FindRunnerExe(repoRoot);
+        var aotExe = FindCraneliftAotExe(repoRoot);
+        var clangExeDir = FindClangBinDir(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(runnerExe);
+        Assert.NotNull(aotExe);
+        Assert.NotNull(clangExeDir);
+
+        var original = await File.ReadAllTextAsync(samplePath);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll, "run", samplePath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_AOT"] = aotExe;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_RUNNER_EXE"] = runnerExe;
+            psi.EnvironmentVariables["PATH"] = clangExeDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(3));
+
+            // Introduce a semantic error: unknown field on the global struct.
+            var nl = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+            var bad = original.Replace("function tick(): i32 {" + nl + "    return 0;" + nl + "}" + nl,
+                "function tick(): i32 {" + nl + "    state.missing = 1;" + nl + "    return 0;" + nl + "}" + nl,
+                StringComparison.Ordinal);
+            Assert.NotEqual(original, bad);
+            await File.WriteAllTextAsync(samplePath, bad, System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("Unknown field"),
+                timeout: TimeSpan.FromSeconds(60));
+
+            if (proc.HasExited)
+            {
+                throw new XunitException($"watch process exited unexpectedly after semantic error (code={proc.ExitCode}).");
+            }
+
+            // Fix the file; watch should recover on the next build.
+            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(2));
+
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = AppContext.BaseDirectory;
