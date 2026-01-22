@@ -3965,7 +3965,7 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     };
 
     var json = JsonSerializer.Serialize(metadata, StasisCliJson.Indented.StructMetadata);
-    File.WriteAllText(path, json, Encoding.UTF8);
+    WriteAllTextAtomic(path, json, Encoding.UTF8);
 }
 
 static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
