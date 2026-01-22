@@ -650,6 +650,14 @@ internal sealed class HotSwapFactAttribute : FactAttribute
             return;
         }
 
+        var isCi = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI"));
+        var runInCi = Environment.GetEnvironmentVariable("STASIS_RUN_HOTSWAP_TESTS") == "1";
+        if (isCi && !runInCi)
+        {
+            Skip = "hot-swap runner integration tests are disabled on CI by default (set STASIS_RUN_HOTSWAP_TESTS=1 to enable).";
+            return;
+        }
+
         var repoRoot = TryFindRepoRootFromCwd();
         if (repoRoot is null) return;
 
@@ -667,10 +675,7 @@ internal sealed class HotSwapFactAttribute : FactAttribute
             return;
         }
 
-        // In CI we want this to fail loudly if prerequisites are missing.
-        // Locally, skip when native prerequisites aren't present.
-        var isCi = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI"));
-        if (!isCi)
+        // Skip when native prerequisites aren't present (unless CI explicitly enabled above and provisioned).
         {
             var runner = Path.Combine(repoRoot, OperatingSystem.IsWindows() ? "stasis_runner.exe" : "stasis_runner");
             if (!File.Exists(runner))
