@@ -16,10 +16,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_main_via_lli()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function add(a: i32, b: i32): i32 {
@@ -99,7 +96,18 @@ public class ExecutionTests
 
     private static bool TryFindLli(out string path)
     {
-        var search = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
+        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            search.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            search.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
         foreach (var dir in search)
         {
             var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "lli.exe" : "lli");
@@ -117,10 +125,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_stasis_tests_via_run_tests_harness()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function add(a: i32, b: i32): i32 {
@@ -164,10 +169,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_compound_and_precedence()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function main(): i32 {
@@ -206,10 +208,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_headless_graphics_builtins()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function main(): i32 {
@@ -252,10 +251,7 @@ public class ExecutionTests
     [Fact]
     public void StrSubstr_copies_full_codepoint()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             global src: u8[16];
@@ -301,10 +297,7 @@ public class ExecutionTests
     [Fact]
     public void StrSubstr_aborts_on_misaligned_boundary()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindLli(out var lliPath), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             global src: u8[16];

@@ -399,11 +399,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Run_Basic()
     {
-        if (!TryFindLli())
-        {
-            // lli not available - skip test
-            return Task.CompletedTask;
-        }
+        Assert.True(TryFindLli(), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--backend", "llvm");
         var result = new
@@ -418,11 +414,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Test_TestsFile()
     {
-        if (!TryFindLli())
-        {
-            // lli not available - skip test
-            return Task.CompletedTask;
-        }
+        Assert.True(TryFindLli(), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--backend", "llvm");
         var scrubbedStdout = ScrubOutput(stdout);
@@ -501,6 +493,17 @@ public class CliSnapshotTests
     {
         var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            search = search.Concat(new[]
+            {
+                Path.Combine(programFiles, "LLVM", "bin"),
+                Path.Combine(programFilesX86, "LLVM", "bin")
+            }).ToArray();
+        }
 
         foreach (var dir in search)
         {
