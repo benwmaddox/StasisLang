@@ -3634,6 +3634,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         return 0;
     }
 
+    string? lastGoodClif = null;
+    var lastRunnerRestartAttemptUtc = DateTime.MinValue;
+
     var initialRc = BuildClif(out var initialClif, out var initialLowerMs);
     if (initialRc != 0)
     {
@@ -3645,6 +3648,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         {
             return 1;
         }
+        lastGoodClif = initialClif;
         Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
     }
 
@@ -3667,6 +3671,18 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         changeSignal.Wait(TimeSpan.FromMilliseconds(100), cts.Token);
         if (!changeSignal.IsSet)
         {
+            // If the JIT runner exits (or we kill it on swap failure), automatically restart it
+            // so the dev session doesn't require a source edit to recover.
+            if (runner is not null && runner.HasExited)
+            {
+                runner = null;
+                if (lastGoodClif is not null && DateTime.UtcNow - lastRunnerRestartAttemptUtc > TimeSpan.FromSeconds(1))
+                {
+                    lastRunnerRestartAttemptUtc = DateTime.UtcNow;
+                    Console.Error.WriteLine("warning: jit runner exited; restarting.");
+                    _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
+                }
+            }
             continue;
         }
         changeSignal.Reset();
@@ -3687,6 +3703,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             {
                 return 1;
             }
+            lastGoodClif = clif;
             continue;
         }
 
@@ -3707,6 +3724,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             continue;
         }
 
+        lastGoodClif = clif;
         swTotal.Stop();
         Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
     }
