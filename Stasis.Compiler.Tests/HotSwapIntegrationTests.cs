@@ -432,11 +432,15 @@ public sealed class HotSwapIntegrationTests
         // Minimal program: define a config field and a tick loop.
         // Data binding should apply config.foo from config.json to state__config__foo.
         File.WriteAllText(stasisPath, """
-            global state: struct {
-                config: struct {
-                    foo: i32;
-                };
-            };
+            struct Config {
+                foo: i32;
+            }
+
+            struct GameState {
+                config: Config;
+            }
+
+            global state: GameState;
 
             function main(): i32 {
                 return 0;
