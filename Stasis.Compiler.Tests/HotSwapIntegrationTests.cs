@@ -67,6 +67,23 @@ public sealed class HotSwapIntegrationTests
                 () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
                 timeout: TimeSpan.FromMinutes(3));
 
+            // Ensure the child runner process is actually running before injecting swap events.
+            await WaitForAnyLineAsync(
+                proc,
+                () =>
+                {
+                    try
+                    {
+                        return Process.GetProcessesByName("stasis_runner")
+                            .Any(p => p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5));
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                },
+                timeout: TimeSpan.FromSeconds(30));
+
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
             var badSwapPath = OperatingSystem.IsWindows()
                 ? @"Z:\this\does\not\exist.swap.dll"
@@ -77,6 +94,10 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () =>
                 {
+                    if (!File.Exists(swapFile))
+                    {
+                        return true; // runner consumed it
+                    }
                     if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
                     {
                         return false;
