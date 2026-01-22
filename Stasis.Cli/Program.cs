@@ -3687,6 +3687,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
     string? lastGoodClif = null;
     var lastRunnerRestartAttemptUtc = DateTime.MinValue;
+    var consecutiveRunnerExits = 0;
 
     var initialRc = BuildClif(out var initialClif, out var initialLowerMs);
     if (initialRc != 0)
@@ -3726,11 +3727,38 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             // so the dev session doesn't require a source edit to recover.
             if (runner is not null && runner.HasExited)
             {
+                consecutiveRunnerExits++;
+                try
+                {
+                    var exitCode = runner.ExitCode;
+                    Console.Error.WriteLine($"warning: jit runner exited (code={exitCode}); restarting.");
+                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText) && !string.IsNullOrWhiteSpace(errText))
+                    {
+                        var tail = errText.Split('\n').Reverse().Take(20).Reverse();
+                        Console.Error.WriteLine("jit runner stderr tail:");
+                        foreach (var line in tail)
+                        {
+                            var t = line.TrimEnd('\r');
+                            if (!string.IsNullOrWhiteSpace(t))
+                            {
+                                Console.Error.WriteLine(t);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    Console.Error.WriteLine("warning: jit runner exited; restarting.");
+                }
                 runner = null;
                 if (lastGoodClif is not null && DateTime.UtcNow - lastRunnerRestartAttemptUtc > TimeSpan.FromSeconds(1))
                 {
                     lastRunnerRestartAttemptUtc = DateTime.UtcNow;
-                    Console.Error.WriteLine("warning: jit runner exited; restarting.");
+                    if (consecutiveRunnerExits >= 5)
+                    {
+                        // Avoid a noisy restart loop on persistent crashes (e.g., missing host symbols).
+                        Thread.Sleep(250);
+                    }
                     _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
                 }
             }
@@ -4190,6 +4218,30 @@ static void WriteAllTextAtomic(string path, string contents, Encoding encoding, 
     {
         File.Move(tmp, path, overwrite: true);
     }
+}
+
+static bool TryReadTextShared(string path, out string text)
+{
+    text = string.Empty;
+    for (var i = 0; i < 5; i++)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            text = reader.ReadToEnd();
+            return true;
+        }
+        catch (IOException) when (i < 4)
+        {
+            Thread.Sleep(5);
+        }
+        catch (UnauthorizedAccessException) when (i < 4)
+        {
+            Thread.Sleep(5);
+        }
+    }
+    return false;
 }
 
 static void WriteIrOutput(string ir, string? outputPath)

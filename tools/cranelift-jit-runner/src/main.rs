@@ -156,9 +156,13 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
         "stasis_load_font",
         "stasis_get_time_ms",
         "stasis_get_time_us",
+        "stasis_audio_init",
+        "stasis_audio_shutdown",
         "stasis_audio_is_available",
         "stasis_audio_get_sample_rate",
+        "stasis_audio_get_channels",
         "stasis_audio_get_queued_frames",
+        "stasis_audio_get_underruns",
         "stasis_audio_push_f32_interleaved",
     ]
     {
