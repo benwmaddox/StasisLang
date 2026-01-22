@@ -3395,7 +3395,6 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     };
 
     Process? runner = null;
-    var runnerHotSwapOkCount = 0;
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
     {
@@ -3442,20 +3441,40 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         stream.Write(bytes, 0, bytes.Length);
     }
 
-    static int WaitForRunnerHotSwapOkCount(Func<int> getOkCount, int prevOkCount, int timeoutMs)
+    async Task<(bool ok, int latencyMs, string? response)> SendSwapAndWaitForAck(string clif, int timeoutMs)
     {
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
+        if (runner is null || runner.HasExited)
         {
-            if (getOkCount() > prevOkCount)
-            {
-                return (int)sw.ElapsedMilliseconds;
-            }
-
-            Thread.Sleep(1);
+            return (false, -1, "runner not running");
         }
 
-        return -1;
+        var sw = Stopwatch.StartNew();
+        var clifBytes = Encoding.UTF8.GetByteCount(clif);
+        WriteUtf8(runner.StandardInput.BaseStream, $"SWAP {clifBytes}\n");
+        WriteUtf8(runner.StandardInput.BaseStream, clif);
+        runner.StandardInput.BaseStream.Flush();
+
+        var resp = await ReadLineWithTimeout(runner.StandardOutput, timeoutMs, cts.Token);
+        sw.Stop();
+
+        if (resp is not null)
+        {
+            try
+            {
+                await File.AppendAllTextAsync(runnerOutLog, resp + Environment.NewLine, Encoding.UTF8, cts.Token);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        if (resp is null)
+        {
+            return (false, -1, null);
+        }
+
+        return (resp.StartsWith("OK", StringComparison.Ordinal), (int)sw.ElapsedMilliseconds, resp);
     }
 
     async Task<bool> EnsureRunnerStarted(string initialClif)
@@ -3497,14 +3516,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         StartLogPump(
             runner.StandardError,
             runnerErrLog,
-            cts.Token,
-            line =>
-            {
-                if (line.Contains("HOTSWAP ok:", StringComparison.Ordinal))
-                {
-                    Interlocked.Increment(ref runnerHotSwapOkCount);
-                }
-            });
+            cts.Token);
 
         // Wait for READY
         var ready = await ReadLineWithTimeout(runner.StandardOutput, 10000, cts.Token);
@@ -3678,15 +3690,22 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             continue;
         }
 
-        var prevOk = Volatile.Read(ref runnerHotSwapOkCount);
-        var clifBytes = Encoding.UTF8.GetByteCount(clif);
-        WriteUtf8(runner.StandardInput.BaseStream, $"SWAP {clifBytes}\n");
-        WriteUtf8(runner.StandardInput.BaseStream, clif);
-        runner.StandardInput.BaseStream.Flush();
-
-        // Wait for runner stderr "HOTSWAP ok:" (existing timing behavior)
-        var swapLatencyMs = WaitForRunnerHotSwapOkCount(() => Volatile.Read(ref runnerHotSwapOkCount), prevOk, timeoutMs: 120000);
+        var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
         Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+        if (!swapOk)
+        {
+            Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
+            try
+            {
+                runner?.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // ignore
+            }
+            runner = null;
+            continue;
+        }
 
         swTotal.Stop();
         Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");

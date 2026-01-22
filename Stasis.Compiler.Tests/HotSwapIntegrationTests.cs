@@ -258,6 +258,127 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
+    [HotSwapFact]
+    public async Task WatchTickJitSwap_SurvivesBuildError_AndSwapsAfterFix()
+    {
+        var repoRoot = FindRepoRoot();
+        var samplePath = Path.Combine(repoRoot, "samples", "hotstate_tick_watch.stasis");
+        Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
+
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var moduleName = "hot";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+
+        var runnerErrLog = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.runner.err.log");
+        var original = await File.ReadAllTextAsync(samplePath);
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll, "run", samplePath, "--watch", "--backend", "cranelift", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            // Introduce a compiler error. The watch loop should stay alive and keep watching.
+            await File.AppendAllTextAsync(samplePath, "\nfunction __jit_build_error(): i32 { return x; }\n", System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("error:") || errLines.AnyContains("Error:"),
+                timeout: TimeSpan.FromSeconds(30));
+
+            if (proc.HasExited)
+            {
+                throw new XunitException($"watch process exited unexpectedly after build error (code={proc.ExitCode}).");
+            }
+
+            // Fix the file; next rebuild should hot-swap again.
+            await File.WriteAllTextAsync(samplePath, original + "\n// jit swap recovery " + DateTime.UtcNow.Ticks + "\n", System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP latency(ms):"),
+                timeout: TimeSpan.FromMinutes(2));
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort: don't fail test cleanup.
+            }
+
+            try
+            {
+                await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+            }
+            catch
+            {
+                // Best-effort.
+            }
+
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = AppContext.BaseDirectory;
