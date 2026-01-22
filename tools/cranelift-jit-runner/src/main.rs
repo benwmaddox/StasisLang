@@ -15,6 +15,8 @@ use cranelift_module::{default_libcall_names, DataDescription, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_native;
 use libloading::Library;
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use target_lexicon::Triple;
 
 mod stasis_clif;
@@ -207,8 +209,271 @@ enum Request
         tick_name: String,
         clif: String,
     },
+    Bind {
+        json_path: String,
+        struct_meta_path: String,
+    },
     Swap { clif: String },
     Quit,
+}
+
+#[derive(Clone)]
+struct DataBinding
+{
+    json_path: String,
+    struct_meta_path: String,
+    fields: Vec<StructFieldMeta>,
+    last_modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructMetaFile
+{
+    version: i32,
+    fields: Vec<StructFieldMeta>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructFieldMeta
+{
+    name: String,
+    json_path: String,
+    offset: i32,
+    size: i32,
+    #[serde(rename = "type")]
+    field_type: String,
+    array_count: i32,
+}
+
+impl DataBinding
+{
+    fn load(json_path: String, struct_meta_path: String) -> Result<Self>
+    {
+        let meta_bytes = std::fs::read(&struct_meta_path)
+            .with_context(|| format!("failed to read struct meta: {struct_meta_path}"))?;
+        let meta: StructMetaFile =
+            serde_json::from_slice(&meta_bytes).with_context(|| format!("failed to parse struct meta: {struct_meta_path}"))?;
+        if meta.version != 1
+        {
+            bail!("unsupported struct meta version {} (expected 1)", meta.version);
+        }
+
+        Ok(Self { json_path, struct_meta_path, fields: meta.fields, last_modified: None })
+    }
+
+    fn apply_if_changed(&mut self, instance: &mut JitInstance) -> Result<bool>
+    {
+        let meta = std::fs::metadata(&self.json_path).ok();
+        let modified = meta.and_then(|m| m.modified().ok());
+
+        if modified.is_none()
+        {
+            return Ok(false);
+        }
+
+        if self.last_modified.is_some() && modified == self.last_modified
+        {
+            return Ok(false);
+        }
+
+        self.last_modified = modified;
+        self.apply(instance)?;
+        Ok(true)
+    }
+
+    fn apply(&self, instance: &mut JitInstance) -> Result<()>
+    {
+        let json_bytes =
+            std::fs::read(&self.json_path).with_context(|| format!("failed to read data file: {}", self.json_path))?;
+        let root: JsonValue =
+            serde_json::from_slice(&json_bytes).with_context(|| format!("failed to parse json: {}", self.json_path))?;
+
+        for field in &self.fields
+        {
+            let Some(dest) = instance.data_ptrs.get(&field.name).copied() else {
+                continue;
+            };
+
+            // Prefer jsonPath; fall back to flattened symbol name as key.
+            let mut value = json_get_by_path(&root, &field.json_path);
+            if value.is_none() && field.json_path != field.name
+            {
+                value = json_get_by_path(&root, &field.name);
+            }
+
+            if value.is_none() && field.array_count > 1
+            {
+                // AoS-style arrays: "asteroids.x" where "asteroids" is array of objects.
+                if let Some((base_path, leaf)) = field.json_path.rsplit_once('.')
+                {
+                    if let Some(base_value) = json_get_by_path(&root, base_path)
+                    {
+                        if let Some(arr) = base_value.as_array()
+                        {
+                            let elem_bytes = field_element_bytes(field)?;
+                            let limit = arr.len().min(field.array_count.max(0) as usize);
+                            for i in 0..limit
+                            {
+                                if let Some(obj) = arr[i].as_object()
+                                {
+                                    if let Some(v) = obj.get(leaf)
+                                    {
+                                        unsafe {
+                                            apply_scalar_to_dest(field, dest.add(i * elem_bytes), v);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let Some(value) = value else { continue };
+
+            if field.array_count > 1 && value.is_array()
+            {
+                let elem_bytes = field_element_bytes(field)?;
+                let arr = value.as_array().unwrap();
+                let limit = arr.len().min(field.array_count.max(0) as usize);
+                for i in 0..limit
+                {
+                    let v = &arr[i];
+                    unsafe {
+                        apply_scalar_to_dest(field, dest.add(i * elem_bytes), v);
+                    }
+                }
+            }
+            else
+            {
+                unsafe {
+                    apply_scalar_to_dest(field, dest, value);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn json_get_by_path<'a>(root: &'a JsonValue, path: &str) -> Option<&'a JsonValue>
+{
+    let mut current = root;
+    for part in path.split('.').map(|s| s.trim()).filter(|s| !s.is_empty())
+    {
+        match current
+        {
+            JsonValue::Object(map) => {
+                current = map.get(part)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn field_element_bytes(field: &StructFieldMeta) -> Result<usize>
+{
+    if field.array_count > 1 && field.size > 0
+    {
+        let elem = field.size / field.array_count;
+        if elem > 0 && (elem * field.array_count) == field.size
+        {
+            return Ok(elem as usize);
+        }
+    }
+
+    Ok(match field.field_type.as_str()
+    {
+        "bool" | "u8" => 1,
+        "u16" => 2,
+        "u32" | "i32" | "f32" => 4,
+        "f64" => 8,
+        // strings are special: treat element as 1 byte in array cases; scalar path handles full header+payload.
+        "string" => 1,
+        _ => 0,
+    })
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn apply_scalar_to_dest(field: &StructFieldMeta, dest: *mut u8, value: &JsonValue)
+{
+    match field.field_type.as_str()
+    {
+        "bool" => {
+            let v = if let Some(b) = value.as_bool() { b } else { value.as_i64().unwrap_or(0) != 0 };
+            *(dest as *mut u8) = if v { 1 } else { 0 };
+        }
+        "u8" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u8) = n as u8; }
+        }
+        "u16" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u16) = n as u16; }
+        }
+        "u32" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u32) = n as u32; }
+        }
+        "i32" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut i32) = n as i32; }
+        }
+        "f32" => {
+            if let Some(n) = value.as_f64() { *(dest as *mut f32) = n as f32; }
+        }
+        "f64" => {
+            if let Some(n) = value.as_f64() { *(dest as *mut f64) = n; }
+        }
+        "string" => {
+            // Matches runtime/stasis_data.c layout:
+            // ascii[N]: [byte_len:i32][u8[N]] (header_bytes=4)
+            // utf8[N]: [byte_len:i32][char_len:i32][u8[N]] (header_bytes=8)
+            let Some(s) = value.as_str() else { return; };
+            if field.array_count <= 1 || field.size <= 0 || field.array_count > field.size
+            {
+                return;
+            }
+            let header_bytes = field.size - field.array_count;
+            if header_bytes != 4 && header_bytes != 8
+            {
+                return;
+            }
+            let payload = dest.add(header_bytes as usize);
+            let payload_cap = field.array_count as usize;
+            if payload_cap == 0 { return; }
+
+            let max_copy = payload_cap.saturating_sub(1);
+            let bytes = s.as_bytes();
+
+            if header_bytes == 4
+            {
+                let mut copy_len = 0usize;
+                for &b in bytes.iter().take(max_copy)
+                {
+                    if b == 0 || b >= 0x80 { break; }
+                    *payload.add(copy_len) = b;
+                    copy_len += 1;
+                }
+                if copy_len < payload_cap { *payload.add(copy_len) = 0; }
+                *(dest as *mut i32) = copy_len as i32;
+                return;
+            }
+
+            // UTF-8: bounded copy, best-effort (assumes input is valid UTF-8).
+            let mut copy_bytes = 0usize;
+            for &b in bytes.iter().take(max_copy)
+            {
+                if b == 0 { break; }
+                *payload.add(copy_bytes) = b;
+                copy_bytes += 1;
+            }
+            if copy_bytes < payload_cap { *payload.add(copy_bytes) = 0; }
+            *(dest as *mut i32) = copy_bytes as i32;
+            *(dest.add(4) as *mut i32) = s.chars().count().min(i32::MAX as usize) as i32;
+        }
+        _ => {}
+    }
 }
 
 struct SwapJob
@@ -287,6 +552,11 @@ fn run_server(fps: u32) -> Result<()>
 
                 let tick_loop_result = run_tick_loop(fps, &mut new_instance, &rx, &mut stdout);
                 return tick_loop_result;
+            }
+            Request::Bind { .. } =>
+            {
+                writeln!(stdout, "ERR databind before init")?;
+                stdout.flush()?;
             }
             Request::Swap { .. } =>
             {
@@ -385,6 +655,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
     let mut next_swap_id: u64 = 1;
     let mut pending_swap_id: Option<u64> = None;
+    let mut data_binding: Option<DataBinding> = None;
+    let mut last_req_seq: i32 = 0;
 
     // Bulk host mode: create a default window if the graphics runtime is present.
     if instance.bulk_active
@@ -440,6 +712,14 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     let missing_restore = new_instance.restore_state(save_bytes);
                     let restore_us = t2.elapsed().as_micros() as u64;
 
+                    if let Some(b) = data_binding.as_ref()
+                    {
+                        if let Err(e) = b.apply(&mut new_instance)
+                        {
+                            eprintln!("DATABIND error: {:#}", e);
+                        }
+                    }
+
                     let bytes: usize = new_instance.state_globals.iter().map(|(_, sz)| *sz).sum();
                     let symbols = new_instance.state_globals.len();
                     eprintln!(
@@ -481,6 +761,33 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
         {
             match req
             {
+                Request::Bind { json_path, struct_meta_path } =>
+                {
+                    match DataBinding::load(json_path.clone(), struct_meta_path.clone())
+                    {
+                        Ok(b) =>
+                        {
+                            if let Err(e) = b.apply(instance)
+                            {
+                                eprintln!("DATABIND error: {:#}", e);
+                                writeln!(stdout, "ERR databind apply failed: {}", format!("{:#}", e).replace('\n', " "))?;
+                                stdout.flush()?;
+                                continue;
+                            }
+
+                            eprintln!("DATABIND: registered {} ({} fields)", json_path, b.fields.len());
+                            data_binding = Some(b);
+                            writeln!(stdout, "OK")?;
+                            stdout.flush()?;
+                        }
+                        Err(e) =>
+                        {
+                            eprintln!("DATABIND error: {:#}", e);
+                            writeln!(stdout, "ERR databind load failed: {}", format!("{:#}", e).replace('\n', " "))?;
+                            stdout.flush()?;
+                        }
+                    }
+                }
                 Request::Swap { clif } =>
                 {
                     if pending_swap_id.is_some()
@@ -520,6 +827,14 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     writeln!(stdout, "ERR already initialized")?;
                     stdout.flush()?;
                 }
+            }
+        }
+
+        if let Some(b) = data_binding.as_mut()
+        {
+            if b.apply_if_changed(instance).unwrap_or(false)
+            {
+                eprintln!("DATABIND: reloaded {}", b.json_path);
             }
         }
 
@@ -570,7 +885,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     }
                 }
 
-                apply_window_requests(instance);
+                 apply_window_requests(instance, &mut last_req_seq);
 
                 let rc = (instance.tick_fn)();
                 if rc != 0
@@ -611,7 +926,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     }
 }
 
-fn apply_window_requests(instance: &mut JitInstance)
+fn apply_window_requests(instance: &mut JitInstance, last_req_seq: &mut i32)
 {
     // Prefer the shared implementation in stasis_graphics.dll when available.
     if let Some(g) = instance.graphics.as_ref()
@@ -644,11 +959,11 @@ fn apply_window_requests(instance: &mut JitInstance)
 
     unsafe {
         let seq = *req_seq;
-        // Best-effort: legacy path doesn't track last seq reliably; apply any non-zero request.
-        if seq == 0
+        if seq == 0 || seq == *last_req_seq
         {
             return;
         }
+        *last_req_seq = seq;
 
         let flags = *req_flags;
         if (flags & HOST_REQ_FLAG_WINDOWED) != 0
@@ -737,6 +1052,27 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 }
                 let clif = read_string(&mut reader, clif_len).unwrap_or_default();
                 let _ = tx2.send(Request::Swap { clif });
+                continue;
+            }
+
+            if trimmed.starts_with("BIND ")
+            {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() != 3
+                {
+                    let _ = tx2.send(Request::Quit);
+                    break;
+                }
+                let json_len = parts[1].parse::<usize>().unwrap_or(0);
+                let meta_len = parts[2].parse::<usize>().unwrap_or(0);
+                if json_len == 0 || meta_len == 0
+                {
+                    let _ = tx2.send(Request::Quit);
+                    break;
+                }
+                let json_path = read_string(&mut reader, json_len).unwrap_or_default();
+                let struct_meta_path = read_string(&mut reader, meta_len).unwrap_or_default();
+                let _ = tx2.send(Request::Bind { json_path, struct_meta_path });
                 continue;
             }
         }

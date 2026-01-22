@@ -3395,6 +3395,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     };
 
     Process? runner = null;
+    DataBindingPlan? dataBindingPlan = null;
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
     {
@@ -3565,6 +3566,35 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return false;
         }
 
+        if (dataBindingPlan is not null)
+        {
+            try
+            {
+                var jsonPath = dataBindingPlan.JsonPath;
+                var metaPath = dataBindingPlan.StructMetaPath;
+                var jsonBytes = Encoding.UTF8.GetByteCount(jsonPath);
+                var metaBytes = Encoding.UTF8.GetByteCount(metaPath);
+                WriteUtf8(runner.StandardInput.BaseStream, $"BIND {jsonBytes} {metaBytes}\n");
+                WriteUtf8(runner.StandardInput.BaseStream, jsonPath);
+                WriteUtf8(runner.StandardInput.BaseStream, metaPath);
+                runner.StandardInput.BaseStream.Flush();
+
+                var bindResp = await ReadLineWithTimeout(runner.StandardOutput, 30000, cts.Token);
+                if (bindResp is not null)
+                {
+                    await File.AppendAllTextAsync(runnerOutLog, bindResp + Environment.NewLine, Encoding.UTF8, cts.Token);
+                }
+                if (bindResp is null || !bindResp.StartsWith("OK", StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine($"warning: jit runner data bind failed: {bindResp ?? "<timeout>"}");
+                }
+            }
+            catch
+            {
+                Console.Error.WriteLine("warning: failed to send data binding to jit runner.");
+            }
+        }
+
         return true;
     }
 
@@ -3619,6 +3649,19 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+
+        if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
+        {
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+        dataBindingPlan = bindPlan;
+        if (dataBindingPlan is not null)
+        {
+            Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
+        }
+
         var options = new CodeGenerationOptions(
             ModuleName: moduleName,
             IncludeTests: false,
