@@ -54,6 +54,16 @@ fn now_ms() -> u64
     }
 }
 
+fn env_flag(name: &str) -> bool
+{
+    std::env::var(name).ok().as_deref() == Some("1")
+}
+
+fn env_u64(name: &str, default: u64) -> u64
+{
+    std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default)
+}
+
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub extern "win64" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
@@ -225,7 +235,6 @@ enum Request
 struct DataBinding
 {
     json_path: String,
-    struct_meta_path: String,
     fields: Vec<StructFieldMeta>,
     last_modified: Option<std::time::SystemTime>,
 }
@@ -244,7 +253,6 @@ struct StructFieldMeta
 {
     name: String,
     json_path: String,
-    offset: i32,
     size: i32,
     #[serde(rename = "type")]
     field_type: String,
@@ -267,7 +275,7 @@ impl DataBinding
             bail!("unsupported struct meta version {} (expected 1)", meta.version);
         }
 
-        Ok(Self { json_path, struct_meta_path, fields: meta.fields, last_modified: None })
+        Ok(Self { json_path, fields: meta.fields, last_modified: None })
     }
 
     fn apply_if_changed(&mut self, instance: &mut JitInstance) -> Result<bool>
@@ -587,10 +595,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let target_dt = if fps == 0 { Duration::from_millis(16) } else { Duration::from_secs_f64(1.0 / (fps as f64)) };
     let mut last = Instant::now();
 
-    let watchdog_ms: u64 = std::env::var("STASIS_JIT_WATCHDOG_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let watchdog_ms = env_u64("STASIS_JIT_WATCHDOG_MS", 0);
 
     let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));
     let tick_counter = Arc::new(AtomicU64::new(0));
@@ -616,10 +621,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
         });
     }
 
-    let heartbeat_ms: u64 = std::env::var("STASIS_JIT_HEARTBEAT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let heartbeat_ms = env_u64("STASIS_JIT_HEARTBEAT_MS", 0);
 
     if heartbeat_ms > 0
     {
@@ -680,10 +682,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
         }
 
         let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
-        let use_bulk_step = std::env::var("STASIS_JIT_USE_HOST_BULK_STEP")
-            .ok()
-            .map(|s| s == "1")
-            .unwrap_or(false);
+        let use_bulk_step = env_flag("STASIS_JIT_USE_HOST_BULK_STEP");
 
         if bulk_step_available && use_bulk_step
         {
@@ -700,10 +699,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     }
 
     let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
-    let use_bulk_step = std::env::var("STASIS_JIT_USE_HOST_BULK_STEP")
-        .ok()
-        .map(|s| s == "1")
-        .unwrap_or(false);
+    let use_bulk_step = env_flag("STASIS_JIT_USE_HOST_BULK_STEP");
 
     loop
     {
