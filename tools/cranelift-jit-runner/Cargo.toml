@@ -1,0 +1,16 @@
+[package]
+name = "stasis-cranelift-jit-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.23", features = ["derive"] }
+cranelift-codegen = "=0.126.1"
+cranelift-frontend = "=0.126.1"
+cranelift-jit = "=0.126.1"
+cranelift-module = "=0.126.1"
+cranelift-native = "=0.126.1"
+libloading = "0.8.6"
+libc = "0.2"
+target-lexicon = "0.13.2"
