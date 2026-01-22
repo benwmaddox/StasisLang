@@ -91,14 +91,35 @@ pub extern "C" fn cosf(x: f32) -> f32
     x.cos()
 }
 
-fn try_load_stasis_graphics_symbols(jit_builder: &mut JITBuilder) -> Option<Library>
+struct GraphicsApi
+{
+    _lib: Library,
+    host_get_frame: Option<unsafe extern "C" fn(*mut i32, *mut f32)>,
+    gfx_submit_u8: Option<unsafe extern "C" fn(*mut i32, *mut f32, *mut u8)>,
+    set_window_size: Option<unsafe extern "C" fn(i32, i32)>,
+    set_fullscreen: Option<unsafe extern "C" fn(i32) -> i32>,
+    init_window: Option<unsafe extern "C" fn(i32, i32, *const i8) -> i32>,
+}
+
+fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
 {
     // In repo/dev runs, the CLI starts the runner with WorkingDirectory=repoRoot,
     // so loading by name resolves `.\stasis_graphics.dll` on Windows.
     let lib = unsafe { Library::new("stasis_graphics.dll") }.ok()?;
 
-    // Register the subset currently needed by Brickout v1 (expand as needed).
+    fn try_get_fn<T: Copy>(lib: &Library, name: &str) -> Option<T>
+    {
+        // SAFETY: we only call through the function pointers with the expected signatures.
+        let sym = unsafe { lib.get::<T>(name.as_bytes()) }.ok()?;
+        Some(*sym)
+    }
+
+    // Register symbols for the JIT (for extern calls), and also capture a few host-side APIs.
     for name in [
+        "stasis_host_get_frame",
+        "stasis_gfx_submit_u8",
+        "stasis_set_window_size",
+        "stasis_set_fullscreen",
         "stasis_init_window",
         "stasis_gfx_load_sprite",
         "stasis_load_font",
@@ -118,7 +139,16 @@ fn try_load_stasis_graphics_symbols(jit_builder: &mut JITBuilder) -> Option<Libr
         }
     }
 
-    Some(lib)
+    let api = GraphicsApi {
+        host_get_frame: try_get_fn::<unsafe extern "C" fn(*mut i32, *mut f32)>(&lib, "stasis_host_get_frame"),
+        gfx_submit_u8: try_get_fn::<unsafe extern "C" fn(*mut i32, *mut f32, *mut u8)>(&lib, "stasis_gfx_submit_u8"),
+        set_window_size: try_get_fn::<unsafe extern "C" fn(i32, i32)>(&lib, "stasis_set_window_size"),
+        set_fullscreen: try_get_fn::<unsafe extern "C" fn(i32) -> i32>(&lib, "stasis_set_fullscreen"),
+        init_window: try_get_fn::<unsafe extern "C" fn(i32, i32, *const i8) -> i32>(&lib, "stasis_init_window"),
+        _lib: lib,
+    };
+
+    Some(api)
 }
 
 enum Request
@@ -201,6 +231,25 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let target_dt = if fps == 0 { Duration::from_millis(16) } else { Duration::from_secs_f64(1.0 / (fps as f64)) };
     let mut last = Instant::now();
 
+    // Bulk host mode: create a default window if the graphics runtime is present.
+    if instance.bulk_active
+    {
+        if let Some(g) = instance.graphics.as_ref()
+        {
+            if let Some(init_window) = g.init_window
+            {
+                let title = b"Stasis\0";
+                unsafe {
+                    let _ = init_window(640, 360, title.as_ptr() as *const i8);
+                }
+            }
+        }
+
+        // Apply any request the program made during main().
+        apply_window_requests(instance);
+        eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
+    }
+
     loop
     {
         while let Ok(req) = rx.try_recv()
@@ -263,10 +312,46 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        let rc = unsafe { (instance.tick_fn)() };
+        if instance.bulk_active
+        {
+            // Update HostFrame snapshot and apply any window requests.
+            if let (Some(host_get_frame), Some(host_i32), Some(host_f32)) =
+                (instance.graphics.as_ref().and_then(|x| x.host_get_frame), instance.host_i32, instance.host_f32)
+            {
+                unsafe {
+                    host_get_frame(host_i32, host_f32);
+                }
+            }
+
+            // Exit if host requested quit (avoid requiring guest queries).
+            if let Some(host_i32) = instance.host_i32
+            {
+                unsafe {
+                    if *host_i32.add(9) != 0
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+
+            apply_window_requests(instance);
+        }
+
+        let rc = (instance.tick_fn)();
         if rc != 0
         {
             return Ok(());
+        }
+
+        if instance.bulk_active
+        {
+            if let (Some(gfx_submit_u8), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
+                (instance.graphics.as_ref().and_then(|x| x.gfx_submit_u8), instance.gfx_cmd_i32, instance.gfx_cmd_f32, instance.gfx_cmd_u8)
+            {
+                unsafe {
+                    gfx_submit_u8(cmd_i32, cmd_f32, cmd_u8);
+                }
+            }
         }
 
         let now = Instant::now();
@@ -275,6 +360,49 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
         if elapsed < target_dt
         {
             thread::sleep(target_dt - elapsed);
+        }
+    }
+}
+
+fn apply_window_requests(instance: &mut JitInstance)
+{
+    // Matches src/host_window_request.stasis:
+    // - HOST_REQ_FLAG_WINDOWED = 1
+    // - HOST_REQ_FLAG_FULLSCREEN = 2
+    const HOST_REQ_FLAG_WINDOWED: i32 = 1;
+    const HOST_REQ_FLAG_FULLSCREEN: i32 = 2;
+
+    if !instance.bulk_active
+    {
+        return;
+    }
+
+    let Some(req_seq) = instance.host_req_seq else { return };
+    let Some(req_flags) = instance.host_req_flags else { return };
+
+    let Some(g) = instance.graphics.as_ref() else { return };
+    let Some(set_fullscreen) = g.set_fullscreen else { return };
+
+    unsafe {
+        let seq = *req_seq;
+        if seq == instance.last_req_seq
+        {
+            return;
+        }
+        instance.last_req_seq = seq;
+
+        let flags = *req_flags;
+        if (flags & HOST_REQ_FLAG_WINDOWED) != 0
+        {
+            if let (Some(set_window_size), Some(wp), Some(hp)) = (g.set_window_size, instance.host_req_window_w_px, instance.host_req_window_h_px)
+            {
+                let _ = set_fullscreen(0);
+                set_window_size(*wp, *hp);
+            }
+        }
+        else if (flags & HOST_REQ_FLAG_FULLSCREEN) != 0
+        {
+            let _ = set_fullscreen(1);
         }
     }
 }
@@ -371,13 +499,25 @@ struct JitInstance
     module_name: String,
     entry_name: String,
     tick_name: String,
-    #[allow(dead_code)]
-    graphics_lib: Option<Library>,
+    graphics: Option<GraphicsApi>,
     module: JITModule,
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
     state_globals: Vec<(String, usize)>,
     data_ptrs: HashMap<String, *mut u8>,
+
+    // Bulk host mode (matches stasis_runner behavior): host writes HostFrame globals and submits gfx_cmd buffers.
+    bulk_active: bool,
+    host_i32: Option<*mut i32>,
+    host_f32: Option<*mut f32>,
+    gfx_cmd_i32: Option<*mut i32>,
+    gfx_cmd_f32: Option<*mut f32>,
+    gfx_cmd_u8: Option<*mut u8>,
+    host_req_seq: Option<*mut i32>,
+    host_req_flags: Option<*mut i32>,
+    host_req_window_w_px: Option<*mut i32>,
+    host_req_window_h_px: Option<*mut i32>,
+    last_req_seq: i32,
 }
 
 impl JitInstance
@@ -399,7 +539,7 @@ impl JitInstance
         jit_builder.symbol("sinf", sinf as *const u8);
         jit_builder.symbol("cosf", cosf as *const u8);
 
-        let graphics_lib = try_load_stasis_graphics_symbols(&mut jit_builder);
+        let graphics = try_load_stasis_graphics(&mut jit_builder);
 
         let mut module = JITModule::new(jit_builder);
 
@@ -469,6 +609,33 @@ impl JitInstance
             data_ptrs.insert(name.clone(), ptr.0 as *mut u8);
         }
 
+        let host_i32 = data_ptrs.get("host_i32").copied().map(|p| p as *mut i32);
+        let host_f32 = data_ptrs.get("host_f32").copied().map(|p| p as *mut f32);
+        let gfx_cmd_i32 = data_ptrs.get("gfx_cmd_i32").copied().map(|p| p as *mut i32);
+        let gfx_cmd_f32 = data_ptrs.get("gfx_cmd_f32").copied().map(|p| p as *mut f32);
+        let gfx_cmd_u8 = data_ptrs.get("gfx_cmd_u8").copied().map(|p| p as *mut u8);
+        let host_req_seq = data_ptrs.get("host_req_seq").copied().map(|p| p as *mut i32);
+        let host_req_flags = data_ptrs.get("host_req_flags").copied().map(|p| p as *mut i32);
+        let host_req_window_w_px = data_ptrs.get("host_req_window_w_px").copied().map(|p| p as *mut i32);
+        let host_req_window_h_px = data_ptrs.get("host_req_window_h_px").copied().map(|p| p as *mut i32);
+
+        let mut last_req_seq = 0i32;
+        if let Some(p) = host_req_seq
+        {
+            unsafe {
+                last_req_seq = *p;
+            }
+        }
+
+        let bulk_active =
+            graphics.as_ref().and_then(|g| g.host_get_frame).is_some()
+            && graphics.as_ref().and_then(|g| g.gfx_submit_u8).is_some()
+            && host_i32.is_some()
+            && host_f32.is_some()
+            && gfx_cmd_i32.is_some()
+            && gfx_cmd_f32.is_some()
+            && gfx_cmd_u8.is_some();
+
         let entry_id = *function_ids.get(entry_name).with_context(|| format!("missing entry function {entry_name}"))?;
         let tick_id = *function_ids.get(tick_name).with_context(|| format!("missing tick function {tick_name}"))?;
 
@@ -479,12 +646,23 @@ impl JitInstance
             module_name: module_name.to_string(),
             entry_name: entry_name.to_string(),
             tick_name: tick_name.to_string(),
-            graphics_lib,
+            graphics,
             module,
             entry_fn: unsafe { std::mem::transmute(entry_ptr) },
             tick_fn: unsafe { std::mem::transmute(tick_ptr) },
             state_globals,
             data_ptrs,
+            bulk_active,
+            host_i32,
+            host_f32,
+            gfx_cmd_i32,
+            gfx_cmd_f32,
+            gfx_cmd_u8,
+            host_req_seq,
+            host_req_flags,
+            host_req_window_w_px,
+            host_req_window_h_px,
+            last_req_seq,
         })
     }
 
