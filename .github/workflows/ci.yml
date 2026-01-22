@@ -43,11 +43,11 @@ jobs:
       - name: Build
         run: dotnet build Stasis.sln -c Release --no-restore
 
-      - name: Install clang (ubuntu)
+      - name: Verify clang (ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld
+          which clang
+          clang --version
 
       - name: Install clang (windows)
         if: runner.os == 'Windows'
