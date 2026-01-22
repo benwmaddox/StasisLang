@@ -27,6 +27,7 @@ public sealed class HotSwapIntegrationTests
         Directory.CreateDirectory(swapDir);
 
         var swapFile = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.swap");
+        var runnerOutLog = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.runner.out.log");
         var runnerErrLog = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.runner.err.log");
 
         var original = await File.ReadAllTextAsync(samplePath);
@@ -36,6 +37,7 @@ public sealed class HotSwapIntegrationTests
         try
         {
             TryDelete(swapFile);
+            TryDelete(runnerOutLog);
             TryDelete(runnerErrLog);
 
             var psi = new ProcessStartInfo
@@ -66,18 +68,29 @@ public sealed class HotSwapIntegrationTests
                 timeout: TimeSpan.FromMinutes(3));
 
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
-            File.WriteAllText(swapFile, @"Z:\this\does\not\exist.swap.dll", System.Text.Encoding.ASCII);
+            var badSwapPath = OperatingSystem.IsWindows()
+                ? @"Z:\this\does\not\exist.swap.dll"
+                : "/this/does/not/exist.swap.so";
+            File.WriteAllText(swapFile, badSwapPath + "\n", System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
                 () =>
                 {
-                    if (!File.Exists(runnerErrLog))
+                    if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
                     {
                         return false;
                     }
-                    return TryReadTextShared(runnerErrLog, out var text) &&
-                        text.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                    var ok = false;
+                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
+                    {
+                        ok |= errText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                    }
+                    if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
+                    {
+                        ok |= outText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                    }
+                    return ok;
                 },
                 timeout: TimeSpan.FromSeconds(30));
 
@@ -93,12 +106,20 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () =>
                 {
-                    if (!File.Exists(runnerErrLog))
+                    if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
                     {
                         return false;
                     }
-                    return TryReadTextShared(runnerErrLog, out var text) &&
-                        text.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    var ok = false;
+                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
+                    {
+                        ok |= errText.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    }
+                    if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
+                    {
+                        ok |= outText.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    }
+                    return ok;
                 },
                 timeout: TimeSpan.FromSeconds(60));
         }
