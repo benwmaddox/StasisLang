@@ -48,10 +48,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18
-          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
-          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
-          which clang
-          clang --version
+          mkdir -p .tools/llvm-18/bin
+          ln -sf /usr/bin/clang-18 .tools/llvm-18/bin/clang
+          ln -sf /usr/bin/clang++-18 .tools/llvm-18/bin/clang++
+          echo "${PWD}/.tools/llvm-18/bin" >> "$GITHUB_PATH"
+          .tools/llvm-18/bin/clang --version
 
       - name: Install clang (windows)
         if: runner.os == 'Windows'
