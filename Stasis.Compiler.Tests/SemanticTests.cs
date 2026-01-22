@@ -65,6 +65,24 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_unknown_field_in_struct_member_access()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): void {
+                state.b = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_void_local()
     {
         var source = """
