@@ -3360,6 +3360,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         {
             Console.Error.WriteLine(timingLine);
         }
+        else if (runner is not null)
+        {
+            Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
+        }
     }
 
     if (runner is not null && !runner.HasExited)
@@ -3773,6 +3777,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var rc = BuildClif(out var clif, out var lowerMs);
         if (rc != 0)
         {
+            if (runner is not null && !runner.HasExited)
+            {
+                Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
+            }
             continue;
         }
 
