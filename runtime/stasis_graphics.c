@@ -140,7 +140,10 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 /* Forward decls for exported functions used before their definitions (MSVC C mode does not allow implicit declarations). */
 STASIS_EXPORT int stasis_get_time_ms(void);
 STASIS_EXPORT int stasis_should_quit(void);
+STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32);
+STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
+STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for internal helpers used before their definitions. */
