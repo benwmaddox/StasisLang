@@ -21,6 +21,23 @@ typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
 typedef int (*stasis_host_get_keyboard_state_fn)(uint8_t *out_u8, int max_bytes);
 typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
+typedef void (*stasis_host_bulk_apply_requests_fn)(
+    const int32_t *host_req_seq,
+    const int32_t *host_req_flags,
+    const int32_t *host_req_window_w_px,
+    const int32_t *host_req_window_h_px);
+typedef int (*stasis_host_bulk_step_fn)(
+    int32_t *host_i32,
+    float *host_f32,
+    int32_t *gfx_cmd_i32,
+    float *gfx_cmd_f32,
+    uint8_t *gfx_cmd_u8,
+    const int32_t *host_req_seq,
+    const int32_t *host_req_flags,
+    const int32_t *host_req_window_w_px,
+    const int32_t *host_req_window_h_px,
+    stasis_tick_fn tick_fn);
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
@@ -794,6 +811,9 @@ static void stasis_rebind_bulk_pointers(
     stasis_host_get_frame_fn *host_get_frame,
     stasis_host_get_keyboard_state_fn *host_get_keyboard_state,
     stasis_gfx_submit_u8_fn *gfx_submit_u8,
+    stasis_host_bulk_init_fn *host_bulk_init,
+    stasis_host_bulk_apply_requests_fn *host_bulk_apply_requests,
+    stasis_host_bulk_step_fn *host_bulk_step,
     int32_t **host_req_seq,
     int32_t **host_req_flags,
     int32_t **host_req_window_w_px,
@@ -895,11 +915,23 @@ static void stasis_rebind_bulk_pointers(
         {
             *gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
         }
+        if (host_bulk_init)
+        {
+            *host_bulk_init = (stasis_host_bulk_init_fn)GetProcAddress(gfx, "stasis_host_bulk_init");
+        }
+        if (host_bulk_apply_requests)
+        {
+            *host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)GetProcAddress(gfx, "stasis_host_bulk_apply_requests");
+        }
+        if (host_bulk_step)
+        {
+            *host_bulk_step = (stasis_host_bulk_step_fn)GetProcAddress(gfx, "stasis_host_bulk_step");
+        }
     }
 
-    if (bulk_active && host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_get_frame && gfx_submit_u8)
+    if (bulk_active && host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
     {
-        if (*host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 && *host_get_frame && *gfx_submit_u8)
+        if (*host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 && (*host_bulk_step || (*host_get_frame && *gfx_submit_u8)))
         {
             *bulk_active = 1;
         }
@@ -1525,6 +1557,29 @@ int main(int argc, char **argv)
         tick_sym = GetProcAddress(lib, tick_name);
     }
 
+    /* Host window request globals are used by bulk mode (defined in src/host_window_request.stasis). */
+    int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
+    int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
+    int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
+    int32_t *host_req_window_h_px = (int32_t *)GetProcAddress(lib, "host_req_window_h_px");
+
+    /* Bulk host loop API (stasis_graphics.dll). */
+    stasis_host_bulk_init_fn host_bulk_init = NULL;
+    stasis_host_bulk_apply_requests_fn host_bulk_apply_requests = NULL;
+    stasis_host_bulk_step_fn host_bulk_step = NULL;
+    if (GetModuleHandleA("stasis_graphics.dll"))
+    {
+        HMODULE gfx_bulk = GetModuleHandleA("stasis_graphics.dll");
+        host_bulk_init = (stasis_host_bulk_init_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_init");
+        host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_apply_requests");
+        host_bulk_step = (stasis_host_bulk_step_fn)GetProcAddress(gfx_bulk, "stasis_host_bulk_step");
+    }
+    if (host_bulk_init)
+    {
+        /* Capture baseline seq before main(). */
+        host_bulk_init(host_req_seq);
+    }
+
     stasis_try_set_sys_args(lib, argc, argv);
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
@@ -1549,10 +1604,6 @@ int main(int argc, char **argv)
         stasis_host_get_frame_fn host_get_frame = NULL;
         stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
-        int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
-        int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
-        int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
-        int32_t *host_req_window_h_px = (int32_t *)GetProcAddress(lib, "host_req_window_h_px");
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
         if (bulk_enabled)
@@ -1572,14 +1623,18 @@ int main(int argc, char **argv)
                 gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
             }
 
-            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_get_frame && gfx_submit_u8)
+            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
             {
                 bulk_active = 1;
             }
         }
 
         /* Apply any request the program made during main(). */
-        if (bulk_active && host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+        if (bulk_active && host_bulk_apply_requests)
+        {
+            host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+        }
+        else if (bulk_active && host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
         {
             last_req_seq = *host_req_seq;
             const int flags = *host_req_flags;
@@ -1807,11 +1862,19 @@ int main(int argc, char **argv)
                                 &host_get_frame,
                                 &host_get_keyboard_state,
                                 &gfx_submit_u8,
+                                &host_bulk_init,
+                                &host_bulk_apply_requests,
+                                &host_bulk_step,
                                 &host_req_seq,
                                 &host_req_flags,
                                 &host_req_window_w_px,
                                 &host_req_window_h_px,
                                 &last_req_seq);
+
+                            if (host_bulk_init)
+                            {
+                                host_bulk_init(host_req_seq);
+                            }
 
                             if (next_map_owned)
                             {
@@ -1835,7 +1898,26 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
-            if (bulk_active)
+            if (bulk_active && host_bulk_step)
+            {
+                int step_result = host_bulk_step(
+                    host_i32,
+                    host_f32,
+                    gfx_cmd_i32,
+                    gfx_cmd_f32,
+                    gfx_cmd_u8,
+                    host_req_seq,
+                    host_req_flags,
+                    host_req_window_w_px,
+                    host_req_window_h_px,
+                    tick);
+                if (step_result != 0)
+                {
+                    result = step_result == 1 ? 0 : step_result;
+                    break;
+                }
+            }
+            else if (bulk_active)
             {
                 host_get_frame(host_i32, host_f32);
                 if (host_get_keyboard_state && host_keys)
@@ -1850,8 +1932,11 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                /* Apply window requests (if any). */
-                if (host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
+                if (host_bulk_apply_requests)
+                {
+                    host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+                }
+                else if (host_req_seq && host_req_flags && init_window && set_fullscreen && *host_req_seq != last_req_seq)
                 {
                     last_req_seq = *host_req_seq;
                     const int flags = *host_req_flags;
@@ -1865,18 +1950,24 @@ int main(int argc, char **argv)
                         (void)set_fullscreen(1);
                     }
                 }
-            }
 
-            int tick_result = tick();
-            if (tick_result != 0)
-            {
-                result = tick_result == 1 ? 0 : tick_result;
-                break;
-            }
+                int tick_result = tick();
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
 
-            if (bulk_active)
-            {
                 gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+            }
+            else
+            {
+                int tick_result = tick();
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
             }
 
             LARGE_INTEGER now;

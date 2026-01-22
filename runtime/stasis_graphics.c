@@ -527,6 +527,108 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
 STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
 
 /*
+ * Bulk host loop helpers.
+ *
+ * Goal: keep "host behavior" (input snapshot + window requests + submit) inside the runtime/graphics library,
+ * so both production runners (stasis_runner) and dev runners (JIT) use the same code paths.
+ *
+ * Notes:
+ * - The guest owns the host_window_request globals (src/host_window_request.stasis). We track the last applied
+ *   request seq in this library, initialized by stasis_host_bulk_init().
+ * - HostFrame layout is defined in src/host_frame.stasis and is written by stasis_host_get_frame().
+ * - Rendering is driven by gfx_cmd buffers (src/gfx_cmd.stasis) and submitted by stasis_gfx_submit_u8().
+ */
+static int g_host_req_inited = 0;
+static int32_t g_host_last_req_seq = 0;
+
+STASIS_EXPORT void stasis_host_bulk_init(const int32_t* host_req_seq)
+{
+    g_host_last_req_seq = host_req_seq ? *host_req_seq : 0;
+    g_host_req_inited = 1;
+}
+
+STASIS_EXPORT void stasis_host_bulk_apply_requests(
+    const int32_t* host_req_seq,
+    const int32_t* host_req_flags,
+    const int32_t* host_req_window_w_px,
+    const int32_t* host_req_window_h_px)
+{
+    /* Matches src/host_window_request.stasis */
+    const int32_t HOST_REQ_FLAG_WINDOWED = 1;
+    const int32_t HOST_REQ_FLAG_FULLSCREEN = 2;
+
+    if (!host_req_seq || !host_req_flags)
+    {
+        return;
+    }
+
+    if (!g_host_req_inited)
+    {
+        stasis_host_bulk_init(host_req_seq);
+    }
+
+    const int32_t seq = *host_req_seq;
+    if (seq == g_host_last_req_seq)
+    {
+        return;
+    }
+    g_host_last_req_seq = seq;
+
+    const int32_t flags = *host_req_flags;
+    if ((flags & HOST_REQ_FLAG_WINDOWED) != 0)
+    {
+        if (host_req_window_w_px && host_req_window_h_px)
+        {
+            (void)stasis_set_fullscreen(0);
+            stasis_set_window_size(*host_req_window_w_px, *host_req_window_h_px);
+        }
+    }
+    else if ((flags & HOST_REQ_FLAG_FULLSCREEN) != 0)
+    {
+        (void)stasis_set_fullscreen(1);
+    }
+}
+
+typedef int (*stasis_tick_fn)(void);
+
+STASIS_EXPORT int stasis_host_bulk_step(
+    int32_t* host_i32,
+    float* host_f32,
+    int32_t* gfx_cmd_i32,
+    float* gfx_cmd_f32,
+    uint8_t* gfx_cmd_u8,
+    const int32_t* host_req_seq,
+    const int32_t* host_req_flags,
+    const int32_t* host_req_window_w_px,
+    const int32_t* host_req_window_h_px,
+    stasis_tick_fn tick_fn)
+{
+    if (!host_i32 || !host_f32 || !gfx_cmd_i32 || !gfx_cmd_f32 || !gfx_cmd_u8 || !tick_fn)
+    {
+        return -1;
+    }
+
+    stasis_host_get_frame(host_i32, host_f32);
+
+    /* Exit if host requested quit (avoid requiring guest queries). */
+    if (host_i32[9] != 0)
+    {
+        return 1;
+    }
+
+    stasis_host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+
+    const int tick_result = tick_fn();
+    if (tick_result != 0)
+    {
+        return tick_result;
+    }
+
+    stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+    return 0;
+}
+
+/*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
  * Layout is defined in src/host_frame.stasis. This is intentionally a simple
