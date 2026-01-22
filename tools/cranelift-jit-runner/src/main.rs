@@ -1,3 +1,38 @@
+/*
+ * stasis-cranelift-jit-runner (server mode)
+ *
+ * High-level job:
+ * - Read Stasis CLIF (Cranelift IR in a simple text format) over stdin.
+ * - JIT compile it in-process using cranelift_jit::JITModule.
+ * - Execute `<module>__main` once, then repeatedly call `<module>__tick`.
+ * - Support hot-swap by accepting replacement CLIF over stdin and swapping the active
+ *   compiled instance while preserving global state.
+ *
+ * Protocol (stdin/stdout):
+ * - On startup: prints `READY` on stdout.
+ * - INIT: `INIT <moduleLen> <entryLen> <tickLen> <clifLen>\n<module><entry><tick><clif>`
+ *     Compiles, runs entry, then enters tick loop. Replies `OK` or `ERR ...`.
+ * - BIND: `BIND <jsonLen> <metaLen>\n<jsonPath><structMetaPath>`
+ *     Loads compiler-emitted struct-meta.json and applies/polls a JSON file to update globals.
+ *     Replies `OK` or `ERR ...`.
+ * - SWAP: `SWAP <clifLen>\n<clif>`
+ *     Compiles on a background worker thread. When finished, the tick loop swaps the active
+ *     instance with a fast state copy and responds `OK ...` or `ERR ...`.
+ * - QUIT: replies `OK` and exits.
+ *
+ * Hot-swap model (JIT path):
+ * - Persisted state is the set of exported globals whose symbol names start with `state__`.
+ * - On swap, we copy bytes for each `state__*` global from the old instance into a map, then
+ *   restore those bytes into the new instance. This mirrors the disk/DLL runner but doesn't use
+ *   a separate on-disk state map.
+ *
+ * Notes on differences vs the disk/DLL runner:
+ * - No filesystem swap files and no OS dynamic loader; the compiled code lives in-process.
+ * - Bulk host loop: `stasis_host_bulk_step` is supported but disabled by default (it has shown
+ *   the ability to deadlock the tick loop on some click paths). The legacy loop
+ *   (`host_get_frame` + `tick` + `gfx_submit_u8`) is the default for reliability.
+ */
+
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -56,11 +91,13 @@ fn now_ms() -> u64
 
 fn env_flag(name: &str) -> bool
 {
+    // Convention: most Stasis env toggles treat "1" as enabled.
     std::env::var(name).ok().as_deref() == Some("1")
 }
 
 fn env_u64(name: &str, default: u64) -> u64
 {
+    // Best-effort parse; keeps runner behavior stable even under unexpected env values.
     std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default)
 }
 
@@ -153,6 +190,9 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
     }
 
     // Register symbols for the JIT (for extern calls), and also capture a few host-side APIs.
+    //
+    // Important: a missing host symbol often only triggers on specific gameplay/UI paths
+    // (e.g., audio init on click). Keep this list in sync with what the compiler emits.
     for name in [
         "stasis_host_get_frame",
         "stasis_gfx_submit_u8",
@@ -265,6 +305,8 @@ impl DataBinding
     {
         let meta_bytes = std::fs::read(&struct_meta_path)
             .with_context(|| format!("failed to read struct meta: {struct_meta_path}"))?;
+        // The CLI writes struct-meta as UTF-8 without BOM. Be tolerant anyway: some Windows tools
+        // (or legacy CLI builds) may produce a BOM, which serde_json rejects.
         let meta_bytes = meta_bytes
             .strip_prefix(&[0xEF, 0xBB, 0xBF])
             .unwrap_or(meta_bytes.as_slice());
@@ -638,6 +680,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     }
 
     // Compile swaps off-thread so the tick loop stays responsive (UI/events continue to pump).
+    // The tick loop only does a fast apply step + pointer swap when compilation finishes.
     let (swap_job_tx, swap_job_rx) = mpsc::channel::<SwapJob>();
     let (swap_result_tx, swap_result_rx) = mpsc::channel::<SwapResult>();
     thread::spawn(move || {
@@ -654,6 +697,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     });
 
     // Drop old instances off-thread as well (tearing down the previous JIT module can be expensive).
+    // This prevents sporadic pauses on swap when JITModule gets freed.
     let (drop_tx, drop_rx) = mpsc::channel::<JitInstance>();
     thread::spawn(move || {
         while let Ok(v) = drop_rx.recv()
