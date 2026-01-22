@@ -679,16 +679,31 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        let uses_bulk_step = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
-        if uses_bulk_step
+        let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
+        let use_bulk_step = std::env::var("STASIS_JIT_USE_HOST_BULK_STEP")
+            .ok()
+            .map(|s| s == "1")
+            .unwrap_or(false);
+
+        if bulk_step_available && use_bulk_step
         {
             eprintln!("HOST bulk: active (stasis_host_bulk_step)");
         }
         else
         {
+            if bulk_step_available && !use_bulk_step
+            {
+                eprintln!("HOST bulk: stasis_host_bulk_step available but disabled (set STASIS_JIT_USE_HOST_BULK_STEP=1 to enable)");
+            }
             eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
         }
     }
+
+    let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
+    let use_bulk_step = std::env::var("STASIS_JIT_USE_HOST_BULK_STEP")
+        .ok()
+        .map(|s| s == "1")
+        .unwrap_or(false);
 
     loop
     {
@@ -847,34 +862,39 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
         if instance.bulk_active
         {
-            if let (Some(host_bulk_step), Some(host_i32), Some(host_f32), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
-                (
-                    instance.graphics.as_ref().and_then(|x| x.host_bulk_step),
-                    instance.host_i32,
-                    instance.host_f32,
-                    instance.gfx_cmd_i32,
-                    instance.gfx_cmd_f32,
-                    instance.gfx_cmd_u8,
-                )
+            if bulk_step_available && use_bulk_step
             {
-                unsafe {
-                    let rc = host_bulk_step(
-                        host_i32,
-                        host_f32,
-                        cmd_i32,
-                        cmd_f32,
-                        cmd_u8,
-                        instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.tick_fn,
-                    );
-                    if rc != 0
-                    {
-                        eprintln!("HOST bulk: step returned {rc}; exiting.");
-                        return Ok(());
+                if let (Some(host_bulk_step), Some(host_i32), Some(host_f32), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
+                    (
+                        instance.graphics.as_ref().and_then(|x| x.host_bulk_step),
+                        instance.host_i32,
+                        instance.host_f32,
+                        instance.gfx_cmd_i32,
+                        instance.gfx_cmd_f32,
+                        instance.gfx_cmd_u8,
+                    )
+                {
+                    unsafe {
+                        let rc = host_bulk_step(
+                            host_i32,
+                            host_f32,
+                            cmd_i32,
+                            cmd_f32,
+                            cmd_u8,
+                            instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.tick_fn,
+                        );
+                        if rc != 0
+                        {
+                            eprintln!("HOST bulk: step returned {rc}; exiting.");
+                            return Ok(());
+                        }
                     }
+                    tick_counter.fetch_add(1, Ordering::Relaxed);
+                    last_progress_ms.store(now_ms(), Ordering::Relaxed);
                 }
             }
             else
@@ -892,7 +912,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     }
                 }
 
-                 apply_window_requests(instance, &mut last_req_seq);
+                apply_window_requests(instance, &mut last_req_seq);
 
                 let rc = (instance.tick_fn)();
                 if rc != 0
@@ -920,8 +940,11 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        tick_counter.fetch_add(1, Ordering::Relaxed);
-        last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        if !(instance.bulk_active && bulk_step_available && use_bulk_step)
+        {
+            tick_counter.fetch_add(1, Ordering::Relaxed);
+            last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        }
 
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(last);
