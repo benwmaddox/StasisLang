@@ -13,6 +13,16 @@ public static class SourceImporter
 {
     private const string ImportKeyword = "import";
 
+    private static void AddDiagnostic(List<Diagnostic> diagnostics, string message, SourceSpan span, string? filePath = null)
+    {
+        if (diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            return;
+        }
+
+        diagnostics.Add(new Diagnostic(message, span, filePath));
+    }
+
     public static SourceImportResult ExpandImports(string entryPath, string source, List<Diagnostic> diagnostics)
     {
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -28,6 +38,11 @@ public static class SourceImporter
 
     private static SourceImportResultWithMap ExpandImportsInner(string currentPath, string source, List<Diagnostic> diagnostics, HashSet<string> visited)
     {
+        if (diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            return new SourceImportResultWithMap(source, source, Array.Empty<SourceImportSegment>());
+        }
+
         var fullPath = Path.GetFullPath(currentPath);
         if (!visited.Add(fullPath))
         {
@@ -63,7 +78,7 @@ public static class SourceImporter
                     var resolvedPath = ResolveImportPathWithPlatformFallback(baseDir, importPath);
                     if (!File.Exists(resolvedPath))
                     {
-                        diagnostics.Add(new Diagnostic($"Import not found: {importPath}", new SourceSpan(lineStart, lineLength), fullPath));
+                        AddDiagnostic(diagnostics, $"Import not found: {importPath}", new SourceSpan(lineStart, lineLength), fullPath);
                     }
                     else
                     {
@@ -224,7 +239,7 @@ public static class SourceImporter
                 continue;
             }
 
-            diagnostics.Add(new Diagnostic($"stdlib files may not declare globals: {fullPath}", new SourceSpan(0, 0), fullPath));
+            AddDiagnostic(diagnostics, $"stdlib files may not declare globals: {fullPath}", new SourceSpan(0, 0), fullPath);
             return;
         }
     }

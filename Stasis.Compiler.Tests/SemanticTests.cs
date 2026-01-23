@@ -1,5 +1,6 @@
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using Stasis.Compiler;
 
 namespace Stasis.Compiler.Tests;
 
@@ -95,6 +96,33 @@ public class SemanticTests
         Assert.Empty(parse.Diagnostics);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): void {
+                state.b = 1;
+                missing0();
+                missing1();
+                missing2();
+                missing3();
+                missing4();
+                missing5();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Equal(DiagnosticPolicy.MaxErrors, sema.Diagnostics.Count);
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
     }
 

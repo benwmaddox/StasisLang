@@ -68,7 +68,7 @@ public class DocumentManager
             allDiags.AddRange(parseResult.Diagnostics);
             allDiags.AddRange(FilterAndRemapDiagnostics(uri, doc.Content, compilerDiagnostics, importSegments, expanded));
             allDiags.AddRange(FilterAndRemapDiagnostics(uri, doc.Content, semanticResult.Diagnostics, importSegments, expanded));
-            doc.AllDiagnostics = allDiags;
+            doc.AllDiagnostics = allDiags.Take(DiagnosticPolicy.MaxErrors).ToList();
         }
         else
         {
@@ -77,7 +77,7 @@ public class DocumentManager
             allDiags.AddRange(lexResult.Diagnostics);
             allDiags.AddRange(parseResult.Diagnostics);
             allDiags.AddRange(FilterAndRemapDiagnostics(uri, doc.Content, compilerDiagnostics, importSegments, expanded));
-            doc.AllDiagnostics = allDiags;
+            doc.AllDiagnostics = allDiags.Take(DiagnosticPolicy.MaxErrors).ToList();
             doc.SemanticResult = null;
         }
     }
