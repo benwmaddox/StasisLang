@@ -14,6 +14,7 @@ public class LoweringTests
     {
         var result = LowerWithDiagnostics(source, allowSemanticDiagnostics: false);
         Assert.Empty(result.Diagnostics);
+        Assert.DoesNotContain("; error:", result.Ir, StringComparison.Ordinal);
         return result.Ir;
     }
 

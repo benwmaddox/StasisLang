@@ -1,3 +1,26 @@
+/*
+ * stasis_runner.c
+ *
+ * High-level job:
+ * - Load a compiled Stasis program as a shared library (DLL/.so).
+ * - Call its entrypoint (`<module>__main`), then repeatedly call `<module>__tick`.
+ * - Optionally support hot-swap: watch a small "swap file" that names a replacement library
+ *   and (optionally) a new state-map. When a swap is requested, migrate global state
+ *   between the old and new libraries and continue ticking without restarting the process.
+ * - Optionally support data binding: bind a JSON config file to exported globals in the
+ *   currently-loaded library (updated after each swap).
+ *
+ * Two runner backends (same control flow, different platform calls):
+ * - Windows: LoadLibrary / GetProcAddress / FreeLibrary
+ * - Linux/macOS: dlopen / dlsym / dlclose
+ *
+ * Hot-swap model (disk/DLL path):
+ * - The compiler emits a state map (name + size per persisted symbol).
+ * - On swap, we copy bytes of each symbol from the old library into a buffer, then copy
+ *   those bytes into the new library's symbols (by name). Missing symbols are tolerated
+ *   and reported.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -493,6 +516,22 @@ static int read_state_map(const char *path, uint64_t *out_hash, stasis_state_sym
     return 0;
 }
 
+/* Free a state map parsed by read_state_map(). Safe to call on NULL. */
+static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
+{
+    if (!syms || !*syms || !sym_count)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < *sym_count; i++)
+    {
+        free((*syms)[i].name);
+    }
+    free(*syms);
+    *syms = NULL;
+    *sym_count = 0;
+}
+
 static int load_state_snapshot(const char *path, uint64_t expected_hash, uint32_t expected_bytes, uint8_t **out_data)
 {
     FILE *f = fopen(path, "rb");
@@ -694,21 +733,6 @@ static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char 
 
     fclose(f);
     return dll_out[0] == '\0' ? 1 : 0;
-}
-
-static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
-{
-    if (!syms || !*syms || !sym_count)
-    {
-        return;
-    }
-    for (uint32_t i = 0; i < *sym_count; i++)
-    {
-        free((*syms)[i].name);
-    }
-    free(*syms);
-    *syms = NULL;
-    *sym_count = 0;
 }
 
 static int copy_state_to_buffer(HMODULE lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)
@@ -1071,21 +1095,6 @@ static int read_swap_file(const char *path, char *dll_out, size_t dll_cap, char 
 
     fclose(f);
     return dll_out[0] == '\0' ? 1 : 0;
-}
-
-static void free_state_map(stasis_state_symbol **syms, uint32_t *sym_count)
-{
-    if (!syms || !*syms || !sym_count)
-    {
-        return;
-    }
-    for (uint32_t i = 0; i < *sym_count; i++)
-    {
-        free((*syms)[i].name);
-    }
-    free(*syms);
-    *syms = NULL;
-    *sym_count = 0;
 }
 
 static int copy_state_to_buffer(void *lib, stasis_state_symbol *syms, uint32_t sym_count, uint8_t *buffer, uint32_t total_bytes, int allow_missing, uint32_t *missing_count)

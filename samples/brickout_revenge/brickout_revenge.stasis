@@ -30,6 +30,18 @@ struct Sprites {
 
 }
 
+// Build render lists as pure data, then submit in bulk once per tick.
+// This is the preferred hot-path model: no per-draw host calls.
+struct GfxState {
+    // Packed sprite stream: [handle,x,y,w,h,rot_deg,a] * 256
+    sprites_i32: i32[1792];
+    sprite_count: i32;
+
+    // Packed line stream: [x1,y1,x2,y2,r,g,b,a] * 512
+    lines_f32: f32[4096];
+    line_count: i32;
+}
+
 struct GameState { 
     rng_state : i32;
 }
@@ -37,31 +49,53 @@ struct GlobalState {
     game : GameState;
     config : GlobalConfig;
     sprites : Sprites;    
+    gfx: GfxState;
     initialized: bool;
 }
 
 global state : GlobalState;
 
-
-function draw_drag_preview(): void {
-    if (state.drag_active == 0) { return; }
-    if (!grid_in_bounds(state.drag_grid_x, state.drag_grid_y)) { return; }
-    let x: f32 = grid_to_world_x(state.drag_grid_x);
-    let y: f32 = grid_to_world_y(state.drag_grid_y);
-    let w: f32 = state.config.brick.width;
-    let h: f32 = state.config.brick.height;
-    let r: f32 = 0.2;
-    let g: f32 = 0.8;
-    let b: f32 = 0.3;
-    let a: f32 = 0.4;
-    if (state.drag_valid == 0) {
-        r = 0.9; g = 0.2; b = 0.2; a = 0.45;
-    }
-    play_draw_filled_rect(x, y, w, h, r, g, b, 0.12);
-    play_draw_rect(x, y, w, h, r, g, b, a);
+function render_begin(): void {
+    state.gfx.sprite_count = 0;
+    state.gfx.line_count = 0;
 }
 
-function main(): i32 {
+function render_push_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
+    let i: i32 = state.gfx.sprite_count;
+    if (i >= 256) { return; }
+    let base: i32 = i * 7;
+    state.gfx.sprites_i32[base + 0] = handle;
+    state.gfx.sprites_i32[base + 1] = x;
+    state.gfx.sprites_i32[base + 2] = y;
+    state.gfx.sprites_i32[base + 3] = w;
+    state.gfx.sprites_i32[base + 4] = h;
+    state.gfx.sprites_i32[base + 5] = rot_deg;
+    state.gfx.sprites_i32[base + 6] = a;
+    state.gfx.sprite_count = i + 1;
+}
+
+function render_push_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
+    let i: i32 = state.gfx.line_count;
+    if (i >= 512) { return; }
+    let base: i32 = i * 8;
+    state.gfx.lines_f32[base + 0] = x1;
+    state.gfx.lines_f32[base + 1] = y1;
+    state.gfx.lines_f32[base + 2] = x2;
+    state.gfx.lines_f32[base + 3] = y2;
+    state.gfx.lines_f32[base + 4] = r;
+    state.gfx.lines_f32[base + 5] = g;
+    state.gfx.lines_f32[base + 6] = b;
+    state.gfx.lines_f32[base + 7] = a;
+    state.gfx.line_count = i + 1;
+}
+
+
+function draw_drag_preview(): void 
+{
+  return;
+}
+
+export function main(): i32 {
     // Require JSON data binding: this sample expects to be run under the native runner so
     // `samples/brickout_revenge/data/config.json` is applied to `state.config` before main().
     // if (state.config.magic != 1337) {
@@ -99,8 +133,12 @@ function main(): i32 {
         state.initialized = true;
     }
 
-    state.timers.last_time = get_time_ms();
+
     return 0;
+}
+
+function swap(){
+
 }
 
 function draw_level() {
@@ -113,10 +151,25 @@ function tick(): i32 {
         return 1;
     }
     
+    render_begin();
+
+    // Demo: batch build sprites/lines into arrays, then submit once.
+    let w: i32 = state.config.screen.width;
+    let h: i32 = state.config.screen.height;
+    render_push_sprite(state.sprites.paddle, (w / 2) - 64, h - 40, 128, 24, 0, 255);
+    render_push_sprite(state.sprites.ball, (w / 2) - 16, (h / 2) - 16, 32, 32, 0, 255);
+
+    render_push_line(0.0, 0.0, i32_to_f32(w), 0.0, 0.2, 0.2, 0.5, 1.0);
+    render_push_line(i32_to_f32(w), 0.0, i32_to_f32(w), i32_to_f32(h), 0.2, 0.2, 0.5, 1.0);
+    render_push_line(i32_to_f32(w), i32_to_f32(h), 0.0, i32_to_f32(h), 0.2, 0.2, 0.5, 1.0);
+    render_push_line(0.0, i32_to_f32(h), 0.0, 0.0, 0.2, 0.2, 0.5, 1.0);
+
     begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
     
     //update_game(dt, delta_ms);
+    gfx_draw_sprites_i32(state.gfx.sprites_i32, state.gfx.sprite_count);
+    draw_lines_f32(state.gfx.lines_f32, state.gfx.line_count);
     draw_frame();
 
     end_frame();

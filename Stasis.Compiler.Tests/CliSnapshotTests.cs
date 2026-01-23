@@ -139,7 +139,7 @@ public class CliSnapshotTests
         // Use `dotnet <dll>` instead of `dotnet run` so we don't execute the generated apphost .exe.
         // Some Windows environments enforce Application Control policies that can block running newly-built exe files.
         var dll = FindCliDll(root, configuration);
-        return new ProcessStartInfo
+        var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
             Arguments = $"\"{dll}\" {string.Join(" ", args)}",
@@ -148,6 +148,39 @@ public class CliSnapshotTests
             RedirectStandardError = true,
             WorkingDirectory = root
         };
+
+        // Ensure the CLI can find LLVM tools (clang/ld) during tests even when the caller didn't run env.bat.
+        // CI provisions a repo-local `.tools/llvm-*/bin` shim; local dev may have `.tools/llvm-*` or Program Files LLVM.
+        var existingPath = psi.Environment.TryGetValue("PATH", out var inheritedPath) && inheritedPath is not null
+            ? inheritedPath
+            : (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+        var prepend = new List<string>();
+        var toolsDir = Path.Combine(root, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly)
+                         .OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                prepend.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            prepend.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            prepend.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
+        var prependPath = string.Join(Path.PathSeparator, prepend.Distinct(StringComparer.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(prependPath))
+        {
+            psi.Environment["PATH"] = $"{prependPath}{Path.PathSeparator}{existingPath}";
+        }
+
+        return psi;
     }
 
     private static string FindCliDll(string root, string configuration)
@@ -399,11 +432,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Run_Basic()
     {
-        if (!TryFindLli())
-        {
-            // lli not available - skip test
-            return Task.CompletedTask;
-        }
+        Assert.True(TryFindClang(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--backend", "llvm");
         var result = new
@@ -418,17 +447,13 @@ public class CliSnapshotTests
     [Fact]
     public Task Test_TestsFile()
     {
-        if (!TryFindLli())
-        {
-            // lli not available - skip test
-            return Task.CompletedTask;
-        }
+        Assert.True(TryFindClang(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--backend", "llvm");
         var scrubbedStdout = ScrubOutput(stdout);
         var scrubbedStderr = ScrubOutput(stderr);
 
-        Assert.Equal(0, exitCode);
+        Assert.True(exitCode == 0, $"stasis test failed (exit={exitCode}).\nstdout:\n{scrubbedStdout}\nstderr:\n{scrubbedStderr}");
         Assert.Contains("PASS: `adds numbers`", scrubbedStdout, StringComparison.Ordinal);
         Assert.Contains("PASS: `true is true`", scrubbedStdout, StringComparison.Ordinal);
         Assert.Contains("Tests: passed=2 failed=0", scrubbedStdout, StringComparison.Ordinal);
@@ -497,23 +522,6 @@ public class CliSnapshotTests
         }
     }
 
-    private static bool TryFindLli()
-    {
-        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (var dir in search)
-        {
-            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "lli.exe" : "lli");
-            if (File.Exists(candidate))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private static bool TryFindCraneliftAot(string root)
     {
         var exeName = OperatingSystem.IsWindows() ? "stasis-cranelift-aot.exe" : "stasis-cranelift-aot";
@@ -542,9 +550,19 @@ public class CliSnapshotTests
 
     private static bool TryFindClang()
     {
+        var root = GetRepoRoot();
         var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .ToList();
+
+        var toolsDir = Path.Combine(root, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly).OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                search.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
 
         if (OperatingSystem.IsWindows())
         {

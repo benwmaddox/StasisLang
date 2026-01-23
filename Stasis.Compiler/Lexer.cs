@@ -44,6 +44,12 @@ public sealed class Lexer
     {
         while (true)
         {
+            if (_diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+            {
+                AddToken(TokenKind.EndOfFile, string.Empty, 0);
+                break;
+            }
+
             SkipWhitespace();
             if (IsAtEnd())
             {
@@ -393,6 +399,11 @@ public sealed class Lexer
 
     private void AddDiagnostic(string message, int start, int length)
     {
+        if (_diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            return;
+        }
+
         _diagnostics.Add(new Diagnostic(message, new SourceSpan(start, length)));
     }
 

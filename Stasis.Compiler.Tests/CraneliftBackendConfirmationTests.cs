@@ -120,6 +120,53 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void NestedStructArrayFieldStores_AreLowered()
+    {
+        var ir = CompileCraneliftIr("""
+            struct Gfx {
+                sprites: i32[7];
+                count: i32;
+            }
+            struct State { gfx: Gfx; }
+            global state: State;
+
+            function main(): i32 {
+                state.gfx.sprites[0] = 123;
+                state.gfx.count = 1;
+                return 0;
+            }
+            """);
+
+        Assert.DoesNotContain("complex array store", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("complex array access", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CraneliftLoweringErrors_AreDiagnostics()
+    {
+        var parse = Parser.Parse("""
+            global a: i32[4];
+            function main(): i32 {
+                let i: i32 = 0;
+                (a)[i] = 1;
+                return 0;
+            }
+            """);
+        Assert.Empty(parse.Diagnostics);
+
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Empty(semantic.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, semantic.Symbols).Plan();
+        var options = new CodeGenerationOptions(ModuleName: "cranelift_confirm", IncludeTests: false, EmitTestHarness: false);
+
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, "cranelift_confirm");
+        var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("Cranelift:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void InlineAttribute_InlinesSimpleReturn()
     {
         var ir = CompileCraneliftIr("""
@@ -499,6 +546,7 @@ public class CraneliftBackendConfirmationTests
         var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);
         Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
         Assert.NotEmpty(result.Ir);
+        Assert.DoesNotContain("; error:", result.Ir, StringComparison.Ordinal);
         return result.Ir;
     }
 }

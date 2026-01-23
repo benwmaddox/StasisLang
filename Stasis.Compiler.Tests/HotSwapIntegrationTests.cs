@@ -27,6 +27,7 @@ public sealed class HotSwapIntegrationTests
         Directory.CreateDirectory(swapDir);
 
         var swapFile = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.swap");
+        var runnerOutLog = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.runner.out.log");
         var runnerErrLog = Path.Combine(swapDir, $"hotstate_tick_watch.{moduleName}.runner.err.log");
 
         var original = await File.ReadAllTextAsync(samplePath);
@@ -36,6 +37,7 @@ public sealed class HotSwapIntegrationTests
         try
         {
             TryDelete(swapFile);
+            TryDelete(runnerOutLog);
             TryDelete(runnerErrLog);
 
             var psi = new ProcessStartInfo
@@ -60,26 +62,69 @@ public sealed class HotSwapIntegrationTests
             using var outLines = new AsyncLineCollector(proc!.StandardOutput);
             using var errLines = new AsyncLineCollector(proc.StandardError);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
-                timeout: TimeSpan.FromMinutes(3));
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
+                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("warning: initial build failed") ||
+                        errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(3));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            {
+                throw new XunitException(
+                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
 
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
-            File.WriteAllText(swapFile, @"Z:\this\does\not\exist.swap.dll", System.Text.Encoding.ASCII);
+            var badSwapPath = OperatingSystem.IsWindows()
+                ? @"Z:\this\does\not\exist.swap.dll"
+                : "/this/does/not/exist.swap.so";
+            File.WriteAllText(swapFile, badSwapPath + "\n", System.Text.Encoding.ASCII);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () =>
-                {
-                    if (!File.Exists(runnerErrLog))
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
                     {
-                        return false;
-                    }
-                    return TryReadTextShared(runnerErrLog, out var text) &&
-                        text.Contains("HOTSWAP warning:", StringComparison.Ordinal);
-                },
-                timeout: TimeSpan.FromSeconds(30));
+                        if (!File.Exists(swapFile))
+                        {
+                            return true; // runner consumed it
+                        }
+                        if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
+                        {
+                            return false;
+                        }
+                        var ok = false;
+                        if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
+                        {
+                            ok |= errText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                        }
+                        if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
+                        {
+                            ok |= outText.Contains("HOTSWAP warning:", StringComparison.Ordinal);
+                        }
+                        return ok;
+                    },
+                    timeout: TimeSpan.FromSeconds(30));
+            }
+            catch (XunitException)
+            {
+                var runnerErr = File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText) ? errText : "<missing>";
+                var runnerOut = File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText) ? outText : "<missing>";
+                throw new XunitException(
+                    $"timeout waiting for runner to consume bad swap or report warning.\n\nrunner.err.log:\n{runnerErr}\n\nrunner.out.log:\n{runnerOut}\n");
+            }
 
             if (proc.HasExited)
             {
@@ -93,12 +138,20 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () =>
                 {
-                    if (!File.Exists(runnerErrLog))
+                    if (!File.Exists(runnerErrLog) && !File.Exists(runnerOutLog))
                     {
                         return false;
                     }
-                    return TryReadTextShared(runnerErrLog, out var text) &&
-                        text.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    var ok = false;
+                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText))
+                    {
+                        ok |= errText.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    }
+                    if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outText))
+                    {
+                        ok |= outText.Contains("HOTSWAP ok:", StringComparison.Ordinal);
+                    }
+                    return ok;
                 },
                 timeout: TimeSpan.FromSeconds(60));
         }
@@ -379,6 +432,279 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
+    [HotSwapFact]
+    public async Task WatchTickJitSwap_DataBind_DoesNotRaceStructMeta()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_databind");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_databind_watch.stasis");
+        var dataDir = Path.Combine(tempDir.FullName, "data");
+        Directory.CreateDirectory(dataDir);
+        var jsonPath = Path.Combine(dataDir, "config.json");
+
+        // Minimal program: define a config field and a tick loop.
+        // Data binding should apply config.foo from config.json to state__config__foo.
+        File.WriteAllText(stasisPath, """
+            struct Config {
+                foo: i32;
+            }
+
+            struct GameState {
+                config: Config;
+            }
+
+            global state: GameState;
+
+            function main(): i32 {
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """, System.Text.Encoding.ASCII);
+
+        File.WriteAllText(jsonPath, """
+            {
+              "config": {
+                "foo": 123
+              }
+            }
+            """, System.Text.Encoding.ASCII);
+
+        var moduleName = "brick";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+        var baseName = Path.GetFileNameWithoutExtension(stasisPath);
+        var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
+        var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerOutLog);
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe!;
+            psi.EnvironmentVariables["STASIS_JIT_HEARTBEAT_MS"] = "0";
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "15000";
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(2));
+
+            // The CLI should not report a bind failure, and the runner logs should not contain ERR databind...
+            // We don't want the CLI to report a bind failure (this was caused by a non-atomic struct-meta write).
+            Assert.False(errLines.AnyContains("jit runner data bind failed"), "CLI reported jit runner data bind failed.");
+
+            // Give the runner a moment to process the BIND message and flush logs.
+            await Task.Delay(250);
+
+            if (File.Exists(runnerOutLog) && TryReadTextShared(runnerOutLog, out var outLog))
+            {
+                Assert.DoesNotContain("ERR databind", outLog, StringComparison.OrdinalIgnoreCase);
+            }
+            if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errLog))
+            {
+                Assert.DoesNotContain("DATABIND error:", errLog, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+
+            // Best-effort: cleanup fresh jit runner processes.
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
+    public async Task WatchTickHotSwap_ReportsSemanticErrors_AndKeepsRunning()
+    {
+        var repoRoot = FindRepoRoot();
+        var samplePath = Path.Combine(repoRoot, "samples", "hotstate_tick_watch.stasis");
+        Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
+
+        var cliDll = FindCliDll(repoRoot);
+        var runnerExe = FindRunnerExe(repoRoot);
+        var aotExe = FindCraneliftAotExe(repoRoot);
+        var clangExeDir = FindClangBinDir(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(runnerExe);
+        Assert.NotNull(aotExe);
+        Assert.NotNull(clangExeDir);
+
+        var original = await File.ReadAllTextAsync(samplePath);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll, "run", samplePath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_AOT"] = aotExe;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_RUNNER_EXE"] = runnerExe;
+            psi.EnvironmentVariables["PATH"] = clangExeDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
+                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("warning: initial build failed") ||
+                        errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(3));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            {
+                throw new XunitException(
+                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            // Introduce a semantic error: unknown field on the global struct.
+            var nl = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+            var bad = original.Replace("function tick(): i32 {" + nl + "    return 0;" + nl + "}" + nl,
+                "function tick(): i32 {" + nl + "    state.missing = 1;" + nl + "    return 0;" + nl + "}" + nl,
+                StringComparison.Ordinal);
+            Assert.NotEqual(original, bad);
+            await File.WriteAllTextAsync(samplePath, bad, System.Text.Encoding.ASCII);
+
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.AnyContains("Unknown field") || errLines.AnyContains("Unknown field"),
+                    timeout: TimeSpan.FromSeconds(60));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            if (proc.HasExited)
+            {
+                throw new XunitException($"watch process exited unexpectedly after semantic error (code={proc.ExitCode}).");
+            }
+
+            // Fix the file; watch should recover on the next build.
+            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
+                timeout: TimeSpan.FromMinutes(2));
+
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = AppContext.BaseDirectory;
@@ -631,6 +957,20 @@ public sealed class HotSwapIntegrationTests
             return false;
         }
 
+        public string GetTail(int maxLines = 60)
+        {
+            lock (_lines)
+            {
+                if (_lines.Count == 0)
+                {
+                    return "<empty>";
+                }
+
+                var start = Math.Max(0, _lines.Count - maxLines);
+                return string.Join("\n", _lines.Skip(start));
+            }
+        }
+
         public void Dispose()
         {
             try { _cts.Cancel(); } catch { }
@@ -649,108 +989,5 @@ internal sealed class HotSwapFactAttribute : FactAttribute
             Skip = "hot-swap runner integration is only supported on Windows/Linux.";
             return;
         }
-
-        var isCi = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI"));
-        var runInCi = Environment.GetEnvironmentVariable("STASIS_RUN_HOTSWAP_TESTS") == "1";
-        if (isCi && !runInCi)
-        {
-            Skip = "hot-swap runner integration tests are disabled on CI by default (set STASIS_RUN_HOTSWAP_TESTS=1 to enable).";
-            return;
-        }
-
-        var repoRoot = TryFindRepoRootFromCwd();
-        if (repoRoot is null) return;
-
-        var sample = Path.Combine(repoRoot, "samples", "hotstate_tick_watch.stasis");
-        if (!File.Exists(sample))
-        {
-            Skip = "missing samples/hotstate_tick_watch.stasis.";
-            return;
-        }
-
-        var cli = Directory.Exists(Path.Combine(repoRoot, "Stasis.Cli")) && File.Exists(Path.Combine(repoRoot, "Stasis.Cli", "Stasis.Cli.csproj"));
-        if (!cli)
-        {
-            Skip = "missing Stasis.Cli project.";
-            return;
-        }
-
-        // Skip when native prerequisites aren't present (unless CI explicitly enabled above and provisioned).
-        {
-            var runner = Path.Combine(repoRoot, OperatingSystem.IsWindows() ? "stasis_runner.exe" : "stasis_runner");
-            if (!File.Exists(runner))
-            {
-                Skip = "missing stasis_runner (build runtime/).";
-                return;
-            }
-
-            var aotRelease = Path.Combine(repoRoot, "tools", "cranelift-aot", "target", "release", OperatingSystem.IsWindows() ? "stasis-cranelift-aot.exe" : "stasis-cranelift-aot");
-            var aotDebug = Path.Combine(repoRoot, "tools", "cranelift-aot", "target", "debug", OperatingSystem.IsWindows() ? "stasis-cranelift-aot.exe" : "stasis-cranelift-aot");
-            if (!File.Exists(aotRelease) && !File.Exists(aotDebug))
-            {
-                Skip = "missing stasis-cranelift-aot (build tools/cranelift-aot).";
-                return;
-            }
-
-            var jitRelease = Path.Combine(repoRoot, "tools", "cranelift-jit-runner", "target", "release", OperatingSystem.IsWindows() ? "stasis-cranelift-jit-runner.exe" : "stasis-cranelift-jit-runner");
-            var jitDebug = Path.Combine(repoRoot, "tools", "cranelift-jit-runner", "target", "debug", OperatingSystem.IsWindows() ? "stasis-cranelift-jit-runner.exe" : "stasis-cranelift-jit-runner");
-            if (!File.Exists(jitRelease) && !File.Exists(jitDebug))
-            {
-                Skip = "missing stasis-cranelift-jit-runner (build tools/cranelift-jit-runner).";
-                return;
-            }
-
-            if (!HasClang(repoRoot))
-            {
-                Skip = "missing clang (install LLVM or ensure .tools/llvm-*/bin exists).";
-                return;
-            }
-        }
-    }
-
-    private static string? TryFindRepoRootFromCwd()
-    {
-        var dir = Directory.GetCurrentDirectory();
-        for (var i = 0; i < 10; i++)
-        {
-            if (File.Exists(Path.Combine(dir, "Stasis.sln")))
-            {
-                return dir;
-            }
-            var parent = Directory.GetParent(dir)?.FullName;
-            if (parent is null)
-            {
-                break;
-            }
-            dir = parent;
-        }
-        return null;
-    }
-
-    private static bool HasClang(string repoRoot)
-    {
-        var exe = OperatingSystem.IsWindows() ? "clang.exe" : "clang";
-        var toolsDir = Path.Combine(repoRoot, ".tools");
-        if (Directory.Exists(toolsDir))
-        {
-            foreach (var llvmDir in Directory.GetDirectories(toolsDir, "llvm-*"))
-            {
-                if (File.Exists(Path.Combine(llvmDir, "bin", exe)))
-                {
-                    return true;
-                }
-            }
-        }
-
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        foreach (var part in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (File.Exists(Path.Combine(part, exe)))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 }

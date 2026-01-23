@@ -1895,9 +1895,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_int expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_int wrong arg count.", new SourceSpan(0, 0));
         }
 
         // Get the integer value to print
@@ -1926,9 +1924,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_char expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_char wrong arg count.", new SourceSpan(0, 0));
         }
 
         // Get the char value to print (as i32)
@@ -1957,9 +1953,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_string expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_string wrong arg count.", new SourceSpan(0, 0));
         }
 
         if (!TryGetStringArg(arguments[0], out var value))
@@ -3424,6 +3418,20 @@ public sealed class CraneliftFunctionBuilder
         return result;
     }
 
+    private string EmitLoweringErrorValue(string message, SourceSpan span)
+    {
+        _diagnostics.Add(new Diagnostic(message, span));
+        var result = NewValue();
+        _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: {message}");
+        return result;
+    }
+
+    private void EmitLoweringErrorVoid(string message, SourceSpan span)
+    {
+        _diagnostics.Add(new Diagnostic(message, span));
+        _instructions.AppendLine($"    ; error: {message}");
+    }
+
     private string EmitUtf8HeaderPointer(string payloadPtr, int headerSize)
     {
         var headerPtr = NewValue();
@@ -3764,7 +3772,7 @@ public sealed class CraneliftFunctionBuilder
                 }
             }
 
-            _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: could not resolve array length");
+            return EmitLoweringErrorValue("Cranelift: could not resolve array length.", member.Span);
         }
         else if (member.Receiver is IdentifierExpressionSyntax enumId &&
                  _enums.TryGetValue(enumId.Identifier.Text, out var enumDecl))
@@ -3795,7 +3803,7 @@ public sealed class CraneliftFunctionBuilder
                 return result;
             }
 
-            _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: unknown enum member {member.Member.Text}");
+            return EmitLoweringErrorValue($"Cranelift: unknown enum member '{member.Member.Text}'.", member.Span);
         }
         else if (member.Receiver is IdentifierExpressionSyntax receiverId &&
                  _elementBindings.TryGetValue(receiverId.Identifier.Text, out var elementBinding))
@@ -3856,9 +3864,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (array.Receiver is not IdentifierExpressionSyntax id)
         {
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: complex array expression");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: unsupported array receiver expression.", array.Receiver.Span);
         }
 
         var arrayName = id.Identifier.Text;
@@ -3904,17 +3910,13 @@ public sealed class CraneliftFunctionBuilder
         // Global array - get base address and calculate element address
         if (!_globalTypes.TryGetValue(arrayName, out var globalType))
         {
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown array {arrayName}");
-            return err;
+            return EmitLoweringErrorValue($"Cranelift: unknown array '{arrayName}'.", array.Span);
         }
 
         // Get symbol to determine element size
         if (!_symbols.TryGetValue(arrayName, out var symbol) || symbol.Type is not ArrayTypeSymbol arrayType)
         {
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: not an array type");
-            return err;
+            return EmitLoweringErrorValue($"Cranelift: '{arrayName}' is not an array type.", array.Span);
         }
 
         // Load array base address
@@ -3975,31 +3977,26 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerArrayFieldAccess(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr)
     {
-        if (memberAccess.Receiver is not IdentifierExpressionSyntax id ||
-            !_symbols.TryGetValue(id.Identifier.Text, out var symbol) ||
-            symbol.Type is not NamedTypeSymbol named ||
+        if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
+            baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
         {
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: complex array access");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: unsupported array field base expression.", memberAccess.Receiver.Span);
         }
 
         var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
         if (field?.Type is not ArrayTypeSyntax arrayType)
         {
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: not an array field");
-            return err;
+            return EmitLoweringErrorValue($"Cranelift: '{memberAccess.Member.Text}' is not an array field on '{named.TypeName}'.", memberAccess.Span);
         }
 
         var elemType = ResolveType(arrayType.ElementType);
         var clifElemType = _typeMapper.Map(elemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+        var fieldBaseName = $"{baseName}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+        _instructions.AppendLine($"    {baseAddr} = global_value {fieldBaseName}");
 
         if (ResolveType(arrayType) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
         {
@@ -4041,9 +4038,7 @@ public sealed class CraneliftFunctionBuilder
             var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
             if (field is null)
             {
-                var err = NewValue();
-                _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
-                return err;
+                return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{structDecl.Name.Text}'.", array.Span);
             }
 
             var elemType = ResolveType(field.Type);
@@ -4084,9 +4079,7 @@ public sealed class CraneliftFunctionBuilder
                 var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
                 if (field is null)
                 {
-                    var err = NewValue();
-                    _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
-                    return err;
+                    return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", array.Span);
                 }
 
                 var elemType = ResolveType(field.Type);
@@ -4131,7 +4124,7 @@ public sealed class CraneliftFunctionBuilder
 
         if (array.Receiver is not IdentifierExpressionSyntax id)
         {
-            _instructions.AppendLine($"    ; error: complex array expression in store");
+            EmitLoweringErrorVoid("Cranelift: unsupported array receiver expression in store.", array.Receiver.Span);
             return;
         }
 
@@ -4176,14 +4169,14 @@ public sealed class CraneliftFunctionBuilder
         // Global array - get base address and calculate element address
         if (!_globalTypes.TryGetValue(arrayName, out var globalType))
         {
-            _instructions.AppendLine($"    ; error: unknown array {arrayName}");
+            EmitLoweringErrorVoid($"Cranelift: unknown array '{arrayName}'.", array.Span);
             return;
         }
 
         // Get symbol to determine element size
         if (!_symbols.TryGetValue(arrayName, out var symbol) || symbol.Type is not ArrayTypeSymbol arrayType)
         {
-            _instructions.AppendLine($"    ; error: not an array type");
+            EmitLoweringErrorVoid($"Cranelift: '{arrayName}' is not an array type.", array.Span);
             return;
         }
 
@@ -4226,26 +4219,25 @@ public sealed class CraneliftFunctionBuilder
 
     private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value, TypeSymbol? valueType)
     {
-        if (memberAccess.Receiver is not IdentifierExpressionSyntax id ||
-            !_symbols.TryGetValue(id.Identifier.Text, out var symbol) ||
-            symbol.Type is not NamedTypeSymbol named ||
+        if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
+            baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
         {
-            _instructions.AppendLine($"    ; error: complex array store");
+            EmitLoweringErrorVoid("Cranelift: unsupported array field base expression in store.", memberAccess.Receiver.Span);
             return;
         }
 
         var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
         if (field?.Type is not ArrayTypeSyntax arrayType)
         {
-            _instructions.AppendLine($"    ; error: not an array field");
+            EmitLoweringErrorVoid($"Cranelift: '{memberAccess.Member.Text}' is not an array field on '{named.TypeName}'.", memberAccess.Span);
             return;
         }
 
         if (ResolveType(field.Type) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
         {
             var byteIndex = LowerExpression(indexExpr);
-            var byteBaseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+            var byteBaseName = $"{baseName}__{memberAccess.Member.Text}";
             var byteBaseAddr = NewValue();
             _instructions.AppendLine($"    {byteBaseAddr} = global_value {byteBaseName}");
             var payloadBase = NewValue();
@@ -4262,10 +4254,10 @@ public sealed class CraneliftFunctionBuilder
         value = CoerceAssignmentValue(value, valueType, elemType);
         value = ReduceI32ToSmallInt(value, clifElemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+        var fieldBaseName = $"{baseName}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+        _instructions.AppendLine($"    {baseAddr} = global_value {fieldBaseName}");
 
         var elemSize = GetTypeSize(clifElemType);
         var elemSizeVal = NewValue();
@@ -4284,7 +4276,7 @@ public sealed class CraneliftFunctionBuilder
     {
         if (member.Member.Text == "length")
         {
-            _instructions.AppendLine("    ; error: cannot assign to length");
+            EmitLoweringErrorVoid("Cranelift: cannot assign to '.length'.", member.Span);
             return;
         }
 
@@ -4302,7 +4294,7 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    store {value}, {addr}");
             return;
         }
-        _instructions.AppendLine($"    ; error: complex member store");
+        EmitLoweringErrorVoid("Cranelift: unsupported member store (requires global struct field).", member.Span);
     }
 
     private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, string fieldName, string value, TypeSymbol? valueType)
@@ -4316,7 +4308,7 @@ public sealed class CraneliftFunctionBuilder
             var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
             if (field is null)
             {
-                _instructions.AppendLine($"    ; error: unknown field {fieldName}");
+                EmitLoweringErrorVoid($"Cranelift: unknown field '{fieldName}' on struct '{structDecl.Name.Text}'.", array.Span);
                 return;
             }
 
@@ -4357,7 +4349,7 @@ public sealed class CraneliftFunctionBuilder
                 var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
                 if (field is null)
                 {
-                    _instructions.AppendLine($"    ; error: unknown field {fieldName}");
+                    EmitLoweringErrorVoid($"Cranelift: unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", array.Span);
                     return;
                 }
 

@@ -2664,8 +2664,18 @@ static int RunCraneliftAot(string aotTool, string clifPath, string objPath, stri
 
     if (UseCraneliftAotServer())
     {
-        var server = GetCraneliftAotServer(aotTool, out spawnMs);
-        return server.Compile(clifPath, objPath, target, moduleName, normalizedOpt, out compileMs);
+        try
+        {
+            var server = GetCraneliftAotServer(aotTool, out spawnMs);
+            return server.Compile(clifPath, objPath, target, moduleName, normalizedOpt, out compileMs);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: cranelift-aot server failed: {ex.Message}");
+            spawnMs = null;
+            compileMs = 0;
+            return 1;
+        }
     }
 
     var sw = Stopwatch.StartNew();
@@ -2691,8 +2701,18 @@ static int RunCraneliftAotFromString(string aotTool, string clif, string objPath
 
     if (UseCraneliftAotServer())
     {
-        var server = GetCraneliftAotServer(aotTool, out spawnMs);
-        return server.CompileFromBytes(Encoding.UTF8.GetBytes(clif), objPath, target, moduleName, normalizedOpt, out compileMs);
+        try
+        {
+            var server = GetCraneliftAotServer(aotTool, out spawnMs);
+            return server.CompileFromBytes(Encoding.UTF8.GetBytes(clif), objPath, target, moduleName, normalizedOpt, out compileMs);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: cranelift-aot server failed: {ex.Message}");
+            spawnMs = null;
+            compileMs = 0;
+            return 1;
+        }
     }
 
     var tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
@@ -3034,6 +3054,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     string? activeDll = null;
     Process? runner = null;
     var runnerHotSwapOkCount = 0;
+    var swapDllSerial = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
     {
@@ -3115,9 +3136,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var hotDll = activeDll is null
-            ? swapDllA
-            : (string.Equals(activeDll, swapDllA, StringComparison.OrdinalIgnoreCase) ? swapDllB : swapDllA);
+        // On Windows, loaded DLLs stay file-locked even after swap, so alternating between swapA/swapB
+        // eventually deadlocks the dev loop once both names have been loaded at least once.
+        // Use a unique output name per successful rebuild to avoid overwriting a locked file.
+        var hotDll = Path.Combine(
+            swapDir,
+            $"{baseName}.{moduleName}.swap.{pid}.{swapDllSerial++}{swapExt}");
         File.WriteAllText(hotClifPath, result.Ir);
         clifWriteMs = phase.ElapsedMilliseconds;
         phase.Restart();
@@ -3360,6 +3384,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         {
             Console.Error.WriteLine(timingLine);
         }
+        else if (runner is not null)
+        {
+            Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
+        }
     }
 
     if (runner is not null && !runner.HasExited)
@@ -3395,6 +3423,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     };
 
     Process? runner = null;
+    DataBindingPlan? dataBindingPlan = null;
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
     {
@@ -3505,6 +3534,14 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("STASIS_JIT_HEARTBEAT_MS")))
+        {
+            psi.EnvironmentVariables["STASIS_JIT_HEARTBEAT_MS"] = "1000";
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("STASIS_JIT_WATCHDOG_MS")))
+        {
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "10000";
+        }
 
         runner = Process.Start(psi);
         if (runner is null)
@@ -3555,6 +3592,35 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         {
             Console.Error.WriteLine($"error: jit runner init failed: {initResp}");
             return false;
+        }
+
+        if (dataBindingPlan is not null)
+        {
+            try
+            {
+                var jsonPath = dataBindingPlan.JsonPath;
+                var metaPath = dataBindingPlan.StructMetaPath;
+                var jsonBytes = Encoding.UTF8.GetByteCount(jsonPath);
+                var metaBytes = Encoding.UTF8.GetByteCount(metaPath);
+                WriteUtf8(runner.StandardInput.BaseStream, $"BIND {jsonBytes} {metaBytes}\n");
+                WriteUtf8(runner.StandardInput.BaseStream, jsonPath);
+                WriteUtf8(runner.StandardInput.BaseStream, metaPath);
+                runner.StandardInput.BaseStream.Flush();
+
+                var bindResp = await ReadLineWithTimeout(runner.StandardOutput, 30000, cts.Token);
+                if (bindResp is not null)
+                {
+                    await File.AppendAllTextAsync(runnerOutLog, bindResp + Environment.NewLine, Encoding.UTF8, cts.Token);
+                }
+                if (bindResp is null || !bindResp.StartsWith("OK", StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine($"warning: jit runner data bind failed: {bindResp ?? "<timeout>"}");
+                }
+            }
+            catch
+            {
+                Console.Error.WriteLine("warning: failed to send data binding to jit runner.");
+            }
         }
 
         return true;
@@ -3611,6 +3677,19 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+
+        if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
+        {
+            clif = string.Empty;
+            lowerMs = 0;
+            return 1;
+        }
+        dataBindingPlan = bindPlan;
+        if (dataBindingPlan is not null)
+        {
+            Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
+        }
+
         var options = new CodeGenerationOptions(
             ModuleName: moduleName,
             IncludeTests: false,
@@ -3636,6 +3715,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
     string? lastGoodClif = null;
     var lastRunnerRestartAttemptUtc = DateTime.MinValue;
+    var consecutiveRunnerExits = 0;
 
     var initialRc = BuildClif(out var initialClif, out var initialLowerMs);
     if (initialRc != 0)
@@ -3675,11 +3755,38 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             // so the dev session doesn't require a source edit to recover.
             if (runner is not null && runner.HasExited)
             {
+                consecutiveRunnerExits++;
+                try
+                {
+                    var exitCode = runner.ExitCode;
+                    Console.Error.WriteLine($"warning: jit runner exited (code={exitCode}); restarting.");
+                    if (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var errText) && !string.IsNullOrWhiteSpace(errText))
+                    {
+                        var tail = errText.Split('\n').Reverse().Take(20).Reverse();
+                        Console.Error.WriteLine("jit runner stderr tail:");
+                        foreach (var line in tail)
+                        {
+                            var t = line.TrimEnd('\r');
+                            if (!string.IsNullOrWhiteSpace(t))
+                            {
+                                Console.Error.WriteLine(t);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    Console.Error.WriteLine("warning: jit runner exited; restarting.");
+                }
                 runner = null;
                 if (lastGoodClif is not null && DateTime.UtcNow - lastRunnerRestartAttemptUtc > TimeSpan.FromSeconds(1))
                 {
                     lastRunnerRestartAttemptUtc = DateTime.UtcNow;
-                    Console.Error.WriteLine("warning: jit runner exited; restarting.");
+                    if (consecutiveRunnerExits >= 5)
+                    {
+                        // Avoid a noisy restart loop on persistent crashes (e.g., missing host symbols).
+                        Thread.Sleep(250);
+                    }
                     _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
                 }
             }
@@ -3694,6 +3801,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var rc = BuildClif(out var clif, out var lowerMs);
         if (rc != 0)
         {
+            if (runner is not null && !runner.HasExited)
+            {
+                Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
+            }
             continue;
         }
 
@@ -3914,7 +4025,8 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     };
 
     var json = JsonSerializer.Serialize(metadata, StasisCliJson.Indented.StructMetadata);
-    File.WriteAllText(path, json, Encoding.UTF8);
+    // Write UTF-8 without BOM so non-.NET parsers (e.g., Rust serde_json) can read it reliably.
+    WriteAllTextAtomic(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 }
 
 static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
@@ -4138,6 +4250,30 @@ static void WriteAllTextAtomic(string path, string contents, Encoding encoding, 
     {
         File.Move(tmp, path, overwrite: true);
     }
+}
+
+static bool TryReadTextShared(string path, out string text)
+{
+    text = string.Empty;
+    for (var i = 0; i < 5; i++)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            text = reader.ReadToEnd();
+            return true;
+        }
+        catch (IOException) when (i < 4)
+        {
+            Thread.Sleep(5);
+        }
+        catch (UnauthorizedAccessException) when (i < 4)
+        {
+            Thread.Sleep(5);
+        }
+    }
+    return false;
 }
 
 static void WriteIrOutput(string ir, string? outputPath)
@@ -5045,6 +5181,8 @@ sealed class CraneliftAotServer : IDisposable
     private readonly Stream input;
     private readonly StreamReader output;
     private readonly object gate = new();
+    private readonly Task stderrPump;
+    private readonly List<string> stderrTail = new();
 
     public long SpawnMs { get; }
     public bool IsAlive => !process.HasExited;
@@ -5055,6 +5193,34 @@ sealed class CraneliftAotServer : IDisposable
         this.input = input;
         this.output = output;
         SpawnMs = spawnMs;
+
+        // Drain stderr to avoid deadlocks if the server emits enough logs/warnings.
+        stderrPump = Task.Run(() =>
+        {
+            try
+            {
+                while (!process.HasExited)
+                {
+                    var line = process.StandardError.ReadLine();
+                    if (line is null)
+                    {
+                        break;
+                    }
+                    lock (stderrTail)
+                    {
+                        stderrTail.Add(line);
+                        if (stderrTail.Count > 200)
+                        {
+                            stderrTail.RemoveRange(0, 50);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort; ignore stderr pump failures.
+            }
+        });
     }
 
     public static CraneliftAotServer Start(string aotTool)
@@ -5072,14 +5238,57 @@ sealed class CraneliftAotServer : IDisposable
         var sw = Stopwatch.StartNew();
         var process = Process.Start(psi)!;
         var output = process.StandardOutput;
-        var ready = output.ReadLine();
         var spawnMs = sw.ElapsedMilliseconds;
-        if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
+        var server = new CraneliftAotServer(process, process.StandardInput.BaseStream, output, spawnMs);
+
+        var startupSw = Stopwatch.StartNew();
+        var startupTimeout = TimeSpan.FromSeconds(10);
+        var stdoutTail = new List<string>();
+
+        while (startupSw.Elapsed < startupTimeout)
         {
-            throw new InvalidOperationException("stasis-cranelift-aot server failed to start.");
+            var remaining = startupTimeout - startupSw.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var readTask = output.ReadLineAsync();
+            var completed = Task.WhenAny(readTask, Task.Delay(remaining)).GetAwaiter().GetResult();
+            if (completed != readTask)
+            {
+                break;
+            }
+
+            var line = readTask.GetAwaiter().GetResult();
+            if (line is null)
+            {
+                break;
+            }
+
+            if (string.Equals(line, "READY", StringComparison.OrdinalIgnoreCase))
+            {
+                return server;
+            }
+
+            // Keep a small tail for diagnostics.
+            stdoutTail.Add(line);
+            if (stdoutTail.Count > 20)
+            {
+                stdoutTail.RemoveAt(0);
+            }
         }
 
-        return new CraneliftAotServer(process, process.StandardInput.BaseStream, output, spawnMs);
+        var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+        var stdoutText = stdoutTail.Count == 0 ? "<none>" : string.Join("\n", stdoutTail);
+        string stderrText;
+        lock (server.stderrTail)
+        {
+            stderrText = server.stderrTail.Count == 0 ? "<none>" : string.Join("\n", server.stderrTail);
+        }
+
+        throw new InvalidOperationException(
+            $"stasis-cranelift-aot server failed to start (no READY within {startupTimeout.TotalSeconds:0}s; exit={exitCode}).\nstdout:\n{stdoutText}\nstderr:\n{stderrText}");
     }
 
     public int Compile(string clifPath, string outputPath, string target, string moduleName, string optLevel, out long compileMs)
@@ -5189,10 +5398,20 @@ sealed class CraneliftRunnerServer : IDisposable
 
         var process = Process.Start(psi)!;
         var control = process.StandardError;
-        var ready = control.ReadLine();
+        var startupTimeout = TimeSpan.FromSeconds(5);
+        var readTask = control.ReadLineAsync();
+        var completed = Task.WhenAny(readTask, Task.Delay(startupTimeout)).GetAwaiter().GetResult();
+        if (completed != readTask)
+        {
+            var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+            throw new InvalidOperationException($"stasis_runner server failed to start (no READY within {startupTimeout.TotalSeconds:0}s; exit={exitCode}).");
+        }
+
+        var ready = readTask.GetAwaiter().GetResult();
         if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("stasis_runner server failed to start.");
+            var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+            throw new InvalidOperationException($"stasis_runner server failed to start (expected READY; got '{ready ?? "<null>"}'; exit={exitCode}).");
         }
 
         return new CraneliftRunnerServer(process, process.StandardInput.BaseStream, control);
