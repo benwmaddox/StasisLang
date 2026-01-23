@@ -13,6 +13,36 @@ public class ExecutionTests
         Stasis.Compiler.LlvmNativeLoader.EnsureLoaded();
     }
 
+    private static string GetRepoRoot()
+    {
+        var current = Directory.GetCurrentDirectory();
+        var candidate = FindRepoRoot(current);
+        if (!string.IsNullOrEmpty(candidate))
+        {
+            return candidate;
+        }
+
+        var assemblyDir = Path.GetDirectoryName(typeof(ExecutionTests).Assembly.Location);
+        candidate = FindRepoRoot(assemblyDir);
+        if (!string.IsNullOrEmpty(candidate))
+        {
+            return candidate;
+        }
+
+        throw new InvalidOperationException("Could not find repo root");
+    }
+
+    private static string? FindRepoRoot(string? start)
+    {
+        var current = start;
+        while (current != null && !File.Exists(Path.Combine(current, "Stasis.sln")))
+        {
+            current = Directory.GetParent(current)?.FullName;
+        }
+
+        return current;
+    }
+
     [Fact]
     public void Runs_main_via_clang()
     {
@@ -130,9 +160,19 @@ public class ExecutionTests
 
     private static bool TryFindClang(out string path)
     {
+        var root = GetRepoRoot();
         var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .ToList();
+
+        var toolsDir = Path.Combine(root, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly).OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                search.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {

@@ -47,33 +47,22 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18
+          sudo apt-get install -y clang-18 lld-18
           mkdir -p .tools/llvm-18/bin
           ln -sf "$(command -v clang-18)" .tools/llvm-18/bin/clang
           ln -sf "$(command -v clang++-18)" .tools/llvm-18/bin/clang++
-          if command -v lli-18 >/dev/null 2>&1; then
-            ln -sf "$(command -v lli-18)" .tools/llvm-18/bin/lli
-          elif command -v lli >/dev/null 2>&1; then
-            ln -sf "$(command -v lli)" .tools/llvm-18/bin/lli
-          elif [ -x /usr/lib/llvm-18/bin/lli ]; then
-            ln -sf /usr/lib/llvm-18/bin/lli .tools/llvm-18/bin/lli
-          else
-            echo "error: llvm interpreter (lli) not found after installing llvm-18"
-            exit 1
-          fi
           echo "PATH=${PWD}/.tools/llvm-18/bin:${PATH}" >> "$GITHUB_ENV"
           echo "clang: $(command -v clang)"
           clang --version
-          echo "lli: $(command -v lli)"
-          lli --version
 
       - name: Install clang (windows)
         if: runner.os == 'Windows'
         run: |
           choco install llvm -y --no-progress
           echo "C:\\Program Files\\LLVM\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) { throw "clang not found on PATH after choco install llvm" }
-          if (-not (Get-Command lli -ErrorAction SilentlyContinue)) { throw "lli not found on PATH after choco install llvm" }
+          $env:PATH = "C:\\Program Files\\LLVM\\bin;$env:PATH"
+          if (-not (Test-Path "C:\\Program Files\\LLVM\\bin\\clang.exe")) { throw "clang.exe missing after choco install llvm" }
+          clang --version
 
       - name: Build cranelift-aot (rust)
         run: cargo build -p stasis-cranelift-aot --release
