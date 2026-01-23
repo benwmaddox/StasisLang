@@ -101,6 +101,36 @@ public class TemplateOutputTests
             WorkingDirectory = root
         };
 
+        // Ensure the CLI can find LLVM tools (clang/ld) during tests even when the caller didn't run env.bat.
+        var inheritedPath = psi.Environment.TryGetValue("PATH", out var existing) && existing is not null
+            ? existing
+            : (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+        var prepend = new List<string>();
+        var toolsDir = Path.Combine(root, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly)
+                         .OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                prepend.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            prepend.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            prepend.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
+        var prependPath = string.Join(Path.PathSeparator, prepend.Distinct(StringComparer.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(prependPath))
+        {
+            psi.Environment["PATH"] = $"{prependPath}{Path.PathSeparator}{inheritedPath}";
+        }
+
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
 
@@ -138,9 +168,19 @@ public class TemplateOutputTests
 
     private static bool TryFindLlvmTooling()
     {
+        var repoRoot = GetRepoRoot();
         var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .ToList();
+
+        var toolsDir = Path.Combine(repoRoot, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly).OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                search.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
 
         if (OperatingSystem.IsWindows())
         {
