@@ -659,10 +659,18 @@ public sealed class HotSwapIntegrationTests
             Assert.NotEqual(original, bad);
             await File.WriteAllTextAsync(samplePath, bad, System.Text.Encoding.ASCII);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () => errLines.AnyContains("Unknown field"),
-                timeout: TimeSpan.FromSeconds(60));
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.AnyContains("Unknown field") || errLines.AnyContains("Unknown field"),
+                    timeout: TimeSpan.FromSeconds(60));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
 
             if (proc.HasExited)
             {
