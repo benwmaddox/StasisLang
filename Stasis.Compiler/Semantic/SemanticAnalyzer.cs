@@ -834,21 +834,67 @@ public sealed class SemanticAnalyzer
                 }
                 // Not an enum member access - regular struct field access
                 AnalyzeExpression(m.Receiver, scope);
+                // Resolve the full member access chain now so missing/invalid fields show up even when used in a return/expression context.
+                _ = ResolveExpressionType(m, scope);
                 break;
             case ArrayAccessExpressionSyntax a:
                 AnalyzeExpression(a.Receiver, scope);
                 AnalyzeExpression(a.Index, scope);
+                var receiverType = ResolveExpressionType(a.Receiver, scope);
+                if (receiverType is not null && receiverType is not ArrayTypeSymbol)
+                {
+                    _diagnostics.Add(new Diagnostic($"Array access requires an array receiver; got '{FormatType(receiverType)}'.", a.Receiver.Span));
+                }
+
+                var indexType = ResolveExpressionType(a.Index, scope);
+                if (indexType is not null && (indexType is not PrimitiveTypeSymbol ip || !IsIntegerType(ip.PrimitiveName)))
+                {
+                    _diagnostics.Add(new Diagnostic($"Array index must be an integer type; got '{FormatType(indexType)}'.", a.Index.Span));
+                }
                 break;
             case CallExpressionSyntax c:
+                if (c.Callee is MemberAccessExpressionSyntax member &&
+                    string.Equals(member.Member.Text, "clear", StringComparison.Ordinal))
+                {
+                    // Special-form call: don't treat `.clear` as a regular member access (it's not a struct field).
+                    AnalyzeExpression(member.Receiver, scope);
+                    foreach (var arg in c.Arguments)
+                    {
+                        AnalyzeExpression(arg, scope);
+                    }
+                    ValidateClearCall(c, member, scope);
+                    break;
+                }
+
                 AnalyzeExpression(c.Callee, scope);
                 foreach (var arg in c.Arguments)
                 {
                     AnalyzeExpression(arg, scope);
                 }
-                if (c.Callee is MemberAccessExpressionSyntax member &&
-                    string.Equals(member.Member.Text, "clear", StringComparison.Ordinal))
+
+                if (c.Callee is IdentifierExpressionSyntax idCallee)
                 {
-                    ValidateClearCall(c, member, scope);
+                    // Functions/tests are global-only in Stasis (no first-class function values).
+                    if (scope.TryGetValue(idCallee.Identifier.Text, out var localCallee))
+                    {
+                        _diagnostics.Add(new Diagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span));
+                    }
+                    else if (_symbols.TryGetValue(idCallee.Identifier.Text, out var calleeSym))
+                    {
+                        if (calleeSym.Kind is not (SymbolKind.Function or SymbolKind.Test))
+                        {
+                            _diagnostics.Add(new Diagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span));
+                        }
+                    }
+                    else
+                    {
+                        // Prefer a function-specific message over a generic undefined identifier error.
+                        _diagnostics.Add(new Diagnostic($"Unknown function '{idCallee.Identifier.Text}'.", idCallee.Identifier.Span));
+                    }
+                }
+                else
+                {
+                    _diagnostics.Add(new Diagnostic("Only simple function calls are supported.", c.Span));
                 }
                 break;
             case OperatorCallExpressionSyntax op:
@@ -1418,6 +1464,16 @@ public sealed class SemanticAnalyzer
             case AssignmentExpressionSyntax assign:
                 return ResolveExpressionType(assign.Left, scope);
             case MemberAccessExpressionSyntax member:
+                // Array length property: `arr.length` yields the compile-time fixed capacity.
+                if (string.Equals(member.Member.Text, "length", StringComparison.Ordinal))
+                {
+                    var receiverType = ResolveExpressionType(member.Receiver, scope);
+                    if (receiverType is ArrayTypeSymbol)
+                    {
+                        return new PrimitiveTypeSymbol("i32");
+                    }
+                }
+
                 // Check if this is an enum member access (e.g., State.Idle)
                 if (member.Receiver is IdentifierExpressionSyntax enumId &&
                     _symbols.TryGetValue(enumId.Identifier.Text, out var enumSymbol) &&
