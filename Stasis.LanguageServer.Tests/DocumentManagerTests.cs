@@ -1,6 +1,7 @@
 namespace Stasis.LanguageServer.Tests;
 
 using Stasis.LanguageServer.Services;
+using Stasis.Compiler;
 using Xunit;
 using System.IO;
 
@@ -235,5 +236,35 @@ public class DocumentManagerTests
         {
             tempDir.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public void UpdateDocument_Limits_diagnostics_and_reports_invalid_calls_and_fields()
+    {
+        var manager = new DocumentManager();
+        var uri = "file:///test.stasis";
+        var content = string.Join("\n", new[]
+        {
+            "struct S { a: i32; }",
+            "global state: S;",
+            "function f(): void {",
+            "    state.b = 1;",
+            "    missing0();",
+            "    missing1();",
+            "    missing2();",
+            "    missing3();",
+            "    missing4();",
+            "    missing5();",
+            "}"
+        });
+
+        manager.GetOrCreateDocument(uri, "");
+        manager.UpdateDocument(uri, content, 1);
+        var doc = manager.GetDocument(uri);
+
+        Assert.NotNull(doc);
+        Assert.Equal(DiagnosticPolicy.MaxErrors, doc!.AllDiagnostics.Count);
+        Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+        Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
     }
 }

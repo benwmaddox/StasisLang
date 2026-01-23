@@ -6,8 +6,8 @@ cd /d "%SCRIPT_DIR%" || exit /b 1
 rem Dev loop for Brickout Revenge (original sample).
 rem Usage: .\dev_brickout_revenge.bat [extra stasis args...]
 
-rem Dev defaults: prefer no-disk Cranelift JIT hot-swap for faster iteration.
-set "STASIS_CRANELIFT_JIT_RUNNER=1"
+rem Dev defaults: use the stable AOT hot-swap path. Set STASIS_CRANELIFT_JIT_RUNNER=1 to opt into the no-disk Cranelift JIT runner.
+set "STASIS_CRANELIFT_JIT_RUNNER=0"
 rem If the JIT runner becomes unresponsive, exit so the watch loop can restart it.
 if not defined STASIS_JIT_WATCHDOG_MS set "STASIS_JIT_WATCHDOG_MS=15000"
 if not defined STASIS_CRANELIFT_JIT_RUNNER_EXE (

@@ -1,5 +1,6 @@
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
+using Stasis.Compiler;
 
 namespace Stasis.Compiler.Tests;
 
@@ -59,6 +60,118 @@ public class SemanticTests
             """;
 
         var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_unknown_field_in_struct_member_access()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): void {
+                state.b = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_unknown_function_call()
+    {
+        var source = """
+            function f(): void {
+                missing();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): void {
+                state.b = 1;
+                missing0();
+                missing1();
+                missing2();
+                missing3();
+                missing4();
+                missing5();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Equal(DiagnosticPolicy.MaxErrors, sema.Diagnostics.Count);
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_calling_non_function_symbol()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Flags_array_access_on_non_array_receiver()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x[0] = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Array access requires an array receiver", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Allows_array_length_property()
+    {
+        var source = """
+            global xs: i32[4];
+            function len(): i32 {
+                return xs.length;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
         Assert.Empty(sema.Diagnostics);

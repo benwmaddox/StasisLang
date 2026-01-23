@@ -1,7 +1,42 @@
+/*
+ * stasis-cranelift-jit-runner (server mode)
+ *
+ * High-level job:
+ * - Read Stasis CLIF (Cranelift IR in a simple text format) over stdin.
+ * - JIT compile it in-process using cranelift_jit::JITModule.
+ * - Execute `<module>__main` once, then repeatedly call `<module>__tick`.
+ * - Support hot-swap by accepting replacement CLIF over stdin and swapping the active
+ *   compiled instance while preserving global state.
+ *
+ * Protocol (stdin/stdout):
+ * - On startup: prints `READY` on stdout.
+ * - INIT: `INIT <moduleLen> <entryLen> <tickLen> <clifLen>\n<module><entry><tick><clif>`
+ *     Compiles, runs entry, then enters tick loop. Replies `OK` or `ERR ...`.
+ * - BIND: `BIND <jsonLen> <metaLen>\n<jsonPath><structMetaPath>`
+ *     Loads compiler-emitted struct-meta.json and applies/polls a JSON file to update globals.
+ *     Replies `OK` or `ERR ...`.
+ * - SWAP: `SWAP <clifLen>\n<clif>`
+ *     Compiles on a background worker thread. When finished, the tick loop swaps the active
+ *     instance with a fast state copy and responds `OK ...` or `ERR ...`.
+ * - QUIT: replies `OK` and exits.
+ *
+ * Hot-swap model (JIT path):
+ * - Persisted state is the set of exported globals whose symbol names start with `state__`.
+ * - On swap, we copy bytes for each `state__*` global from the old instance into a map, then
+ *   restore those bytes into the new instance. This mirrors the disk/DLL runner but doesn't use
+ *   a separate on-disk state map.
+ *
+ * Notes on differences vs the disk/DLL runner:
+ * - No filesystem swap files and no OS dynamic loader; the compiled code lives in-process.
+ * - Bulk host loop: `stasis_host_bulk_step` is supported but disabled by default (it has shown
+ *   the ability to deadlock the tick loop on some click paths). The legacy loop
+ *   (`host_get_frame` + `tick` + `gfx_submit_u8`) is the default for reliability.
+ */
+
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -15,6 +50,8 @@ use cranelift_module::{default_libcall_names, DataDescription, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_native;
 use libloading::Library;
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use target_lexicon::Triple;
 
 mod stasis_clif;
@@ -50,6 +87,18 @@ fn now_ms() -> u64
         Ok(d) => d.as_millis() as u64,
         Err(_) => 0,
     }
+}
+
+fn env_flag(name: &str) -> bool
+{
+    // Convention: most Stasis env toggles treat "1" as enabled.
+    std::env::var(name).ok().as_deref() == Some("1")
+}
+
+fn env_u64(name: &str, default: u64) -> u64
+{
+    // Best-effort parse; keeps runner behavior stable even under unexpected env values.
+    std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default)
 }
 
 #[cfg(windows)]
@@ -141,6 +190,9 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
     }
 
     // Register symbols for the JIT (for extern calls), and also capture a few host-side APIs.
+    //
+    // Important: a missing host symbol often only triggers on specific gameplay/UI paths
+    // (e.g., audio init on click). Keep this list in sync with what the compiler emits.
     for name in [
         "stasis_host_get_frame",
         "stasis_gfx_submit_u8",
@@ -154,9 +206,13 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
         "stasis_load_font",
         "stasis_get_time_ms",
         "stasis_get_time_us",
+        "stasis_audio_init",
+        "stasis_audio_shutdown",
         "stasis_audio_is_available",
         "stasis_audio_get_sample_rate",
+        "stasis_audio_get_channels",
         "stasis_audio_get_queued_frames",
+        "stasis_audio_get_underruns",
         "stasis_audio_push_f32_interleaved",
     ]
     {
@@ -207,8 +263,295 @@ enum Request
         tick_name: String,
         clif: String,
     },
+    Bind {
+        json_path: String,
+        struct_meta_path: String,
+    },
     Swap { clif: String },
     Quit,
+}
+
+#[derive(Clone)]
+struct DataBinding
+{
+    json_path: String,
+    fields: Vec<StructFieldMeta>,
+    last_modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructMetaFile
+{
+    version: i32,
+    fields: Vec<StructFieldMeta>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructFieldMeta
+{
+    name: String,
+    json_path: String,
+    size: i32,
+    #[serde(rename = "type")]
+    field_type: String,
+    array_count: i32,
+}
+
+impl DataBinding
+{
+    fn load(json_path: String, struct_meta_path: String) -> Result<Self>
+    {
+        let meta_bytes = std::fs::read(&struct_meta_path)
+            .with_context(|| format!("failed to read struct meta: {struct_meta_path}"))?;
+        // The CLI writes struct-meta as UTF-8 without BOM. Be tolerant anyway: some Windows tools
+        // (or legacy CLI builds) may produce a BOM, which serde_json rejects.
+        let meta_bytes = meta_bytes
+            .strip_prefix(&[0xEF, 0xBB, 0xBF])
+            .unwrap_or(meta_bytes.as_slice());
+        let meta: StructMetaFile =
+            serde_json::from_slice(&meta_bytes).with_context(|| format!("failed to parse struct meta: {struct_meta_path}"))?;
+        if meta.version != 1
+        {
+            bail!("unsupported struct meta version {} (expected 1)", meta.version);
+        }
+
+        Ok(Self { json_path, fields: meta.fields, last_modified: None })
+    }
+
+    fn apply_if_changed(&mut self, instance: &mut JitInstance) -> Result<bool>
+    {
+        let meta = std::fs::metadata(&self.json_path).ok();
+        let modified = meta.and_then(|m| m.modified().ok());
+
+        if modified.is_none()
+        {
+            return Ok(false);
+        }
+
+        if self.last_modified.is_some() && modified == self.last_modified
+        {
+            return Ok(false);
+        }
+
+        self.last_modified = modified;
+        self.apply(instance)?;
+        Ok(true)
+    }
+
+    fn apply(&self, instance: &mut JitInstance) -> Result<()>
+    {
+        let json_bytes =
+            std::fs::read(&self.json_path).with_context(|| format!("failed to read data file: {}", self.json_path))?;
+        let root: JsonValue =
+            serde_json::from_slice(&json_bytes).with_context(|| format!("failed to parse json: {}", self.json_path))?;
+
+        for field in &self.fields
+        {
+            let Some(dest) = instance.data_ptrs.get(&field.name).copied() else {
+                continue;
+            };
+
+            // Prefer jsonPath; fall back to flattened symbol name as key.
+            let mut value = json_get_by_path(&root, &field.json_path);
+            if value.is_none() && field.json_path != field.name
+            {
+                value = json_get_by_path(&root, &field.name);
+            }
+
+            if value.is_none() && field.array_count > 1
+            {
+                // AoS-style arrays: "asteroids.x" where "asteroids" is array of objects.
+                if let Some((base_path, leaf)) = field.json_path.rsplit_once('.')
+                {
+                    if let Some(base_value) = json_get_by_path(&root, base_path)
+                    {
+                        if let Some(arr) = base_value.as_array()
+                        {
+                            let elem_bytes = field_element_bytes(field)?;
+                            let limit = arr.len().min(field.array_count.max(0) as usize);
+                            for i in 0..limit
+                            {
+                                if let Some(obj) = arr[i].as_object()
+                                {
+                                    if let Some(v) = obj.get(leaf)
+                                    {
+                                        unsafe {
+                                            apply_scalar_to_dest(field, dest.add(i * elem_bytes), v);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let Some(value) = value else { continue };
+
+            if field.array_count > 1 && value.is_array()
+            {
+                let elem_bytes = field_element_bytes(field)?;
+                let arr = value.as_array().unwrap();
+                let limit = arr.len().min(field.array_count.max(0) as usize);
+                for i in 0..limit
+                {
+                    let v = &arr[i];
+                    unsafe {
+                        apply_scalar_to_dest(field, dest.add(i * elem_bytes), v);
+                    }
+                }
+            }
+            else
+            {
+                unsafe {
+                    apply_scalar_to_dest(field, dest, value);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn json_get_by_path<'a>(root: &'a JsonValue, path: &str) -> Option<&'a JsonValue>
+{
+    let mut current = root;
+    for part in path.split('.').map(|s| s.trim()).filter(|s| !s.is_empty())
+    {
+        match current
+        {
+            JsonValue::Object(map) => {
+                current = map.get(part)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn field_element_bytes(field: &StructFieldMeta) -> Result<usize>
+{
+    if field.array_count > 1 && field.size > 0
+    {
+        let elem = field.size / field.array_count;
+        if elem > 0 && (elem * field.array_count) == field.size
+        {
+            return Ok(elem as usize);
+        }
+    }
+
+    Ok(match field.field_type.as_str()
+    {
+        "bool" | "u8" => 1,
+        "u16" => 2,
+        "u32" | "i32" | "f32" => 4,
+        "f64" => 8,
+        // strings are special: treat element as 1 byte in array cases; scalar path handles full header+payload.
+        "string" => 1,
+        _ => 0,
+    })
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn apply_scalar_to_dest(field: &StructFieldMeta, dest: *mut u8, value: &JsonValue)
+{
+    match field.field_type.as_str()
+    {
+        "bool" => {
+            let v = if let Some(b) = value.as_bool() { b } else { value.as_i64().unwrap_or(0) != 0 };
+            *(dest as *mut u8) = if v { 1 } else { 0 };
+        }
+        "u8" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u8) = n as u8; }
+        }
+        "u16" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u16) = n as u16; }
+        }
+        "u32" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut u32) = n as u32; }
+        }
+        "i32" => {
+            if let Some(n) = value.as_i64() { *(dest as *mut i32) = n as i32; }
+        }
+        "f32" => {
+            if let Some(n) = value.as_f64() { *(dest as *mut f32) = n as f32; }
+        }
+        "f64" => {
+            if let Some(n) = value.as_f64() { *(dest as *mut f64) = n; }
+        }
+        "string" => {
+            // Matches runtime/stasis_data.c layout:
+            // ascii[N]: [byte_len:i32][u8[N]] (header_bytes=4)
+            // utf8[N]: [byte_len:i32][char_len:i32][u8[N]] (header_bytes=8)
+            let Some(s) = value.as_str() else { return; };
+            if field.array_count <= 1 || field.size <= 0 || field.array_count > field.size
+            {
+                return;
+            }
+            let header_bytes = field.size - field.array_count;
+            if header_bytes != 4 && header_bytes != 8
+            {
+                return;
+            }
+            let payload = dest.add(header_bytes as usize);
+            let payload_cap = field.array_count as usize;
+            if payload_cap == 0 { return; }
+
+            let max_copy = payload_cap.saturating_sub(1);
+            let bytes = s.as_bytes();
+
+            if header_bytes == 4
+            {
+                let mut copy_len = 0usize;
+                for &b in bytes.iter().take(max_copy)
+                {
+                    if b == 0 || b >= 0x80 { break; }
+                    *payload.add(copy_len) = b;
+                    copy_len += 1;
+                }
+                if copy_len < payload_cap { *payload.add(copy_len) = 0; }
+                *(dest as *mut i32) = copy_len as i32;
+                return;
+            }
+
+            // UTF-8: bounded copy, best-effort (assumes input is valid UTF-8).
+            let mut copy_bytes = 0usize;
+            for &b in bytes.iter().take(max_copy)
+            {
+                if b == 0 { break; }
+                *payload.add(copy_bytes) = b;
+                copy_bytes += 1;
+            }
+            if copy_bytes < payload_cap { *payload.add(copy_bytes) = 0; }
+            *(dest as *mut i32) = copy_bytes as i32;
+            *(dest.add(4) as *mut i32) = s.chars().count().min(i32::MAX as usize) as i32;
+        }
+        _ => {}
+    }
+}
+
+struct SwapJob
+{
+    id: u64,
+    module_name: String,
+    entry_name: String,
+    tick_name: String,
+    clif: String,
+}
+
+enum SwapOutcome
+{
+    Ok { instance: JitInstance, compile_us: u64 },
+    Err { message: String },
+}
+
+struct SwapResult
+{
+    id: u64,
+    outcome: SwapOutcome,
 }
 
 fn run_server(fps: u32) -> Result<()>
@@ -267,6 +610,11 @@ fn run_server(fps: u32) -> Result<()>
                 let tick_loop_result = run_tick_loop(fps, &mut new_instance, &rx, &mut stdout);
                 return tick_loop_result;
             }
+            Request::Bind { .. } =>
+            {
+                writeln!(stdout, "ERR databind before init")?;
+                stdout.flush()?;
+            }
             Request::Swap { .. } =>
             {
                 writeln!(stdout, "ERR swap before init")?;
@@ -289,27 +637,18 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let target_dt = if fps == 0 { Duration::from_millis(16) } else { Duration::from_secs_f64(1.0 / (fps as f64)) };
     let mut last = Instant::now();
 
-    let watchdog_ms: u64 = std::env::var("STASIS_JIT_WATCHDOG_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let watchdog_ms = env_u64("STASIS_JIT_WATCHDOG_MS", 0);
 
     let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));
     let tick_counter = Arc::new(AtomicU64::new(0));
-    let busy = Arc::new(AtomicBool::new(false));
+    let swap_counter = Arc::new(AtomicU64::new(0));
 
     if watchdog_ms > 0
     {
         let last_progress_ms = Arc::clone(&last_progress_ms);
         let tick_counter = Arc::clone(&tick_counter);
-        let busy = Arc::clone(&busy);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(250));
-            if busy.load(Ordering::Relaxed)
-            {
-                continue;
-            }
-
             let last_ms = last_progress_ms.load(Ordering::Relaxed);
             let now = now_ms();
             if now.saturating_sub(last_ms) > watchdog_ms
@@ -323,6 +662,54 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         });
     }
+
+    let heartbeat_ms = env_u64("STASIS_JIT_HEARTBEAT_MS", 0);
+
+    if heartbeat_ms > 0
+    {
+        let tick_counter = Arc::clone(&tick_counter);
+        let swap_counter = Arc::clone(&swap_counter);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(heartbeat_ms.max(50)));
+            eprintln!(
+                "HEARTBEAT ticks={} swaps={}",
+                tick_counter.load(Ordering::Relaxed),
+                swap_counter.load(Ordering::Relaxed)
+            );
+        });
+    }
+
+    // Compile swaps off-thread so the tick loop stays responsive (UI/events continue to pump).
+    // The tick loop only does a fast apply step + pointer swap when compilation finishes.
+    let (swap_job_tx, swap_job_rx) = mpsc::channel::<SwapJob>();
+    let (swap_result_tx, swap_result_rx) = mpsc::channel::<SwapResult>();
+    thread::spawn(move || {
+        while let Ok(job) = swap_job_rx.recv()
+        {
+            let t0 = Instant::now();
+            let outcome = match JitInstance::compile(&job.module_name, &job.entry_name, &job.tick_name, &job.clif)
+            {
+                Ok(instance) => SwapOutcome::Ok { instance, compile_us: t0.elapsed().as_micros() as u64 },
+                Err(e) => SwapOutcome::Err { message: format!("{:#}", e) },
+            };
+            let _ = swap_result_tx.send(SwapResult { id: job.id, outcome });
+        }
+    });
+
+    // Drop old instances off-thread as well (tearing down the previous JIT module can be expensive).
+    // This prevents sporadic pauses on swap when JITModule gets freed.
+    let (drop_tx, drop_rx) = mpsc::channel::<JitInstance>();
+    thread::spawn(move || {
+        while let Ok(v) = drop_rx.recv()
+        {
+            drop(v);
+        }
+    });
+
+    let mut next_swap_id: u64 = 1;
+    let mut pending_swap_id: Option<u64> = None;
+    let mut data_binding: Option<DataBinding> = None;
+    let mut last_req_seq: i32 = 0;
 
     // Bulk host mode: create a default window if the graphics runtime is present.
     if instance.bulk_active
@@ -338,50 +725,62 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        let uses_bulk_step = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
-        if uses_bulk_step
+        let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
+        let use_bulk_step = env_flag("STASIS_JIT_USE_HOST_BULK_STEP");
+
+        if bulk_step_available && use_bulk_step
         {
             eprintln!("HOST bulk: active (stasis_host_bulk_step)");
         }
         else
         {
+            if bulk_step_available && !use_bulk_step
+            {
+                eprintln!("HOST bulk: stasis_host_bulk_step available but disabled (set STASIS_JIT_USE_HOST_BULK_STEP=1 to enable)");
+            }
             eprintln!("HOST bulk: active (host_get_frame + gfx_submit_u8)");
         }
     }
+
+    let bulk_step_available = instance.graphics.as_ref().and_then(|g| g.host_bulk_step).is_some();
+    let use_bulk_step = env_flag("STASIS_JIT_USE_HOST_BULK_STEP");
 
     loop
     {
         last_progress_ms.store(now_ms(), Ordering::Relaxed);
 
-        while let Ok(req) = rx.try_recv()
+        while let Ok(result) = swap_result_rx.try_recv()
         {
-            match req
+            // If multiple results arrive (shouldn't happen with the watch protocol), apply the latest matching swap.
+            if pending_swap_id != Some(result.id)
             {
-                Request::Swap { clif } =>
+                // Drop compiled instances we didn't apply.
+                if let SwapOutcome::Ok { instance: compiled, .. } = result.outcome
                 {
-                    busy.store(true, Ordering::Relaxed);
+                    let _ = drop_tx.send(compiled);
+                }
+                continue;
+            }
+
+            match result.outcome
+            {
+                SwapOutcome::Ok { instance: mut new_instance, compile_us } =>
+                {
                     let t0 = Instant::now();
                     let (missing_save, save_bytes) = instance.save_state();
                     let save_us = t0.elapsed().as_micros() as u64;
 
-                    let t1 = Instant::now();
-                    let mut new_instance = match JitInstance::compile(&instance.module_name, &instance.entry_name, &instance.tick_name, &clif)
-                    {
-                        Ok(v) => v,
-                        Err(e) =>
-                        {
-                            busy.store(false, Ordering::Relaxed);
-                            eprintln!("HOTSWAP error: {:#}", e);
-                            writeln!(stdout, "ERR swap compile failed")?;
-                            stdout.flush()?;
-                            continue;
-                        }
-                    };
-                    let compile_us = t1.elapsed().as_micros() as u64;
-
                     let t2 = Instant::now();
                     let missing_restore = new_instance.restore_state(save_bytes);
                     let restore_us = t2.elapsed().as_micros() as u64;
+
+                    if let Some(b) = data_binding.as_ref()
+                    {
+                        if let Err(e) = b.apply(&mut new_instance)
+                        {
+                            eprintln!("DATABIND error: {:#}", e);
+                        }
+                    }
 
                     let bytes: usize = new_instance.state_globals.iter().map(|(_, sz)| *sz).sum();
                     let symbols = new_instance.state_globals.len();
@@ -397,11 +796,87 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         );
                     }
 
-                    *instance = new_instance;
-                    writeln!(stdout, "OK")?;
+                    let old = std::mem::replace(instance, new_instance);
+                    let _ = drop_tx.send(old);
+                    swap_counter.fetch_add(1, Ordering::Relaxed);
+
+                    writeln!(
+                        stdout,
+                        "OK id={} save_us={} compile_us={} restore_us={}",
+                        result.id, save_us, compile_us, restore_us
+                    )?;
                     stdout.flush()?;
-                    busy.store(false, Ordering::Relaxed);
-                    last_progress_ms.store(now_ms(), Ordering::Relaxed);
+                }
+                SwapOutcome::Err { message } =>
+                {
+                    eprintln!("HOTSWAP error: {}", message);
+                    writeln!(stdout, "ERR swap compile failed: {}", message.replace('\n', " "))?;
+                    stdout.flush()?;
+                }
+            }
+
+            pending_swap_id = None;
+            last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        }
+
+        while let Ok(req) = rx.try_recv()
+        {
+            match req
+            {
+                Request::Bind { json_path, struct_meta_path } =>
+                {
+                    match DataBinding::load(json_path.clone(), struct_meta_path.clone())
+                    {
+                        Ok(b) =>
+                        {
+                            if let Err(e) = b.apply(instance)
+                            {
+                                eprintln!("DATABIND error: {:#}", e);
+                                writeln!(stdout, "ERR databind apply failed: {}", format!("{:#}", e).replace('\n', " "))?;
+                                stdout.flush()?;
+                                continue;
+                            }
+
+                            eprintln!("DATABIND: registered {} ({} fields)", json_path, b.fields.len());
+                            data_binding = Some(b);
+                            writeln!(stdout, "OK")?;
+                            stdout.flush()?;
+                        }
+                        Err(e) =>
+                        {
+                            eprintln!("DATABIND error: {:#}", e);
+                            writeln!(stdout, "ERR databind load failed: {}", format!("{:#}", e).replace('\n', " "))?;
+                            stdout.flush()?;
+                        }
+                    }
+                }
+                Request::Swap { clif } =>
+                {
+                    if pending_swap_id.is_some()
+                    {
+                        writeln!(stdout, "ERR swap already pending")?;
+                        stdout.flush()?;
+                        continue;
+                    }
+
+                    let id = next_swap_id;
+                    next_swap_id = next_swap_id.saturating_add(1);
+                    pending_swap_id = Some(id);
+
+                    eprintln!("HOTSWAP queued: id={} bytes={}", id, clif.len());
+                    let job = SwapJob {
+                        id,
+                        module_name: instance.module_name.clone(),
+                        entry_name: instance.entry_name.clone(),
+                        tick_name: instance.tick_name.clone(),
+                        clif,
+                    };
+                    if swap_job_tx.send(job).is_err()
+                    {
+                        pending_swap_id = None;
+                        writeln!(stdout, "ERR swap worker unavailable")?;
+                        stdout.flush()?;
+                    }
                 }
                 Request::Quit =>
                 {
@@ -417,36 +892,49 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
+        if let Some(b) = data_binding.as_mut()
+        {
+            if b.apply_if_changed(instance).unwrap_or(false)
+            {
+                eprintln!("DATABIND: reloaded {}", b.json_path);
+            }
+        }
+
         if instance.bulk_active
         {
-            if let (Some(host_bulk_step), Some(host_i32), Some(host_f32), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
-                (
-                    instance.graphics.as_ref().and_then(|x| x.host_bulk_step),
-                    instance.host_i32,
-                    instance.host_f32,
-                    instance.gfx_cmd_i32,
-                    instance.gfx_cmd_f32,
-                    instance.gfx_cmd_u8,
-                )
+            if bulk_step_available && use_bulk_step
             {
-                unsafe {
-                    let rc = host_bulk_step(
-                        host_i32,
-                        host_f32,
-                        cmd_i32,
-                        cmd_f32,
-                        cmd_u8,
-                        instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
-                        instance.tick_fn,
-                    );
-                    if rc != 0
-                    {
-                        eprintln!("HOST bulk: step returned {rc}; exiting.");
-                        return Ok(());
+                if let (Some(host_bulk_step), Some(host_i32), Some(host_f32), Some(cmd_i32), Some(cmd_f32), Some(cmd_u8)) =
+                    (
+                        instance.graphics.as_ref().and_then(|x| x.host_bulk_step),
+                        instance.host_i32,
+                        instance.host_f32,
+                        instance.gfx_cmd_i32,
+                        instance.gfx_cmd_f32,
+                        instance.gfx_cmd_u8,
+                    )
+                {
+                    unsafe {
+                        let rc = host_bulk_step(
+                            host_i32,
+                            host_f32,
+                            cmd_i32,
+                            cmd_f32,
+                            cmd_u8,
+                            instance.host_req_seq.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_flags.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_window_w_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.host_req_window_h_px.map(|p| p as *const i32).unwrap_or(std::ptr::null()),
+                            instance.tick_fn,
+                        );
+                        if rc != 0
+                        {
+                            eprintln!("HOST bulk: step returned {rc}; exiting.");
+                            return Ok(());
+                        }
                     }
+                    tick_counter.fetch_add(1, Ordering::Relaxed);
+                    last_progress_ms.store(now_ms(), Ordering::Relaxed);
                 }
             }
             else
@@ -464,7 +952,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     }
                 }
 
-                apply_window_requests(instance);
+                apply_window_requests(instance, &mut last_req_seq);
 
                 let rc = (instance.tick_fn)();
                 if rc != 0
@@ -492,8 +980,11 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             }
         }
 
-        tick_counter.fetch_add(1, Ordering::Relaxed);
-        last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        if !(instance.bulk_active && bulk_step_available && use_bulk_step)
+        {
+            tick_counter.fetch_add(1, Ordering::Relaxed);
+            last_progress_ms.store(now_ms(), Ordering::Relaxed);
+        }
 
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(last);
@@ -505,7 +996,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     }
 }
 
-fn apply_window_requests(instance: &mut JitInstance)
+fn apply_window_requests(instance: &mut JitInstance, last_req_seq: &mut i32)
 {
     // Prefer the shared implementation in stasis_graphics.dll when available.
     if let Some(g) = instance.graphics.as_ref()
@@ -538,11 +1029,11 @@ fn apply_window_requests(instance: &mut JitInstance)
 
     unsafe {
         let seq = *req_seq;
-        // Best-effort: legacy path doesn't track last seq reliably; apply any non-zero request.
-        if seq == 0
+        if seq == 0 || seq == *last_req_seq
         {
             return;
         }
+        *last_req_seq = seq;
 
         let flags = *req_flags;
         if (flags & HOST_REQ_FLAG_WINDOWED) != 0
@@ -633,6 +1124,27 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let _ = tx2.send(Request::Swap { clif });
                 continue;
             }
+
+            if trimmed.starts_with("BIND ")
+            {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() != 3
+                {
+                    let _ = tx2.send(Request::Quit);
+                    break;
+                }
+                let json_len = parts[1].parse::<usize>().unwrap_or(0);
+                let meta_len = parts[2].parse::<usize>().unwrap_or(0);
+                if json_len == 0 || meta_len == 0
+                {
+                    let _ = tx2.send(Request::Quit);
+                    break;
+                }
+                let json_path = read_string(&mut reader, json_len).unwrap_or_default();
+                let struct_meta_path = read_string(&mut reader, meta_len).unwrap_or_default();
+                let _ = tx2.send(Request::Bind { json_path, struct_meta_path });
+                continue;
+            }
         }
     });
 
@@ -671,6 +1183,10 @@ struct JitInstance
     host_req_window_w_px: Option<*mut i32>,
     host_req_window_h_px: Option<*mut i32>,
 }
+
+// SAFETY: JitInstance contains raw pointers to JIT-owned memory. We only move whole instances
+// across threads (via channels) and ensure the active instance is used on a single thread at a time.
+unsafe impl Send for JitInstance {}
 
 impl JitInstance
 {

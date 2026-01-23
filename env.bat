@@ -6,11 +6,20 @@ REM Keeps the repo self-contained by preferring toolchains in well-known locatio
 set "REPO_ROOT=%~dp0"
 if "%REPO_ROOT:~-1%"=="\" set "REPO_ROOT=%REPO_ROOT:~0,-1%"
 
-REM Prefer the repo-pinned LLVM toolchain if present (pick the newest llvm-* folder).
+REM Prefer the repo-pinned LLVM toolchain if present.
+REM The LLVM backend emits IR compatible with the LLVMSharp/libLLVM version pinned in the repo.
+REM Prefer an llvm-20* toolchain when available (matches LLVMSharp 20.x).
 set "LLVM_BIN="
-for /f "delims=" %%D in ('dir /b /ad "%REPO_ROOT%\.tools\llvm-*" 2^>NUL') do (
+for /f "delims=" %%D in ('dir /b /ad "%REPO_ROOT%\.tools\llvm-20*" 2^>NUL') do (
   if exist "%REPO_ROOT%\.tools\%%D\bin\clang.exe" (
     set "LLVM_BIN=%REPO_ROOT%\.tools\%%D\bin"
+  )
+)
+if not defined LLVM_BIN (
+  for /f "delims=" %%D in ('dir /b /ad "%REPO_ROOT%\.tools\llvm-*" 2^>NUL') do (
+    if exist "%REPO_ROOT%\.tools\%%D\bin\clang.exe" (
+      set "LLVM_BIN=%REPO_ROOT%\.tools\%%D\bin"
+    )
   )
 )
 if defined LLVM_BIN (

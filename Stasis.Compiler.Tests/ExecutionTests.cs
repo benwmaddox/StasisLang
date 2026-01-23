@@ -13,13 +13,40 @@ public class ExecutionTests
         Stasis.Compiler.LlvmNativeLoader.EnsureLoaded();
     }
 
-    [Fact]
-    public void Runs_main_via_lli()
+    private static string GetRepoRoot()
     {
-        if (!TryFindLli(out var lliPath))
+        var current = Directory.GetCurrentDirectory();
+        var candidate = FindRepoRoot(current);
+        if (!string.IsNullOrEmpty(candidate))
         {
-            return;
+            return candidate;
         }
+
+        var assemblyDir = Path.GetDirectoryName(typeof(ExecutionTests).Assembly.Location);
+        candidate = FindRepoRoot(assemblyDir);
+        if (!string.IsNullOrEmpty(candidate))
+        {
+            return candidate;
+        }
+
+        throw new InvalidOperationException("Could not find repo root");
+    }
+
+    private static string? FindRepoRoot(string? start)
+    {
+        var current = start;
+        while (current != null && !File.Exists(Path.Combine(current, "Stasis.sln")))
+        {
+            current = Directory.GetParent(current)?.FullName;
+        }
+
+        return current;
+    }
+
+    [Fact]
+    public void Runs_main_via_clang()
+    {
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function add(a: i32, b: i32): i32 {
@@ -44,7 +71,7 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp);
         try
         {
             Assert.Equal(5, exitCode);
@@ -74,21 +101,55 @@ public class ExecutionTests
         return (proc.ExitCode, stderr);
     }
 
-    private static bool TryFindClangSibling(string llvmToolPath, out string clangPath)
+    private static (int ExitCode, string Stderr) CompileAndRunIr(string clangPath, string irPath, string? entryFunction = null)
     {
-        var dir = Path.GetDirectoryName(llvmToolPath);
-        if (!string.IsNullOrEmpty(dir))
+        var objPath = Path.Combine(
+            Path.GetTempPath(),
+            $"stasis_ir_{Guid.NewGuid():N}{(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".obj" : ".o")}");
+
+        var exePath = Path.Combine(
+            Path.GetTempPath(),
+            $"stasis_exec_{Guid.NewGuid():N}{(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty)}");
+
+        var wrapperPath = string.Empty;
+        try
         {
-            var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "clang.exe" : "clang");
-            if (File.Exists(candidate))
+            var (compileExit, compileStderr) = RunProcess(clangPath, $"-x ir -c \"{irPath}\" -O0 -o \"{objPath}\"");
+            Assert.True(compileExit == 0, $"clang IR compile failed (exit={compileExit}).\nstderr:\n{compileStderr}");
+
+            if (!string.IsNullOrWhiteSpace(entryFunction))
             {
-                clangPath = candidate;
-                return true;
+                wrapperPath = Path.Combine(Path.GetTempPath(), $"stasis_wrap_{Guid.NewGuid():N}.c");
+                File.WriteAllText(wrapperPath,
+                    $"extern int {entryFunction}(void);\nint main(void) {{ return {entryFunction}(); }}\n");
+                var (linkExit, linkStderr) = RunProcess(clangPath, $"\"{wrapperPath}\" \"{objPath}\" -O0 -o \"{exePath}\"");
+                Assert.True(linkExit == 0, $"clang link failed (exit={linkExit}).\nstderr:\n{linkStderr}");
+            }
+            else
+            {
+                var (linkExit, linkStderr) = RunProcess(clangPath, $"\"{objPath}\" -O0 -o \"{exePath}\"");
+                Assert.True(linkExit == 0, $"clang link failed (exit={linkExit}).\nstderr:\n{linkStderr}");
+            }
+
+            return RunProcess(exePath, string.Empty);
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(wrapperPath) && File.Exists(wrapperPath))
+            {
+                File.Delete(wrapperPath);
+            }
+
+            if (File.Exists(objPath))
+            {
+                File.Delete(objPath);
+            }
+
+            if (File.Exists(exePath))
+            {
+                File.Delete(exePath);
             }
         }
-
-        clangPath = string.Empty;
-        return false;
     }
 
     private static bool LooksLikeLlvmCrashReport(string stderr)
@@ -97,12 +158,33 @@ public class ExecutionTests
             || stderr.Contains("Stack dump:", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool TryFindLli(out string path)
+    private static bool TryFindClang(out string path)
     {
-        var search = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? Array.Empty<string>();
+        var root = GetRepoRoot();
+        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+
+        var toolsDir = Path.Combine(root, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly).OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                search.Add(Path.Combine(llvmDir, "bin"));
+            }
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            search.Add(Path.Combine(programFiles, "LLVM", "bin"));
+            search.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
+        }
+
         foreach (var dir in search)
         {
-            var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "lli.exe" : "lli");
+            var candidate = Path.Combine(dir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "clang.exe" : "clang");
             if (File.Exists(candidate))
             {
                 path = candidate;
@@ -117,10 +199,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_stasis_tests_via_run_tests_harness()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function add(a: i32, b: i32): i32 {
@@ -149,7 +228,7 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, $"-entry-function=run_tests \"{temp}\"");
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp, entryFunction: "run_tests");
         try
         {
             Assert.Equal(0, exitCode);
@@ -164,10 +243,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_compound_and_precedence()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function main(): i32 {
@@ -191,7 +267,7 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp);
         try
         {
             Assert.Equal(5, exitCode);
@@ -206,10 +282,7 @@ public class ExecutionTests
     [Fact]
     public void Runs_headless_graphics_builtins()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             function main(): i32 {
@@ -237,7 +310,7 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp);
         try
         {
             Assert.Equal(0, exitCode);
@@ -252,10 +325,7 @@ public class ExecutionTests
     [Fact]
     public void StrSubstr_copies_full_codepoint()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             global src: u8[16];
@@ -286,7 +356,7 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp);
         try
         {
             Assert.Equal(3, exitCode);
@@ -301,10 +371,7 @@ public class ExecutionTests
     [Fact]
     public void StrSubstr_aborts_on_misaligned_boundary()
     {
-        if (!TryFindLli(out var lliPath))
-        {
-            return;
-        }
+        Assert.True(TryFindClang(out var clangPath), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var source = """
             global src: u8[16];
@@ -334,42 +401,15 @@ public class ExecutionTests
         var temp = Path.GetTempFileName();
         File.WriteAllText(temp, lower.Ir);
 
-        var (exitCode, stderr) = RunProcess(lliPath, temp);
+        var (exitCode, stderr) = CompileAndRunIr(clangPath, temp);
         try
         {
             Assert.NotEqual(0, exitCode);
-            if (string.IsNullOrWhiteSpace(stderr) || stderr.Contains("abort", StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
-            // On some Windows setups, abort() under lli is reported as an LLVM crash dump (illegal instruction).
-            // Fall back to compiling the IR with clang (same LLVM toolchain) and executing the native binary.
-            if (!LooksLikeLlvmCrashReport(stderr) || !TryFindClangSibling(lliPath, out var clangPath))
-            {
-                return;
-            }
-
-            var exePath = Path.Combine(Path.GetTempPath(), $"stasis_exec_{Guid.NewGuid():N}.exe");
-            try
-            {
-                var (clangExit, clangStderr) = RunProcess(clangPath, $"-x ir \"{temp}\" -o \"{exePath}\"");
-                if (clangExit != 0)
-                {
-                    return;
-                }
-
-                var (nativeExit, nativeStderr) = RunProcess(exePath, string.Empty);
-                Assert.NotEqual(0, nativeExit);
-                Assert.True(string.IsNullOrWhiteSpace(nativeStderr) || nativeStderr.Contains("abort", StringComparison.OrdinalIgnoreCase), nativeStderr);
-            }
-            finally
-            {
-                if (File.Exists(exePath))
-                {
-                    File.Delete(exePath);
-                }
-            }
+            Assert.True(
+                string.IsNullOrWhiteSpace(stderr) ||
+                stderr.Contains("abort", StringComparison.OrdinalIgnoreCase) ||
+                LooksLikeLlvmCrashReport(stderr),
+                stderr);
         }
         finally
         {
