@@ -71,6 +71,7 @@ struct enum global function export test return let if else for foreach in
 - Diagnostics highlight the exact `SourceSpan` that triggered an error, include a concise human-friendly description, and often include a hint on how to fix it (similar to Elm's clarity).
 - The parser/semantic layers emit messages such as "Use infix '=' for assignment" or "Only one assignment per expression is permitted" so the code author immediately sees which operator or expression needs rewriting.
 - CLI tools and editors can read the `SourceSpan` attached to every diagnostic to underline the tokens, show line/column info, and include references to the spec section being violated.
+- Compilation must not silently continue after an error: any invalid program or unsupported construct must produce diagnostics and fail compilation, rather than generating placeholder IR or skipping effects.
 
 # **4. Types**
 

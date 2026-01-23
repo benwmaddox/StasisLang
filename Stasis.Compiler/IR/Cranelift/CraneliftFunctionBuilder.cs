@@ -1895,9 +1895,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_int expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_int wrong arg count.", new SourceSpan(0, 0));
         }
 
         // Get the integer value to print
@@ -1926,9 +1924,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_char expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_char wrong arg count.", new SourceSpan(0, 0));
         }
 
         // Get the char value to print (as i32)
@@ -1957,9 +1953,7 @@ public sealed class CraneliftFunctionBuilder
         if (arguments.Count != 1)
         {
             _diagnostics.Add(new Diagnostic("print_string expects 1 argument", new SourceSpan(0, 0)));
-            var err = NewValue();
-            _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: wrong arg count");
-            return err;
+            return EmitLoweringErrorValue("Cranelift: print_string wrong arg count.", new SourceSpan(0, 0));
         }
 
         if (!TryGetStringArg(arguments[0], out var value))
@@ -3778,7 +3772,7 @@ public sealed class CraneliftFunctionBuilder
                 }
             }
 
-            _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: could not resolve array length");
+            return EmitLoweringErrorValue("Cranelift: could not resolve array length.", member.Span);
         }
         else if (member.Receiver is IdentifierExpressionSyntax enumId &&
                  _enums.TryGetValue(enumId.Identifier.Text, out var enumDecl))
@@ -3809,7 +3803,7 @@ public sealed class CraneliftFunctionBuilder
                 return result;
             }
 
-            _instructions.AppendLine($"    {result} = iconst.i32 0 ; error: unknown enum member {member.Member.Text}");
+            return EmitLoweringErrorValue($"Cranelift: unknown enum member '{member.Member.Text}'.", member.Span);
         }
         else if (member.Receiver is IdentifierExpressionSyntax receiverId &&
                  _elementBindings.TryGetValue(receiverId.Identifier.Text, out var elementBinding))
@@ -4044,9 +4038,7 @@ public sealed class CraneliftFunctionBuilder
             var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
             if (field is null)
             {
-                var err = NewValue();
-                _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
-                return err;
+                return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{structDecl.Name.Text}'.", array.Span);
             }
 
             var elemType = ResolveType(field.Type);
@@ -4087,9 +4079,7 @@ public sealed class CraneliftFunctionBuilder
                 var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
                 if (field is null)
                 {
-                    var err = NewValue();
-                    _instructions.AppendLine($"    {err} = iconst.i32 0 ; error: unknown field {fieldName}");
-                    return err;
+                    return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", array.Span);
                 }
 
                 var elemType = ResolveType(field.Type);

@@ -546,6 +546,7 @@ public class CraneliftBackendConfirmationTests
         var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);
         Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.Message)));
         Assert.NotEmpty(result.Ir);
+        Assert.DoesNotContain("; error:", result.Ir, StringComparison.Ordinal);
         return result.Ir;
     }
 }
