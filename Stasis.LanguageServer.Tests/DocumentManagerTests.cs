@@ -266,5 +266,6 @@ public class DocumentManagerTests
         Assert.Equal(DiagnosticPolicy.MaxErrors, doc!.AllDiagnostics.Count);
         Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
         Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+        Assert.Contains(doc.AllDiagnostics, d => d.Message.Contains("Hint:", StringComparison.Ordinal));
     }
 }

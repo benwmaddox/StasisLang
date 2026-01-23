@@ -372,6 +372,62 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Unknown_function_call_includes_hint_and_suggestion()
+    {
+        var source = """
+            function tick(): void {}
+            function f(): void {
+                ticl();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function 'ticl'", StringComparison.Ordinal));
+        var diag = sema.Diagnostics.First(d => d.Message.Contains("Unknown function 'ticl'", StringComparison.Ordinal));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+        Assert.Contains("did you mean", diag.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Calling_non_function_includes_hint()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+        var diag = sema.Diagnostics.First(d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unknown_struct_field_includes_hint()
+    {
+        var source = """
+            struct S { alpha: i32; beta: i32; }
+            global state: S;
+            function f(): void {
+                state.alhpa = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+        var diag = sema.Diagnostics.First(d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Allows_enum_declaration()
     {
         var source = """
