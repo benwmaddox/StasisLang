@@ -84,6 +84,25 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Unknown_field_includes_hint()
+    {
+        var source = """
+            struct S { alpha: i32; beta: i32; }
+            global state: S;
+            function f(): void {
+                state.alhpa = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        var diag = Assert.Single(sema.Diagnostics, d => d.Message.Contains("Unknown field", StringComparison.Ordinal));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Flags_unknown_function_call()
     {
         var source = """
@@ -97,6 +116,25 @@ public class SemanticTests
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Unknown_function_includes_did_you_mean_hint()
+    {
+        var source = """
+            function tick(): void {}
+            function f(): void {
+                ticl();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        var diag = Assert.Single(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+        Assert.Contains("did you mean", diag.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -141,6 +179,25 @@ public class SemanticTests
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Not_callable_includes_symbol_kind_and_hint()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        var diag = Assert.Single(sema.Diagnostics, d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("Hint:", diag.Message, StringComparison.Ordinal);
+        Assert.Contains("local", diag.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

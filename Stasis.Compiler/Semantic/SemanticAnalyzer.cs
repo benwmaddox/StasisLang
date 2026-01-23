@@ -78,7 +78,111 @@ public sealed class SemanticAnalyzer
             return;
         }
 
+        // Avoid repeating the same diagnostic when type resolution is invoked multiple times (e.g., member access on LHS and later during assignment type-checking).
+        // The cap is small, so a linear scan is fine.
+        for (var i = 0; i < _diagnostics.Count; i++)
+        {
+            var d = _diagnostics[i];
+            if (d.Span.Start == span.Start &&
+                d.Span.Length == span.Length &&
+                string.Equals(d.Message, message, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+
         _diagnostics.Add(new Diagnostic(message, span));
+    }
+
+    private static IEnumerable<string> GetClosestMatches(string target, IEnumerable<string> candidates, int maxCount = 3)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return Array.Empty<string>();
+        }
+
+        var maxDistance = Math.Min(3, Math.Max(1, target.Length / 3));
+        var ranked = new List<(string Value, int Dist)>();
+        foreach (var cand in candidates)
+        {
+            if (string.IsNullOrEmpty(cand))
+            {
+                continue;
+            }
+
+            var dist = BoundedEditDistance(target, cand, maxDistance);
+            if (dist <= maxDistance)
+            {
+                ranked.Add((cand, dist));
+            }
+        }
+
+        return ranked
+            .OrderBy(t => t.Dist)
+            .ThenBy(t => t.Value, StringComparer.Ordinal)
+            .Take(maxCount)
+            .Select(t => t.Value)
+            .ToArray();
+    }
+
+    private static int BoundedEditDistance(string a, string b, int maxDistance)
+    {
+        if (string.Equals(a, b, StringComparison.Ordinal))
+        {
+            return 0;
+        }
+
+        if (Math.Abs(a.Length - b.Length) > maxDistance)
+        {
+            return maxDistance + 1;
+        }
+
+        if (a.Length == 0)
+        {
+            return b.Length <= maxDistance ? b.Length : maxDistance + 1;
+        }
+
+        if (b.Length == 0)
+        {
+            return a.Length <= maxDistance ? a.Length : maxDistance + 1;
+        }
+
+        // Standard Levenshtein with early abort if the best distance in the current row exceeds maxDistance.
+        var prev = new int[b.Length + 1];
+        var cur = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++)
+        {
+            prev[j] = j;
+        }
+
+        for (var i = 1; i <= a.Length; i++)
+        {
+            cur[0] = i;
+            var rowMin = cur[0];
+            var ac = a[i - 1];
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var cost = ac == b[j - 1] ? 0 : 1;
+                var del = prev[j] + 1;
+                var ins = cur[j - 1] + 1;
+                var sub = prev[j - 1] + cost;
+                var v = Math.Min(del, Math.Min(ins, sub));
+                cur[j] = v;
+                if (v < rowMin)
+                {
+                    rowMin = v;
+                }
+            }
+
+            if (rowMin > maxDistance)
+            {
+                return maxDistance + 1;
+            }
+
+            (prev, cur) = (cur, prev);
+        }
+
+        return prev[b.Length];
     }
 
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
@@ -868,7 +972,19 @@ public sealed class SemanticAnalyzer
                         var memberName = $"{enumName}.{m.Member.Text}";
                         if (!_symbols.ContainsKey(memberName))
                         {
-                            AddDiagnostic($"Enum '{enumName}' does not have a member named '{m.Member.Text}'.", m.Member.Span);
+                            var candidates = _symbols
+                                .Where(kvp =>
+                                    kvp.Value.Kind == SymbolKind.Const &&
+                                    kvp.Key.StartsWith(enumName + ".", StringComparison.Ordinal))
+                                .Select(kvp => kvp.Key.Substring(enumName.Length + 1));
+                            var matches = GetClosestMatches(m.Member.Text, candidates).ToArray();
+                            var hint = matches.Length switch
+                            {
+                                0 => "Hint: check the enum member name.",
+                                1 => $"Hint: did you mean '{matches[0]}'?",
+                                _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(x => $"'{x}'"))}?"
+                            };
+                            AddDiagnostic($"Enum '{enumName}' does not have a member named '{m.Member.Text}'. {hint}", m.Member.Span);
                         }
                         // Don't recursively analyze the receiver since it's just the enum type name
                         return;
@@ -919,19 +1035,40 @@ public sealed class SemanticAnalyzer
                     // Functions/tests are global-only in Stasis (no first-class function values).
                     if (scope.TryGetValue(idCallee.Identifier.Text, out var localCallee))
                     {
-                        AddDiagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span);
+                        var kind = localCallee.Kind.ToString().ToLowerInvariant();
+                        var ty = localCallee.Type is null ? "unknown" : FormatType(localCallee.Type);
+                        AddDiagnostic(
+                            $"'{idCallee.Identifier.Text}' is not callable ({kind} {ty}). Hint: remove '()' to use the value, or call a declared function.",
+                            idCallee.Identifier.Span);
                     }
                     else if (_symbols.TryGetValue(idCallee.Identifier.Text, out var calleeSym))
                     {
                         if (calleeSym.Kind is not (SymbolKind.Function or SymbolKind.Test))
                         {
-                            AddDiagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span);
+                            var kind = calleeSym.Kind.ToString().ToLowerInvariant();
+                            var ty = calleeSym.Type is null ? "unknown" : FormatType(calleeSym.Type);
+                            AddDiagnostic(
+                                $"'{idCallee.Identifier.Text}' is not callable ({kind} {ty}). Hint: remove '()' to use the value, or call a declared function.",
+                                idCallee.Identifier.Span);
                         }
                     }
                     else
                     {
                         // Prefer a function-specific message over a generic undefined identifier error.
-                        AddDiagnostic($"Unknown function '{idCallee.Identifier.Text}'.", idCallee.Identifier.Span);
+                        var name = idCallee.Identifier.Text;
+                        var candidates = _symbols
+                            .Where(kvp =>
+                                kvp.Value.Kind is SymbolKind.Function or SymbolKind.Test &&
+                                !kvp.Key.Contains('.', StringComparison.Ordinal))
+                            .Select(kvp => kvp.Key);
+                        var matches = GetClosestMatches(name, candidates).ToArray();
+                        var hint = matches.Length switch
+                        {
+                            0 => "Hint: declare it with `function name(...): type { ... }` (or check imports/spelling).",
+                            1 => $"Hint: did you mean '{matches[0]}'?",
+                            _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(m => $"'{m}'"))}?"
+                        };
+                        AddDiagnostic($"Unknown function '{name}'. {hint}", idCallee.Identifier.Span);
                     }
                 }
                 else
@@ -1617,21 +1754,35 @@ public sealed class SemanticAnalyzer
             if (currentType is not NamedTypeSymbol named)
             {
                 var got = currentType is null ? "unknown" : FormatType(currentType);
-                AddDiagnostic($"Member access '.{memberName}' requires a struct type; got '{got}'.", memberSpan);
+                AddDiagnostic(
+                    $"Member access '.{memberName}' requires a struct type; got '{got}'. Hint: check the receiver expression type; only structs support '.field' access.",
+                    memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
             if (!_structs.TryGetValue(named.TypeName, out var structDecl))
             {
                 // Not a struct type (could be an enum or unknown)
-                AddDiagnostic($"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'.", memberSpan);
+                var hint = _symbols.TryGetValue(named.TypeName, out var sym) && sym.Kind == SymbolKind.Enum
+                    ? "Hint: for enums, use 'EnumName.Member'."
+                    : "Hint: only structs support '.field' access.";
+                AddDiagnostic($"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'. {hint}", memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
             var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, memberName, StringComparison.Ordinal));
             if (field is null)
             {
-                AddDiagnostic($"Unknown field '{memberName}' on struct '{named.TypeName}'.", memberSpan);
+                var fieldNames = structDecl.Fields.Select(f => f.Identifier.Text).ToArray();
+                var matches = GetClosestMatches(memberName, fieldNames).ToArray();
+                var hint = matches.Length switch
+                {
+                    0 when fieldNames.Length <= 8 => $"Hint: available fields: {string.Join(", ", fieldNames.Select(n => $"'{n}'"))}.",
+                    0 => "Hint: check the field name or the struct type.",
+                    1 => $"Hint: did you mean '{matches[0]}'?",
+                    _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(m => $"'{m}'"))}?"
+                };
+                AddDiagnostic($"Unknown field '{memberName}' on struct '{named.TypeName}'. {hint}", memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
