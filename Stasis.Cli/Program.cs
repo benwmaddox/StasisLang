@@ -2664,8 +2664,18 @@ static int RunCraneliftAot(string aotTool, string clifPath, string objPath, stri
 
     if (UseCraneliftAotServer())
     {
-        var server = GetCraneliftAotServer(aotTool, out spawnMs);
-        return server.Compile(clifPath, objPath, target, moduleName, normalizedOpt, out compileMs);
+        try
+        {
+            var server = GetCraneliftAotServer(aotTool, out spawnMs);
+            return server.Compile(clifPath, objPath, target, moduleName, normalizedOpt, out compileMs);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: cranelift-aot server failed: {ex.Message}");
+            spawnMs = null;
+            compileMs = 0;
+            return 1;
+        }
     }
 
     var sw = Stopwatch.StartNew();
@@ -2691,8 +2701,18 @@ static int RunCraneliftAotFromString(string aotTool, string clif, string objPath
 
     if (UseCraneliftAotServer())
     {
-        var server = GetCraneliftAotServer(aotTool, out spawnMs);
-        return server.CompileFromBytes(Encoding.UTF8.GetBytes(clif), objPath, target, moduleName, normalizedOpt, out compileMs);
+        try
+        {
+            var server = GetCraneliftAotServer(aotTool, out spawnMs);
+            return server.CompileFromBytes(Encoding.UTF8.GetBytes(clif), objPath, target, moduleName, normalizedOpt, out compileMs);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: cranelift-aot server failed: {ex.Message}");
+            spawnMs = null;
+            compileMs = 0;
+            return 1;
+        }
     }
 
     var tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
@@ -5161,6 +5181,8 @@ sealed class CraneliftAotServer : IDisposable
     private readonly Stream input;
     private readonly StreamReader output;
     private readonly object gate = new();
+    private readonly Task stderrPump;
+    private readonly List<string> stderrTail = new();
 
     public long SpawnMs { get; }
     public bool IsAlive => !process.HasExited;
@@ -5171,6 +5193,34 @@ sealed class CraneliftAotServer : IDisposable
         this.input = input;
         this.output = output;
         SpawnMs = spawnMs;
+
+        // Drain stderr to avoid deadlocks if the server emits enough logs/warnings.
+        stderrPump = Task.Run(() =>
+        {
+            try
+            {
+                while (!process.HasExited)
+                {
+                    var line = process.StandardError.ReadLine();
+                    if (line is null)
+                    {
+                        break;
+                    }
+                    lock (stderrTail)
+                    {
+                        stderrTail.Add(line);
+                        if (stderrTail.Count > 200)
+                        {
+                            stderrTail.RemoveRange(0, 50);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort; ignore stderr pump failures.
+            }
+        });
     }
 
     public static CraneliftAotServer Start(string aotTool)
@@ -5188,14 +5238,57 @@ sealed class CraneliftAotServer : IDisposable
         var sw = Stopwatch.StartNew();
         var process = Process.Start(psi)!;
         var output = process.StandardOutput;
-        var ready = output.ReadLine();
         var spawnMs = sw.ElapsedMilliseconds;
-        if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
+        var server = new CraneliftAotServer(process, process.StandardInput.BaseStream, output, spawnMs);
+
+        var startupSw = Stopwatch.StartNew();
+        var startupTimeout = TimeSpan.FromSeconds(10);
+        var stdoutTail = new List<string>();
+
+        while (startupSw.Elapsed < startupTimeout)
         {
-            throw new InvalidOperationException("stasis-cranelift-aot server failed to start.");
+            var remaining = startupTimeout - startupSw.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var readTask = output.ReadLineAsync();
+            var completed = Task.WhenAny(readTask, Task.Delay(remaining)).GetAwaiter().GetResult();
+            if (completed != readTask)
+            {
+                break;
+            }
+
+            var line = readTask.GetAwaiter().GetResult();
+            if (line is null)
+            {
+                break;
+            }
+
+            if (string.Equals(line, "READY", StringComparison.OrdinalIgnoreCase))
+            {
+                return server;
+            }
+
+            // Keep a small tail for diagnostics.
+            stdoutTail.Add(line);
+            if (stdoutTail.Count > 20)
+            {
+                stdoutTail.RemoveAt(0);
+            }
         }
 
-        return new CraneliftAotServer(process, process.StandardInput.BaseStream, output, spawnMs);
+        var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+        var stdoutText = stdoutTail.Count == 0 ? "<none>" : string.Join("\n", stdoutTail);
+        string stderrText;
+        lock (server.stderrTail)
+        {
+            stderrText = server.stderrTail.Count == 0 ? "<none>" : string.Join("\n", server.stderrTail);
+        }
+
+        throw new InvalidOperationException(
+            $"stasis-cranelift-aot server failed to start (no READY within {startupTimeout.TotalSeconds:0}s; exit={exitCode}).\nstdout:\n{stdoutText}\nstderr:\n{stderrText}");
     }
 
     public int Compile(string clifPath, string outputPath, string target, string moduleName, string optLevel, out long compileMs)
@@ -5305,10 +5398,20 @@ sealed class CraneliftRunnerServer : IDisposable
 
         var process = Process.Start(psi)!;
         var control = process.StandardError;
-        var ready = control.ReadLine();
+        var startupTimeout = TimeSpan.FromSeconds(5);
+        var readTask = control.ReadLineAsync();
+        var completed = Task.WhenAny(readTask, Task.Delay(startupTimeout)).GetAwaiter().GetResult();
+        if (completed != readTask)
+        {
+            var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+            throw new InvalidOperationException($"stasis_runner server failed to start (no READY within {startupTimeout.TotalSeconds:0}s; exit={exitCode}).");
+        }
+
+        var ready = readTask.GetAwaiter().GetResult();
         if (!string.Equals(ready, "READY", StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("stasis_runner server failed to start.");
+            var exitCode = process.HasExited ? process.ExitCode.ToString() : "<running>";
+            throw new InvalidOperationException($"stasis_runner server failed to start (expected READY; got '{ready ?? "<null>"}'; exit={exitCode}).");
         }
 
         return new CraneliftRunnerServer(process, process.StandardInput.BaseStream, control);
