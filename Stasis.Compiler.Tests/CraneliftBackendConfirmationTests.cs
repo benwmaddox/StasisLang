@@ -120,6 +120,28 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void NestedStructArrayFieldStores_AreLowered()
+    {
+        var ir = CompileCraneliftIr("""
+            struct Gfx {
+                sprites: i32[7];
+                count: i32;
+            }
+            struct State { gfx: Gfx; }
+            global state: State;
+
+            function main(): i32 {
+                state.gfx.sprites[0] = 123;
+                state.gfx.count = 1;
+                return 0;
+            }
+            """);
+
+        Assert.DoesNotContain("complex array store", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("complex array access", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InlineAttribute_InlinesSimpleReturn()
     {
         var ir = CompileCraneliftIr("""
