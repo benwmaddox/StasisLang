@@ -453,7 +453,7 @@ public class CliSnapshotTests
         var scrubbedStdout = ScrubOutput(stdout);
         var scrubbedStderr = ScrubOutput(stderr);
 
-        Assert.Equal(0, exitCode);
+        Assert.True(exitCode == 0, $"stasis test failed (exit={exitCode}).\nstdout:\n{scrubbedStdout}\nstderr:\n{scrubbedStderr}");
         Assert.Contains("PASS: `adds numbers`", scrubbedStdout, StringComparison.Ordinal);
         Assert.Contains("PASS: `true is true`", scrubbedStdout, StringComparison.Ordinal);
         Assert.Contains("Tests: passed=2 failed=0", scrubbedStdout, StringComparison.Ordinal);

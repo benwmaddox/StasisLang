@@ -62,10 +62,28 @@ public sealed class HotSwapIntegrationTests
             using var outLines = new AsyncLineCollector(proc!.StandardOutput);
             using var errLines = new AsyncLineCollector(proc.StandardError);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
-                timeout: TimeSpan.FromMinutes(3));
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
+                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("warning: initial build failed") ||
+                        errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(3));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            {
+                throw new XunitException(
+                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
 
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
             var badSwapPath = OperatingSystem.IsWindows()
@@ -610,10 +628,28 @@ public sealed class HotSwapIntegrationTests
             using var outLines = new AsyncLineCollector(proc!.StandardOutput);
             using var errLines = new AsyncLineCollector(proc.StandardError);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
-                timeout: TimeSpan.FromMinutes(3));
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () =>
+                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        errLines.AnyContains("warning: initial build failed") ||
+                        errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(3));
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+
+            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            {
+                throw new XunitException(
+                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
 
             // Introduce a semantic error: unknown field on the global struct.
             var nl = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
@@ -911,6 +947,20 @@ public sealed class HotSwapIntegrationTests
                 }
             }
             return false;
+        }
+
+        public string GetTail(int maxLines = 60)
+        {
+            lock (_lines)
+            {
+                if (_lines.Count == 0)
+                {
+                    return "<empty>";
+                }
+
+                var start = Math.Max(0, _lines.Count - maxLines);
+                return string.Join("\n", _lines.Skip(start));
+            }
         }
 
         public void Dispose()
