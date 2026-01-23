@@ -16,9 +16,16 @@ public sealed class Parser
     public static ParseResult Parse(string text)
     {
         var lex = Lexer.Lex(text);
+        if (lex.Diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            var eof = lex.Tokens.Count > 0 ? lex.Tokens[^1] : new Token(TokenKind.EndOfFile, string.Empty, new SourceSpan(0, 0));
+            var empty = new CompilationUnitSyntax(new List<DeclarationSyntax>(), eof);
+            return new ParseResult(empty, lex.Diagnostics.Take(DiagnosticPolicy.MaxErrors).ToArray());
+        }
+
         var parser = new Parser(lex.Tokens);
         var compilation = parser.ParseCompilationUnit();
-        var diagnostics = lex.Diagnostics.Concat(parser._diagnostics).ToArray();
+        var diagnostics = lex.Diagnostics.Concat(parser._diagnostics).Take(DiagnosticPolicy.MaxErrors).ToArray();
         return new ParseResult(compilation, diagnostics);
     }
 
@@ -27,6 +34,11 @@ public sealed class Parser
         var declarations = new List<DeclarationSyntax>();
         while (!IsAtEnd() && Current.Kind != TokenKind.EndOfFile)
         {
+            if (_diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+            {
+                break;
+            }
+
             var decl = ParseTopLevel();
             if (decl is not null)
             {
@@ -720,5 +732,17 @@ public sealed class Parser
         return _tokens[index];
     }
 
-    private void AddDiagnostic(string message, SourceSpan span) => _diagnostics.Add(new Diagnostic(message, span));
+    private void AddDiagnostic(string message, SourceSpan span)
+    {
+        if (_diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic(message, span));
+        if (_diagnostics.Count >= DiagnosticPolicy.MaxErrors)
+        {
+            _position = Math.Max(0, _tokens.Count - 1);
+        }
+    }
 }

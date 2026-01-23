@@ -29,6 +29,8 @@ public sealed class SemanticAnalyzer
     private readonly List<Diagnostic> _diagnostics = new();
     private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
 
+    private bool AtDiagnosticLimit => _diagnostics.Count >= DiagnosticPolicy.MaxErrors;
+
     public SemanticAnalyzer(SemanticAnalyzerOptions? options = null)
     {
         _options = options ?? new SemanticAnalyzerOptions();
@@ -38,13 +40,23 @@ public sealed class SemanticAnalyzer
     {
         DeclareBuiltIns();
         DeclareTypes(compilationUnit);
+        if (AtDiagnosticLimit) return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
         DeclareGlobals(compilationUnit);
+        if (AtDiagnosticLimit) return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
         DeclareConstants(compilationUnit);
+        if (AtDiagnosticLimit) return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
         DeclareFunctions(compilationUnit);
+        if (AtDiagnosticLimit) return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
         ValidateFunctionDeclarations(compilationUnit);
+        if (AtDiagnosticLimit) return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
 
         foreach (var decl in compilationUnit.Declarations)
         {
+            if (AtDiagnosticLimit)
+            {
+                break;
+            }
+
             switch (decl)
             {
                 case FunctionDeclarationSyntax fn:
@@ -59,6 +71,16 @@ public sealed class SemanticAnalyzer
         return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
     }
 
+    private void AddDiagnostic(string message, SourceSpan span)
+    {
+        if (AtDiagnosticLimit)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic(message, span));
+    }
+
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
     {
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -69,14 +91,14 @@ public sealed class SemanticAnalyzer
             {
                 if (!fn.IsExtern && !hasExternAttr)
                 {
-                    _diagnostics.Add(new Diagnostic($"Function '{fn.Name.Text}' is missing a body. Add a body or mark it as extern.", fn.Name.Span));
+                    AddDiagnostic($"Function '{fn.Name.Text}' is missing a body. Add a body or mark it as extern.", fn.Name.Span);
                 }
             }
             else
             {
                 if (hasExternAttr)
                 {
-                    _diagnostics.Add(new Diagnostic($"Function '{fn.Name.Text}' has a body and cannot be marked @extern.", fn.Name.Span));
+                    AddDiagnostic($"Function '{fn.Name.Text}' has a body and cannot be marked @extern.", fn.Name.Span);
                 }
             }
         }
@@ -287,7 +309,7 @@ public sealed class SemanticAnalyzer
 
             if (decl.Initializer is not LiteralExpressionSyntax)
             {
-                _diagnostics.Add(new Diagnostic("Const initializers must be literal values for now.", decl.Initializer.Span));
+                AddDiagnostic("Const initializers must be literal values for now.", decl.Initializer.Span);
             }
         }
     }
@@ -419,7 +441,7 @@ public sealed class SemanticAnalyzer
         {
             if (TryResolveLocalId(name, out var id) && !assignedInScope.Contains(id))
             {
-                _diagnostics.Add(new Diagnostic($"Local '{name}' may be uninitialized here. Assign before reading.", span));
+                AddDiagnostic($"Local '{name}' may be uninitialized here. Assign before reading.", span);
             }
         }
 
@@ -647,8 +669,18 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeBlock(BlockStatementSyntax block, Dictionary<string, Symbol> scope)
     {
+        if (AtDiagnosticLimit)
+        {
+            return;
+        }
+
         foreach (var stmt in block.Statements)
         {
+            if (AtDiagnosticLimit)
+            {
+                return;
+            }
+
             AnalyzeStatement(stmt, scope);
         }
     }
@@ -686,6 +718,11 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeStatement(StatementSyntax stmt, Dictionary<string, Symbol> scope)
     {
+        if (AtDiagnosticLimit)
+        {
+            return;
+        }
+
         switch (stmt)
         {
             case BlockStatementSyntax block:
@@ -731,7 +768,7 @@ public sealed class SemanticAnalyzer
                     var elementType = ResolveIterableElementType(fes.Iterable, scope);
                     if (elementType is null)
                     {
-                        _diagnostics.Add(new Diagnostic("foreach target must be an array.", fes.Iterable.Span));
+                        AddDiagnostic("foreach target must be an array.", fes.Iterable.Span);
                         break;
                     }
 
@@ -772,7 +809,7 @@ public sealed class SemanticAnalyzer
 
         if (v.Type is null)
         {
-            _diagnostics.Add(new Diagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span));
+            AddDiagnostic("Local variables must declare a type; use 'let name: type = value;' to initialize.", v.Name.Span);
         }
         else
         {
@@ -790,11 +827,11 @@ public sealed class SemanticAnalyzer
             {
                 if (!TryAllowNumericLiteralAssignment(varType, v.Initializer, out var literalError))
                 {
-                    _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(initType)}' to variable of type '{FormatType(varType)}'.", v.Initializer.Span));
+                    AddDiagnostic($"Cannot assign value of type '{FormatType(initType)}' to variable of type '{FormatType(varType)}'.", v.Initializer.Span);
                 }
                 else if (literalError is not null)
                 {
-                    _diagnostics.Add(new Diagnostic(literalError, v.Initializer.Span));
+                    AddDiagnostic(literalError, v.Initializer.Span);
                 }
             }
         }
@@ -802,6 +839,11 @@ public sealed class SemanticAnalyzer
 
     private void AnalyzeExpression(ExpressionSyntax expr, Dictionary<string, Symbol> scope)
     {
+        if (AtDiagnosticLimit)
+        {
+            return;
+        }
+
         switch (expr)
         {
             case IdentifierExpressionSyntax id:
@@ -826,7 +868,7 @@ public sealed class SemanticAnalyzer
                         var memberName = $"{enumName}.{m.Member.Text}";
                         if (!_symbols.ContainsKey(memberName))
                         {
-                            _diagnostics.Add(new Diagnostic($"Enum '{enumName}' does not have a member named '{m.Member.Text}'.", m.Member.Span));
+                            AddDiagnostic($"Enum '{enumName}' does not have a member named '{m.Member.Text}'.", m.Member.Span);
                         }
                         // Don't recursively analyze the receiver since it's just the enum type name
                         return;
@@ -843,13 +885,13 @@ public sealed class SemanticAnalyzer
                 var receiverType = ResolveExpressionType(a.Receiver, scope);
                 if (receiverType is not null && receiverType is not ArrayTypeSymbol)
                 {
-                    _diagnostics.Add(new Diagnostic($"Array access requires an array receiver; got '{FormatType(receiverType)}'.", a.Receiver.Span));
+                    AddDiagnostic($"Array access requires an array receiver; got '{FormatType(receiverType)}'.", a.Receiver.Span);
                 }
 
                 var indexType = ResolveExpressionType(a.Index, scope);
                 if (indexType is not null && (indexType is not PrimitiveTypeSymbol ip || !IsIntegerType(ip.PrimitiveName)))
                 {
-                    _diagnostics.Add(new Diagnostic($"Array index must be an integer type; got '{FormatType(indexType)}'.", a.Index.Span));
+                    AddDiagnostic($"Array index must be an integer type; got '{FormatType(indexType)}'.", a.Index.Span);
                 }
                 break;
             case CallExpressionSyntax c:
@@ -877,24 +919,24 @@ public sealed class SemanticAnalyzer
                     // Functions/tests are global-only in Stasis (no first-class function values).
                     if (scope.TryGetValue(idCallee.Identifier.Text, out var localCallee))
                     {
-                        _diagnostics.Add(new Diagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span));
+                        AddDiagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span);
                     }
                     else if (_symbols.TryGetValue(idCallee.Identifier.Text, out var calleeSym))
                     {
                         if (calleeSym.Kind is not (SymbolKind.Function or SymbolKind.Test))
                         {
-                            _diagnostics.Add(new Diagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span));
+                            AddDiagnostic($"'{idCallee.Identifier.Text}' is not callable.", idCallee.Identifier.Span);
                         }
                     }
                     else
                     {
                         // Prefer a function-specific message over a generic undefined identifier error.
-                        _diagnostics.Add(new Diagnostic($"Unknown function '{idCallee.Identifier.Text}'.", idCallee.Identifier.Span));
+                        AddDiagnostic($"Unknown function '{idCallee.Identifier.Text}'.", idCallee.Identifier.Span);
                     }
                 }
                 else
                 {
-                    _diagnostics.Add(new Diagnostic("Only simple function calls are supported.", c.Span));
+                    AddDiagnostic("Only simple function calls are supported.", c.Span);
                 }
                 break;
             case OperatorCallExpressionSyntax op:
@@ -918,11 +960,11 @@ public sealed class SemanticAnalyzer
                 {
                     if (!TryAllowNumericLiteralAssignment(leftType, assign.Right, out var literalError))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot assign value of type '{FormatType(rightType)}' to target of type '{FormatType(leftType)}'.", assign.Right.Span));
+                        AddDiagnostic($"Cannot assign value of type '{FormatType(rightType)}' to target of type '{FormatType(leftType)}'.", assign.Right.Span);
                     }
                     else if (literalError is not null)
                     {
-                        _diagnostics.Add(new Diagnostic(literalError, assign.Right.Span));
+                        AddDiagnostic(literalError, assign.Right.Span);
                     }
                 }
                 break;
@@ -938,7 +980,7 @@ public sealed class SemanticAnalyzer
     {
         if (call.Arguments.Count != 0)
         {
-            _diagnostics.Add(new Diagnostic("clear() takes no arguments.", call.Span));
+            AddDiagnostic("clear() takes no arguments.", call.Span);
             return;
         }
 
@@ -951,26 +993,26 @@ public sealed class SemanticAnalyzer
 
         if (root is not IdentifierExpressionSyntax id)
         {
-            _diagnostics.Add(new Diagnostic("clear() receiver must be a global or global field.", member.Receiver.Span));
+            AddDiagnostic("clear() receiver must be a global or global field.", member.Receiver.Span);
             return;
         }
 
         if (scope.TryGetValue(id.Identifier.Text, out var localSym) && localSym.Kind == SymbolKind.Local)
         {
-            _diagnostics.Add(new Diagnostic("clear() is only supported on globals and global struct fields.", member.Receiver.Span));
+            AddDiagnostic("clear() is only supported on globals and global struct fields.", member.Receiver.Span);
             return;
         }
 
         if (!_symbols.TryGetValue(id.Identifier.Text, out var globalSym) || globalSym.Kind != SymbolKind.Global)
         {
-            _diagnostics.Add(new Diagnostic("clear() receiver must be a global or global field.", member.Receiver.Span));
+            AddDiagnostic("clear() receiver must be a global or global field.", member.Receiver.Span);
             return;
         }
 
         var recvType = ResolveExpressionType(member.Receiver, scope);
         if (recvType is null)
         {
-            _diagnostics.Add(new Diagnostic("clear() receiver type could not be resolved.", member.Receiver.Span));
+            AddDiagnostic("clear() receiver type could not be resolved.", member.Receiver.Span);
             return;
         }
 
@@ -983,7 +1025,7 @@ public sealed class SemanticAnalyzer
 
         if (!ok)
         {
-            _diagnostics.Add(new Diagnostic($"clear() is only supported for zeroable fixed arrays and structs; got '{FormatType(recvType)}'.", member.Receiver.Span));
+            AddDiagnostic($"clear() is only supported for zeroable fixed arrays and structs; got '{FormatType(recvType)}'.", member.Receiver.Span);
         }
     }
 
@@ -1015,15 +1057,15 @@ public sealed class SemanticAnalyzer
         var opText = op.OperatorToken.Text;
         if (op.Arguments.Count != 1)
         {
-            _diagnostics.Add(new Diagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span));
+            AddDiagnostic($"Operator '.{opText}()' requires exactly one argument.", op.Span);
         }
 
         if (opText == "=")
         {
-            _diagnostics.Add(new Diagnostic("Use infix '=' for assignment.", op.Span));
+            AddDiagnostic("Use infix '=' for assignment.", op.Span);
             if (!IsAssignableReceiver(op.Receiver))
             {
-                _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", op.Receiver.Span));
+                AddDiagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", op.Receiver.Span);
             }
             return;
         }
@@ -1042,25 +1084,25 @@ public sealed class SemanticAnalyzer
             {
                 if (!TryAllowNumericLiteralCompatibility(recvPrim.PrimitiveName, op.Arguments[0], out var literalError))
                 {
-                    _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span));
+                    AddDiagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span);
                 }
                 else if (literalError is not null)
                 {
-                    _diagnostics.Add(new Diagnostic(literalError, op.Arguments[0].Span));
+                    AddDiagnostic(literalError, op.Arguments[0].Span);
                 }
             }
             else if (IsFloatType(recvPrim.PrimitiveName) && IsFloatType(argPrim.PrimitiveName) &&
                      !string.Equals(recvPrim.PrimitiveName, argPrim.PrimitiveName, StringComparison.Ordinal))
             {
-                _diagnostics.Add(new Diagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span));
+                AddDiagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use an explicit conversion.", op.Span);
             }
             else if (IsIntegerType(recvPrim.PrimitiveName) && IsFloatType(argPrim.PrimitiveName))
             {
-                _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span));
+                AddDiagnostic($"Cannot mix integer type '{recvPrim.PrimitiveName}' with float type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span);
             }
             else if (IsFloatType(recvPrim.PrimitiveName) && IsIntegerType(argPrim.PrimitiveName))
             {
-                _diagnostics.Add(new Diagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span));
+                AddDiagnostic($"Cannot mix float type '{recvPrim.PrimitiveName}' with integer type '{argPrim.PrimitiveName}' in operator call. Use i32_to_f32() or f32_to_i32() for explicit conversion.", op.Span);
             }
         }
     }
@@ -1074,14 +1116,14 @@ public sealed class SemanticAnalyzer
     {
         if (!IsAssignableReceiver(target))
         {
-            _diagnostics.Add(new Diagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", target.Span));
+            AddDiagnostic("Left side of assignment must be an assignable location (identifier, field, or array element).", target.Span);
             return;
         }
 
         // Check if trying to assign to a constant
         if (target is IdentifierExpressionSyntax id && _symbols.TryGetValue(id.Identifier.Text, out var sym) && sym.Kind == SymbolKind.Const)
         {
-            _diagnostics.Add(new Diagnostic($"Cannot assign to constant '{id.Identifier.Text}'. Constants are immutable.", target.Span));
+            AddDiagnostic($"Cannot assign to constant '{id.Identifier.Text}'. Constants are immutable.", target.Span);
             return;
         }
 
@@ -1095,19 +1137,19 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic($"Unsupported assignment operator '{opToken.Text}'.", opToken.Span));
+        AddDiagnostic($"Unsupported assignment operator '{opToken.Text}'.", opToken.Span);
     }
 
     private void ValidateSingleAssignment(AssignmentExpressionSyntax assign)
     {
         if (assign.Left is AssignmentExpressionSyntax or BinaryExpressionSyntax { OperatorToken.Kind: TokenKind.Equal or TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.StarEqual or TokenKind.SlashEqual or TokenKind.PercentEqual })
         {
-            _diagnostics.Add(new Diagnostic("Only one assignment is permitted per expression.", assign.Left.Span));
+            AddDiagnostic("Only one assignment is permitted per expression.", assign.Left.Span);
         }
 
         if (assign.Right is AssignmentExpressionSyntax rightAssign)
         {
-            _diagnostics.Add(new Diagnostic("Only one assignment is permitted per expression.", rightAssign.Span));
+            AddDiagnostic("Only one assignment is permitted per expression.", rightAssign.Span);
         }
     }
 
@@ -1139,11 +1181,11 @@ public sealed class SemanticAnalyzer
                     // Check for mixed integer/float operations - require explicit conversion
                     if (IsIntegerType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span);
                     }
                     else if (IsFloatType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span);
                     }
                     else if (IsIntegerType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName) &&
                              !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
@@ -1153,21 +1195,21 @@ public sealed class SemanticAnalyzer
                         var leftLiteralOk = TryAllowNumericLiteralCompatibility(rightPrim.PrimitiveName, bin.Left, out var leftLiteralError);
                         if (!rightLiteralOk && !leftLiteralOk)
                         {
-                            _diagnostics.Add(new Diagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span));
+                            AddDiagnostic($"Cannot mix integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span);
                         }
                         else if (rightLiteralError is not null)
                         {
-                            _diagnostics.Add(new Diagnostic(rightLiteralError, bin.Right.Span));
+                            AddDiagnostic(rightLiteralError, bin.Right.Span);
                         }
                         else if (leftLiteralError is not null)
                         {
-                            _diagnostics.Add(new Diagnostic(leftLiteralError, bin.Left.Span));
+                            AddDiagnostic(leftLiteralError, bin.Left.Span);
                         }
                     }
                     else if (IsFloatType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName) &&
                              !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot mix float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}' in arithmetic. Use an explicit conversion.", bin.OperatorToken.Span);
                     }
                 }
             }
@@ -1182,11 +1224,11 @@ public sealed class SemanticAnalyzer
                 {
                     if (IsIntegerType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span);
                     }
                     else if (IsFloatType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use i32_to_f32() or f32_to_i32() for explicit conversion.", bin.OperatorToken.Span);
                     }
                     else if (IsIntegerType(leftPrim.PrimitiveName) && IsIntegerType(rightPrim.PrimitiveName) &&
                              !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
@@ -1195,21 +1237,21 @@ public sealed class SemanticAnalyzer
                         var leftLiteralOk = TryAllowNumericLiteralCompatibility(rightPrim.PrimitiveName, bin.Left, out var leftLiteralError);
                         if (!rightLiteralOk && !leftLiteralOk)
                         {
-                            _diagnostics.Add(new Diagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span));
+                            AddDiagnostic($"Cannot compare integer type '{leftPrim.PrimitiveName}' with integer type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span);
                         }
                         else if (rightLiteralError is not null)
                         {
-                            _diagnostics.Add(new Diagnostic(rightLiteralError, bin.Right.Span));
+                            AddDiagnostic(rightLiteralError, bin.Right.Span);
                         }
                         else if (leftLiteralError is not null)
                         {
-                            _diagnostics.Add(new Diagnostic(leftLiteralError, bin.Left.Span));
+                            AddDiagnostic(leftLiteralError, bin.Left.Span);
                         }
                     }
                     else if (IsFloatType(leftPrim.PrimitiveName) && IsFloatType(rightPrim.PrimitiveName) &&
                              !string.Equals(leftPrim.PrimitiveName, rightPrim.PrimitiveName, StringComparison.Ordinal))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span));
+                        AddDiagnostic($"Cannot compare float type '{leftPrim.PrimitiveName}' with float type '{rightPrim.PrimitiveName}'. Use an explicit conversion.", bin.OperatorToken.Span);
                     }
                 }
 
@@ -1219,7 +1261,7 @@ public sealed class SemanticAnalyzer
                     // Left is an enum - right must be the same enum type
                     if (rightType is not NamedTypeSymbol rightNamed || !string.Equals(leftNamed.TypeName, rightNamed.TypeName, StringComparison.Ordinal))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot compare enum '{leftNamed.TypeName}' with type '{FormatType(rightType ?? new PrimitiveTypeSymbol("unknown"))}'.", bin.Right.Span));
+                        AddDiagnostic($"Cannot compare enum '{leftNamed.TypeName}' with type '{FormatType(rightType ?? new PrimitiveTypeSymbol("unknown"))}'.", bin.Right.Span);
                     }
                 }
                 else if (rightType is NamedTypeSymbol rightNamed && _symbols.TryGetValue(rightNamed.TypeName, out var rightSymbol) && rightSymbol.Kind == SymbolKind.Enum)
@@ -1227,14 +1269,14 @@ public sealed class SemanticAnalyzer
                     // Right is an enum - left must be the same enum type
                     if (leftType is not NamedTypeSymbol leftNamed2 || !string.Equals(rightNamed.TypeName, leftNamed2.TypeName, StringComparison.Ordinal))
                     {
-                        _diagnostics.Add(new Diagnostic($"Cannot compare type '{FormatType(leftType ?? new PrimitiveTypeSymbol("unknown"))}' with enum '{rightNamed.TypeName}'.", bin.Left.Span));
+                        AddDiagnostic($"Cannot compare type '{FormatType(leftType ?? new PrimitiveTypeSymbol("unknown"))}' with enum '{rightNamed.TypeName}'.", bin.Left.Span);
                     }
                 }
             }
             return;
         }
 
-        _diagnostics.Add(new Diagnostic($"Unsupported infix operator '{bin.OperatorToken.Text}'.", bin.OperatorToken.Span));
+        AddDiagnostic($"Unsupported infix operator '{bin.OperatorToken.Text}'.", bin.OperatorToken.Span);
     }
 
     private TypeSymbol? ResolveType(TypeSyntax typeSyntax)
@@ -1247,7 +1289,7 @@ public sealed class SemanticAnalyzer
                     return sym.Type;
                 }
 
-                _diagnostics.Add(new Diagnostic($"Unknown type '{named.Name}'.", named.Span));
+                AddDiagnostic($"Unknown type '{named.Name}'.", named.Span);
                 return new NamedTypeSymbol(named.Name);
             case ArrayTypeSyntax array:
                 var elementType = ResolveType(array.ElementType);
@@ -1262,7 +1304,7 @@ public sealed class SemanticAnalyzer
                 }
 
                 var span = array.SizeToken?.Span ?? array.Span;
-                _diagnostics.Add(new Diagnostic("Array size must be a positive integer literal.", span));
+                AddDiagnostic("Array size must be a positive integer literal.", span);
                 return elementType;
             default:
                 return null;
@@ -1281,7 +1323,7 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic($"Undefined identifier '{name}'.", span));
+        AddDiagnostic($"Undefined identifier '{name}'.", span);
     }
 
     private void EnsurePrimitiveLocal(TypeSymbol? type, SourceSpan span)
@@ -1306,7 +1348,7 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic("Locals and parameters must be primitive types, struct references, or arrays.", span));
+        AddDiagnostic("Locals and parameters must be primitive types, struct references, or arrays.", span);
     }
 
     private void EnsureGlobalType(TypeSymbol? type, SourceSpan span)
@@ -1323,7 +1365,7 @@ public sealed class SemanticAnalyzer
                 return;
             }
 
-            _diagnostics.Add(new Diagnostic("Global arrays must declare a positive length.", span));
+            AddDiagnostic("Global arrays must declare a positive length.", span);
             return;
         }
 
@@ -1332,7 +1374,7 @@ public sealed class SemanticAnalyzer
             return;
         }
 
-        _diagnostics.Add(new Diagnostic("Globals must be primitive, struct, or array types.", span));
+        AddDiagnostic("Globals must be primitive, struct, or array types.", span);
     }
 
     private void ValidateStructFields(StructDeclarationSyntax structDecl)
@@ -1341,7 +1383,7 @@ public sealed class SemanticAnalyzer
         {
             if (field.Type is ArrayTypeSyntax array && string.IsNullOrEmpty(array.SizeText))
             {
-                _diagnostics.Add(new Diagnostic("Struct array fields must declare a positive length.", field.Type.Span));
+                AddDiagnostic("Struct array fields must declare a positive length.", field.Type.Span);
             }
         }
     }
@@ -1413,7 +1455,7 @@ public sealed class SemanticAnalyzer
     {
         if (_symbols.ContainsKey(name))
         {
-            _diagnostics.Add(new Diagnostic($"Duplicate symbol '{name}'.", span));
+            AddDiagnostic($"Duplicate symbol '{name}'.", span);
             return;
         }
 
@@ -1424,7 +1466,7 @@ public sealed class SemanticAnalyzer
     {
         if (scope.ContainsKey(name))
         {
-            _diagnostics.Add(new Diagnostic($"Duplicate local '{name}'.", span));
+            AddDiagnostic($"Duplicate local '{name}'.", span);
             return;
         }
 
@@ -1575,21 +1617,21 @@ public sealed class SemanticAnalyzer
             if (currentType is not NamedTypeSymbol named)
             {
                 var got = currentType is null ? "unknown" : FormatType(currentType);
-                _diagnostics.Add(new Diagnostic($"Member access '.{memberName}' requires a struct type; got '{got}'.", memberSpan));
+                AddDiagnostic($"Member access '.{memberName}' requires a struct type; got '{got}'.", memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
             if (!_structs.TryGetValue(named.TypeName, out var structDecl))
             {
                 // Not a struct type (could be an enum or unknown)
-                _diagnostics.Add(new Diagnostic($"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'.", memberSpan));
+                AddDiagnostic($"Type '{named.TypeName}' is not a struct; cannot access field '{memberName}'.", memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
             var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, memberName, StringComparison.Ordinal));
             if (field is null)
             {
-                _diagnostics.Add(new Diagnostic($"Unknown field '{memberName}' on struct '{named.TypeName}'.", memberSpan));
+                AddDiagnostic($"Unknown field '{memberName}' on struct '{named.TypeName}'.", memberSpan);
                 return new PrimitiveTypeSymbol("i32");
             }
 
