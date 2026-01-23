@@ -3975,9 +3975,8 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerArrayFieldAccess(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr)
     {
-        if (memberAccess.Receiver is not IdentifierExpressionSyntax id ||
-            !_symbols.TryGetValue(id.Identifier.Text, out var symbol) ||
-            symbol.Type is not NamedTypeSymbol named ||
+        if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
+            baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
         {
             var err = NewValue();
@@ -3996,10 +3995,10 @@ public sealed class CraneliftFunctionBuilder
         var elemType = ResolveType(arrayType.ElementType);
         var clifElemType = _typeMapper.Map(elemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+        var fieldBaseName = $"{baseName}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+        _instructions.AppendLine($"    {baseAddr} = global_value {fieldBaseName}");
 
         if (ResolveType(arrayType) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
         {
@@ -4226,9 +4225,8 @@ public sealed class CraneliftFunctionBuilder
 
     private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value, TypeSymbol? valueType)
     {
-        if (memberAccess.Receiver is not IdentifierExpressionSyntax id ||
-            !_symbols.TryGetValue(id.Identifier.Text, out var symbol) ||
-            symbol.Type is not NamedTypeSymbol named ||
+        if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
+            baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
         {
             _instructions.AppendLine($"    ; error: complex array store");
@@ -4245,7 +4243,7 @@ public sealed class CraneliftFunctionBuilder
         if (ResolveType(field.Type) is ArrayTypeSymbol arrayTypeSym && IsStringBuffer(arrayTypeSym, out var headerSize))
         {
             var byteIndex = LowerExpression(indexExpr);
-            var byteBaseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+            var byteBaseName = $"{baseName}__{memberAccess.Member.Text}";
             var byteBaseAddr = NewValue();
             _instructions.AppendLine($"    {byteBaseAddr} = global_value {byteBaseName}");
             var payloadBase = NewValue();
@@ -4262,10 +4260,10 @@ public sealed class CraneliftFunctionBuilder
         value = CoerceAssignmentValue(value, valueType, elemType);
         value = ReduceI32ToSmallInt(value, clifElemType);
         var index = LowerExpression(indexExpr);
-        var baseName = $"{id.Identifier.Text}__{memberAccess.Member.Text}";
+        var fieldBaseName = $"{baseName}__{memberAccess.Member.Text}";
 
         var baseAddr = NewValue();
-        _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
+        _instructions.AppendLine($"    {baseAddr} = global_value {fieldBaseName}");
 
         var elemSize = GetTypeSize(clifElemType);
         var elemSizeVal = NewValue();
