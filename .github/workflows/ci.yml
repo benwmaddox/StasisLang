@@ -54,6 +54,7 @@ jobs:
           mkdir -p .tools/llvm-20/bin
           ln -sf "$(command -v clang-20)" .tools/llvm-20/bin/clang
           ln -sf "$(command -v clang++-20)" .tools/llvm-20/bin/clang++
+          ln -sf "$(command -v lli-20)" .tools/llvm-20/bin/lli
           echo "PATH=${PWD}/.tools/llvm-20/bin:${PATH}" >> "$GITHUB_ENV"
           echo "clang: $(command -v clang)"
           clang --version
