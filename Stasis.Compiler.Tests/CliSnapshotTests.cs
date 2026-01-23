@@ -399,7 +399,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Run_Basic()
     {
-        Assert.True(TryFindLli(), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
+        Assert.True(TryFindClang(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--backend", "llvm");
         var result = new
@@ -414,7 +414,7 @@ public class CliSnapshotTests
     [Fact]
     public Task Test_TestsFile()
     {
-        Assert.True(TryFindLli(), "Missing LLVM interpreter (lli) on PATH. CI should install an LLVM toolchain.");
+        Assert.True(TryFindClang(), "Missing LLVM tooling (clang) on PATH. CI should install an LLVM toolchain.");
 
         var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--backend", "llvm");
         var scrubbedStdout = ScrubOutput(stdout);
@@ -487,34 +487,6 @@ public class CliSnapshotTests
         {
             tempDir.Delete(true);
         }
-    }
-
-    private static bool TryFindLli()
-    {
-        var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-
-        if (OperatingSystem.IsWindows())
-        {
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-            search = search.Concat(new[]
-            {
-                Path.Combine(programFiles, "LLVM", "bin"),
-                Path.Combine(programFilesX86, "LLVM", "bin")
-            }).ToArray();
-        }
-
-        foreach (var dir in search)
-        {
-            var candidate = Path.Combine(dir, OperatingSystem.IsWindows() ? "lli.exe" : "lli");
-            if (File.Exists(candidate))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static bool TryFindCraneliftAot(string root)
