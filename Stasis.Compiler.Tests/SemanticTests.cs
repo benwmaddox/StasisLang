@@ -83,6 +83,73 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_unknown_function_call()
+    {
+        var source = """
+            function f(): void {
+                missing();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown function", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_calling_non_function_symbol()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("not callable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Flags_array_access_on_non_array_receiver()
+    {
+        var source = """
+            function f(): void {
+                let x: i32 = 0;
+                x[0] = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Array access requires an array receiver", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Allows_array_length_property()
+    {
+        var source = """
+            global xs: i32[4];
+            function len(): i32 {
+                return xs.length;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Empty(sema.Diagnostics);
+    }
+
+    [Fact]
     public void Flags_void_local()
     {
         var source = """
