@@ -239,7 +239,7 @@ public class CraneliftBackendConfirmationTests
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         Assert.NotEmpty(semantic.Diagnostics);
-        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'draw_lines_f32'", StringComparison.Ordinal));
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Unknown function 'draw_lines_f32'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -254,7 +254,7 @@ public class CraneliftBackendConfirmationTests
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         Assert.NotEmpty(semantic.Diagnostics);
-        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'input_pointer_count'", StringComparison.Ordinal));
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Unknown function 'input_pointer_count'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -284,7 +284,7 @@ public class CraneliftBackendConfirmationTests
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         Assert.NotEmpty(semantic.Diagnostics);
-        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'gfx_draw_sprites_i32'", StringComparison.Ordinal));
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Unknown function 'gfx_draw_sprites_i32'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -299,7 +299,7 @@ public class CraneliftBackendConfirmationTests
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         Assert.NotEmpty(semantic.Diagnostics);
-        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'gfx_debug_get_frame_hash'", StringComparison.Ordinal));
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Unknown function 'gfx_debug_get_frame_hash'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -314,7 +314,7 @@ public class CraneliftBackendConfirmationTests
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         Assert.NotEmpty(semantic.Diagnostics);
-        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Undefined identifier 'input_pointer_x_px'", StringComparison.Ordinal));
+        Assert.Contains(semantic.Diagnostics, d => d.Message.Contains("Unknown function 'input_pointer_x_px'", StringComparison.Ordinal));
     }
 
     [Fact]
