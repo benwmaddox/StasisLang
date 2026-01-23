@@ -3034,6 +3034,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     string? activeDll = null;
     Process? runner = null;
     var runnerHotSwapOkCount = 0;
+    var swapDllSerial = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
     {
@@ -3115,9 +3116,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return 1;
         }
 
-        var hotDll = activeDll is null
-            ? swapDllA
-            : (string.Equals(activeDll, swapDllA, StringComparison.OrdinalIgnoreCase) ? swapDllB : swapDllA);
+        // On Windows, loaded DLLs stay file-locked even after swap, so alternating between swapA/swapB
+        // eventually deadlocks the dev loop once both names have been loaded at least once.
+        // Use a unique output name per successful rebuild to avoid overwriting a locked file.
+        var hotDll = Path.Combine(
+            swapDir,
+            $"{baseName}.{moduleName}.swap.{pid}.{swapDllSerial++}{swapExt}");
         File.WriteAllText(hotClifPath, result.Ir);
         clifWriteMs = phase.ElapsedMilliseconds;
         phase.Restart();
