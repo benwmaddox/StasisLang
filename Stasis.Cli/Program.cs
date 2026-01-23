@@ -1605,6 +1605,7 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     else if (isTest)
     {
         args.Add("-Wl,-e,run_tests");
+        args.Add("-nostartfiles");
     }
 
     if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
