@@ -53,6 +53,7 @@ For v1:
 This avoids writing/loading hot-swap DLL/SO artifacts, which can reduce hot-swap latency:
 
 ```bash
+cd tools/cranelift-jit-runner && cargo build --release
 STASIS_CRANELIFT_JIT_RUNNER=1 ./dev_brickout_revenge_wsl.sh
 ```
 
@@ -64,4 +65,3 @@ For apples-to-apples timing, use a repo-local workspace under WSL (not `/mnt/*`)
 
 - Windows native (`dev_brickout_revenge*.bat`)
 - WSL (`dev_brickout_revenge*_wsl.sh`)
-
