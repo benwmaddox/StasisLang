@@ -56,6 +56,11 @@ function(configure_stasis_target target is_static)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
 
+    if(NOT WIN32 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
+        # Defensive stack realignment for callers that don't maintain 16-byte alignment (e.g., some JIT/AOT runtimes).
+        target_compile_options(${target} PRIVATE -mstackrealign)
+    endif()
+
     if(${is_static})
         if(NOT STASIS_GRAPHICS_SDL_ONLY)
             target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC GLEW_STATIC)

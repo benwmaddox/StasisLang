@@ -96,7 +96,7 @@ function gfx_draw_sprites_i32(cmds: i32[], count: i32): void {
     gfx_cmd_sprites_from_i32(cmds, count);
 }
 
-function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+function draw_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_text(font, text, x, y, r, g, b, a);
 }
 

@@ -51,7 +51,7 @@ Run (Cranelift):
 ```
 
 Notes:
-- Uses `C:\Windows\Fonts\consola.ttf` by default; edit `FONT_PATH` in `samples/interactive_showcase.stasis` if needed.
+- Uses `docs/assets/fonts/dejavu-sans-mono.ttf` by default; edit `FONT_PATH` in `samples/interactive_showcase.stasis` if needed.
 
 ### 2) Asteroids (vector graphics + keyboard input + gameplay)
 
