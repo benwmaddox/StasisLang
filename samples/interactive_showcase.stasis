@@ -19,7 +19,7 @@ import "../src/stdlib/audio.stasis";
 const PI2: f32 = 6.28318;
 const FRAME_MS: i32 = 16;
 
-const FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const FONT_SIZE: i32 = 20;
 
 const FRAMES_PER_PUSH: i32 = 256;

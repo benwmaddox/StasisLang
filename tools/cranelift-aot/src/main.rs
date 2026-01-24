@@ -264,7 +264,7 @@ fn build_flags(opt_level: &str, target: &Triple) -> Result<settings::Flags>
         other => bail!("invalid --opt-level '{other}' (use none|speed|speed_and_size)"),
     }
 
-    if matches!(target.operating_system, OperatingSystem::Darwin(_) | OperatingSystem::MacOSX(_))
+    if matches!(target.operating_system, OperatingSystem::Darwin(_) | OperatingSystem::MacOSX(_) | OperatingSystem::Linux)
     {
         flag_builder.set("is_pic", "true")?;
     }

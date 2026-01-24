@@ -3054,6 +3054,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     string? activeDll = null;
     Process? runner = null;
     var runnerHotSwapOkCount = 0;
+    long runnerHotSwapLoadUs = -1;
     var swapDllSerial = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
@@ -3261,6 +3262,11 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                         if (line.Contains("HOTSWAP ok:", StringComparison.Ordinal))
                         {
                             Interlocked.Increment(ref runnerHotSwapOkCount);
+                            var loadUs = TryParseHotSwapLoadUs(line);
+                            if (loadUs >= 0)
+                            {
+                                Interlocked.Exchange(ref runnerHotSwapLoadUs, loadUs);
+                            }
                         }
                     });
 
@@ -3293,6 +3299,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     prevOkCount,
                     timeoutMs: 20000);
             Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+            Console.WriteLine($"HOTSWAP load(us): {Volatile.Read(ref runnerHotSwapLoadUs)}");
             return 0;
         }
         finally
@@ -3313,6 +3320,28 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 // Best-effort cleanup.
             }
         }
+    }
+
+    static long TryParseHotSwapLoadUs(string line)
+    {
+        const string needle = "load=";
+        var idx = line.IndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return -1;
+        }
+        idx += needle.Length;
+        var end = idx;
+        while (end < line.Length && char.IsDigit(line[end]))
+        {
+            end++;
+        }
+        if (end == idx)
+        {
+            return -1;
+        }
+        var span = line.AsSpan(idx, end - idx);
+        return long.TryParse(span, out var value) ? value : -1;
     }
 
     var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);
@@ -4221,6 +4250,10 @@ static void WriteAllTextAtomic(string path, string contents, Encoding encoding, 
     {
         try
         {
+            if (!File.Exists(tmp))
+            {
+                File.WriteAllText(tmp, contents, encoding);
+            }
             if (OperatingSystem.IsWindows() && File.Exists(path))
             {
                 File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);

@@ -7,7 +7,7 @@ import "../src/host_frame.stasis";
 //
 // NOTE: Font path is Windows-specific by default. Change FONT_PATH if needed.
 
-const FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const FONT_SIZE: i32 = 20;
 
 global font: i32;
