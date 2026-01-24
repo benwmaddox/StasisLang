@@ -227,6 +227,23 @@ For v1:
 ./dev_brickout_revenge_v1_wsl.sh
 ```
 
+### Troubleshooting: `Permission denied` running `.sh`
+
+If you see `bash: ./dev_brickout_revenge_wsl.sh: Permission denied`, the script likely isn't marked executable in your working copy.
+
+Fix it:
+
+```bash
+chmod +x ./dev_brickout_revenge_wsl.sh ./dev_brickout_revenge_v1_wsl.sh ./build.sh ./stasis.sh
+./dev_brickout_revenge_wsl.sh
+```
+
+One-off workaround (doesn't require the executable bit):
+
+```bash
+bash ./dev_brickout_revenge_wsl.sh
+```
+
 ### Diskless hot-swap (optional)
 
 This avoids writing/loading hot-swap DLL/SO artifacts, which can reduce hot-swap latency:
