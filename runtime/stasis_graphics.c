@@ -147,8 +147,10 @@ STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y, float r, float g, float b, float a);
 
 /* Forward decls for internal helpers used before their definitions. */
+typedef struct SpriteEntry SpriteEntry;
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
+static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h, int allow_reuse_slot);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -160,7 +162,7 @@ static void reset_sprite_program(void);
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
 #define MAX_SPRITES 256
 
-typedef struct {
+typedef struct SpriteEntry {
     char* path;
     int w;              /* current rasterized width */
     int h;              /* current rasterized height */
@@ -809,7 +811,15 @@ static void stasis_audio_shutdown_internal(void) {
     g_audio_running_frame_index = 0;
 }
 
+static int stasis_audio_disabled(void) {
+    const char* env = getenv("STASIS_DISABLE_AUDIO");
+    return env && *env && strcmp(env, "0") != 0;
+}
+
 static int stasis_audio_ensure_init(void) {
+    if (stasis_audio_disabled()) {
+        return 0;
+    }
     if (g_audio_initialized && g_audio_device != 0) {
         return 1;
     }
@@ -2156,6 +2166,7 @@ static void flush_sprites(void) {
 
     g_sprite_vert_count = 0;
 }
+#endif
 
 /* Fast path for command-buffer sprite submission.
  *
@@ -2235,6 +2246,7 @@ static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_cou
 #endif
 }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static const char* kFallbackPostfxVert =
 "#version 120\n"
 "varying vec2 v_uv;\n"
@@ -4461,6 +4473,12 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     if (!path || font_size <= 0) return 0;
     if (!g_window) return 0;
 
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        SDL_Log("stasis_load_font: could not resolve %s", path);
+        return 0;
+    }
+
     /* Find free slot */
     int slot = -1;
     for (int i = 0; i < MAX_FONTS; i++) {
@@ -4476,9 +4494,9 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     }
 
     /* Read font file */
-    FILE* f = fopen(path, "rb");
+    FILE* f = fopen(resolved, "rb");
     if (!f) {
-        SDL_Log("stasis_load_font: failed to open %s", path);
+        SDL_Log("stasis_load_font: failed to open %s", resolved);
         return 0;
     }
 
@@ -4501,7 +4519,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     memset(font, 0, sizeof(*font));
     if (!stbtt_InitFont(&font->font_info, ttf_buffer, 0)) {
         free(ttf_buffer);
-        SDL_Log("stasis_load_font: stbtt_InitFont failed for %s", path);
+        SDL_Log("stasis_load_font: stbtt_InitFont failed for %s", resolved);
         return 0;
     }
 
@@ -4591,7 +4609,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     free(atlas_bitmap);
 
     font->active = true;
-    SDL_Log("stasis_load_font: loaded %s size=%d handle=%d", path, font_size, slot + 1);
+    SDL_Log("stasis_load_font: loaded %s size=%d handle=%d", resolved, font_size, slot + 1);
 
     return slot + 1; /* Return 1-based handle */
 }

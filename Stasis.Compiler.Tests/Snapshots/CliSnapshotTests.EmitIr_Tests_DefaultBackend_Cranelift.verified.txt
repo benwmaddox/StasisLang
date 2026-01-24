@@ -12,12 +12,12 @@ global cstr_4: i8[17] ; bytes: 20 74 65 73 74 2D 74 69 6D 65 3D 25 64 6D 73 0A 0
 global cstr_5: i8[17] ; bytes: 60 61 64 64 69 74 69 6F 6E 20 77 6F 72 6B 73 60 00
 
 ; === External Functions ===
-external printf3(i64, i64, i64) -> i32 windows_fastcall
-external time(i64) -> i64 windows_fastcall
-external clock() -> i64 windows_fastcall
+external printf3(i64, i64, i64) -> i32 <call_conv>
+external time(i64) -> i64 <call_conv>
+external clock() -> i64 <call_conv>
 
 ; === Functions ===
-function %module__add(i32, i32) -> i32 windows_fastcall {
+function %module__add(i32, i32) -> i32 <call_conv> {
 block0(v0: i32, v1: i32):
     v2 = stack_slot.i32
     store v0, v2
@@ -29,7 +29,7 @@ block0(v0: i32, v1: i32):
     return v6
 }
 
-function %module__test_addition_works() -> i32 windows_fastcall {
+function %module__test_addition_works() -> i32 <call_conv> {
 block0:
     v0 = iconst.i32 2
     v1 = iconst.i32 3
@@ -40,7 +40,7 @@ block0:
     return v5
 }
 
-function %module__run_tests() -> i32 windows_fastcall {
+function %module__run_tests() -> i32 <call_conv> {
 block0:
     v0 = iconst.i32 0
     v1 = iconst.i64 0
