@@ -28,3 +28,28 @@ Summary:
 Notes:
 - Runner log reported `stasis_load_font: failed to open docs/assets/fonts/dejavu-sans-mono.ttf` during this run.
 
+## WSL hot-swap timing (non-jit / AOT, Cranelift)
+
+Date: 2026-01-24
+
+Repo:
+- Branch: feat/wsl-dev-brickout
+- Commit: 2e0e561
+
+Command:
+
+```bash
+STASIS_DISABLE_AUDIO=1 SDL_AUDIODRIVER=dummy scripts/hotswap_timing_brickout_v1.sh
+```
+
+Metric:
+- Parse `HOTSWAP load(us): ...` from `build/hotswap_brickout_v1.out.log` (DLL load time only, same as Windows).
+
+Samples (ms):
+- 0.367, 0.362, 0.362
+
+Summary:
+- count=3 min=0.362ms avg=0.364ms max=0.367ms
+
+Notes:
+- This run stalled after edit 4 (no new HOTSWAP load line). Re-run if a full 8-sample set is required.
