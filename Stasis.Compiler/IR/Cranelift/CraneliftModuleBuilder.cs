@@ -1,4 +1,5 @@
 using System.Text;
+using System.Runtime.InteropServices;
 
 namespace Stasis.Compiler.IR.Cranelift;
 
@@ -64,7 +65,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _externalFunctions.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
         var retStr = FormatReturnType(returnType);
-        _externals.AppendLine($"external {name}({paramStr}){retStr} windows_fastcall");
+        _externals.AppendLine($"external {name}({paramStr}){retStr} {GetCallConv()}");
     }
 
     /// <summary>
@@ -168,7 +169,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _functionNames.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
         var retStr = FormatReturnType(returnType);
-        _functions.AppendLine($"function %{name}({paramStr}){retStr} windows_fastcall {{");
+        _functions.AppendLine($"function %{name}({paramStr}){retStr} {GetCallConv()} {{");
         _functions.AppendLine($"block0:");
         if (returnType != CraneliftTypeMapper.ClifType.Void)
         {
@@ -195,7 +196,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
         _functionNames.Add(name);
         var paramStr = string.Join(", ", paramTypes.Select(FormatType));
         var retStr = FormatReturnType(returnType);
-        _functions.AppendLine($"function %{name}({paramStr}){retStr} windows_fastcall {{");
+        _functions.AppendLine($"function %{name}({paramStr}){retStr} {GetCallConv()} {{");
         _functions.Append(body);
         _functions.AppendLine($"}}");
         _functions.AppendLine();
@@ -250,9 +251,12 @@ public sealed class CraneliftModuleBuilder : IDisposable
             CraneliftTypeMapper.ClifType.F32 => "f32",
             CraneliftTypeMapper.ClifType.F64 => "f64",
             CraneliftTypeMapper.ClifType.B1 => "b1",
-            CraneliftTypeMapper.ClifType.R64 => "r64",
+            CraneliftTypeMapper.ClifType.R64 => "i64",
             _ => "i32"
         };
+
+    private static string GetCallConv() =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "windows_fastcall" : "system_v";
 
     private static string FormatReturnType(CraneliftTypeMapper.ClifType type)
     {

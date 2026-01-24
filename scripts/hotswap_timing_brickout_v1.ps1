@@ -57,6 +57,16 @@ function Summarize([string]$label, [int[]]$values, [string]$unit) {
     return "${label}: min=${min}${unit} avg=${avg}${unit} max=${max}${unit}"
 }
 
+function SummarizeFloat([string]$label, [double[]]$values, [string]$unit) {
+    if ($values.Count -eq 0) { return "${label}: n/a" }
+    $min = ($values | Measure-Object -Minimum).Minimum
+    $max = ($values | Measure-Object -Maximum).Maximum
+    $avg = [math]::Round(($values | Measure-Object -Average).Average, 3)
+    $min = [math]::Round($min, 3)
+    $max = [math]::Round($max, 3)
+    return "${label}: min=${min}${unit} avg=${avg}${unit} max=${max}${unit}"
+}
+
 function Wait-ForText {
     param(
         [string]$Path,
@@ -107,6 +117,18 @@ function Parse-HotSwapOk([string[]]$lines) {
     return $swaps
 }
 
+function Parse-HotSwapLoadUs([string[]]$lines) {
+    $loads = @()
+    foreach ($line in $lines) {
+        if ($line -like "*HOTSWAP load(us):*") {
+            foreach ($m in [regex]::Matches($line, "HOTSWAP load\\(us\\):\\s*([0-9]+)")) {
+                $loads += [int]$m.Groups[1].Value
+            }
+        }
+    }
+    return $loads
+}
+
 Write-Host ("Mode: {0}" -f $Mode)
 Write-Host ("Sample: {0}" -f $sample)
 Write-Host ("Runner log: {0}" -f $runnerErrLog)
@@ -134,8 +156,8 @@ try {
         throw "Timed out waiting for initial HOTRELOAD output."
     }
 
-    $swapLog = if ($Mode -eq "jit") { $outLog } else { $runnerErrLog }
-    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP ok:" }
+    $swapLog = if ($Mode -eq "jit") { $outLog } else { $outLog }
+    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP load(us):" }
 
     $prevSwapCount = 0
     if (Test-Path $swapLog) {
@@ -170,16 +192,20 @@ finally {
 }
 
 $errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
-$runnerLines = if (Test-Path $runnerErrLog) { Get-Content $runnerErrLog } else { @() }
+$outLines = if (Test-Path $outLog) { Get-Content $outLog } else { @() }
 
 $reloads = Parse-HotReloadPhases $errLines
-$swaps = Parse-HotSwapOk $runnerLines
+$loadsUs = if ($Mode -eq "jit") { @() } else { Parse-HotSwapLoadUs $outLines }
 
 $reloadTotals = $reloads | ForEach-Object { $_["total"] }
 $reloadLinks = $reloads | ForEach-Object { $_["link"] }
-$swapLoads = $swaps | ForEach-Object { $_["load"] }
+$loadMs = $loadsUs | ForEach-Object { [math]::Round($_ / 1000.0, 3) }
 
-Write-Host ("Reloads: {0} Swaps: {1}" -f $reloads.Count, $swaps.Count)
+Write-Host ("Reloads: {0} Swaps: {1}" -f $reloads.Count, $loadMs.Count)
 Write-Host (Summarize "HOTRELOAD total" $reloadTotals "ms")
 Write-Host (Summarize "HOTRELOAD link" $reloadLinks "ms")
-Write-Host (Summarize "HOTSWAP load" $swapLoads "us")
+if ($Mode -eq "jit") {
+    Write-Host "HOTSWAP load: n/a (jit mode does not emit HOTSWAP load(us))"
+} else {
+    Write-Host (SummarizeFloat "HOTSWAP load" $loadMs "ms")
+}

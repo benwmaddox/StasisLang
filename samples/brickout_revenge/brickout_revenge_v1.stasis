@@ -13,7 +13,7 @@ import "brickout_revenge_v1_ui_flow.stasis";
 // Fonts:
 // - `load_font` prerenders a glyph atlas from a TTF.
 // - This default path is Windows-centric; change it if needed.
-const UI_FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const UI_FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const UI_FONT_SIZE_PX: i32 = 24;
 //
 // Live tuning:
@@ -2646,4 +2646,3 @@ function tick(): i32 {
 
     return 0;
 }
-
