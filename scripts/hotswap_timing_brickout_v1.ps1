@@ -136,6 +136,9 @@ Write-Host ("Runner log: {0}" -f $runnerErrLog)
 $cliArgs = @("run", $sample, "--watch", "--backend", "cranelift", "--graphics", "--module", "brick", "--fps", [string]$Fps)
 
 $env:STASIS_DEV = "1"
+if (-not $env:STASIS_HOTSWAP_DELAY_MS) {
+    $env:STASIS_HOTSWAP_DELAY_MS = "500"
+}
 if ($Mode -eq "jit") {
     $env:STASIS_CRANELIFT_JIT_RUNNER = "1"
 } else {

@@ -29,6 +29,8 @@ export STASIS_USE_SDL=1
 export STASIS_ASSET_ROOT="$root"
 : "${STASIS_CRANELIFT_JIT_RUNNER:=0}"
 : "${STASIS_DISABLE_AUDIO:=1}"
+: "${SDL_AUDIODRIVER:=dummy}"
+: "${STASIS_HOTSWAP_DELAY_MS:=500}"
 
 ./stasis.sh run "$sample" --watch --backend cranelift --graphics --module brick --fps "$fps" >"$out_log" 2>"$err_log" &
 watch_pid=$!
@@ -62,32 +64,74 @@ while true; do
 done
 
 load_needle="HOTSWAP load(us):"
+exit_needle="warning: runner exited with code"
+reload_needle="HOTRELOAD phases(ms):"
 prev_count=0
 if [[ -f "$out_log" ]]; then
   prev_count=$(grep -c "$load_needle" "$out_log" || true)
 fi
+prev_exit_count=0
+if [[ -f "$err_log" ]]; then
+  prev_exit_count=$(grep -c "$exit_needle" "$err_log" || true)
+fi
+prev_reload_count=0
+if [[ -f "$err_log" ]]; then
+  prev_reload_count=$(grep -c "$reload_needle" "$err_log" || true)
+fi
+max_retries="${MAX_RETRIES:-3}"
 
 for i in $(seq 1 "$iterations"); do
-  printf "\n// hotswap timing brickout_v1 aot %s %s\n" "$i" "$(date +%s%N)" >> "$sample"
-  sleep "$(awk "BEGIN {print $sleep_after_edit_ms/1000}")"
-
-  start_ts=$(date +%s%N)
+  attempt=0
   while true; do
-    if [[ -f "$out_log" ]]; then
-      count=$(grep -c "$load_needle" "$out_log" || true)
-      if (( count > prev_count )); then
-        prev_count=$count
-        break
+    attempt=$((attempt + 1))
+    printf "\n// hotswap timing brickout_v1 aot %s.%s %s\n" "$i" "$attempt" "$(date +%s%N)" >> "$sample"
+    sleep "$(awk "BEGIN {print $sleep_after_edit_ms/1000}")"
+
+    start_ts=$(date +%s%N)
+    while true; do
+      if [[ -f "$out_log" ]]; then
+        count=$(grep -c "$load_needle" "$out_log" || true)
+        if (( count > prev_count )); then
+          prev_count=$count
+          break 2
+        fi
       fi
-    fi
-    now_ts=$(date +%s%N)
-    elapsed_ms=$(( (now_ts - start_ts) / 1000000 ))
-    if (( elapsed_ms >= swap_timeout_ms )); then
-      echo "error: timed out waiting for HOTSWAP load after edit $i" >&2
-      tail -n 50 "$out_log" >&2 || true
-      exit 1
-    fi
-    sleep 0.05
+      if [[ -f "$err_log" ]]; then
+        exit_count=$(grep -c "$exit_needle" "$err_log" || true)
+        if (( exit_count > prev_exit_count )); then
+          prev_exit_count=$exit_count
+          start_reload_ts=$(date +%s)
+          while true; do
+            reload_count=$(grep -c "$reload_needle" "$err_log" || true)
+            if (( reload_count > prev_reload_count )); then
+              prev_reload_count=$reload_count
+              break
+            fi
+            now_reload=$(date +%s)
+            if (( now_reload - start_reload_ts >= swap_timeout_ms / 1000 )); then
+              echo "error: timed out waiting for restart after runner exit (edit $i)" >&2
+              tail -n 50 "$err_log" >&2 || true
+              exit 1
+            fi
+            sleep 0.05
+          done
+          if (( attempt >= max_retries )); then
+            echo "error: exceeded retries after runner exits on edit $i" >&2
+            tail -n 50 "$err_log" >&2 || true
+            exit 1
+          fi
+          break
+        fi
+      fi
+      now_ts=$(date +%s%N)
+      elapsed_ms=$(( (now_ts - start_ts) / 1000000 ))
+      if (( elapsed_ms >= swap_timeout_ms )); then
+        echo "error: timed out waiting for HOTSWAP load after edit $i (attempt $attempt)" >&2
+        tail -n 50 "$out_log" >&2 || true
+        exit 1
+      fi
+      sleep 0.05
+    done
   done
 done
 
