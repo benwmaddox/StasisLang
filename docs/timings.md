@@ -46,10 +46,10 @@ Metric:
 - Parse `HOTSWAP load(us): ...` from `build/hotswap_brickout_v1.out.log` (DLL load time only, same as Windows).
 
 Samples (ms):
-- 0.367, 0.362, 0.362
+- 0.321, 0.340, 0.336, 0.368, 0.368, 0.368, 0.368, 0.368
 
 Summary:
-- count=3 min=0.362ms avg=0.364ms max=0.367ms
+- count=8 min=0.321ms avg=0.355ms max=0.368ms
 
 Notes:
-- This run stalled after edit 4 (no new HOTSWAP load line). Re-run if a full 8-sample set is required.
+- Script defaults `STASIS_HOTSWAP_DELAY_MS=500` and retries when the runner restarts.
