@@ -343,8 +343,8 @@ public class CliSnapshotTests
             var result = new
             {
                 ExitCode = exitCode,
-                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
-                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+                Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
@@ -387,8 +387,8 @@ public class CliSnapshotTests
             var result = new
             {
                 ExitCode = exitCode,
-                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
-                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+                Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
@@ -418,8 +418,8 @@ public class CliSnapshotTests
             var result = new
             {
                 ExitCode = exitCode,
-                Stdout = ScrubOutput(stdout).Replace(temp, "<temp-file>"),
-                Stderr = ScrubOutput(stderr).Replace(temp, "<temp-file>")
+                Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
@@ -428,6 +428,10 @@ public class CliSnapshotTests
             File.Delete(temp);
         }
     }
+
+    static string NormalizeCraneliftCallConv(string text) =>
+        text.Replace(" windows_fastcall", " <call_conv>", StringComparison.Ordinal)
+            .Replace(" system_v", " <call_conv>", StringComparison.Ordinal);
 
     [Fact]
     public Task Run_Basic()
