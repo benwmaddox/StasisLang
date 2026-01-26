@@ -10,26 +10,11 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Show a simple game loop (init -> tick -> draw).
 // - Demonstrate keyboard + pointer input.
 // - Keep state in explicit globals (no hidden allocation).
-// - Use deterministic updates (fixed dt) for predictability.
-
-const SCREEN_W: i32 = 480;
-const SCREEN_H: i32 = 800;
+// - Keep most tuning data in JSON so learners can edit without recompiling.
 
 const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
-const FONT_SIZE_PX: i32 = 20;
-
-const BUCKET_W: f32 = 110.0;
-const BUCKET_H: f32 = 20.0;
-const BUCKET_Y_PAD: f32 = 24.0;
-const BUCKET_SPEED: f32 = 520.0; // pixels/sec (used when keys are held)
-const BUCKET_TURN_RATE: f32 = 10.0; // smoothing toward pointer target
-
-const BALL_RADIUS: f32 = 10.0;
-const BALL_FALL_SPEED: f32 = 240.0;
-const BALL_SPAWN_MS: i32 = 650;
 const MAX_BALLS: i32 = 24;
-
-const DT: f32 = 1.0 / 60.0; // fixed dt keeps the math easy to follow
+const CONFIG_MAGIC: i32 = 1337;
 
 struct Ball {
     x: f32;
@@ -38,14 +23,44 @@ struct Ball {
     active: bool;
 }
 
+// Tunable parameters (data-bound from JSON in samples/bucket_catcher/data/config.json).
+struct BucketConfig {
+    magic: i32;
+    screen_w: i32;
+    screen_h: i32;
+    font_size_px: i32;
+    tick_dt_s: f32;
+    bucket_w: f32;
+    bucket_h: f32;
+    bucket_y_pad: f32;
+    bucket_speed: f32;
+    bucket_turn_rate: f32;
+    ball_radius: f32;
+    ball_fall_speed: f32;
+    ball_spawn_s: f32;
+    bg_r: f32;
+    bg_g: f32;
+    bg_b: f32;
+    bucket_r: f32;
+    bucket_g: f32;
+    bucket_b: f32;
+    ball_r: f32;
+    ball_g: f32;
+    ball_b: f32;
+    ui_r: f32;
+    ui_g: f32;
+    ui_b: f32;
+}
+
 struct GameState {
+    config: BucketConfig;
     bucket_x: f32;
     bucket_target_x: f32;
     catches: i32;
     misses: i32;
 
     balls: Ball[24];
-    spawn_timer_ms: i32;
+    spawn_timer_s: f32;
 
     ui_font: i32;
     ui_ascii: ascii[64];
@@ -71,8 +86,45 @@ function next_rand_u32(): i32 {
 
 function rand_range_f32(min_v: f32, max_v: f32): f32 {
     let r: i32 = next_rand_u32();
-    let f: f32 = i32_to_f32(r & 0xFFFF) / 65535.0;
+    let f: f32 = i32_to_f32(r % 65536) / 65535.0;
     return min_v + (max_v - min_v) * f;
+}
+
+function ensure_config_loaded(): void {
+    if (state.config.magic == CONFIG_MAGIC) {
+        if (state.config.screen_w < 1 || state.config.screen_h < 1) {
+            state.config.screen_w = 480;
+            state.config.screen_h = 800;
+        }
+        return;
+    }
+
+    // Defaults for when JSON binding is not present.
+    state.config.magic = CONFIG_MAGIC;
+    state.config.screen_w = 480;
+    state.config.screen_h = 800;
+    state.config.font_size_px = 20;
+    state.config.tick_dt_s = 1.0 / 60.0;
+    state.config.bucket_w = 110.0;
+    state.config.bucket_h = 20.0;
+    state.config.bucket_y_pad = 24.0;
+    state.config.bucket_speed = 520.0;
+    state.config.bucket_turn_rate = 10.0;
+    state.config.ball_radius = 10.0;
+    state.config.ball_fall_speed = 240.0;
+    state.config.ball_spawn_s = 0.65;
+    state.config.bg_r = 0.05;
+    state.config.bg_g = 0.07;
+    state.config.bg_b = 0.10;
+    state.config.bucket_r = 0.2;
+    state.config.bucket_g = 0.8;
+    state.config.bucket_b = 1.0;
+    state.config.ball_r = 1.0;
+    state.config.ball_g = 0.7;
+    state.config.ball_b = 0.2;
+    state.config.ui_r = 0.9;
+    state.config.ui_g = 0.9;
+    state.config.ui_b = 0.9;
 }
 
 function clamp(v: f32, lo: f32, hi: f32): f32 {
@@ -84,13 +136,14 @@ function clamp(v: f32, lo: f32, hi: f32): f32 {
 function init_game(): void {
     if (!state.initialized) {
         state.initialized = true;
-        seed_rng(i64_to_i32_trunc(time(0)));
+        ensure_config_loaded();
+        seed_rng(get_time_ms());
 
-        state.bucket_x = i32_to_f32(SCREEN_W) * 0.5;
+        state.bucket_x = i32_to_f32(state.config.screen_w) * 0.5;
         state.bucket_target_x = state.bucket_x;
         state.catches = 0;
         state.misses = 0;
-        state.spawn_timer_ms = 0;
+        state.spawn_timer_s = 0.0;
 
         foreach (let ball in state.balls) {
             ball.active = false;
@@ -103,12 +156,12 @@ function ensure_window(): bool {
         return true;
     }
 
-    if (!init_window(SCREEN_W, SCREEN_H, "Bucket Catcher")) {
+    if (!init_window(state.config.screen_w, state.config.screen_h, "Bucket Catcher")) {
         return false;
     }
 
     // Fonts depend on the graphics context, so load them after the window exists.
-    state.ui_font = load_font(FONT_PATH, FONT_SIZE_PX);
+    state.ui_font = load_font(FONT_PATH, state.config.font_size_px);
     return true;
 }
 
@@ -117,9 +170,9 @@ function spawn_ball(): void {
     for (i = 0; i < MAX_BALLS; i = i + 1) {
         if (!state.balls[i].active) {
             state.balls[i].active = true;
-            state.balls[i].x = rand_range_f32(BALL_RADIUS, i32_to_f32(SCREEN_W) - BALL_RADIUS);
-            state.balls[i].y = -BALL_RADIUS;
-            state.balls[i].vy = BALL_FALL_SPEED;
+            state.balls[i].x = rand_range_f32(state.config.ball_radius, i32_to_f32(state.config.screen_w) - state.config.ball_radius);
+            state.balls[i].y = -state.config.ball_radius;
+            state.balls[i].vy = state.config.ball_fall_speed;
             return;
         }
     }
@@ -134,76 +187,77 @@ function update_input(): void {
 
     // Keyboard input: steer left/right with arrow keys.
     let move: f32 = 0.0;
-    if (input_key_down(SCANCODE_LEFT)) { move = move - 1.0; }
-    if (input_key_down(SCANCODE_RIGHT)) { move = move + 1.0; }
+    if (input_key_down(Scancode.Left)) { move = move - 1.0; }
+    if (input_key_down(Scancode.Right)) { move = move + 1.0; }
     if (move != 0.0) {
-        state.bucket_target_x = state.bucket_target_x + move * BUCKET_SPEED * DT;
+        state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed * state.config.tick_dt_s;
     }
 
-    let half_w: f32 = BUCKET_W * 0.5;
-    state.bucket_target_x = clamp(state.bucket_target_x, half_w, i32_to_f32(SCREEN_W) - half_w);
+    let half_w: f32 = state.config.bucket_w * 0.5;
+    state.bucket_target_x = clamp(state.bucket_target_x, half_w, i32_to_f32(state.config.screen_w) - half_w);
 }
 
 function update_bucket(): void {
     // Smoothly approach the target to avoid jittery motion.
-    let half_w: f32 = BUCKET_W * 0.5;
+    let half_w: f32 = state.config.bucket_w * 0.5;
     let dx: f32 = state.bucket_target_x - state.bucket_x;
-    state.bucket_x = state.bucket_x + dx * BUCKET_TURN_RATE * DT;
-    state.bucket_x = clamp(state.bucket_x, half_w, i32_to_f32(SCREEN_W) - half_w);
+    state.bucket_x = state.bucket_x + dx * state.config.bucket_turn_rate * state.config.tick_dt_s;
+    state.bucket_x = clamp(state.bucket_x, half_w, i32_to_f32(state.config.screen_w) - half_w);
 }
 
 function update_balls(): void {
-    let bucket_top: f32 = i32_to_f32(SCREEN_H) - BUCKET_Y_PAD - BUCKET_H;
-    let bucket_left: f32 = state.bucket_x - BUCKET_W * 0.5;
-    let bucket_right: f32 = state.bucket_x + BUCKET_W * 0.5;
+    let bucket_top: f32 = i32_to_f32(state.config.screen_h) - state.config.bucket_y_pad - state.config.bucket_h;
+    let bucket_left: f32 = state.bucket_x - state.config.bucket_w * 0.5;
+    let bucket_right: f32 = state.bucket_x + state.config.bucket_w * 0.5;
 
     foreach (let ball in state.balls) {
-        if (!ball.active) { continue; }
-        ball.y = ball.y + ball.vy * DT;
+        if (ball.active) {
+            ball.y = ball.y + ball.vy * state.config.tick_dt_s;
 
-        // Catch: circle overlaps the bucket rectangle.
-        if (ball.y + BALL_RADIUS >= bucket_top &&
-            ball.y - BALL_RADIUS <= bucket_top + BUCKET_H &&
-            ball.x >= bucket_left &&
-            ball.x <= bucket_right) {
-            ball.active = false;
-            state.catches = state.catches + 1;
-            continue;
-        }
-
-        // Miss: fell below the screen.
-        if (ball.y - BALL_RADIUS > i32_to_f32(SCREEN_H)) {
-            ball.active = false;
-            state.misses = state.misses + 1;
+            // Catch: circle overlaps the bucket rectangle.
+            if (ball.y + state.config.ball_radius >= bucket_top &&
+                ball.y - state.config.ball_radius <= bucket_top + state.config.bucket_h &&
+                ball.x >= bucket_left &&
+                ball.x <= bucket_right) {
+                ball.active = false;
+                state.catches = state.catches + 1;
+            } else {
+                // Miss: fell below the screen.
+                if (ball.y - state.config.ball_radius > i32_to_f32(state.config.screen_h)) {
+                    ball.active = false;
+                    state.misses = state.misses + 1;
+                }
+            }
         }
     }
 }
 
 function update_spawns(): void {
-    state.spawn_timer_ms = state.spawn_timer_ms + 16;
-    if (state.spawn_timer_ms >= BALL_SPAWN_MS) {
-        state.spawn_timer_ms = 0;
+    state.spawn_timer_s = state.spawn_timer_s + state.config.tick_dt_s;
+    if (state.spawn_timer_s >= state.config.ball_spawn_s) {
+        state.spawn_timer_s = 0.0;
         spawn_ball();
     }
 }
 
 function draw_bucket(): void {
-    let x0: f32 = state.bucket_x - BUCKET_W * 0.5;
-    let y0: f32 = i32_to_f32(SCREEN_H) - BUCKET_Y_PAD - BUCKET_H;
-    let x1: f32 = state.bucket_x + BUCKET_W * 0.5;
-    let y1: f32 = y0 + BUCKET_H;
+    let x0: f32 = state.bucket_x - state.config.bucket_w * 0.5;
+    let y0: f32 = i32_to_f32(state.config.screen_h) - state.config.bucket_y_pad - state.config.bucket_h;
+    let x1: f32 = state.bucket_x + state.config.bucket_w * 0.5;
+    let y1: f32 = y0 + state.config.bucket_h;
 
     // Outline (clear and cheap).
-    draw_line(x0, y0, x1, y0, 0.2, 0.8, 1.0, 1.0);
-    draw_line(x1, y0, x1, y1, 0.2, 0.8, 1.0, 1.0);
-    draw_line(x1, y1, x0, y1, 0.2, 0.8, 1.0, 1.0);
-    draw_line(x0, y1, x0, y0, 0.2, 0.8, 1.0, 1.0);
+    draw_line(x0, y0, x1, y0, state.config.bucket_r, state.config.bucket_g, state.config.bucket_b, 1.0);
+    draw_line(x1, y0, x1, y1, state.config.bucket_r, state.config.bucket_g, state.config.bucket_b, 1.0);
+    draw_line(x1, y1, x0, y1, state.config.bucket_r, state.config.bucket_g, state.config.bucket_b, 1.0);
+    draw_line(x0, y1, x0, y0, state.config.bucket_r, state.config.bucket_g, state.config.bucket_b, 1.0);
 }
 
 function draw_balls(): void {
     foreach (let ball in state.balls) {
-        if (!ball.active) { continue; }
-        game_draw_circle(ball.x, ball.y, BALL_RADIUS, 1.0, 0.7, 0.2, 1.0);
+        if (ball.active) {
+            game_draw_circle(ball.x, ball.y, state.config.ball_radius, state.config.ball_r, state.config.ball_g, state.config.ball_b, 1.0);
+        }
     }
 }
 
@@ -216,7 +270,7 @@ function draw_ui(): void {
     ascii_append_i32(state.ui_ascii, state.misses);
     from_ascii(state.ui_text, state.ui_ascii, 64);
 
-    draw_text(state.ui_font, state.ui_text, 12.0, 10.0, 0.9, 0.9, 0.9, 1.0);
+    draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_r, state.config.ui_g, state.config.ui_b, 1.0);
 }
 
 function tick(): i32 {
@@ -234,7 +288,7 @@ function tick(): i32 {
     update_balls();
 
     begin_frame();
-    clear(0.05, 0.07, 0.1, 1.0);
+    clear(state.config.bg_r, state.config.bg_g, state.config.bg_b, 1.0);
     draw_balls();
     draw_bucket();
     draw_ui();
