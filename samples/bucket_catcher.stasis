@@ -19,7 +19,6 @@ import "../src/stdlib/sdl_scancodes.stasis";
 
 const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const MAX_BALLS: i32 = 24;
-const CONFIG_MAGIC: i32 = 1337;
 
 struct Ball {
     x: f32;
@@ -30,7 +29,7 @@ struct Ball {
 
 // Tunable parameters (data-bound from JSON in samples/bucket_catcher/data/config.json).
 struct BucketConfig {
-    magic: i32;
+    json_loaded: bool;
     screen_w: i32;
     screen_h: i32;
     font_size_px: i32;
@@ -96,7 +95,7 @@ function rand_range_f32(min_v: f32, max_v: f32): f32 {
 }
 
 function ensure_config_loaded(): void {
-    if (state.config.magic == CONFIG_MAGIC) {
+    if (state.config.json_loaded) {
         if (state.config.screen_w < 1 || state.config.screen_h < 1) {
             state.config.screen_w = 480;
             state.config.screen_h = 800;
@@ -105,7 +104,7 @@ function ensure_config_loaded(): void {
     }
 
     // Defaults for when JSON binding is not present.
-    state.config.magic = CONFIG_MAGIC;
+    state.config.json_loaded = true;
     state.config.screen_w = 480;
     state.config.screen_h = 800;
     state.config.font_size_px = 20;
