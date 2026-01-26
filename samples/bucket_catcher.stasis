@@ -92,9 +92,8 @@ function init_game(): void {
         state.misses = 0;
         state.spawn_timer_ms = 0;
 
-        let i: i32 = 0;
-        for (i = 0; i < MAX_BALLS; i = i + 1) {
-            state.balls[i].active = false;
+        foreach (let ball in state.balls) {
+            ball.active = false;
         }
     }
 }
@@ -140,28 +139,27 @@ function update_bucket(): void {
 }
 
 function update_balls(): void {
-    let i: i32 = 0;
     let bucket_top: f32 = i32_to_f32(SCREEN_H) - BUCKET_Y_PAD - BUCKET_H;
     let bucket_left: f32 = state.bucket_x - BUCKET_W * 0.5;
     let bucket_right: f32 = state.bucket_x + BUCKET_W * 0.5;
 
-    for (i = 0; i < MAX_BALLS; i = i + 1) {
-        if (!state.balls[i].active) { continue; }
-        state.balls[i].y = state.balls[i].y + state.balls[i].vy * DT;
+    foreach (let ball in state.balls) {
+        if (!ball.active) { continue; }
+        ball.y = ball.y + ball.vy * DT;
 
         // Catch: circle overlaps the bucket rectangle.
-        if (state.balls[i].y + BALL_RADIUS >= bucket_top &&
-            state.balls[i].y - BALL_RADIUS <= bucket_top + BUCKET_H &&
-            state.balls[i].x >= bucket_left &&
-            state.balls[i].x <= bucket_right) {
-            state.balls[i].active = false;
+        if (ball.y + BALL_RADIUS >= bucket_top &&
+            ball.y - BALL_RADIUS <= bucket_top + BUCKET_H &&
+            ball.x >= bucket_left &&
+            ball.x <= bucket_right) {
+            ball.active = false;
             state.catches = state.catches + 1;
             continue;
         }
 
         // Miss: fell below the screen.
-        if (state.balls[i].y - BALL_RADIUS > i32_to_f32(SCREEN_H)) {
-            state.balls[i].active = false;
+        if (ball.y - BALL_RADIUS > i32_to_f32(SCREEN_H)) {
+            ball.active = false;
             state.misses = state.misses + 1;
         }
     }
@@ -189,10 +187,9 @@ function draw_bucket(): void {
 }
 
 function draw_balls(): void {
-    let i: i32 = 0;
-    for (i = 0; i < MAX_BALLS; i = i + 1) {
-        if (!state.balls[i].active) { continue; }
-        game_draw_circle(state.balls[i].x, state.balls[i].y, BALL_RADIUS, 1.0, 0.7, 0.2, 1.0);
+    foreach (let ball in state.balls) {
+        if (!ball.active) { continue; }
+        game_draw_circle(ball.x, ball.y, BALL_RADIUS, 1.0, 0.7, 0.2, 1.0);
     }
 }
 
