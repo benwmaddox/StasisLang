@@ -53,3 +53,26 @@ Summary:
 
 Notes:
 - Script defaults `STASIS_HOTSWAP_DELAY_MS=500` and retries when the runner restarts.
+
+## WSL data-binding reload timing (brickout_revenge_v1 config.json)
+
+Date: 2026-01-26
+
+Repo:
+- Branch: fix/wsl-llvmsharp-restore
+- Commit: eccb2af
+
+Command:
+
+```bash
+STASIS_DISABLE_AUDIO=1 SDL_AUDIODRIVER=dummy ./stasis.sh run samples/brickout_revenge/brickout_revenge_v1.stasis --watch --backend cranelift --graphics --module brick --fps 60
+```
+
+Metric:
+- Parse `DATABIND: reloaded ... apply_ms=...` from `build/hotstate/brickout_revenge_v1.brick.runner.err.log` after editing `samples/brickout_revenge/data/config.json`.
+
+Samples (ms):
+- 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1
+
+Summary:
+- count=10 min=0.100ms avg=0.100ms max=0.100ms
