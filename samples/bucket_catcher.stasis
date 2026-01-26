@@ -118,7 +118,6 @@ function ensure_config_loaded(): void {
     }
 
     // Defaults for when JSON binding is not present.
-    state.config.json_loaded = true;
     state.config.screen_width = 480;
     state.config.screen_height = 800;
     state.config.font_path = "docs/assets/fonts/dejavu-sans-mono.ttf";
