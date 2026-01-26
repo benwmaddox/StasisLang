@@ -11,13 +11,13 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Demonstrate keyboard + pointer input.
 // - Keep state in explicit globals (no hidden allocation).
 // - Keep most tuning data in JSON so learners can edit without recompiling.
+// - Use PNG sprites for the bucket/ball to show asset binding.
 //
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
 // - The runtime runner binds matching keys into the global state (see --data-bind).
 // - We still provide defaults in ensure_config_loaded() so the sample runs anywhere.
 
-const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const MAX_BALLS: i32 = 24;
 
 struct Ball {
@@ -32,7 +32,10 @@ struct BucketConfig {
     json_loaded: bool;
     screen_width: i32;
     screen_height: i32;
+    font_path: string;
     font_size_pixels: i32;
+    bucket_sprite_path: string;
+    ball_sprite_path: string;
     tick_delta_seconds: f32;
     bucket_width: f32;
     bucket_height: f32;
@@ -67,6 +70,8 @@ struct GameState {
     spawn_timer_seconds: f32;
 
     ui_font: i32;
+    bucket_sprite: i32;
+    ball_sprite: i32;
     ui_ascii: ascii[64];
     ui_text: utf8[64];
 
@@ -100,6 +105,15 @@ function ensure_config_loaded(): void {
             state.config.screen_width = 480;
             state.config.screen_height = 800;
         }
+        if (state.config.font_path == "") {
+            state.config.font_path = "docs/assets/fonts/dejavu-sans-mono.ttf";
+        }
+        if (state.config.bucket_sprite_path == "") {
+            state.config.bucket_sprite_path = "samples/bucket_catcher/assets/bucket.png";
+        }
+        if (state.config.ball_sprite_path == "") {
+            state.config.ball_sprite_path = "samples/bucket_catcher/assets/ball.png";
+        }
         return;
     }
 
@@ -107,7 +121,10 @@ function ensure_config_loaded(): void {
     state.config.json_loaded = true;
     state.config.screen_width = 480;
     state.config.screen_height = 800;
+    state.config.font_path = "docs/assets/fonts/dejavu-sans-mono.ttf";
     state.config.font_size_pixels = 20;
+    state.config.bucket_sprite_path = "samples/bucket_catcher/assets/bucket.png";
+    state.config.ball_sprite_path = "samples/bucket_catcher/assets/ball.png";
     state.config.tick_delta_seconds = 1.0 / 60.0;
     state.config.bucket_width = 110.0;
     state.config.bucket_height = 20.0;
@@ -165,7 +182,17 @@ function ensure_window(): bool {
     }
 
     // Fonts depend on the graphics context, so load them after the window exists.
-    state.ui_font = load_font(FONT_PATH, state.config.font_size_pixels);
+    state.ui_font = load_font(state.config.font_path, state.config.font_size_pixels);
+    state.bucket_sprite = gfx_load_sprite(
+        state.config.bucket_sprite_path,
+        f32_to_i32(state.config.bucket_width),
+        f32_to_i32(state.config.bucket_height)
+    );
+    state.ball_sprite = gfx_load_sprite(
+        state.config.ball_sprite_path,
+        f32_to_i32(state.config.ball_radius * 2.0),
+        f32_to_i32(state.config.ball_radius * 2.0)
+    );
     return true;
 }
 
@@ -250,17 +277,41 @@ function draw_bucket(): void {
     let x1: f32 = state.bucket_x + state.config.bucket_width * 0.5;
     let y1: f32 = y0 + state.config.bucket_height;
 
-    // Outline (clear and cheap).
-    draw_line(x0, y0, x1, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-    draw_line(x1, y0, x1, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-    draw_line(x1, y1, x0, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-    draw_line(x0, y1, x0, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
+    if (state.bucket_sprite != 0) {
+        gfx_draw_sprite(
+            state.bucket_sprite,
+            f32_to_i32(x0),
+            f32_to_i32(y0),
+            f32_to_i32(state.config.bucket_width),
+            f32_to_i32(state.config.bucket_height),
+            0,
+            255
+        );
+    } else {
+        // Outline fallback (clear and cheap).
+        draw_line(x0, y0, x1, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
+        draw_line(x1, y0, x1, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
+        draw_line(x1, y1, x0, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
+        draw_line(x0, y1, x0, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
+    }
 }
 
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            game_draw_circle(ball.x, ball.y, state.config.ball_radius, state.config.ball_red, state.config.ball_green, state.config.ball_blue, 1.0);
+            if (state.ball_sprite != 0) {
+                gfx_draw_sprite(
+                    state.ball_sprite,
+                    f32_to_i32(ball.x - state.config.ball_radius),
+                    f32_to_i32(ball.y - state.config.ball_radius),
+                    f32_to_i32(state.config.ball_radius * 2.0),
+                    f32_to_i32(state.config.ball_radius * 2.0),
+                    0,
+                    255
+                );
+            } else {
+                game_draw_circle(ball.x, ball.y, state.config.ball_radius, state.config.ball_red, state.config.ball_green, state.config.ball_blue, 1.0);
+            }
         }
     }
 }
