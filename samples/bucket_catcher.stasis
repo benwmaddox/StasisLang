@@ -1,0 +1,233 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/game_input.stasis";
+import "../src/stdlib/game_draw.stasis";
+import "../src/stdlib/sdl_scancodes.stasis";
+
+// Bucket Catcher - minimal instructional sample.
+//
+// Goals:
+// - Show a simple game loop (init -> tick -> draw).
+// - Demonstrate keyboard + pointer input.
+// - Keep state in explicit globals (no hidden allocation).
+// - Use deterministic updates (fixed dt) for predictability.
+
+const SCREEN_W: i32 = 480;
+const SCREEN_H: i32 = 800;
+
+const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
+const FONT_SIZE_PX: i32 = 20;
+
+const BUCKET_W: f32 = 110.0;
+const BUCKET_H: f32 = 20.0;
+const BUCKET_Y_PAD: f32 = 24.0;
+const BUCKET_SPEED: f32 = 520.0; // pixels/sec (used when keys are held)
+const BUCKET_TURN_RATE: f32 = 10.0; // smoothing toward pointer target
+
+const BALL_RADIUS: f32 = 10.0;
+const BALL_FALL_SPEED: f32 = 240.0;
+const BALL_SPAWN_MS: i32 = 650;
+const MAX_BALLS: i32 = 24;
+
+const DT: f32 = 1.0 / 60.0; // fixed dt keeps the math easy to follow
+
+struct Ball {
+    x: f32;
+    y: f32;
+    vy: f32;
+    active: bool;
+}
+
+// Game state
+global bucket_x: f32;
+global bucket_target_x: f32;
+global catches: i32;
+global misses: i32;
+
+global balls: Ball[24];
+global spawn_timer_ms: i32;
+
+global ui_font: i32;
+global ui_ascii: ascii[64];
+global ui_text: utf8[64];
+
+global rng_state: i32;
+
+global initialized: bool;
+
+function seed_rng(seed: i32): void {
+    rng_state = seed;
+}
+
+function next_rand_u32(): i32 {
+    // LCG (fast, deterministic, good enough for simple gameplay).
+    rng_state = rng_state * 1103515245 + 12345;
+    if (rng_state < 0) { rng_state = 0 - rng_state; }
+    return rng_state;
+}
+
+function rand_range_f32(min_v: f32, max_v: f32): f32 {
+    let r: i32 = next_rand_u32();
+    let f: f32 = i32_to_f32(r & 0xFFFF) / 65535.0;
+    return min_v + (max_v - min_v) * f;
+}
+
+function clamp(v: f32, lo: f32, hi: f32): f32 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+function init_game(): void {
+    if (!initialized) {
+        initialized = true;
+        seed_rng(i64_to_i32_trunc(time(0)));
+
+        bucket_x = i32_to_f32(SCREEN_W) * 0.5;
+        bucket_target_x = bucket_x;
+        catches = 0;
+        misses = 0;
+        spawn_timer_ms = 0;
+
+        let i: i32 = 0;
+        for (i = 0; i < MAX_BALLS; i = i + 1) {
+            balls[i].active = false;
+        }
+    }
+}
+
+function spawn_ball(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_BALLS; i = i + 1) {
+        if (!balls[i].active) {
+            balls[i].active = true;
+            balls[i].x = rand_range_f32(BALL_RADIUS, i32_to_f32(SCREEN_W) - BALL_RADIUS);
+            balls[i].y = -BALL_RADIUS;
+            balls[i].vy = BALL_FALL_SPEED;
+            return;
+        }
+    }
+}
+
+function update_input(): void {
+    // Pointer input: follow the first active pointer when it is down.
+    let count: i32 = input_pointer_count();
+    if (count > 0 && input_pointer_is_down(0)) {
+        bucket_target_x = input_pointer_x_px(0);
+    }
+
+    // Keyboard input: steer left/right with arrow keys.
+    let move: f32 = 0.0;
+    if (input_key_down(SCANCODE_LEFT)) { move = move - 1.0; }
+    if (input_key_down(SCANCODE_RIGHT)) { move = move + 1.0; }
+    if (move != 0.0) {
+        bucket_target_x = bucket_target_x + move * BUCKET_SPEED * DT;
+    }
+
+    let half_w: f32 = BUCKET_W * 0.5;
+    bucket_target_x = clamp(bucket_target_x, half_w, i32_to_f32(SCREEN_W) - half_w);
+}
+
+function update_bucket(): void {
+    // Smoothly approach the target to avoid jittery motion.
+    let half_w: f32 = BUCKET_W * 0.5;
+    let dx: f32 = bucket_target_x - bucket_x;
+    bucket_x = bucket_x + dx * BUCKET_TURN_RATE * DT;
+    bucket_x = clamp(bucket_x, half_w, i32_to_f32(SCREEN_W) - half_w);
+}
+
+function update_balls(): void {
+    let i: i32 = 0;
+    let bucket_top: f32 = i32_to_f32(SCREEN_H) - BUCKET_Y_PAD - BUCKET_H;
+    let bucket_left: f32 = bucket_x - BUCKET_W * 0.5;
+    let bucket_right: f32 = bucket_x + BUCKET_W * 0.5;
+
+    for (i = 0; i < MAX_BALLS; i = i + 1) {
+        if (!balls[i].active) { continue; }
+        balls[i].y = balls[i].y + balls[i].vy * DT;
+
+        // Catch: circle overlaps the bucket rectangle.
+        if (balls[i].y + BALL_RADIUS >= bucket_top &&
+            balls[i].y - BALL_RADIUS <= bucket_top + BUCKET_H &&
+            balls[i].x >= bucket_left &&
+            balls[i].x <= bucket_right) {
+            balls[i].active = false;
+            catches = catches + 1;
+            continue;
+        }
+
+        // Miss: fell below the screen.
+        if (balls[i].y - BALL_RADIUS > i32_to_f32(SCREEN_H)) {
+            balls[i].active = false;
+            misses = misses + 1;
+        }
+    }
+}
+
+function update_spawns(): void {
+    spawn_timer_ms = spawn_timer_ms + 16;
+    if (spawn_timer_ms >= BALL_SPAWN_MS) {
+        spawn_timer_ms = 0;
+        spawn_ball();
+    }
+}
+
+function draw_bucket(): void {
+    let x0: f32 = bucket_x - BUCKET_W * 0.5;
+    let y0: f32 = i32_to_f32(SCREEN_H) - BUCKET_Y_PAD - BUCKET_H;
+    let x1: f32 = bucket_x + BUCKET_W * 0.5;
+    let y1: f32 = y0 + BUCKET_H;
+
+    // Outline (clear and cheap).
+    draw_line(x0, y0, x1, y0, 0.2, 0.8, 1.0, 1.0);
+    draw_line(x1, y0, x1, y1, 0.2, 0.8, 1.0, 1.0);
+    draw_line(x1, y1, x0, y1, 0.2, 0.8, 1.0, 1.0);
+    draw_line(x0, y1, x0, y0, 0.2, 0.8, 1.0, 1.0);
+}
+
+function draw_balls(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_BALLS; i = i + 1) {
+        if (!balls[i].active) { continue; }
+        game_draw_circle(balls[i].x, balls[i].y, BALL_RADIUS, 1.0, 0.7, 0.2, 1.0);
+    }
+}
+
+function draw_ui(): void {
+    if (ui_font == 0) { return; }
+    ascii_clear(ui_ascii);
+    ascii_append(ui_ascii, "Catches: ");
+    ascii_append_i32(ui_ascii, catches);
+    ascii_append(ui_ascii, "  Misses: ");
+    ascii_append_i32(ui_ascii, misses);
+    from_ascii(ui_text, ui_ascii, 64);
+
+    draw_text(ui_font, ui_text, 12.0, 10.0, 0.9, 0.9, 0.9, 1.0);
+}
+
+function main(): i32 {
+    init_game();
+
+    if (!init_window(SCREEN_W, SCREEN_H, "Bucket Catcher")) {
+        return 1;
+    }
+
+    // Fonts depend on the graphics context, so load them after the window exists.
+    ui_font = load_font(FONT_PATH, FONT_SIZE_PX);
+
+    while (!should_quit()) {
+        update_input();
+        update_bucket();
+        update_spawns();
+        update_balls();
+
+        begin_frame();
+        clear(0.05, 0.07, 0.1, 1.0);
+        draw_balls();
+        draw_bucket();
+        draw_ui();
+        end_frame();
+    }
+
+    return 0;
+}
