@@ -11,6 +11,11 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Demonstrate keyboard + pointer input.
 // - Keep state in explicit globals (no hidden allocation).
 // - Keep most tuning data in JSON so learners can edit without recompiling.
+//
+// Config binding:
+// - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
+// - The runtime runner binds matching keys into the global state (see --data-bind).
+// - We still provide defaults in ensure_config_loaded() so the sample runs anywhere.
 
 const FONT_PATH: string = "docs/assets/fonts/dejavu-sans-mono.ttf";
 const MAX_BALLS: i32 = 24;
