@@ -193,6 +193,25 @@ function ensure_window(): bool {
         f32_to_i32(state.config.ball_radius * 2.0),
         f32_to_i32(state.config.ball_radius * 2.0)
     );
+
+    if (state.ui_font == 0) {
+        print_string("error: failed to load font: ");
+        print_string(state.config.font_path);
+        print_string("\n");
+        return false;
+    }
+    if (state.bucket_sprite == 0) {
+        print_string("error: failed to load bucket sprite: ");
+        print_string(state.config.bucket_sprite_path);
+        print_string("\n");
+        return false;
+    }
+    if (state.ball_sprite == 0) {
+        print_string("error: failed to load ball sprite: ");
+        print_string(state.config.ball_sprite_path);
+        print_string("\n");
+        return false;
+    }
     return true;
 }
 
@@ -277,41 +296,29 @@ function draw_bucket(): void {
     let x1: f32 = state.bucket_x + state.config.bucket_width * 0.5;
     let y1: f32 = y0 + state.config.bucket_height;
 
-    if (state.bucket_sprite != 0) {
-        gfx_draw_sprite(
-            state.bucket_sprite,
-            f32_to_i32(x0),
-            f32_to_i32(y0),
-            f32_to_i32(state.config.bucket_width),
-            f32_to_i32(state.config.bucket_height),
-            0,
-            255
-        );
-    } else {
-        // Outline fallback (clear and cheap).
-        draw_line(x0, y0, x1, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-        draw_line(x1, y0, x1, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-        draw_line(x1, y1, x0, y1, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-        draw_line(x0, y1, x0, y0, state.config.bucket_red, state.config.bucket_green, state.config.bucket_blue, 1.0);
-    }
+    gfx_draw_sprite(
+        state.bucket_sprite,
+        f32_to_i32(x0),
+        f32_to_i32(y0),
+        f32_to_i32(state.config.bucket_width),
+        f32_to_i32(state.config.bucket_height),
+        0,
+        255
+    );
 }
 
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            if (state.ball_sprite != 0) {
-                gfx_draw_sprite(
-                    state.ball_sprite,
-                    f32_to_i32(ball.x - state.config.ball_radius),
-                    f32_to_i32(ball.y - state.config.ball_radius),
-                    f32_to_i32(state.config.ball_radius * 2.0),
-                    f32_to_i32(state.config.ball_radius * 2.0),
-                    0,
-                    255
-                );
-            } else {
-                game_draw_circle(ball.x, ball.y, state.config.ball_radius, state.config.ball_red, state.config.ball_green, state.config.ball_blue, 1.0);
-            }
+            gfx_draw_sprite(
+                state.ball_sprite,
+                f32_to_i32(ball.x - state.config.ball_radius),
+                f32_to_i32(ball.y - state.config.ball_radius),
+                f32_to_i32(state.config.ball_radius * 2.0),
+                f32_to_i32(state.config.ball_radius * 2.0),
+                0,
+                255
+            );
         }
     }
 }
