@@ -16,7 +16,7 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
 // - The runtime runner binds matching keys into the global state (see --data-bind).
-// - We require JSON binding; missing fields are treated as errors.
+// - We require JSON binding; json_loaded must be true.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
 
 const MAX_BALLS: i32 = 24;
@@ -77,7 +77,6 @@ struct GameState {
     ui_text: utf8[64];
 
     rng_state: i32;
-    initialized: bool;
 }
 
 // Single global state block (instructional style).
@@ -108,68 +107,6 @@ function ensure_config_loaded(): void {
     print_string("error: config.json not bound; start the sample with data binding enabled.\n");
 }
 
-function validate_config(): bool {
-    let ok: bool = true;
-
-    if (!state.config.json_loaded) {
-        return false;
-    }
-    if (state.config.screen_width < 1 || state.config.screen_height < 1) {
-        print_string("error: config.screen_width and config.screen_height must be > 0\n");
-        ok = false;
-    }
-    if (state.config.font_path == "") {
-        print_string("error: config.font_path is required\n");
-        ok = false;
-    }
-    if (state.config.font_size_pixels < 1) {
-        print_string("error: config.font_size_pixels must be > 0\n");
-        ok = false;
-    }
-    if (state.config.bucket_sprite_path == "") {
-        print_string("error: config.bucket_sprite_path is required\n");
-        ok = false;
-    }
-    if (state.config.ball_sprite_path == "") {
-        print_string("error: config.ball_sprite_path is required\n");
-        ok = false;
-    }
-    if (state.config.tick_delta_seconds <= 0.0) {
-        print_string("error: config.tick_delta_seconds must be > 0\n");
-        ok = false;
-    }
-    if (state.config.bucket_width <= 0.0 || state.config.bucket_height <= 0.0) {
-        print_string("error: config.bucket_width and config.bucket_height must be > 0\n");
-        ok = false;
-    }
-    if (state.config.bucket_speed <= 0.0) {
-        print_string("error: config.bucket_speed must be > 0\n");
-        ok = false;
-    }
-    if (state.config.bucket_turn_rate <= 0.0) {
-        print_string("error: config.bucket_turn_rate must be > 0\n");
-        ok = false;
-    }
-    if (state.config.ball_radius <= 0.0) {
-        print_string("error: config.ball_radius must be > 0\n");
-        ok = false;
-    }
-    if (state.config.ball_fall_speed <= 0.0) {
-        print_string("error: config.ball_fall_speed must be > 0\n");
-        ok = false;
-    }
-    if (state.config.ball_spawn_seconds <= 0.0) {
-        print_string("error: config.ball_spawn_seconds must be > 0\n");
-        ok = false;
-    }
-
-    if (!ok) {
-        print_string("hint: check samples/bucket_catcher/data/config.json\n");
-    }
-
-    return ok;
-}
-
 function clamp(v: f32, lo: f32, hi: f32): f32 {
     if (v < lo) { return lo; }
     if (v > hi) { return hi; }
@@ -177,26 +114,20 @@ function clamp(v: f32, lo: f32, hi: f32): f32 {
 }
 
 function init_game(): void {
-    if (!state.initialized) {
-        state.initialized = true;
-        ensure_config_loaded();
-        if (!state.config.json_loaded) {
-            return;
-        }
-        if (!validate_config()) {
-            return;
-        }
-        seed_rng(get_time_ms());
+    ensure_config_loaded();
+    if (!state.config.json_loaded) {
+        return;
+    }
+    seed_rng(get_time_ms());
 
-        state.bucket_x = i32_to_f32(state.config.screen_width) * 0.5;
-        state.bucket_target_x = state.bucket_x;
-        state.catches = 0;
-        state.misses = 0;
-        state.spawn_timer_seconds = 0.0;
+    state.bucket_x = i32_to_f32(state.config.screen_width) * 0.5;
+    state.bucket_target_x = state.bucket_x;
+    state.catches = 0;
+    state.misses = 0;
+    state.spawn_timer_seconds = 0.0;
 
-        foreach (let ball in state.balls) {
-            ball.active = false;
-        }
+    foreach (let ball in state.balls) {
+        ball.active = false;
     }
 }
 
@@ -364,9 +295,6 @@ function draw_ui(): void {
 }
 
 function tick(): i32 {
-    if (!state.initialized) {
-        return 1;
-    }
     if (!state.config.json_loaded || state.ui_font == 0 || state.bucket_sprite == 0 || state.ball_sprite == 0) {
         return 1;
     }
