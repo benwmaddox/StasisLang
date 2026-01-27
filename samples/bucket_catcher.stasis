@@ -16,7 +16,7 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
 // - The runtime runner binds matching keys into the global state (see --data-bind).
-// - We still provide defaults in ensure_config_loaded() so the sample runs anywhere.
+// - We require JSON binding; missing fields are treated as errors.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
 
 const MAX_BALLS: i32 = 24;
@@ -102,23 +102,72 @@ function rand_range_f32(min_v: f32, max_v: f32): f32 {
 
 function ensure_config_loaded(): void {
     if (state.config.json_loaded) {
-        if (state.config.screen_width < 1 || state.config.screen_height < 1) {
-            state.config.screen_width = 480;
-            state.config.screen_height = 800;
-        }
-        if (state.config.font_path == "") {
-            state.config.font_path = "docs/assets/fonts/dejavu-sans-mono.ttf";
-        }
-        if (state.config.bucket_sprite_path == "") {
-            state.config.bucket_sprite_path = "samples/bucket_catcher/assets/bucket.png";
-        }
-        if (state.config.ball_sprite_path == "") {
-            state.config.ball_sprite_path = "samples/bucket_catcher/assets/ball.png";
-        }
         return;
     }
 
     print_string("error: config.json not bound; start the sample with data binding enabled.\n");
+}
+
+function validate_config(): bool {
+    let ok: bool = true;
+
+    if (!state.config.json_loaded) {
+        return false;
+    }
+    if (state.config.screen_width < 1 || state.config.screen_height < 1) {
+        print_string("error: config.screen_width and config.screen_height must be > 0\n");
+        ok = false;
+    }
+    if (state.config.font_path == "") {
+        print_string("error: config.font_path is required\n");
+        ok = false;
+    }
+    if (state.config.font_size_pixels < 1) {
+        print_string("error: config.font_size_pixels must be > 0\n");
+        ok = false;
+    }
+    if (state.config.bucket_sprite_path == "") {
+        print_string("error: config.bucket_sprite_path is required\n");
+        ok = false;
+    }
+    if (state.config.ball_sprite_path == "") {
+        print_string("error: config.ball_sprite_path is required\n");
+        ok = false;
+    }
+    if (state.config.tick_delta_seconds <= 0.0) {
+        print_string("error: config.tick_delta_seconds must be > 0\n");
+        ok = false;
+    }
+    if (state.config.bucket_width <= 0.0 || state.config.bucket_height <= 0.0) {
+        print_string("error: config.bucket_width and config.bucket_height must be > 0\n");
+        ok = false;
+    }
+    if (state.config.bucket_speed <= 0.0) {
+        print_string("error: config.bucket_speed must be > 0\n");
+        ok = false;
+    }
+    if (state.config.bucket_turn_rate <= 0.0) {
+        print_string("error: config.bucket_turn_rate must be > 0\n");
+        ok = false;
+    }
+    if (state.config.ball_radius <= 0.0) {
+        print_string("error: config.ball_radius must be > 0\n");
+        ok = false;
+    }
+    if (state.config.ball_fall_speed <= 0.0) {
+        print_string("error: config.ball_fall_speed must be > 0\n");
+        ok = false;
+    }
+    if (state.config.ball_spawn_seconds <= 0.0) {
+        print_string("error: config.ball_spawn_seconds must be > 0\n");
+        ok = false;
+    }
+
+    if (!ok) {
+        print_string("hint: check samples/bucket_catcher/data/config.json\n");
+    }
+
+    return ok;
 }
 
 function clamp(v: f32, lo: f32, hi: f32): f32 {
@@ -132,6 +181,9 @@ function init_game(): void {
         state.initialized = true;
         ensure_config_loaded();
         if (!state.config.json_loaded) {
+            return;
+        }
+        if (!validate_config()) {
             return;
         }
         seed_rng(get_time_ms());
