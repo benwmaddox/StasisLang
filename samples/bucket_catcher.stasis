@@ -118,34 +118,7 @@ function ensure_config_loaded(): void {
         return;
     }
 
-    // Defaults for when JSON binding is not present.
-    state.config.screen_width = 480;
-    state.config.screen_height = 800;
-    state.config.font_path = "docs/assets/fonts/dejavu-sans-mono.ttf";
-    state.config.font_size_pixels = 20;
-    state.config.bucket_sprite_path = "samples/bucket_catcher/assets/bucket.png";
-    state.config.ball_sprite_path = "samples/bucket_catcher/assets/ball.png";
-    state.config.tick_delta_seconds = 1.0 / 60.0;
-    state.config.bucket_width = 110.0;
-    state.config.bucket_height = 20.0;
-    state.config.bucket_bottom_padding = 24.0;
-    state.config.bucket_speed = 520.0;
-    state.config.bucket_turn_rate = 10.0;
-    state.config.ball_radius = 10.0;
-    state.config.ball_fall_speed = 240.0;
-    state.config.ball_spawn_seconds = 0.65;
-    state.config.background_red = 0.05;
-    state.config.background_green = 0.07;
-    state.config.background_blue = 0.10;
-    state.config.bucket_red = 0.2;
-    state.config.bucket_green = 0.8;
-    state.config.bucket_blue = 1.0;
-    state.config.ball_red = 1.0;
-    state.config.ball_green = 0.7;
-    state.config.ball_blue = 0.2;
-    state.config.ui_red = 0.9;
-    state.config.ui_green = 0.9;
-    state.config.ui_blue = 0.9;
+    print_string("error: config.json not bound; start the sample with data binding enabled.\n");
 }
 
 function clamp(v: f32, lo: f32, hi: f32): f32 {
@@ -158,6 +131,9 @@ function init_game(): void {
     if (!state.initialized) {
         state.initialized = true;
         ensure_config_loaded();
+        if (!state.config.json_loaded) {
+            return;
+        }
         seed_rng(get_time_ms());
 
         state.bucket_x = i32_to_f32(state.config.screen_width) * 0.5;
@@ -336,7 +312,10 @@ function draw_ui(): void {
 }
 
 function tick(): i32 {
-    if (!state.initialized || state.ui_font == 0) {
+    if (!state.initialized) {
+        return 1;
+    }
+    if (!state.config.json_loaded || state.ui_font == 0 || state.bucket_sprite == 0 || state.ball_sprite == 0) {
         return 1;
     }
 
