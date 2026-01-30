@@ -1,0 +1,6 @@
+// Host-owned input snapshot.
+// Import this to bind a global `input` populated by the runtime each tick.
+
+import "stdlib/input_snapshot.stasis";
+
+global input: InputSnapshot;

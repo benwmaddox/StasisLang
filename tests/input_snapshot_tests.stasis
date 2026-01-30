@@ -1,106 +1,76 @@
-import "../src/host_frame.stasis";
-import "../src/stdlib/input_snapshot.stasis";
-import "../src/stdlib/input_snapshot_host.stasis";
+import "../src/host_input_snapshot.stasis";
 
 const KEY_A: i32 = 4; // SDL scancode A
 
 struct InputTestState {
-    input: InputSnapshot;
     score: i32;
     taps_seen: i32;
 }
 
 global test_state: InputTestState;
-global prev_keys: i32[512];
-
-function fake_host_key(scancode: i32, down: i32): void {
-    if (scancode < 0 || scancode >= INPUT_MAX_KEYS) { return; }
-    host_i32[HOST_I_KEY_BASE + scancode] = down;
-}
-
-function fake_host_pointer(idx: i32, id: i32, x_px: f32, y_px: f32, is_down: i32, went_down: i32, went_up: i32): void {
-    if (idx < 0 || idx >= INPUT_MAX_POINTERS) { return; }
-    let i_base: i32 = HOST_I_POINTER_BASE + idx * HOST_I_POINTER_STRIDE;
-    let f_base: i32 = HOST_F_POINTER_BASE + idx * HOST_F_POINTER_STRIDE;
-    host_i32[i_base + 0] = id;
-    host_i32[i_base + 1] = is_down;
-    host_i32[i_base + 2] = went_down;
-    host_i32[i_base + 3] = went_up;
-    host_f32[f_base + 0] = x_px;
-    host_f32[f_base + 1] = y_px;
-    host_f32[f_base + 2] = 0.0;
-    host_f32[f_base + 3] = 0.0;
-    host_f32[f_base + 4] = 0.0;
-    host_f32[f_base + 5] = 0.0;
-}
 
 function apply_input(): void {
     test_state.score = 0;
     test_state.taps_seen = 0;
-    if (test_state.input.key_down[KEY_A] != 0) {
+    if (input.key_down[KEY_A] != 0) {
         test_state.score = test_state.score + 10;
     }
     let i: i32 = 0;
-    for (i = 0; i < test_state.input.pointer_count; i = i + 1) {
-        if (test_state.input.pointer_went_down[i] != 0) {
+    for (i = 0; i < input.pointer_count; i = i + 1) {
+        if (input.pointer_went_down[i] != 0) {
             test_state.score = test_state.score + 3;
             test_state.taps_seen = test_state.taps_seen + 1;
         }
     }
-    if (test_state.input.mouse_clicked) {
+    if (input.mouse_clicked != 0) {
         test_state.score = test_state.score + 2;
     }
 }
 
 test `input snapshot clear resets globals`() {
-    test_state.input.key_down[KEY_A] = 1;
-    test_state.input.pointer_count = 2;
-    test_state.input.pointer_x_px[0] = 10;
-    test_state.input.mouse_down = true;
+    input.key_down[KEY_A] = 1;
+    input.pointer_count = 2;
+    input.pointer_x_px[0] = 10;
+    input.mouse_down = 1;
     test_state.score = 7;
     test_state.clear();
-    return test_state.input.key_down[KEY_A] == 0
-        && test_state.input.pointer_count == 0
-        && test_state.input.pointer_x_px[0] == 0
-        && !test_state.input.mouse_down
+    input.clear();
+    return input.key_down[KEY_A] == 0
+        && input.pointer_count == 0
+        && input.pointer_x_px[0] == 0
+        && input.mouse_down == 0
         && test_state.score == 0;
 }
 
 test `input snapshot fake user input`(): bool {
     test_state.clear();
-    prev_keys.clear();
-    host_i32.clear();
-    host_f32.clear();
+    input.clear();
+    input.key_down[KEY_A] = 1;
+    input.key_went_down[KEY_A] = 1;
+    input.pointer_count = 2;
+    input.pointer_id[0] = 0;
+    input.pointer_x_px[0] = 100;
+    input.pointer_y_px[0] = 50;
+    input.pointer_is_down[0] = 1;
+    input.pointer_went_down[0] = 1;
+    input.pointer_went_up[0] = 1;
+    input.pointer_id[1] = 14;
+    input.pointer_x_px[1] = 140;
+    input.pointer_y_px[1] = 60;
+    input.pointer_went_down[1] = 1;
+    input.pointer_went_up[1] = 1;
+    input.mouse_x_px = 100;
+    input.mouse_y_px = 50;
+    input.mouse_down = 1;
+    input.mouse_clicked = 1;
 
-    fake_host_key(KEY_A, 1);
-    host_i32[HOST_I_POINTER_COUNT] = 2;
-    fake_host_pointer(0, 0, 100.0, 50.0, 1, 1, 1);
-    fake_host_pointer(1, 14, 140.0, 60.0, 0, 1, 1);
-
-    input_snapshot_read_keys_from_snapshot(prev_keys, host_i32, test_state.input.key_down, test_state.input.key_went_down, test_state.input.key_went_up);
-    test_state.input.pointer_count = input_snapshot_read_pointers_from_snapshot(
-        host_i32,
-        host_f32,
-        test_state.input.pointer_id,
-        test_state.input.pointer_x_px,
-        test_state.input.pointer_y_px,
-        test_state.input.pointer_is_down,
-        test_state.input.pointer_went_down,
-        test_state.input.pointer_went_up);
-    let mouse_i_base: i32 = HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE;
-    let mouse_f_base: i32 = HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE;
-    test_state.input.mouse_x_px = f32_to_i32(host_f32[mouse_f_base + 0]);
-    test_state.input.mouse_y_px = f32_to_i32(host_f32[mouse_f_base + 1]);
-    test_state.input.mouse_down = host_i32[mouse_i_base + 1] != 0;
-    test_state.input.mouse_clicked = host_i32[mouse_i_base + 3] != 0;
     apply_input();
-    input_snapshot_commit_prev_keys_from_snapshot(prev_keys, host_i32);
-    return test_state.input.key_down[KEY_A] == 1
-        && test_state.input.key_went_down[KEY_A] == 1
-        && test_state.input.pointer_count == 2
-        && test_state.input.pointer_went_up[1] != 0
-        && test_state.input.mouse_x_px == 100
-        && test_state.input.mouse_clicked
+    return input.key_down[KEY_A] == 1
+        && input.key_went_down[KEY_A] == 1
+        && input.pointer_count == 2
+        && input.pointer_went_up[1] != 0
+        && input.mouse_x_px == 100
+        && input.mouse_clicked != 0
         && test_state.score == 18
         && test_state.taps_seen == 2;
 }

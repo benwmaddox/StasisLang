@@ -19,6 +19,6 @@ struct InputSnapshot {
 
     mouse_x_px: i32;
     mouse_y_px: i32;
-    mouse_down: bool;
-    mouse_clicked: bool;
+    mouse_down: i32;
+    mouse_clicked: i32;
 }
