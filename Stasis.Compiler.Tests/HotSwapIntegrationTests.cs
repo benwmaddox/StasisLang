@@ -55,6 +55,11 @@ public sealed class HotSwapIntegrationTests
             psi.EnvironmentVariables["STASIS_CRANELIFT_AOT"] = aotExe;
             psi.EnvironmentVariables["STASIS_CRANELIFT_RUNNER_EXE"] = runnerExe;
             psi.EnvironmentVariables["PATH"] = clangExeDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+            var clangExe = Path.Combine(clangExeDir, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
+            if (File.Exists(clangExe))
+            {
+                psi.EnvironmentVariables["STASIS_CLANG"] = clangExe;
+            }
 
             proc = Process.Start(psi);
             Assert.NotNull(proc);
@@ -749,14 +754,17 @@ public sealed class HotSwapIntegrationTests
     private static string? FindRunnerExe(string repoRoot)
     {
         var exe = OperatingSystem.IsWindows() ? "stasis_runner.exe" : "stasis_runner";
-        var p = Path.Combine(repoRoot, exe);
-        if (File.Exists(p))
+        var candidates = new[]
         {
-            return p;
-        }
+            Path.Combine(repoRoot, exe),
+            Path.Combine(repoRoot, "build", exe),
+            Path.Combine(repoRoot, "runtime", "build", "bin", "Release", exe),
+            Path.Combine(repoRoot, "runtime", "build", "bin", "Debug", exe),
+            Path.Combine(repoRoot, "runtime", "build", "bin", exe),
+            Path.Combine(repoRoot, "runtime", "build", exe)
+        };
 
-        var p2 = Path.Combine(repoRoot, "build", exe);
-        return File.Exists(p2) ? p2 : null;
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     private static string? FindCraneliftAotExe(string repoRoot)
@@ -784,11 +792,58 @@ public sealed class HotSwapIntegrationTests
                 return p;
             }
         }
+
+        if (TryBuildCraneliftJitRunner(repoRoot))
+        {
+            var built = Path.Combine(repoRoot, "tools", "cranelift-jit-runner", "target", "release", exe);
+            if (File.Exists(built))
+            {
+                return built;
+            }
+        }
         return null;
+    }
+
+    private static bool TryBuildCraneliftJitRunner(string repoRoot)
+    {
+        try
+        {
+            var cargo = OperatingSystem.IsWindows() ? "cargo.exe" : "cargo";
+            var toolDir = Path.Combine(repoRoot, "tools", "cranelift-jit-runner");
+            if (!Directory.Exists(toolDir))
+            {
+                return false;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = cargo,
+                Arguments = "build -p stasis-cranelift-jit-runner --release",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = toolDir
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return false;
+            }
+            process.WaitForExit();
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? FindClangBinDir(string repoRoot)
     {
+        var clangExe = OperatingSystem.IsWindows() ? "clang.exe" : "clang";
+        var candidates = new List<string>();
+
         // Prefer pinned LLVM under .tools/.
         var toolsDir = Path.Combine(repoRoot, ".tools");
         if (Directory.Exists(toolsDir))
@@ -800,10 +855,9 @@ public sealed class HotSwapIntegrationTests
             foreach (var llvmDir in llvmDirs)
             {
                 var bin = Path.Combine(llvmDir, "bin");
-                var clang = Path.Combine(bin, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
-                if (File.Exists(clang))
+                if (File.Exists(Path.Combine(bin, clangExe)))
                 {
-                    return bin;
+                    candidates.Add(bin);
                 }
             }
         }
@@ -812,14 +866,78 @@ public sealed class HotSwapIntegrationTests
         var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         foreach (var part in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            var clang = Path.Combine(part, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
-            if (File.Exists(clang))
+            if (File.Exists(Path.Combine(part, clangExe)))
             {
-                return part;
+                candidates.Add(part);
             }
         }
 
-        return null;
+        var best = PickBestClangBin(candidates);
+        return best ?? candidates.FirstOrDefault();
+    }
+
+    private static string? PickBestClangBin(IEnumerable<string> bins)
+    {
+        const int minOpaquePtrMajor = 15;
+        var best = (path: (string?)null, version: -1);
+
+        foreach (var bin in bins.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var clangPath = Path.Combine(bin, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
+            if (!File.Exists(clangPath))
+            {
+                continue;
+            }
+
+            if (TryGetClangMajorVersion(clangPath, out var major))
+            {
+                if (major >= minOpaquePtrMajor && major > best.version)
+                {
+                    best = (bin, major);
+                }
+            }
+        }
+
+        return best.path;
+    }
+
+    private static bool TryGetClangMajorVersion(string clangPath, out int major)
+    {
+        major = 0;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = clangPath,
+                Arguments = "--version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using var proc = Process.Start(psi);
+            if (proc is null)
+            {
+                return false;
+            }
+            var line = proc.StandardOutput.ReadLine() ?? string.Empty;
+            proc.WaitForExit(2000);
+            var idx = line.IndexOf("version ", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return false;
+            }
+            var ver = line[(idx + "version ".Length)..];
+            var dot = ver.IndexOf('.');
+            if (dot < 0)
+            {
+                return false;
+            }
+            return int.TryParse(ver[..dot], out major);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static IEnumerable<string> GuessBuildConfigs()
