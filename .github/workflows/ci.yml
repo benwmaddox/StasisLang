@@ -7,6 +7,8 @@ concurrency:
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
@@ -30,6 +32,11 @@ jobs:
         run: |
           set -euo pipefail
           dispatch_ref="${{ inputs.ref }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "PR runs are deferred to the quiet-period dispatcher."
+            exit 1
+          fi
 
           if [ -n "$dispatch_ref" ]; then
             echo "workflow_dispatch with ref=$dispatch_ref"
