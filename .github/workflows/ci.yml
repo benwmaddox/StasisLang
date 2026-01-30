@@ -5,7 +5,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.ref || github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 on:
@@ -33,7 +33,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dispatch_ref="${{ inputs.ref }}"
+          dispatch_ref="${{ github.event.inputs.ref }}"
 
           if [ -n "$dispatch_ref" ]; then
             echo "workflow_dispatch with ref=$dispatch_ref"
@@ -95,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
