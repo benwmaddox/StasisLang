@@ -18,6 +18,8 @@ fi
 
 export STASIS_ASSET_ROOT="${script_dir}"
 export STASIS_USE_SDL=1
+: "${STASIS_DISABLE_AUDIO:=1}"
+: "${SDL_AUDIODRIVER:=dummy}"
 
 : "${STASIS_CRANELIFT_JIT_RUNNER:=0}"
 : "${STASIS_JIT_WATCHDOG_MS:=15000}"
@@ -25,4 +27,3 @@ export STASIS_USE_SDL=1
 exec ./stasis.sh run "samples/brickout_revenge/brickout_revenge_v1.stasis" \
   --watch --backend cranelift --graphics --module brick --fps 60 \
   "$@"
-
