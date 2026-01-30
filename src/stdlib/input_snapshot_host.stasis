@@ -89,3 +89,7 @@ function input_snapshot_read_pointers_from_snapshot(snapshot_i32: i32[768], snap
 function input_snapshot_commit_prev_keys(prev_keys: i32[512]): void {
     mem_copy_i32(prev_keys, INPUT_MAX_KEYS, 0, host_i32, HOST_I32_COUNT, HOST_I_KEY_BASE, INPUT_MAX_KEYS);
 }
+
+function input_snapshot_commit_prev_keys_from_snapshot(prev_keys: i32[512], snapshot_i32: i32[768]): void {
+    mem_copy_i32(prev_keys, INPUT_MAX_KEYS, 0, snapshot_i32, HOST_I32_COUNT, HOST_I_KEY_BASE, INPUT_MAX_KEYS);
+}

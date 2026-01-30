@@ -3,8 +3,8 @@
 import "../host_frame.stasis";
 import "memory.stasis";
 
-const HOST_SNAPSHOT_I32_COUNT: i32 = HOST_I32_COUNT;
-const HOST_SNAPSHOT_F32_COUNT: i32 = HOST_F32_COUNT;
+const HOST_SNAPSHOT_I32_COUNT: i32 = 768;
+const HOST_SNAPSHOT_F32_COUNT: i32 = 64;
 
 struct HostFrameSnapshot {
     i32: i32[768];
