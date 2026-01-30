@@ -9,9 +9,77 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
 
 jobs:
+  precheck:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - name: Decide if CI should run
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY}"
+          api="https://api.github.com"
+          auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept_header="Accept: application/vnd.github+json"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            latest_sha="${{ github.event.pull_request.head.sha }}"
+            latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+              "$api/repos/$repo/commits/$latest_sha")
+            latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
+
+            last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+              "$api/repos/$repo/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=1")
+            last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
+          else
+            latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+              "$api/repos/$repo/commits/main")
+            latest_sha=$(echo "$latest_commit_json" | jq -r '.sha')
+            latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
+
+            last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+              "$api/repos/$repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1")
+            last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
+          fi
+
+          now_epoch=$(date +%s)
+          latest_epoch=$(date -d "$latest_date" +%s)
+          age_minutes=$(( (now_epoch - latest_epoch) / 60 ))
+
+          if [ -n "$last_success_sha" ] && [ "$last_success_sha" = "$latest_sha" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "No new commits since last successful CI on PR head ($latest_sha)."
+            else
+              echo "No new commits since last successful CI on main ($latest_sha)."
+            fi
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no_new_commits" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$age_minutes" -lt 30 ]; then
+            echo "Latest commit is ${age_minutes} minutes old (<30)."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=quiet_period" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "reason=ready" >> "$GITHUB_OUTPUT"
+
   build-test:
+    needs: precheck
+    if: needs.precheck.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
