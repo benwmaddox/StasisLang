@@ -39,8 +39,14 @@ jobs:
             latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
 
             last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
-              "$api/repos/$repo/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=1")
-            last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
+              "$api/repos/$repo/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=100")
+            pr_number="${{ github.event.pull_request.number }}"
+            last_success_sha=$(echo "$last_success_json" | jq -r --argjson pr "$pr_number" '
+              .workflow_runs
+              | map(select(.pull_requests[]?.number == $pr))
+              | first
+              | .head_sha // empty
+            ')
           else
             latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
               "$api/repos/$repo/commits/main")
