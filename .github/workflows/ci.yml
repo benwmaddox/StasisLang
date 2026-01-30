@@ -1,17 +1,20 @@
 name: CI
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref (branch or SHA) to build; used by PR dispatcher"
+        required: false
+        type: string
 
 jobs:
   precheck:
@@ -26,37 +29,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          dispatch_ref="${{ inputs.ref }}"
+
+          if [ -n "$dispatch_ref" ]; then
+            echo "workflow_dispatch with ref=$dispatch_ref"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=dispatch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           repo="${GITHUB_REPOSITORY}"
           api="https://api.github.com"
           auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
           accept_header="Accept: application/vnd.github+json"
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            latest_sha="${{ github.event.pull_request.head.sha }}"
-            latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
-              "$api/repos/$repo/commits/$latest_sha")
-            latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
+          latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/commits/main")
+          latest_sha=$(echo "$latest_commit_json" | jq -r '.sha')
+          latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
 
-            last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
-              "$api/repos/$repo/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=100")
-            pr_number="${{ github.event.pull_request.number }}"
-            last_success_sha=$(echo "$last_success_json" | jq -r --argjson pr "$pr_number" '
-              .workflow_runs
-              | map(select(.pull_requests[]?.number == $pr))
-              | first
-              | .head_sha // empty
-            ')
-          else
-            latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
-              "$api/repos/$repo/commits/main")
-            latest_sha=$(echo "$latest_commit_json" | jq -r '.sha')
-            latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
-
-            last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
-              "$api/repos/$repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1")
-            last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
-          fi
+          last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1")
+          last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
 
           now_epoch=$(date +%s)
           latest_epoch=$(date -d "$latest_date" +%s)
@@ -96,6 +90,8 @@ jobs:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
