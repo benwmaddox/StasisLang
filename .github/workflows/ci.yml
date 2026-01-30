@@ -1,5 +1,9 @@
 name: CI
 
+permissions:
+  contents: read
+  statuses: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -34,8 +38,19 @@ jobs:
           dispatch_ref="${{ inputs.ref }}"
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "PR runs are deferred to the quiet-period dispatcher."
-            exit 1
+            repo="${GITHUB_REPOSITORY}"
+            api="https://api.github.com"
+            auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+            accept_header="Accept: application/vnd.github+json"
+            pr_sha="${{ github.event.pull_request.head.sha }}"
+
+            curl -s -X POST -H "$auth_header" -H "$accept_header" \
+              "$api/repos/$repo/statuses/$pr_sha" \
+              -d '{"state":"pending","context":"ci/quiet","description":"Waiting on scheduled test run"}' > /dev/null
+
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=pr_waiting" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           if [ -n "$dispatch_ref" ]; then
@@ -183,3 +198,33 @@ jobs:
 
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
+
+  pr-status:
+    needs: build-test
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update PR quiet status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          api="https://api.github.com"
+          auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept_header="Accept: application/vnd.github+json"
+          ref="${{ inputs.ref }}"
+
+          ref_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/git/ref/heads/$ref")
+          sha=$(echo "$ref_json" | jq -r '.object.sha')
+
+          case "${{ needs.build-test.result }}" in
+            success) state="success" ;;
+            cancelled) state="error" ;;
+            *) state="failure" ;;
+          esac
+
+          curl -s -X POST -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/statuses/$sha" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/quiet\",\"description\":\"Scheduled CI run completed\"}" > /dev/null
