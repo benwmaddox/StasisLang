@@ -375,6 +375,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     var fileStopwatch = System.Diagnostics.Stopwatch.StartNew();
     var logPhaseTiming = Environment.GetEnvironmentVariable("STASIS_PHASE_TIMING") == "1";
     var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var entryAssetRoot = GetEntryAssetRoot(path);
     long readMs = 0;
     long parseMs = 0;
     long semaMs = 0;
@@ -511,7 +512,10 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         if (lowerDiagnostics.Count > 0)
         {
             PrintDiagnostics(lowerDiagnostics, source, path);
-            WriteIrOutput(ir, outputPath);
+            if (!string.Equals(mode, "run", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteIrOutput(ir, outputPath);
+            }
             return 1;
         }
 
@@ -567,9 +571,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var entryName = $"{moduleName}__{entryBase}";
                     if (useCraneliftRunner)
                     {
-                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, tickHostFps: hasTick ? tickHostFps : null);
+                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
                     }
-                    return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
+                    return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath, entryAssetRoot);
                 }
 
                 File.WriteAllText(cachedClif, ir);
@@ -598,7 +602,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var runSw = Stopwatch.StartNew();
                     var entryBase = mode == "test" ? "run_tests" : "main";
                     var entryName = $"{moduleName}__{entryBase}";
-                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, tickHostFps: hasTick ? tickHostFps : null);
+                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -622,7 +626,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                         return ensureExit;
                     }
                     var runSw = Stopwatch.StartNew();
-                    var exit = RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath);
+                    var exit = RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath, entryAssetRoot);
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -682,8 +686,8 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 long runLink;
                 long runRun;
                 var runExit = useInMemoryClif
-                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun)
-                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, out runAotSpawn, out runAotCompile, out runLink, out runRun);
+                    ? ExecuteClifWithRunnerFromString(mode, ir, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, entryAssetRoot, out runAotSpawn, out runAotCompile, out runLink, out runRun)
+                    : ExecuteClifWithRunner(mode, tempClif, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, aotTool, moduleName, hotStatePlan, dataBindingPlan, dllExports, hasTick ? tickHostFps : (int?)null, entryAssetRoot, out runAotSpawn, out runAotCompile, out runLink, out runRun);
                 if (logPhaseTiming)
                 {
                     aotSpawnMs = runAotSpawn ?? 0;
@@ -720,7 +724,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return exitCode;
             }
 
-            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName);
+            var execExit = ExecuteObject(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, entryAssetRoot);
             if (logPhaseTiming)
             {
                 linkMs = phaseStopwatch.ElapsedMilliseconds;
@@ -748,7 +752,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             return exitCode;
         }
 
-        var executeExit = Execute(mode, tempLl, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
+        var executeExit = Execute(mode, tempLl, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryAssetRoot);
         if (logPhaseTiming)
         {
             llvmExecMs = phaseStopwatch.ElapsedMilliseconds;
@@ -786,7 +790,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
     }
 }
 
-static int ExecuteObject(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string moduleName)
+static int ExecuteObject(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string moduleName, string entryAssetRoot)
 {
     if (!TryFindTool("clang", out var clang))
     {
@@ -828,7 +832,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
                     }
                 }
             }
-        });
+        }, assetRoot: entryAssetRoot);
     }
     finally
     {
@@ -839,7 +843,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 }
 
-static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long linkMs, out long runMs)
+static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, string entryAssetRoot, out long linkMs, out long runMs)
 {
     linkMs = 0;
     runMs = 0;
@@ -879,7 +883,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         var entry = entryName;
         if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null)
         {
-            var runner = GetCraneliftRunnerServer(runnerPath);
+            var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
             return runner.Run(dllPath, entry, out runMs);
         }
 
@@ -910,7 +914,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         {
             runnerArgs += $" --fps {tickHostFps.Value}";
         }
-        var runExit = RunProcess(runnerPath, runnerArgs);
+        var runExit = RunProcess(runnerPath, runnerArgs, assetRoot: entryAssetRoot);
         runMs = runStopwatch.ElapsedMilliseconds;
         return runExit;
     }
@@ -930,7 +934,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 }
 
-static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, string entryAssetRoot, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -945,7 +949,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, entryAssetRoot, out linkMs, out runMs);
     }
     finally
     {
@@ -956,7 +960,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
     }
 }
 
-static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
+static int ExecuteClifWithRunnerFromString(string mode, string clif, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string aotTool, string moduleName, HotStatePlan? hotStatePlan, DataBindingPlan? dataBindingPlan, IReadOnlyList<string> dllExports, int? tickHostFps, string entryAssetRoot, out long? aotSpawnMs, out long aotCompileMs, out long linkMs, out long runMs)
 {
     aotSpawnMs = null;
     aotCompileMs = 0;
@@ -971,7 +975,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
             return aotExit;
         }
 
-        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, out linkMs, out runMs);
+        return ExecuteObjectWithRunner(mode, tempObj, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, moduleName, hotStatePlan, dataBindingPlan, dllExports, tickHostFps, entryAssetRoot, out linkMs, out runMs);
     }
     finally
     {
@@ -1340,7 +1344,7 @@ static string? FindRepoRoot()
     return null;
 }
 
-static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string? cachedExecutablePath = null, bool keepExecutable = false)
+static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, string? cachedExecutablePath = null, bool keepExecutable = false)
 {
     var cachedExecutableUsed = false;
     if (!string.IsNullOrWhiteSpace(cachedExecutablePath))
@@ -1383,21 +1387,27 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                     }
                 }
             }
-        });
+        }, assetRoot: entryAssetRoot);
     }
 
     // lli doesn't support external libraries easily, so use clang when graphics is enabled (or sys runtime is referenced).
     if (!enableGraphics && !LlvmIrUsesSysRuntime(llPath) && TryFindTool("lli", out var llvmInterpreter))
     {
-        return ExecuteWithLlvmInterpreter(llvmInterpreter, mode, llPath, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
+        return ExecuteWithLlvmInterpreter(llvmInterpreter, mode, llPath, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryAssetRoot);
     }
 
     if (TryFindTool("clang", out var clang))
     {
         var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+        string? testWrapperPath = null;
         try
         {
-            var args = BuildClangArgs(llPath, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
+            var llvmInput = llPath;
+            if (mode == "test")
+            {
+                llvmInput = EnsureLlvmTestEntrypoint(llPath, out testWrapperPath);
+            }
+            var args = BuildClangArgs(llvmInput, exePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
             var exit = RunProcess(clang, args, suppressOutput: true);
             if (exit != 0)
             {
@@ -1426,10 +1436,14 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                         }
                     }
                 }
-            });
+            }, assetRoot: entryAssetRoot);
         }
         finally
         {
+            if (!string.IsNullOrEmpty(testWrapperPath) && File.Exists(testWrapperPath))
+            {
+                File.Delete(testWrapperPath);
+            }
             if (!keepExecutable && File.Exists(exePath))
             {
                 File.Delete(exePath);
@@ -1461,6 +1475,35 @@ static bool LlvmIrUsesSysRuntime(string llPath)
     }
 
     return false;
+}
+
+static string EnsureLlvmTestEntrypoint(string llPath, out string? tempPath)
+{
+    tempPath = null;
+    if (!File.Exists(llPath))
+    {
+        return llPath;
+    }
+
+    var text = File.ReadAllText(llPath);
+    if (text.Contains("define i32 @main", StringComparison.Ordinal) ||
+        text.Contains("define i64 @main", StringComparison.Ordinal) ||
+        text.Contains("define void @main", StringComparison.Ordinal))
+    {
+        return llPath;
+    }
+
+    tempPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.test.ll");
+    var sb = new StringBuilder(text.Length + 256);
+    sb.AppendLine(text.TrimEnd());
+    sb.AppendLine();
+    sb.AppendLine("define i32 @main() {");
+    sb.AppendLine("entry:");
+    sb.AppendLine("  %result = call i32 @run_tests()");
+    sb.AppendLine("  ret i32 %result");
+    sb.AppendLine("}");
+    File.WriteAllText(tempPath, sb.ToString());
+    return tempPath;
 }
 
 static string BuildClangArgs(string llPath, string exePath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null)
@@ -1561,11 +1604,6 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
 
     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
-        if (isTest)
-        {
-            args.Add("-Wl,/entry:run_tests");
-        }
-
         args.Add("-Wl,/subsystem:console");
         args.Add("-Wl,/ignore:4210");
         args.Add("-Wl,/STACK:8388608");
@@ -1602,10 +1640,6 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
             args.Add("-loldnames");
         }
     }
-    else if (isTest)
-    {
-        args.Add("-Wl,-e,run_tests");
-    }
 
     if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
     {
@@ -1615,19 +1649,19 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
     return string.Join(" ", args);
 }
 
-static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries)
+static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot)
 {
     var interpreterArguments = mode == "test"
         ? $"-entry-function=run_tests \"{llvmIrPath}\""
         : $"\"{llvmIrPath}\"";
-    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments);
+    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, assetRoot: entryAssetRoot);
     if (interpreterExitCode == 0)
     {
         return 0;
     }
 
     // Retry with clang for stability if the interpreter fails (e.g., SIGSEGV on some inputs).
-    if (TryExecuteWithClangFallback(mode, llvmIrPath, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, out var clangExitCode))
+    if (TryExecuteWithClangFallback(mode, llvmIrPath, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryAssetRoot, out var clangExitCode))
     {
         return clangExitCode;
     }
@@ -1635,7 +1669,7 @@ static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, strin
     return interpreterExitCode;
 }
 
-static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, out int exitCode)
+static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, out int exitCode)
 {
     if (!TryFindTool("clang", out var clangPath))
     {
@@ -1644,9 +1678,15 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
     }
 
     var executablePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+    string? testWrapperPath = null;
     try
     {
-        var clangArguments = BuildClangArgs(llvmIrPath, executablePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
+        var llvmInput = llvmIrPath;
+        if (mode == "test")
+        {
+            llvmInput = EnsureLlvmTestEntrypoint(llvmIrPath, out testWrapperPath);
+        }
+        var clangArguments = BuildClangArgs(llvmInput, executablePath, mode == "test", optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries);
         var clangExitCode = RunProcess(clangPath, clangArguments, suppressOutput: true);
         if (clangExitCode != 0)
         {
@@ -1654,11 +1694,15 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
             return true;
         }
 
-        exitCode = RunProcess(executablePath, string.Empty);
+        exitCode = RunProcess(executablePath, string.Empty, assetRoot: entryAssetRoot);
         return true;
     }
     finally
     {
+        if (!string.IsNullOrEmpty(testWrapperPath) && File.Exists(testWrapperPath))
+        {
+            File.Delete(testWrapperPath);
+        }
         if (File.Exists(executablePath))
         {
             File.Delete(executablePath);
@@ -2395,17 +2439,14 @@ static string? GetLatestWindowsSdkLib()
 
 static bool TryFindTool(string name, out string path)
 {
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    // Lightweight override for non-standard installs (no repo-local toolchain required).
+    // Example: set STASIS_CLANG=/usr/bin/clang
+    var overrideVar = $"STASIS_{name.ToUpperInvariant()}";
+    var overridePath = Environment.GetEnvironmentVariable(overrideVar);
+    if (!string.IsNullOrWhiteSpace(overridePath) && File.Exists(overridePath))
     {
-        // Lightweight override for non-standard installs (no repo-local toolchain required).
-        // Example: set STASIS_CLANG=C:\Program Files\LLVM\bin\clang.exe
-        var overrideVar = $"STASIS_{name.ToUpperInvariant()}";
-        var overridePath = Environment.GetEnvironmentVariable(overrideVar);
-        if (!string.IsNullOrWhiteSpace(overridePath) && File.Exists(overridePath))
-        {
-            path = overridePath;
-            return true;
-        }
+        path = overridePath;
+        return true;
     }
 
     var search = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
@@ -2434,7 +2475,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, string? assetRoot = null)
 {
     if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
     {
@@ -2447,9 +2488,9 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         Arguments = arguments,
         UseShellExecute = false
     };
-    // Pass asset root to child processes so relative sprite paths resolve to the workspace.
-    var assetRoot = Directory.GetCurrentDirectory();
-    psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = assetRoot;
+    // Pass asset root to child processes so relative paths resolve from the entrypoint directory.
+    var resolvedAssetRoot = string.IsNullOrWhiteSpace(assetRoot) ? Directory.GetCurrentDirectory() : assetRoot;
+    psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = resolvedAssetRoot;
     configure?.Invoke(psi);
     if (suppressOutput)
     {
@@ -2514,14 +2555,16 @@ static CraneliftAotServer GetCraneliftAotServer(string aotTool, out long? spawnM
     }
 }
 
-static CraneliftRunnerServer GetCraneliftRunnerServer(string runnerPath)
+static CraneliftRunnerServer GetCraneliftRunnerServer(string runnerPath, string entryAssetRoot)
 {
     lock (CraneliftRunnerState.Lock)
     {
-        if (CraneliftRunnerState.Instance == null || !CraneliftRunnerState.Instance.IsAlive)
+        if (CraneliftRunnerState.Instance == null ||
+            !CraneliftRunnerState.Instance.IsAlive ||
+            !string.Equals(CraneliftRunnerState.Instance.AssetRoot, entryAssetRoot, StringComparison.Ordinal))
         {
             CraneliftRunnerState.Instance?.Dispose();
-            CraneliftRunnerState.Instance = CraneliftRunnerServer.Start(runnerPath);
+            CraneliftRunnerState.Instance = CraneliftRunnerServer.Start(runnerPath, entryAssetRoot);
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
@@ -2852,8 +2895,24 @@ static string? FindDataBindingJson(string sourcePath, string repoRoot)
     }
 
     var sourceDir = Path.GetDirectoryName(sourcePath);
+    var sourceBaseName = Path.GetFileNameWithoutExtension(sourcePath);
     if (!string.IsNullOrEmpty(sourceDir))
     {
+        if (!string.IsNullOrEmpty(sourceBaseName))
+        {
+            var inEntryDataDir = FirstJsonInDir(Path.Combine(sourceDir, sourceBaseName, "data"));
+            if (!string.IsNullOrEmpty(inEntryDataDir))
+            {
+                return inEntryDataDir;
+            }
+
+            var inEntryDir = FirstJsonInDir(Path.Combine(sourceDir, sourceBaseName));
+            if (!string.IsNullOrEmpty(inEntryDir))
+            {
+                return inEntryDir;
+            }
+        }
+
         var inLocalDataDir = FirstJsonInDir(Path.Combine(sourceDir, "data"));
         if (!string.IsNullOrEmpty(inLocalDataDir))
         {
@@ -2875,6 +2934,12 @@ static string? FindDataBindingJson(string sourcePath, string repoRoot)
     }
 
     return null;
+}
+
+static string GetEntryAssetRoot(string sourcePath)
+{
+    var fullPath = Path.GetFullPath(sourcePath);
+    return Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
 }
 
 static bool TryGetDataBindingPlan(string sourcePath, LayoutPlan layout, string moduleName, IReadOnlyList<string> exportedFunctions, out DataBindingPlan? plan)
@@ -2959,6 +3024,7 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
 
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
+    var entryAssetRoot = GetEntryAssetRoot(sourcePath);
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
         Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
@@ -3224,7 +3290,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
-                psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+                psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = entryAssetRoot;
                 var spawnSw = Stopwatch.StartNew();
 
                 try
@@ -4319,10 +4385,7 @@ static void WriteIrOutput(string ir, string? outputPath)
             Directory.CreateDirectory(outDir);
         }
         File.WriteAllText(outputPath, ir);
-        return;
     }
-
-    Console.WriteLine(ir);
 }
 
 static void PrintUsage()
@@ -4674,7 +4737,7 @@ static string? TryGetCachedRunnerDllPath(CompileResult result)
     return Path.Combine(cacheDirectory, cacheFileName + extension);
 }
 
-static int RunCachedExecutable(string mode, string executablePath, bool enableGraphics, string? graphicsLibPath)
+static int RunCachedExecutable(string mode, string executablePath, bool enableGraphics, string? graphicsLibPath, string entryAssetRoot)
 {
     if (enableGraphics)
     {
@@ -4698,10 +4761,10 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
                 }
             }
         }
-    });
+    }, assetRoot: entryAssetRoot);
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, int? tickHostFps = null)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, string entryAssetRoot, int? tickHostFps = null)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -4720,7 +4783,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
 
     if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer())
     {
-        var runner = GetCraneliftRunnerServer(runnerPath);
+        var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
         return runner.Run(dllPath, entryName, out _);
     }
 
@@ -4734,7 +4797,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
     {
         args += $" --fps {tickHostFps.Value}";
     }
-    return RunProcess(runnerPath, args);
+    return RunProcess(runnerPath, args, assetRoot: entryAssetRoot);
 }
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries)
@@ -4980,6 +5043,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, string moduleName, bool useCraneliftRunner)
 {
     var testStopwatch = Stopwatch.StartNew();
+    var entryAssetRoot = GetEntryAssetRoot(result.FilePath);
 
     if (result.Diagnostics.Count > 0)
     {
@@ -5033,12 +5097,12 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null);
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
                 }
             }
             else
@@ -5049,7 +5113,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                 }
                 else
                 {
-                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, aotTool, moduleName, hotStatePlan: null, dataBindingPlan: null, dllExports: new[] { $"{moduleName}__run_tests" }, tickHostFps: null, out _, out _, out _, out _);
+                    executeExit = ExecuteClifWithRunner("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, aotTool, moduleName, hotStatePlan: null, dataBindingPlan: null, dllExports: new[] { $"{moduleName}__run_tests" }, tickHostFps: null, entryAssetRoot, out _, out _, out _, out _);
                 }
             }
         }
@@ -5070,12 +5134,12 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath);
+                        executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath, entryAssetRoot);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath);
+                    executeExit = RunCachedExecutable("test", cachedExecutablePath, result.UsesGraphics, graphicsLibPath, entryAssetRoot);
                 }
             }
             else
@@ -5096,7 +5160,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                         }
                         else
                         {
-                            executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, moduleName);
+                            executeExit = ExecuteObject("test", tempObj, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, moduleName, entryAssetRoot);
                         }
                     }
                     finally
@@ -5114,7 +5178,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     {
         var cachedExecutablePath = TryGetCachedExecutablePath(result);
         var keepExecutable = !string.IsNullOrEmpty(cachedExecutablePath);
-        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, cachedExecutablePath, keepExecutable);
+        executeExit = Execute("test", result.ArtifactPath, optLevel, enableLto, result.UsesGraphics, graphicsLibPath, result.LinkLibraries, entryAssetRoot, cachedExecutablePath, keepExecutable);
     }
     testStopwatch.Stop();
     var total = result.CompileMilliseconds + testStopwatch.ElapsedMilliseconds;
@@ -5409,15 +5473,17 @@ sealed class CraneliftRunnerServer : IDisposable
     private readonly object gate = new();
 
     public bool IsAlive => !process.HasExited;
+    public string AssetRoot { get; }
 
-    private CraneliftRunnerServer(Process process, Stream input, StreamReader control)
+    private CraneliftRunnerServer(Process process, Stream input, StreamReader control, string assetRoot)
     {
         this.process = process;
         this.input = input;
         this.control = control;
+        AssetRoot = assetRoot;
     }
 
-    public static CraneliftRunnerServer Start(string runnerPath)
+    public static CraneliftRunnerServer Start(string runnerPath, string assetRoot)
     {
         var psi = new ProcessStartInfo
         {
@@ -5428,6 +5494,7 @@ sealed class CraneliftRunnerServer : IDisposable
             RedirectStandardError = true,
             RedirectStandardOutput = false
         };
+        psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = assetRoot;
 
         var process = Process.Start(psi)!;
         var control = process.StandardError;
@@ -5447,7 +5514,7 @@ sealed class CraneliftRunnerServer : IDisposable
             throw new InvalidOperationException($"stasis_runner server failed to start (expected READY; got '{ready ?? "<null>"}'; exit={exitCode}).");
         }
 
-        return new CraneliftRunnerServer(process, process.StandardInput.BaseStream, control);
+        return new CraneliftRunnerServer(process, process.StandardInput.BaseStream, control, assetRoot);
     }
 
     public int Run(string dllPath, string entryName, out long runMs)

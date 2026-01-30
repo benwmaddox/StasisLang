@@ -106,29 +106,15 @@ public class TemplateOutputTests
             ? existing
             : (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
 
-        var prepend = new List<string>();
-        var toolsDir = Path.Combine(root, ".tools");
-        if (Directory.Exists(toolsDir))
+        var preferredClangBin = GetPreferredClangBin(root, inheritedPath);
+        if (!string.IsNullOrWhiteSpace(preferredClangBin))
         {
-            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly)
-                         .OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            psi.Environment["PATH"] = $"{preferredClangBin}{Path.PathSeparator}{inheritedPath}";
+            var clangExe = Path.Combine(preferredClangBin, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
+            if (File.Exists(clangExe))
             {
-                prepend.Add(Path.Combine(llvmDir, "bin"));
+                psi.Environment["STASIS_CLANG"] = clangExe;
             }
-        }
-
-        if (OperatingSystem.IsWindows())
-        {
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-            prepend.Add(Path.Combine(programFiles, "LLVM", "bin"));
-            prepend.Add(Path.Combine(programFilesX86, "LLVM", "bin"));
-        }
-
-        var prependPath = string.Join(Path.PathSeparator, prepend.Distinct(StringComparer.OrdinalIgnoreCase));
-        if (!string.IsNullOrWhiteSpace(prependPath))
-        {
-            psi.Environment["PATH"] = $"{prependPath}{Path.PathSeparator}{inheritedPath}";
         }
 
         var stdout = new StringBuilder();
@@ -200,6 +186,112 @@ public class TemplateOutputTests
         }
 
         return false;
+    }
+
+    private static string? GetPreferredClangBin(string repoRoot, string inheritedPath)
+    {
+        const int minOpaquePtrMajor = 15;
+        var clangExe = OperatingSystem.IsWindows() ? "clang.exe" : "clang";
+        var candidates = new List<string>();
+
+        var toolsDir = Path.Combine(repoRoot, ".tools");
+        if (Directory.Exists(toolsDir))
+        {
+            foreach (var llvmDir in Directory.EnumerateDirectories(toolsDir, "llvm-*", SearchOption.TopDirectoryOnly)
+                         .OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase))
+            {
+                var bin = Path.Combine(llvmDir, "bin");
+                if (File.Exists(Path.Combine(bin, clangExe)))
+                {
+                    candidates.Add(bin);
+                }
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            var winBins = new[]
+            {
+                Path.Combine(programFiles, "LLVM", "bin"),
+                Path.Combine(programFilesX86, "LLVM", "bin")
+            };
+            foreach (var bin in winBins)
+            {
+                if (File.Exists(Path.Combine(bin, clangExe)))
+                {
+                    candidates.Add(bin);
+                }
+            }
+        }
+
+        foreach (var part in inheritedPath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (File.Exists(Path.Combine(part, clangExe)))
+            {
+                candidates.Add(part);
+            }
+        }
+
+        var best = (path: (string?)null, version: -1);
+        foreach (var bin in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var clangPath = Path.Combine(bin, clangExe);
+            if (!File.Exists(clangPath))
+            {
+                continue;
+            }
+
+            if (TryGetClangMajorVersion(clangPath, out var major))
+            {
+                if (major >= minOpaquePtrMajor && major > best.version)
+                {
+                    best = (bin, major);
+                }
+            }
+        }
+
+        return best.path;
+    }
+
+    private static bool TryGetClangMajorVersion(string clangPath, out int major)
+    {
+        major = 0;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = clangPath,
+                Arguments = "--version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using var proc = Process.Start(psi);
+            if (proc is null)
+            {
+                return false;
+            }
+            var line = proc.StandardOutput.ReadLine() ?? string.Empty;
+            proc.WaitForExit(2000);
+            var idx = line.IndexOf("version ", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return false;
+            }
+            var ver = line[(idx + "version ".Length)..];
+            var dot = ver.IndexOf('.');
+            if (dot < 0)
+            {
+                return false;
+            }
+            return int.TryParse(ver[..dot], out major);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void EnsureBuildDirExists(string repoRoot)
