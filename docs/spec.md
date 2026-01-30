@@ -138,6 +138,16 @@ ascii[N]   // ASCII-only string buffers with a single length header
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
 - String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
 
+### Host input snapshot
+
+The host runtime owns a canonical per-frame input snapshot and writes it directly into a Stasis global named `input`.
+
+- Stasis projects import `src/host_input_snapshot.stasis`, which declares `global input: InputSnapshot`.
+- The host binds the `input` global at startup (and after hot-swap) and fills it once per tick before `tick()` runs.
+- No Stasis-side copying is required; games read from `input` directly to keep setup minimal and deterministic.
+- Key transition flags (`key_went_down`, `key_went_up`) are computed by the host runtime.
+- Pointer coordinates are written in integer pixels (`pointer_x_px`, `pointer_y_px`, `mouse_x_px`, `mouse_y_px`).
+
 ### System/host helpers (`sys_*`)
 
 These are host-provided helpers intended for tooling (compilers, asset pipelines, etc.).
