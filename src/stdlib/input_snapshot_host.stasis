@@ -5,19 +5,6 @@ import "../host_frame.stasis";
 import "memory.stasis";
 import "input_snapshot.stasis";
 
-function input_snapshot_read_host_keys(prev_keys: i32[512], key_down: i32[512], key_went_down: i32[512], key_went_up: i32[512]): void {
-    let i: i32 = 0;
-    for (i = 0; i < INPUT_MAX_KEYS; i = i + 1) {
-        let down: i32 = 0;
-        if (host_key_down(i)) { down = 1; }
-        key_down[i] = down;
-        key_went_down[i] = 0;
-        if (down != 0 && prev_keys[i] == 0) { key_went_down[i] = 1; }
-        key_went_up[i] = 0;
-        if (down == 0 && prev_keys[i] != 0) { key_went_up[i] = 1; }
-    }
-}
-
 function input_snapshot_read_keys_from_snapshot(prev_keys: i32[512], snapshot_i32: i32[768], key_down: i32[512], key_went_down: i32[512], key_went_up: i32[512]): void {
     let i: i32 = 0;
     for (i = 0; i < INPUT_MAX_KEYS; i = i + 1) {
@@ -28,32 +15,6 @@ function input_snapshot_read_keys_from_snapshot(prev_keys: i32[512], snapshot_i3
         key_went_up[i] = 0;
         if (down == 0 && prev_keys[i] != 0) { key_went_up[i] = 1; }
     }
-}
-
-function input_snapshot_read_host_pointers(pointer_id: i32[8], pointer_x_px: f32[8], pointer_y_px: f32[8], pointer_is_down: i32[8], pointer_went_down: i32[8], pointer_went_up: i32[8]): i32 {
-    let count: i32 = host_pointer_count();
-    if (count < 0) { count = 0; }
-    if (count > INPUT_MAX_POINTERS) { count = INPUT_MAX_POINTERS; }
-
-    let i: i32 = 0;
-    for (i = 0; i < INPUT_MAX_POINTERS; i = i + 1) {
-        if (i < count) {
-            pointer_id[i] = host_pointer_id(i);
-            pointer_x_px[i] = host_pointer_x_px(i);
-            pointer_y_px[i] = host_pointer_y_px(i);
-            pointer_is_down[i] = host_pointer_is_down(i);
-            pointer_went_down[i] = host_pointer_went_down(i);
-            pointer_went_up[i] = host_pointer_went_up(i);
-        } else {
-            pointer_id[i] = -1;
-            pointer_x_px[i] = 0.0;
-            pointer_y_px[i] = 0.0;
-            pointer_is_down[i] = 0;
-            pointer_went_down[i] = 0;
-            pointer_went_up[i] = 0;
-        }
-    }
-    return count;
 }
 
 function input_snapshot_read_pointers_from_snapshot(snapshot_i32: i32[768], snapshot_f32: f32[64], pointer_id: i32[8], pointer_x_px: f32[8], pointer_y_px: f32[8], pointer_is_down: i32[8], pointer_went_down: i32[8], pointer_went_up: i32[8]): i32 {
@@ -84,10 +45,6 @@ function input_snapshot_read_pointers_from_snapshot(snapshot_i32: i32[768], snap
         }
     }
     return count;
-}
-
-function input_snapshot_commit_prev_keys(prev_keys: i32[512]): void {
-    mem_copy_i32(prev_keys, INPUT_MAX_KEYS, 0, host_i32, HOST_I32_COUNT, HOST_I_KEY_BASE, INPUT_MAX_KEYS);
 }
 
 function input_snapshot_commit_prev_keys_from_snapshot(prev_keys: i32[512], snapshot_i32: i32[768]): void {
