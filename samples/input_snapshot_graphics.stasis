@@ -68,7 +68,7 @@ function tick(): i32 {
     state.input.mouse_y_px = host_snap.f32[mouse_f_base + 1];
     state.input.mouse_down = host_snap.i32[mouse_i_base + 1] != 0;
     state.input.mouse_clicked = host_snap.i32[mouse_i_base + 3] != 0;
-    input_snapshot_commit_prev_keys(prev_keys);
+    input_snapshot_commit_prev_keys_from_snapshot(prev_keys, host_snap.i32);
 
     // Tick logic: count taps and track last tap position.
     if (state.input.key_went_down[KEY_SPACE] != 0) {
