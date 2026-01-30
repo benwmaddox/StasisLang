@@ -1,5 +1,7 @@
 ﻿{
-  Stdout:
+  Stdout: ,
+  Stderr: ,
+  Ir:
 ; ModuleID = 'module'
 source_filename = "module"
 
@@ -83,6 +85,5 @@ declare i64 @time(ptr)
 
 declare i64 @clock()
 
-declare i32 @printf(ptr, ...),
-  Stderr: 
+declare i32 @printf(ptr, ...)
 }

@@ -316,20 +316,30 @@ public class CliSnapshotTests
     [Fact]
     public Task EmitIr_Basic()
     {
-        var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--emit-ir", "--backend", "llvm");
-        var result = new
+        var outPath = Path.GetTempFileName();
+        try
         {
-            ExitCode = exitCode,
-            Stdout = ScrubOutput(stdout),
-            Stderr = ScrubOutput(stderr)
-        };
-        return Verifier.Verify(result).UseDirectory("Snapshots");
+            var (exitCode, stdout, stderr) = RunCli("run", GetSamplePath("basic.stasis"), "--emit-ir", "--backend", "llvm", "--out", outPath);
+            var result = new
+            {
+                ExitCode = exitCode,
+                Stdout = ScrubOutput(stdout),
+                Stderr = ScrubOutput(stderr),
+                Ir = ScrubOutput(File.ReadAllText(outPath))
+            };
+            return Verifier.Verify(result).UseDirectory("Snapshots");
+        }
+        finally
+        {
+            File.Delete(outPath);
+        }
     }
 
     [Fact]
     public Task EmitIr_Cranelift_Minimal()
     {
         var temp = Path.GetTempFileName();
+        var outPath = Path.GetTempFileName();
         File.WriteAllText(temp, """
             function main(): i32 {
                 let x: i32 = 2 + 3;
@@ -339,38 +349,50 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "cranelift", "--emit-ir");
+            var (exitCode, stdout, stderr) = RunCli("run", temp, "--backend", "cranelift", "--emit-ir", "--out", outPath);
             var result = new
             {
                 ExitCode = exitCode,
                 Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
-                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>")),
+                Ir = NormalizeCraneliftCallConv(ScrubOutput(File.ReadAllText(outPath)).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
         finally
         {
             File.Delete(temp);
+            File.Delete(outPath);
         }
     }
 
     [Fact]
     public Task EmitIr_Tests()
     {
-        var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--emit-ir", "--backend", "llvm");
-        var result = new
+        var outPath = Path.GetTempFileName();
+        try
         {
-            ExitCode = exitCode,
-            Stdout = ScrubOutput(stdout),
-            Stderr = ScrubOutput(stderr)
-        };
-        return Verifier.Verify(result).UseDirectory("Snapshots");
+            var (exitCode, stdout, stderr) = RunCli("test", GetSamplePath("tests.stasis"), "--emit-ir", "--backend", "llvm", "--out", outPath);
+            var result = new
+            {
+                ExitCode = exitCode,
+                Stdout = ScrubOutput(stdout),
+                Stderr = ScrubOutput(stderr),
+                Ir = ScrubOutput(File.ReadAllText(outPath))
+            };
+            return Verifier.Verify(result).UseDirectory("Snapshots");
+        }
+        finally
+        {
+            File.Delete(outPath);
+        }
     }
 
     [Fact]
     public Task EmitIr_Tests_DefaultBackend_Cranelift()
     {
         var temp = Path.GetTempFileName();
+        var outPath = Path.GetTempFileName();
         File.WriteAllText(temp, """
             function add(a: i32, b: i32): i32 {
                 return a + b;
@@ -383,18 +405,20 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("test", temp, "--emit-ir");
+            var (exitCode, stdout, stderr) = RunCli("test", temp, "--emit-ir", "--out", outPath);
             var result = new
             {
                 ExitCode = exitCode,
                 Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
-                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>")),
+                Ir = NormalizeCraneliftCallConv(ScrubOutput(File.ReadAllText(outPath)).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
         finally
         {
             File.Delete(temp);
+            File.Delete(outPath);
         }
     }
 
@@ -402,6 +426,7 @@ public class CliSnapshotTests
     public Task EmitIr_Cranelift_WithTests_Minimal()
     {
         var temp = Path.GetTempFileName();
+        var outPath = Path.GetTempFileName();
         File.WriteAllText(temp, """
             function add(a: i32, b: i32): i32 {
                 return a + b;
@@ -414,18 +439,20 @@ public class CliSnapshotTests
 
         try
         {
-            var (exitCode, stdout, stderr) = RunCli("test", temp, "--backend", "cranelift", "--emit-ir");
+            var (exitCode, stdout, stderr) = RunCli("test", temp, "--backend", "cranelift", "--emit-ir", "--out", outPath);
             var result = new
             {
                 ExitCode = exitCode,
                 Stdout = NormalizeCraneliftCallConv(ScrubOutput(stdout).Replace(temp, "<temp-file>")),
-                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>"))
+                Stderr = NormalizeCraneliftCallConv(ScrubOutput(stderr).Replace(temp, "<temp-file>")),
+                Ir = NormalizeCraneliftCallConv(ScrubOutput(File.ReadAllText(outPath)).Replace(temp, "<temp-file>"))
             };
             return Verifier.Verify(result).UseDirectory("Snapshots");
         }
         finally
         {
             File.Delete(temp);
+            File.Delete(outPath);
         }
     }
 

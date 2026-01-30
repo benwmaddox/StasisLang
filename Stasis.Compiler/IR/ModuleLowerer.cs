@@ -36,7 +36,11 @@ public sealed class ModuleLowerer
             EmitTestHarness(compilationUnit, builder, semantic.Symbols, diagnostics);
         }
 
-        return new LowerResult(builder.EmitToString(), diagnostics);
+        var ir = builder.EmitToString();
+        // LLVM textual IR produced by LLVMSharp can include GEP flags not accepted by clang's IR parser.
+        // Drop nuw on GEP to keep clang-compatible IR for tests and templates.
+        ir = ir.Replace("getelementptr inbounds nuw ", "getelementptr inbounds ");
+        return new LowerResult(ir, diagnostics);
     }
 
     private static void EmitGlobals(CompilationUnitSyntax compilationUnit, IReadOnlyDictionary<string, Symbol> symbols, LayoutPlan layout, LlvmModuleBuilder builder)
