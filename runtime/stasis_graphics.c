@@ -132,25 +132,25 @@ typedef struct {
 
 static StasisInputFrame g_input_frame;
 typedef struct {
-    int32_t *key_down;
-    int32_t *key_went_down;
-    int32_t *key_went_up;
+    uint8_t *key_down;
+    uint8_t *key_went_down;
+    uint8_t *key_went_up;
     int32_t *pointer_count;
     int32_t *pointer_id;
     int32_t *pointer_x_px;
     int32_t *pointer_y_px;
-    int32_t *pointer_is_down;
-    int32_t *pointer_went_down;
-    int32_t *pointer_went_up;
+    uint8_t *pointer_is_down;
+    uint8_t *pointer_went_down;
+    uint8_t *pointer_went_up;
     int32_t *mouse_x_px;
     int32_t *mouse_y_px;
-    int32_t *mouse_down;
-    int32_t *mouse_clicked;
+    uint8_t *mouse_down;
+    uint8_t *mouse_clicked;
 } StasisInputBindings;
 
 static StasisInputBindings g_input_bindings;
 static int g_input_bindings_active = 0;
-static int32_t g_prev_keys[512];
+static uint8_t g_prev_keys[512];
 static int g_events_pumped_this_frame = 0;
 static float g_prev_x_px[STASIS_MAX_POINTERS];
 static float g_prev_y_px[STASIS_MAX_POINTERS];
@@ -583,7 +583,7 @@ static void stasis_write_input_snapshot(const Uint8* keys, int num_keys)
 
     for (int i = 0; i < 512; i++)
     {
-        int down = (keys && i < num_keys && keys[i]) ? 1 : 0;
+        uint8_t down = (keys && i < num_keys && keys[i]) ? 1 : 0;
         g_input_bindings.key_down[i] = down;
         g_input_bindings.key_went_down[i] = (down && g_prev_keys[i] == 0) ? 1 : 0;
         g_input_bindings.key_went_up[i] = (!down && g_prev_keys[i] != 0) ? 1 : 0;
