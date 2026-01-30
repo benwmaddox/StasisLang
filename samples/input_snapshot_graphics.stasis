@@ -31,15 +31,10 @@ function draw_cross(x: f32, y: f32, r: f32, g: f32, b: f32): void {
 }
 
 function draw_viewport_outline(): void {
-    let vx_i: i32 = host_viewport_x_px();
-    let vy_i: i32 = host_viewport_y_px();
-    let vw_i: i32 = host_viewport_w_px();
-    let vh_i: i32 = host_viewport_h_px();
-
-    let vx: f32 = i32_to_f32(vx_i);
-    let vy: f32 = i32_to_f32(vy_i);
-    let vw: f32 = i32_to_f32(vw_i);
-    let vh: f32 = i32_to_f32(vh_i);
+    let vx: f32 = host_viewport_x_px_f32();
+    let vy: f32 = host_viewport_y_px_f32();
+    let vw: f32 = host_viewport_w_px_f32();
+    let vh: f32 = host_viewport_h_px_f32();
 
     let x0: f32 = vx;
     let y0: f32 = vy;
