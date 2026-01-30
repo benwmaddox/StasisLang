@@ -43,10 +43,12 @@ jobs:
             auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
             accept_header="Accept: application/vnd.github+json"
             pr_sha="${{ github.event.pull_request.head.sha }}"
+            next_run_utc=$(date -u -d 'next hour' +"%Y-%m-%d %H:00 UTC")
+            desc="Waiting for scheduled CI (~20 min). Next run: $next_run_utc"
 
             curl -s -X POST -H "$auth_header" -H "$accept_header" \
               "$api/repos/$repo/statuses/$pr_sha" \
-              -d '{"state":"pending","context":"ci/quiet","description":"Waiting on scheduled test run"}' > /dev/null
+              -d "{\"state\":\"pending\",\"context\":\"ci/quiet\",\"description\":\"$desc\"}" > /dev/null
 
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "reason=pr_waiting" >> "$GITHUB_OUTPUT"
@@ -227,4 +229,4 @@ jobs:
 
           curl -s -X POST -H "$auth_header" -H "$accept_header" \
             "$api/repos/$repo/statuses/$sha" \
-            -d "{\"state\":\"$state\",\"context\":\"ci/quiet\",\"description\":\"Scheduled CI run completed\"}" > /dev/null
+            -d "{\"state\":\"$state\",\"context\":\"ci/quiet\",\"description\":\"Scheduled CI run completed (~20 min)\"}" > /dev/null
