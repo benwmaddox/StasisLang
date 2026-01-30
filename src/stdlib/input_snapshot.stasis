@@ -11,14 +11,14 @@ struct InputSnapshot {
 
     pointer_count: i32;
     pointer_id: i32[8];
-    pointer_x_px: f32[8];
-    pointer_y_px: f32[8];
+    pointer_x_px: i32[8];
+    pointer_y_px: i32[8];
     pointer_is_down: i32[8];
     pointer_went_down: i32[8];
     pointer_went_up: i32[8];
 
-    mouse_x_px: f32;
-    mouse_y_px: f32;
+    mouse_x_px: i32;
+    mouse_y_px: i32;
     mouse_down: bool;
     mouse_clicked: bool;
 }

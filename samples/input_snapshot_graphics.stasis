@@ -4,7 +4,6 @@ import "../src/gfx_cmd.stasis";
 import "../src/host_frame.stasis";
 import "../src/stdlib/input_snapshot.stasis";
 import "../src/stdlib/input_snapshot_host.stasis";
-import "../src/stdlib/host_snapshot.stasis";
 
 // Input snapshot graphics sample:
 // - Host writes the input snapshot into HostFrame once per tick.
@@ -17,14 +16,13 @@ const KEY_SPACE: i32 = 44; // SDL scancode Space
 struct SampleState {
     input: InputSnapshot;
     tap_count: i32;
-    last_tap_x: f32;
-    last_tap_y: f32;
+    last_tap_x: i32;
+    last_tap_y: i32;
     ticks: i32;
 }
 
 global state: SampleState;
 global prev_keys: i32[512];
-global host_snap: HostFrameSnapshot;
 
 function draw_cross(x: f32, y: f32, r: f32, g: f32, b: f32): void {
     let half: f32 = 6.0;
@@ -50,12 +48,10 @@ function draw_viewport_outline(): void {
 }
 
 function tick(): i32 {
-    host_snapshot_copy(host_snap.i32, host_snap.f32);
-
-    input_snapshot_read_keys_from_snapshot(prev_keys, host_snap.i32, state.input.key_down, state.input.key_went_down, state.input.key_went_up);
+    input_snapshot_read_keys_from_snapshot(prev_keys, host_i32, state.input.key_down, state.input.key_went_down, state.input.key_went_up);
     state.input.pointer_count = input_snapshot_read_pointers_from_snapshot(
-        host_snap.i32,
-        host_snap.f32,
+        host_i32,
+        host_f32,
         state.input.pointer_id,
         state.input.pointer_x_px,
         state.input.pointer_y_px,
@@ -64,11 +60,11 @@ function tick(): i32 {
         state.input.pointer_went_up);
     let mouse_i_base: i32 = HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE;
     let mouse_f_base: i32 = HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE;
-    state.input.mouse_x_px = host_snap.f32[mouse_f_base + 0];
-    state.input.mouse_y_px = host_snap.f32[mouse_f_base + 1];
-    state.input.mouse_down = host_snap.i32[mouse_i_base + 1] != 0;
-    state.input.mouse_clicked = host_snap.i32[mouse_i_base + 3] != 0;
-    input_snapshot_commit_prev_keys_from_snapshot(prev_keys, host_snap.i32);
+    state.input.mouse_x_px = f32_to_i32(host_f32[mouse_f_base + 0]);
+    state.input.mouse_y_px = f32_to_i32(host_f32[mouse_f_base + 1]);
+    state.input.mouse_down = host_i32[mouse_i_base + 1] != 0;
+    state.input.mouse_clicked = host_i32[mouse_i_base + 3] != 0;
+    input_snapshot_commit_prev_keys_from_snapshot(prev_keys, host_i32);
 
     // Tick logic: count taps and track last tap position.
     if (state.input.key_went_down[KEY_SPACE] != 0) {
@@ -91,8 +87,8 @@ function tick(): i32 {
 
     let count: i32 = state.input.pointer_count;
     for (i = 0; i < count; i = i + 1) {
-        let x: f32 = state.input.pointer_x_px[i];
-        let y: f32 = state.input.pointer_y_px[i];
+        let x: f32 = i32_to_f32(state.input.pointer_x_px[i]);
+        let y: f32 = i32_to_f32(state.input.pointer_y_px[i]);
 
         let is_down: bool = state.input.pointer_is_down[i] != 0;
         let went_down: bool = state.input.pointer_went_down[i] != 0;
@@ -123,7 +119,7 @@ function tick(): i32 {
 
     // Highlight last tap.
     if (state.tap_count > 0) {
-        draw_cross(state.last_tap_x, state.last_tap_y, 1.0, 0.2, 0.8);
+        draw_cross(i32_to_f32(state.last_tap_x), i32_to_f32(state.last_tap_y), 1.0, 0.2, 0.8);
     }
 
     gfx_cmd_mark_present();
