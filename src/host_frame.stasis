@@ -87,16 +87,16 @@ function host_pointer_id(index: i32): i32 {
     return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 0];
 }
 
-function host_pointer_is_down(index: i32): i32 {
-    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 1];
+function host_pointer_is_down(index: i32): bool {
+    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 1] != 0;
 }
 
-function host_pointer_went_down(index: i32): i32 {
-    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 2];
+function host_pointer_went_down(index: i32): bool {
+    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 2] != 0;
 }
 
-function host_pointer_went_up(index: i32): i32 {
-    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 3];
+function host_pointer_went_up(index: i32): bool {
+    return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 3] != 0;
 }
 
 function host_pointer_x_px(index: i32): f32 {

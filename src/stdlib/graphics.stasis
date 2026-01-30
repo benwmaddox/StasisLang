@@ -123,9 +123,9 @@ function gfx_submit_u8(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[]): void {
 // Pointer/query wrappers over HostFrame
 function input_pointer_count(): i32 { return host_pointer_count(); }
 function input_pointer_id(index: i32): i32 { return host_pointer_id(index); }
-function input_pointer_is_down(index: i32): bool { return host_pointer_is_down(index) != 0; }
-function input_pointer_went_down(index: i32): bool { return host_pointer_went_down(index) != 0; }
-function input_pointer_went_up(index: i32): bool { return host_pointer_went_up(index) != 0; }
+function input_pointer_is_down(index: i32): bool { return host_pointer_is_down(index); }
+function input_pointer_went_down(index: i32): bool { return host_pointer_went_down(index); }
+function input_pointer_went_up(index: i32): bool { return host_pointer_went_up(index); }
 function input_pointer_x_px(index: i32): f32 { return host_pointer_x_px(index); }
 function input_pointer_y_px(index: i32): f32 { return host_pointer_y_px(index); }
 function input_pointer_dx_px(index: i32): f32 { return host_pointer_dx_px(index); }
