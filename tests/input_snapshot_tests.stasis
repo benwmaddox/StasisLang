@@ -1,6 +1,7 @@
 import "../src/host_frame.stasis";
 import "../src/stdlib/input_snapshot.stasis";
 import "../src/stdlib/input_snapshot_host.stasis";
+import "../src/stdlib/host_snapshot.stasis";
 
 const KEY_A: i32 = 4; // SDL scancode A
 
@@ -12,6 +13,7 @@ struct InputTestState {
 
 global test_state: InputTestState;
 global prev_keys: i32[512];
+global host_snap: HostFrameSnapshot;
 
 function fake_host_key(scancode: i32, down: i32): void {
     if (scancode < 0 || scancode >= INPUT_MAX_KEYS) { return; }
@@ -77,20 +79,25 @@ test `input snapshot fake user input`(): bool {
     fake_host_pointer(0, 0, 100.0, 50.0, 1, 1, 1);
     fake_host_pointer(1, 14, 140.0, 60.0, 0, 1, 1);
 
-    input_snapshot_read_host_keys(prev_keys, test_state.input.key_down, test_state.input.key_went_down, test_state.input.key_went_up);
-    test_state.input.pointer_count = input_snapshot_read_host_pointers(
+    host_snapshot_copy(host_snap.i32, host_snap.f32);
+    input_snapshot_read_keys_from_snapshot(prev_keys, host_snap.i32, test_state.input.key_down, test_state.input.key_went_down, test_state.input.key_went_up);
+    test_state.input.pointer_count = input_snapshot_read_pointers_from_snapshot(
+        host_snap.i32,
+        host_snap.f32,
         test_state.input.pointer_id,
         test_state.input.pointer_x_px,
         test_state.input.pointer_y_px,
         test_state.input.pointer_is_down,
         test_state.input.pointer_went_down,
         test_state.input.pointer_went_up);
-    test_state.input.mouse_x_px = host_pointer_x_px(0);
-    test_state.input.mouse_y_px = host_pointer_y_px(0);
-    test_state.input.mouse_down = host_pointer_is_down(0) != 0;
-    test_state.input.mouse_clicked = host_pointer_went_up(0) != 0;
+    let mouse_i_base: i32 = HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE;
+    let mouse_f_base: i32 = HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE;
+    test_state.input.mouse_x_px = host_snap.f32[mouse_f_base + 0];
+    test_state.input.mouse_y_px = host_snap.f32[mouse_f_base + 1];
+    test_state.input.mouse_down = host_snap.i32[mouse_i_base + 1] != 0;
+    test_state.input.mouse_clicked = host_snap.i32[mouse_i_base + 3] != 0;
     apply_input();
-    input_snapshot_commit_prev_keys(prev_keys);
+    input_snapshot_commit_prev_keys_from_snapshot(prev_keys, host_snap.i32);
     return test_state.input.key_down[KEY_A] == 1
         && test_state.input.key_went_down[KEY_A] == 1
         && test_state.input.pointer_count == 2
