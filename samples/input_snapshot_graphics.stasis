@@ -5,12 +5,23 @@ import "../src/host_frame.stasis";
 import "../src/stdlib/input_snapshot.stasis";
 import "../src/stdlib/input_snapshot_host.stasis";
 
-// Input snapshot graphics sample: draws a crosshair for each pointer using the snapshot helpers.
+// Input snapshot graphics sample:
+// - Host writes the input snapshot into HostFrame once per tick.
+// - Guest reads HostFrame into a deterministic InputSnapshot.
+// - Tick logic updates state from that snapshot.
+// - Guest emits render commands; host presents after tick.
 
-const TARGET_FPS: i32 = 60;
-const FRAME_TIME_MS: i32 = 16;
+const KEY_SPACE: i32 = 44; // SDL scancode Space
 
-global snapshot: InputSnapshot;
+struct SampleState {
+    input: InputSnapshot;
+    tap_count: i32;
+    last_tap_x: f32;
+    last_tap_y: f32;
+    ticks: i32;
+}
+
+global state: SampleState;
 global prev_keys: i32[512];
 
 function draw_cross(x: f32, y: f32, r: f32, g: f32, b: f32): void {
@@ -42,34 +53,47 @@ function draw_viewport_outline(): void {
 }
 
 function tick(): i32 {
-    input_snapshot_read_host_keys(prev_keys, snapshot.key_down, snapshot.key_went_down, snapshot.key_went_up);
-    snapshot.pointer_count = input_snapshot_read_host_pointers(
-        snapshot.pointer_id,
-        snapshot.pointer_x_px,
-        snapshot.pointer_y_px,
-        snapshot.pointer_is_down,
-        snapshot.pointer_went_down,
-        snapshot.pointer_went_up);
-    snapshot.mouse_x_px = host_pointer_x_px(0);
-    snapshot.mouse_y_px = host_pointer_y_px(0);
-    snapshot.mouse_down = host_pointer_is_down(0) != 0;
-    snapshot.mouse_clicked = host_pointer_went_up(0) != 0;
+    input_snapshot_read_host_keys(prev_keys, state.input.key_down, state.input.key_went_down, state.input.key_went_up);
+    state.input.pointer_count = input_snapshot_read_host_pointers(
+        state.input.pointer_id,
+        state.input.pointer_x_px,
+        state.input.pointer_y_px,
+        state.input.pointer_is_down,
+        state.input.pointer_went_down,
+        state.input.pointer_went_up);
+    state.input.mouse_x_px = host_pointer_x_px(0);
+    state.input.mouse_y_px = host_pointer_y_px(0);
+    state.input.mouse_down = host_pointer_is_down(0) != 0;
+    state.input.mouse_clicked = host_pointer_went_up(0) != 0;
     input_snapshot_commit_prev_keys(prev_keys);
+
+    // Tick logic: count taps and track last tap position.
+    if (state.input.key_went_down[KEY_SPACE] != 0) {
+        state.tap_count = 0;
+    }
+    let i: i32 = 0;
+    for (i = 0; i < state.input.pointer_count; i = i + 1) {
+        if (state.input.pointer_went_down[i] != 0) {
+            state.tap_count = state.tap_count + 1;
+            state.last_tap_x = state.input.pointer_x_px[i];
+            state.last_tap_y = state.input.pointer_y_px[i];
+        }
+    }
+    state.ticks = state.ticks + 1;
 
     gfx_cmd_begin();
     gfx_cmd_clear(0.02, 0.02, 0.03, 1.0);
 
     draw_viewport_outline();
 
-    let count: i32 = snapshot.pointer_count;
-    let i: i32 = 0;
+    let count: i32 = state.input.pointer_count;
     for (i = 0; i < count; i = i + 1) {
-        let x: f32 = snapshot.pointer_x_px[i];
-        let y: f32 = snapshot.pointer_y_px[i];
+        let x: f32 = state.input.pointer_x_px[i];
+        let y: f32 = state.input.pointer_y_px[i];
 
-        let is_down: bool = snapshot.pointer_is_down[i] != 0;
-        let went_down: bool = snapshot.pointer_went_down[i] != 0;
-        let went_up: bool = snapshot.pointer_went_up[i] != 0;
+        let is_down: bool = state.input.pointer_is_down[i] != 0;
+        let went_down: bool = state.input.pointer_went_down[i] != 0;
+        let went_up: bool = state.input.pointer_went_up[i] != 0;
 
         let r: f32 = 0.2;
         let g: f32 = 0.8;
@@ -92,6 +116,11 @@ function tick(): i32 {
         }
 
         draw_cross(x, y, r, g, b);
+    }
+
+    // Highlight last tap.
+    if (state.tap_count > 0) {
+        draw_cross(state.last_tap_x, state.last_tap_y, 1.0, 0.2, 0.8);
     }
 
     gfx_cmd_mark_present();
