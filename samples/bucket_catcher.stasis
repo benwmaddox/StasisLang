@@ -33,10 +33,10 @@ struct BucketConfig {
     json_loaded: bool;
     screen_width: i32;
     screen_height: i32;
-    font_path: string;
+    font_path: utf8[256];
     font_size_pixels: i32;
-    bucket_sprite_path: string;
-    ball_sprite_path: string;
+    bucket_sprite_path: utf8[256];
+    ball_sprite_path: utf8[256];
     tick_delta_seconds: f32;
     bucket_width: f32;
     bucket_height: f32;
@@ -132,6 +132,10 @@ function init_game(): void {
 }
 
 function ensure_window(): bool {
+    if (!state.config.json_loaded) {
+        ensure_config_loaded();
+        return false;
+    }
     if (state.ui_font != 0) {
         return true;
     }
@@ -320,6 +324,9 @@ function tick(): i32 {
 
 function main(): i32 {
     init_game();
+    if (!state.config.json_loaded) {
+        return 1;
+    }
     if (!ensure_window()) {
         return 1;
     }

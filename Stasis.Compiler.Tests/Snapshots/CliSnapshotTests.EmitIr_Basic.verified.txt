@@ -1,5 +1,7 @@
 ﻿{
-  Stdout:
+  Stdout: ,
+  Stderr: ,
+  Ir:
 ; ModuleID = 'module'
 source_filename = "module"
 
@@ -19,6 +21,5 @@ define i32 @main() {
 entry:
   %add.call = call i32 @add(i32 2, i32 3)
   ret i32 %add.call
-},
-  Stderr: 
+}
 }
