@@ -36,10 +36,10 @@ function draw_viewport_outline(): void {
     let vw_i: i32 = host_viewport_w_px();
     let vh_i: i32 = host_viewport_h_px();
 
-    let vx: f32 = vx_i;
-    let vy: f32 = vy_i;
-    let vw: f32 = vw_i;
-    let vh: f32 = vh_i;
+    let vx: f32 = i32_to_f32(vx_i);
+    let vy: f32 = i32_to_f32(vy_i);
+    let vw: f32 = i32_to_f32(vw_i);
+    let vh: f32 = i32_to_f32(vh_i);
 
     let x0: f32 = vx;
     let y0: f32 = vy;
