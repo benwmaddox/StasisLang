@@ -65,20 +65,20 @@ typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
 typedef struct {
-    int32_t *key_down;
-    int32_t *key_went_down;
-    int32_t *key_went_up;
+    uint8_t *key_down;
+    uint8_t *key_went_down;
+    uint8_t *key_went_up;
     int32_t *pointer_count;
     int32_t *pointer_id;
     int32_t *pointer_x_px;
     int32_t *pointer_y_px;
-    int32_t *pointer_is_down;
-    int32_t *pointer_went_down;
-    int32_t *pointer_went_up;
+    uint8_t *pointer_is_down;
+    uint8_t *pointer_went_down;
+    uint8_t *pointer_went_up;
     int32_t *mouse_x_px;
     int32_t *mouse_y_px;
-    int32_t *mouse_down;
-    int32_t *mouse_clicked;
+    uint8_t *mouse_down;
+    uint8_t *mouse_clicked;
 } stasis_input_bindings;
 typedef void (*stasis_input_bind_fn)(const stasis_input_bindings *bindings);
 

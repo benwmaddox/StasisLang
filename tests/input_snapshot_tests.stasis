@@ -12,65 +12,65 @@ global test_state: InputTestState;
 function apply_input(): void {
     test_state.score = 0;
     test_state.taps_seen = 0;
-    if (input.key_down[KEY_A] != 0) {
+    if (input.key_down[KEY_A]) {
         test_state.score = test_state.score + 10;
     }
     let i: i32 = 0;
     for (i = 0; i < input.pointer_count; i = i + 1) {
-        if (input.pointer_went_down[i] != 0) {
+        if (input.pointer_went_down[i]) {
             test_state.score = test_state.score + 3;
             test_state.taps_seen = test_state.taps_seen + 1;
         }
     }
-    if (input.mouse_clicked != 0) {
+    if (input.mouse_clicked) {
         test_state.score = test_state.score + 2;
     }
 }
 
 test `input snapshot clear resets globals`() {
-    input.key_down[KEY_A] = 1;
+    input.key_down[KEY_A] = true;
     input.pointer_count = 2;
     input.pointer_x_px[0] = 10;
-    input.mouse_down = 1;
+    input.mouse_down = true;
     test_state.score = 7;
     test_state.clear();
     input.clear();
-    return input.key_down[KEY_A] == 0
+    return !input.key_down[KEY_A]
         && input.pointer_count == 0
         && input.pointer_x_px[0] == 0
-        && input.mouse_down == 0
+        && !input.mouse_down
         && test_state.score == 0;
 }
 
 test `input snapshot fake user input`(): bool {
     test_state.clear();
     input.clear();
-    input.key_down[KEY_A] = 1;
-    input.key_went_down[KEY_A] = 1;
+    input.key_down[KEY_A] = true;
+    input.key_went_down[KEY_A] = true;
     input.pointer_count = 2;
     input.pointer_id[0] = 0;
     input.pointer_x_px[0] = 100;
     input.pointer_y_px[0] = 50;
-    input.pointer_is_down[0] = 1;
-    input.pointer_went_down[0] = 1;
-    input.pointer_went_up[0] = 1;
+    input.pointer_is_down[0] = true;
+    input.pointer_went_down[0] = true;
+    input.pointer_went_up[0] = true;
     input.pointer_id[1] = 14;
     input.pointer_x_px[1] = 140;
     input.pointer_y_px[1] = 60;
-    input.pointer_went_down[1] = 1;
-    input.pointer_went_up[1] = 1;
+    input.pointer_went_down[1] = true;
+    input.pointer_went_up[1] = true;
     input.mouse_x_px = 100;
     input.mouse_y_px = 50;
-    input.mouse_down = 1;
-    input.mouse_clicked = 1;
+    input.mouse_down = true;
+    input.mouse_clicked = true;
 
     apply_input();
-    return input.key_down[KEY_A] == 1
-        && input.key_went_down[KEY_A] == 1
+    return input.key_down[KEY_A]
+        && input.key_went_down[KEY_A]
         && input.pointer_count == 2
-        && input.pointer_went_up[1] != 0
+        && input.pointer_went_up[1]
         && input.mouse_x_px == 100
-        && input.mouse_clicked != 0
+        && input.mouse_clicked
         && test_state.score == 18
         && test_state.taps_seen == 2;
 }
