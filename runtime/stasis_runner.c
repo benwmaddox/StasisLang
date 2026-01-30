@@ -2143,6 +2143,14 @@ int main(int argc, char **argv)
     }
 
     stasis_data_set_dll(lib);
+    if (data_bind_json && data_bind_meta)
+    {
+        int handle = stasis_data_bind(data_bind_json, data_bind_meta);
+        if (handle == 0)
+        {
+            fprintf(stderr, "warning: failed to register data binding\n");
+        }
+    }
     stasis_try_set_sys_args(lib, argc, argv);
 
     stasis_entry_fn entry = (stasis_entry_fn)symbol;

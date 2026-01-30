@@ -170,6 +170,18 @@ if (path is null)
         runAllInDirectory = true;
         path = Directory.GetCurrentDirectory();
     }
+    else if (mode == "run")
+    {
+        if (!TryPromptForRunPath(Directory.GetCurrentDirectory(), out path, out var pickedWatch))
+        {
+            PrintUsage();
+            return;
+        }
+        if (pickedWatch.HasValue)
+        {
+            watch = pickedWatch.Value;
+        }
+    }
     else
     {
         PrintUsage();
@@ -4391,7 +4403,7 @@ static void WriteIrOutput(string ir, string? outputPath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run <file> [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
+    Console.WriteLine("  stasisc run [<file>] [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");
@@ -4400,6 +4412,7 @@ static void PrintUsage()
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Run: omit <file> to pick interactively (breadth-first listing) and optionally enable --watch.");
     Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
@@ -4407,6 +4420,121 @@ static void PrintUsage()
     Console.WriteLine("LLVM: pass --llvm-target <triple> to set the LLVM module target triple (useful for cross-compiling emitted IR).");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
+}
+
+static bool TryPromptForRunPath(string root, out string? path, out bool? watch)
+{
+    path = null;
+    watch = null;
+
+    if (Console.IsInputRedirected)
+    {
+        return false;
+    }
+
+    var files = FindStasisFilesBreadthFirst(root);
+    if (files.Count == 0)
+    {
+        Console.Error.WriteLine($"error: no .stasis files found under {root}");
+        return false;
+    }
+
+    Console.WriteLine("Select a .stasis file to run:");
+    for (var i = 0; i < files.Count; i++)
+    {
+        Console.WriteLine($"  [{i + 1}] {files[i]}");
+    }
+    Console.Write("Enter number (or q to quit): ");
+    var input = Console.ReadLine();
+    if (string.IsNullOrWhiteSpace(input) || input.Trim().Equals("q", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+    if (!int.TryParse(input.Trim(), out var choice) || choice < 1 || choice > files.Count)
+    {
+        Console.Error.WriteLine("error: invalid selection");
+        return false;
+    }
+
+    path = Path.Combine(root, files[choice - 1]);
+
+    Console.WriteLine("Run mode:");
+    Console.WriteLine("  [1] One-time run");
+    Console.WriteLine("  [2] Watch (auto-rebuild + hot-swap)");
+    Console.Write("Enter choice (default 1): ");
+    var modeInput = Console.ReadLine();
+    if (string.IsNullOrWhiteSpace(modeInput))
+    {
+        watch = false;
+        return true;
+    }
+    if (modeInput.Trim() == "1")
+    {
+        watch = false;
+        return true;
+    }
+    if (modeInput.Trim() == "2")
+    {
+        watch = true;
+        return true;
+    }
+
+    Console.Error.WriteLine("error: invalid run mode selection");
+    return false;
+}
+
+static List<string> FindStasisFilesBreadthFirst(string root)
+{
+    var results = new List<string>();
+    var queue = new Queue<string>();
+    queue.Enqueue(root);
+
+    while (queue.Count > 0)
+    {
+        var dir = queue.Dequeue();
+        IEnumerable<string> files;
+        IEnumerable<string> dirs;
+        try
+        {
+            files = Directory.EnumerateFiles(dir, "*.stasis", SearchOption.TopDirectoryOnly);
+            dirs = Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            continue;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            continue;
+        }
+
+        foreach (var file in files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+        {
+            results.Add(Path.GetRelativePath(root, file));
+        }
+
+        foreach (var sub in dirs.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
+        {
+            var name = Path.GetFileName(sub);
+            if (name.StartsWith(".", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            if (string.Equals(name, "build", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "bin", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "obj", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (string.Equals(name, ".stasis_cache", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            queue.Enqueue(sub);
+        }
+    }
+
+    return results;
 }
 
 static int RunAllTestsInDirectoryParallel(string[] files, bool includeTests, string moduleName, bool emitIrOnly, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool allowReachabilityFallback, bool enableTestCache, string? llvmTargetTriple, bool useLowerLock = true, int lowerDegree = 1) =>
