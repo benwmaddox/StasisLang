@@ -109,16 +109,16 @@ export function main(): i32 {
         return 1;
     }    
 
-    state.sprites.paddle = gfx_load_sprite("samples/brickout_revenge/assets/paddle.svg", 128, 24);
-    state.sprites.ball = gfx_load_sprite("samples/brickout_revenge/assets/ball.svg", 32, 32);
-    state.sprites.brick_basic_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic.svg", 160, 64);
-    state.sprites.brick_basic_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_turret.svg", 160, 64);
-    state.sprites.brick_basic_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_basic_fx.svg", 160, 64); 
-    state.sprites.brick_armored_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored.svg", 160, 64);    
-    state.sprites.brick_armored_turret = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_turret.svg", 160, 64);    
-    state.sprites.brick_armored_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_armored_fx.svg", 160, 64);
-    state.sprites.brick_reflector_base = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector.svg", 160, 64);
-    state.sprites.brick_reflector_fx = gfx_load_sprite("samples/brickout_revenge/assets/brick_reflector_fx.svg", 160, 64);
+    state.sprites.paddle = gfx_load_sprite("assets/paddle.svg", 128, 24);
+    state.sprites.ball = gfx_load_sprite("assets/ball.svg", 32, 32);
+    state.sprites.brick_basic_base = gfx_load_sprite("assets/brick_basic.svg", 160, 64);
+    state.sprites.brick_basic_turret = gfx_load_sprite("assets/brick_basic_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx = gfx_load_sprite("assets/brick_basic_fx.svg", 160, 64);
+    state.sprites.brick_armored_base = gfx_load_sprite("assets/brick_armored.svg", 160, 64);
+    state.sprites.brick_armored_turret = gfx_load_sprite("assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_armored_fx = gfx_load_sprite("assets/brick_armored_fx.svg", 160, 64);
+    state.sprites.brick_reflector_base = gfx_load_sprite("assets/brick_reflector.svg", 160, 64);
+    state.sprites.brick_reflector_fx = gfx_load_sprite("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == false) {
         state.game.rng_state = time();
