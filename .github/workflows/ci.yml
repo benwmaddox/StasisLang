@@ -1,17 +1,89 @@
 name: CI
 
+permissions:
+  contents: read
+  statuses: write
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref (branch or SHA) to build; used by PR dispatcher"
+        required: false
+        type: string
 
 jobs:
+  precheck:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - name: Decide if CI should run
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dispatch_ref="${{ github.event.inputs.ref }}"
+
+          if [ -n "$dispatch_ref" ]; then
+            echo "workflow_dispatch with ref=$dispatch_ref"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=dispatch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          repo="${GITHUB_REPOSITORY}"
+          api="https://api.github.com"
+          auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept_header="Accept: application/vnd.github+json"
+
+          latest_commit_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/commits/main")
+          latest_sha=$(echo "$latest_commit_json" | jq -r '.sha')
+          latest_date=$(echo "$latest_commit_json" | jq -r '.commit.committer.date')
+
+          last_success_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1")
+          last_success_sha=$(echo "$last_success_json" | jq -r '.workflow_runs[0].head_sha // empty')
+
+          now_epoch=$(date +%s)
+          latest_epoch=$(date -d "$latest_date" +%s)
+          age_minutes=$(( (now_epoch - latest_epoch) / 60 ))
+
+          if [ -n "$last_success_sha" ] && [ "$last_success_sha" = "$latest_sha" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "No new commits since last successful CI on PR head ($latest_sha)."
+            else
+              echo "No new commits since last successful CI on main ($latest_sha)."
+            fi
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no_new_commits" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$age_minutes" -lt 30 ]; then
+            echo "Latest commit is ${age_minutes} minutes old (<30)."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=quiet_period" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "reason=ready" >> "$GITHUB_OUTPUT"
+
   build-test:
+    needs: precheck
+    if: needs.precheck.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +94,8 @@ jobs:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -106,3 +180,33 @@ jobs:
 
       - name: Test
         run: dotnet test Stasis.sln -c Release --no-build
+
+  pr-status:
+    needs: build-test
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update PR quiet status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          api="https://api.github.com"
+          auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept_header="Accept: application/vnd.github+json"
+          ref="${{ inputs.ref }}"
+
+          ref_json=$(curl -s -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/git/ref/heads/$ref")
+          sha=$(echo "$ref_json" | jq -r '.object.sha')
+
+          case "${{ needs.build-test.result }}" in
+            success) state="success" ;;
+            cancelled) state="error" ;;
+            *) state="failure" ;;
+          esac
+
+          curl -s -X POST -H "$auth_header" -H "$accept_header" \
+            "$api/repos/$repo/statuses/$sha" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/quiet\",\"description\":\"Scheduled CI run completed (~20 min)\"}" > /dev/null

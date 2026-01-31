@@ -64,6 +64,23 @@ typedef int (*stasis_host_bulk_step_fn)(
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
+typedef struct {
+    uint8_t *key_down;
+    uint8_t *key_went_down;
+    uint8_t *key_went_up;
+    int32_t *pointer_count;
+    int32_t *pointer_id;
+    int32_t *pointer_x_px;
+    int32_t *pointer_y_px;
+    uint8_t *pointer_is_down;
+    uint8_t *pointer_went_down;
+    uint8_t *pointer_went_up;
+    int32_t *mouse_x_px;
+    int32_t *mouse_y_px;
+    uint8_t *mouse_down;
+    uint8_t *mouse_clicked;
+} stasis_input_bindings;
+typedef void (*stasis_input_bind_fn)(const stasis_input_bindings *bindings);
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -962,6 +979,54 @@ static void stasis_rebind_bulk_pointers(
     }
 }
 
+static void stasis_try_bind_input_snapshot(HMODULE lib)
+{
+    if (!lib)
+    {
+        return;
+    }
+
+    HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+    if (!gfx)
+    {
+        return;
+    }
+
+    stasis_input_bind_fn input_bind = (stasis_input_bind_fn)GetProcAddress(gfx, "stasis_input_bind");
+    if (!input_bind)
+    {
+        return;
+    }
+
+    stasis_input_bindings bindings;
+    memset(&bindings, 0, sizeof(bindings));
+    bindings.key_down = (int32_t *)GetProcAddress(lib, "input__key_down");
+    bindings.key_went_down = (int32_t *)GetProcAddress(lib, "input__key_went_down");
+    bindings.key_went_up = (int32_t *)GetProcAddress(lib, "input__key_went_up");
+    bindings.pointer_count = (int32_t *)GetProcAddress(lib, "input__pointer_count");
+    bindings.pointer_id = (int32_t *)GetProcAddress(lib, "input__pointer_id");
+    bindings.pointer_x_px = (int32_t *)GetProcAddress(lib, "input__pointer_x_px");
+    bindings.pointer_y_px = (int32_t *)GetProcAddress(lib, "input__pointer_y_px");
+    bindings.pointer_is_down = (int32_t *)GetProcAddress(lib, "input__pointer_is_down");
+    bindings.pointer_went_down = (int32_t *)GetProcAddress(lib, "input__pointer_went_down");
+    bindings.pointer_went_up = (int32_t *)GetProcAddress(lib, "input__pointer_went_up");
+    bindings.mouse_x_px = (int32_t *)GetProcAddress(lib, "input__mouse_x_px");
+    bindings.mouse_y_px = (int32_t *)GetProcAddress(lib, "input__mouse_y_px");
+    bindings.mouse_down = (int32_t *)GetProcAddress(lib, "input__mouse_down");
+    bindings.mouse_clicked = (int32_t *)GetProcAddress(lib, "input__mouse_clicked");
+
+    if (!bindings.key_down || !bindings.key_went_down || !bindings.key_went_up ||
+        !bindings.pointer_count || !bindings.pointer_id || !bindings.pointer_x_px || !bindings.pointer_y_px ||
+        !bindings.pointer_is_down || !bindings.pointer_went_down || !bindings.pointer_went_up ||
+        !bindings.mouse_x_px || !bindings.mouse_y_px || !bindings.mouse_down || !bindings.mouse_clicked)
+    {
+        input_bind(NULL);
+        return;
+    }
+
+    input_bind(&bindings);
+}
+
 static DWORD WINAPI hot_exit_thread(LPVOID user_data)
 {
     stasis_hot_exit_args *args = (stasis_hot_exit_args *)user_data;
@@ -1593,6 +1658,8 @@ int main(int argc, char **argv)
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
 
+    stasis_try_bind_input_snapshot(lib);
+
     if (result == 0 && tick_sym)
     {
         stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
@@ -1879,6 +1946,8 @@ int main(int argc, char **argv)
                                 &host_req_window_w_px,
                                 &host_req_window_h_px,
                                 &last_req_seq);
+
+                            stasis_try_bind_input_snapshot(lib);
 
                             if (host_bulk_init)
                             {

@@ -45,6 +45,7 @@ EXPORTS
     stasis_input_viewport_y_px
     stasis_input_viewport_w_px
     stasis_input_viewport_h_px
+    stasis_input_bind
     stasis_host_get_frame
     stasis_host_get_keyboard_state
     stasis_gfx_notify_file_changed
