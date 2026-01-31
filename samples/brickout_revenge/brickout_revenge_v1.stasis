@@ -68,7 +68,7 @@ const UI_PANEL_GAP: f32 = 12.0;
 // Non-interactive benchmark harness:
 // - Runs for a fixed number of ticks, prints average `tick_time_ms`, then exits.
 // - `tick_time_ms` excludes `end_frame()` (swap/vsync) by design in this sample.
-const BENCH_AUTO_EXIT: i32 = 1;
+const BENCH_AUTO_EXIT: i32 = 0;
 const BENCH_WARMUP_FRAMES: i32 = 200;
 const BENCH_TOTAL_FRAMES: i32 = 2000;
 const BENCH_SKIP_MAXIMIZE: i32 = 1;
