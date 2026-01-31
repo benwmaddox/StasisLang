@@ -183,7 +183,7 @@ jobs:
 
   pr-status:
     needs: build-test
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Update PR quiet status
@@ -195,7 +195,7 @@ jobs:
           api="https://api.github.com"
           auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
           accept_header="Accept: application/vnd.github+json"
-          ref="${{ inputs.ref }}"
+          ref="${{ github.event.inputs.ref }}"
 
           ref_json=$(curl -s -H "$auth_header" -H "$accept_header" \
             "$api/repos/$repo/git/ref/heads/$ref")
