@@ -2228,9 +2228,9 @@ function handle_pointer_input(): void {
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
         let pid: i32 = host_pointer_id(i);
-        let went_down: bool = host_pointer_went_down(i) != 0;
-        let went_up: bool = host_pointer_went_up(i) != 0;
-        let is_down: bool = host_pointer_is_down(i) != 0;
+        let went_down: bool = host_pointer_went_down(i);
+        let went_up: bool = host_pointer_went_up(i);
+        let is_down: bool = host_pointer_is_down(i);
         let sx: f32 = host_pointer_x_px(i) + state.layout.viewport_x;
         let sy: f32 = host_pointer_y_px(i) + state.layout.viewport_y;
 
@@ -2306,7 +2306,7 @@ function record_tap_pulses(): void {
     let count: i32 = host_pointer_count();
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let went_down: bool = host_pointer_went_down(i) != 0;
+        let went_down: bool = host_pointer_went_down(i);
         if (went_down) {
             let x: f32 = host_pointer_x_px(i);
             let y: f32 = host_pointer_y_px(i);
@@ -2548,4 +2548,3 @@ function tick(): i32 {
 
     return 0;
 }
-

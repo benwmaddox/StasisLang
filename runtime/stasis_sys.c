@@ -11,6 +11,7 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
 #endif
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -365,7 +366,24 @@ int stasis_sys_file_mtime_ms(const char *path)
     // Preserve change detection semantics while staying in i32: wrap into the signed range.
     return (int)(ms & 0x7fffffffULL);
 #else
-    return -1;
+    struct stat st;
+    if (stat(path, &st) != 0)
+    {
+        return -1;
+    }
+
+    struct timespec ts;
+#ifdef __APPLE__
+    ts = st.st_mtimespec;
+#elif defined(__linux__) || defined(__unix__) || defined(__posix__) || defined(_POSIX_C_SOURCE)
+    ts = st.st_mtim;
+#else
+    ts.tv_sec = st.st_mtime;
+    ts.tv_nsec = 0;
+#endif
+
+    uint64_t ms = ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
+    return (int)(ms & 0x7fffffffULL);
 #endif
 }
 

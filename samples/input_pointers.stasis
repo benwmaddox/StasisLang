@@ -49,9 +49,9 @@ function tick(): i32 {
         let x: f32 = host_pointer_x_px(i);
         let y: f32 = host_pointer_y_px(i);
 
-        let is_down: bool = host_pointer_is_down(i) != 0;
-        let went_down: bool = host_pointer_went_down(i) != 0;
-        let went_up: bool = host_pointer_went_up(i) != 0;
+        let is_down: bool = host_pointer_is_down(i);
+        let went_down: bool = host_pointer_went_down(i);
+        let went_up: bool = host_pointer_went_up(i);
 
         let r: f32 = 0.2;
         let g: f32 = 0.8;
