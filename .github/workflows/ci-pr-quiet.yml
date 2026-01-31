@@ -9,6 +9,7 @@ permissions:
   contents: read
   pull-requests: read
   actions: write
+  statuses: write
 
 jobs:
   dispatch:
@@ -38,6 +39,7 @@ jobs:
             "$api/repos/$repo/actions/workflows/ci.yml/runs?per_page=100")
 
           now_epoch=$(date +%s)
+          next_run_utc=$(date -u -d 'next hour' +"%Y-%m-%d %H:00 UTC")
 
           echo "$prs_json" | jq -c '.[]' | while read -r pr; do
             pr_number=$(echo "$pr" | jq -r '.number')
@@ -56,14 +58,22 @@ jobs:
             commit_epoch=$(date -d "$commit_date" +%s)
             age_minutes=$(( (now_epoch - commit_epoch) / 60 ))
 
+            has_success=$(echo "$runs_json" | jq -r --arg sha "$head_sha" '
+              any(.workflow_runs[]; .head_sha == $sha and .conclusion == "success")
+            ')
+
+            if [ "$has_success" != "true" ]; then
+              desc="Waiting for scheduled CI (~20 min). Next run: $next_run_utc"
+              curl -s -X POST -H "$auth_header" -H "$accept_header" \
+                "$api/repos/$repo/statuses/$head_sha" \
+                -d "{\"state\":\"pending\",\"context\":\"ci/quiet\",\"description\":\"$desc\"}" > /dev/null
+            fi
+
             if [ "$age_minutes" -lt 30 ]; then
               echo "PR #$pr_number head is ${age_minutes} minutes old (<30); skipping."
               continue
             fi
 
-            has_success=$(echo "$runs_json" | jq -r --arg sha "$head_sha" '
-              any(.workflow_runs[]; .head_sha == $sha and .conclusion == "success")
-            ')
             if [ "$has_success" = "true" ]; then
               echo "PR #$pr_number head already passed CI ($head_sha); skipping."
               continue
