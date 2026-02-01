@@ -126,12 +126,12 @@ The CLI prints a per-phase breakdown for each hot reload:
 
 The runner prints per-swap timings:
 
-- `HOTSWAP ok: save=...us load=...us restore=...us bytes=... symbols=...`
+- `HOTSWAP ok: save=...ms load=...ms restore=...ms bytes=... symbols=...`
 
 Use these to decide what to optimize. In practice:
 
 - `link=...` tends to dominate.
-- `load=...us` is usually small once outputs and dependencies are stable and on a fast path.
+- `load=...ms` is usually small once outputs and dependencies are stable and on a fast path.
 
 ## Animation and SVG Guidance (current best practice)
 
