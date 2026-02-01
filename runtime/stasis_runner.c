@@ -1705,6 +1705,9 @@ int main(int argc, char **argv)
             }
         }
 
+        const int log_cmd_hdr = stasis_env_flag("STASIS_GFX_LOG_CMD_HDR", 0);
+        int log_cmd_remaining = log_cmd_hdr ? 5 : 0;
+
         /* Apply any request the program made during main(). */
         if (bulk_active && host_bulk_apply_requests)
         {
@@ -2036,6 +2039,13 @@ int main(int argc, char **argv)
                     break;
                 }
 
+                if (log_cmd_remaining > 0 && gfx_cmd_i32)
+                {
+                    fprintf(stderr, "GFX_CMD flags=%d lines=%d sprites=%d text=%d\n",
+                            gfx_cmd_i32[2], gfx_cmd_i32[3], gfx_cmd_i32[4], gfx_cmd_i32[7]);
+                    log_cmd_remaining--;
+                }
+
                 gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
             }
             else
@@ -2244,6 +2254,80 @@ int main(int argc, char **argv)
         long long last_us = ts_last.tv_sec * 1000000LL + ts_last.tv_nsec / 1000LL;
         int tick_diag_count = 0;
 
+        /* Bulk host loop API (stasis_graphics.so). */
+        stasis_host_bulk_init_fn host_bulk_init = NULL;
+        stasis_host_bulk_apply_requests_fn host_bulk_apply_requests = NULL;
+        stasis_host_bulk_step_fn host_bulk_step = NULL;
+        stasis_host_get_frame_fn host_get_frame = NULL;
+        stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
+        stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
+
+        void *gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!gfx_lib)
+        {
+            gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
+        }
+        if (!gfx_lib)
+        {
+            gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
+        }
+        if (!gfx_lib)
+        {
+            gfx_lib = dlopen("stasis_graphics.so", RTLD_NOW | RTLD_NOLOAD);
+        }
+        if (!gfx_lib)
+        {
+            gfx_lib = RTLD_DEFAULT;
+        }
+
+        host_bulk_init = (stasis_host_bulk_init_fn)dlsym(gfx_lib, "stasis_host_bulk_init");
+        host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)dlsym(gfx_lib, "stasis_host_bulk_apply_requests");
+        host_bulk_step = (stasis_host_bulk_step_fn)dlsym(gfx_lib, "stasis_host_bulk_step");
+        host_get_frame = (stasis_host_get_frame_fn)dlsym(gfx_lib, "stasis_host_get_frame");
+        host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)dlsym(gfx_lib, "stasis_host_get_keyboard_state");
+        gfx_submit_u8 = (stasis_gfx_submit_u8_fn)dlsym(gfx_lib, "stasis_gfx_submit_u8");
+
+        int32_t *host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
+        int32_t *host_req_flags = (int32_t *)dlsym(lib, "host_req_flags");
+        int32_t *host_req_window_w_px = (int32_t *)dlsym(lib, "host_req_window_w_px");
+        int32_t *host_req_window_h_px = (int32_t *)dlsym(lib, "host_req_window_h_px");
+
+        const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
+        int bulk_active = 0;
+        int32_t *host_i32 = NULL;
+        float *host_f32 = NULL;
+        uint8_t *host_keys = NULL;
+        int32_t *gfx_cmd_i32 = NULL;
+        float *gfx_cmd_f32 = NULL;
+        uint8_t *gfx_cmd_u8 = NULL;
+        int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
+
+        if (bulk_enabled)
+        {
+            host_i32 = (int32_t *)dlsym(lib, "host_i32");
+            host_f32 = (float *)dlsym(lib, "host_f32");
+            host_keys = (uint8_t *)dlsym(lib, "host_keys");
+            gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
+            gfx_cmd_f32 = (float *)dlsym(lib, "gfx_cmd_f32");
+            gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
+
+            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+                (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+            {
+                bulk_active = 1;
+            }
+        }
+
+        if (host_bulk_init && host_req_seq)
+        {
+            host_bulk_init(host_req_seq);
+        }
+
+        if (bulk_active && host_bulk_apply_requests)
+        {
+            host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+        }
+
         for (;;)
         {
             if (swap_file_path && file_exists(swap_file_path))
@@ -2449,23 +2533,92 @@ int main(int argc, char **argv)
 
             stasis_data_poll_all();
 
-            if (runner_diag && tick_diag_count < 10)
+            if (bulk_active && host_bulk_step)
             {
-                fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
-                fflush(stderr);
+                int step_result = host_bulk_step(
+                    host_i32,
+                    host_f32,
+                    gfx_cmd_i32,
+                    gfx_cmd_f32,
+                    gfx_cmd_u8,
+                    host_req_seq,
+                    host_req_flags,
+                    host_req_window_w_px,
+                    host_req_window_h_px,
+                    tick);
+                if (step_result != 0)
+                {
+                    result = step_result == 1 ? 0 : step_result;
+                    break;
+                }
             }
+            else if (bulk_active)
+            {
+                if (host_get_frame)
+                {
+                    host_get_frame(host_i32, host_f32);
+                }
+                if (host_get_keyboard_state && host_keys)
+                {
+                    (void)host_get_keyboard_state(host_keys, 512);
+                }
+                if (host_i32 && host_i32[9] != 0)
+                {
+                    result = 0;
+                    break;
+                }
+                if (host_bulk_apply_requests)
+                {
+                    host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
+                }
+                else if (host_req_seq && host_req_flags && *host_req_seq != last_req_seq)
+                {
+                    last_req_seq = *host_req_seq;
+                }
 
-            int tick_result = tick();
-            if (runner_diag && tick_diag_count < 10)
-            {
-                fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
-                fflush(stderr);
-                tick_diag_count++;
+                if (runner_diag && tick_diag_count < 10)
+                {
+                    fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
+                    fflush(stderr);
+                }
+
+                int tick_result = tick();
+                if (runner_diag && tick_diag_count < 10)
+                {
+                    fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
+                    fflush(stderr);
+                    tick_diag_count++;
+                }
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
+                if (gfx_submit_u8)
+                {
+                    gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+                }
             }
-            if (tick_result != 0)
+            else
             {
-                result = tick_result == 1 ? 0 : tick_result;
-                break;
+                if (runner_diag && tick_diag_count < 10)
+                {
+                    fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
+                    fflush(stderr);
+                }
+
+                int tick_result = tick();
+                if (runner_diag && tick_diag_count < 10)
+                {
+                    fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
+                    fflush(stderr);
+                    tick_diag_count++;
+                }
+                if (tick_result != 0)
+                {
+                    result = tick_result == 1 ? 0 : tick_result;
+                    break;
+                }
             }
 
             struct timespec ts_now;
