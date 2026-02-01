@@ -1000,20 +1000,20 @@ static void stasis_try_bind_input_snapshot(HMODULE lib)
 
     stasis_input_bindings bindings;
     memset(&bindings, 0, sizeof(bindings));
-    bindings.key_down = (int32_t *)GetProcAddress(lib, "input__key_down");
-    bindings.key_went_down = (int32_t *)GetProcAddress(lib, "input__key_went_down");
-    bindings.key_went_up = (int32_t *)GetProcAddress(lib, "input__key_went_up");
+    bindings.key_down = (uint8_t *)GetProcAddress(lib, "input__key_down");
+    bindings.key_went_down = (uint8_t *)GetProcAddress(lib, "input__key_went_down");
+    bindings.key_went_up = (uint8_t *)GetProcAddress(lib, "input__key_went_up");
     bindings.pointer_count = (int32_t *)GetProcAddress(lib, "input__pointer_count");
     bindings.pointer_id = (int32_t *)GetProcAddress(lib, "input__pointer_id");
     bindings.pointer_x_px = (int32_t *)GetProcAddress(lib, "input__pointer_x_px");
     bindings.pointer_y_px = (int32_t *)GetProcAddress(lib, "input__pointer_y_px");
-    bindings.pointer_is_down = (int32_t *)GetProcAddress(lib, "input__pointer_is_down");
-    bindings.pointer_went_down = (int32_t *)GetProcAddress(lib, "input__pointer_went_down");
-    bindings.pointer_went_up = (int32_t *)GetProcAddress(lib, "input__pointer_went_up");
+    bindings.pointer_is_down = (uint8_t *)GetProcAddress(lib, "input__pointer_is_down");
+    bindings.pointer_went_down = (uint8_t *)GetProcAddress(lib, "input__pointer_went_down");
+    bindings.pointer_went_up = (uint8_t *)GetProcAddress(lib, "input__pointer_went_up");
     bindings.mouse_x_px = (int32_t *)GetProcAddress(lib, "input__mouse_x_px");
     bindings.mouse_y_px = (int32_t *)GetProcAddress(lib, "input__mouse_y_px");
-    bindings.mouse_down = (int32_t *)GetProcAddress(lib, "input__mouse_down");
-    bindings.mouse_clicked = (int32_t *)GetProcAddress(lib, "input__mouse_clicked");
+    bindings.mouse_down = (uint8_t *)GetProcAddress(lib, "input__mouse_down");
+    bindings.mouse_clicked = (uint8_t *)GetProcAddress(lib, "input__mouse_clicked");
 
     if (!bindings.key_down || !bindings.key_went_down || !bindings.key_went_up ||
         !bindings.pointer_count || !bindings.pointer_id || !bindings.pointer_x_px || !bindings.pointer_y_px ||
