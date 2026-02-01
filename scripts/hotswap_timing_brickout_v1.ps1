@@ -124,9 +124,9 @@ function Parse-HotSwapOk([string[]]$lines) {
 function Parse-HotSwapLoadUs([string[]]$lines) {
     $loads = @()
     foreach ($line in $lines) {
-        if ($line -like "*HOTSWAP load(us):*") {
-            foreach ($m in [regex]::Matches($line, "HOTSWAP load\\(us\\):\\s*([0-9]+)")) {
-                $loads += [int]$m.Groups[1].Value
+        if ($line -like "*HOTSWAP load(ms):*") {
+            foreach ($m in [regex]::Matches($line, "HOTSWAP load\\(ms\\):\\s*([0-9]+(?:\\.[0-9]+)?)")) {
+                $loads += [double]$m.Groups[1].Value
             }
         }
     }
@@ -164,7 +164,7 @@ try {
     }
 
     $swapLog = if ($Mode -eq "jit") { $outLog } else { $outLog }
-    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP load(us):" }
+    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP load(ms):" }
 
     $prevSwapCount = 0
     if (Test-Path $swapLog) {
@@ -202,17 +202,17 @@ $errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
 $outLines = if (Test-Path $outLog) { Get-Content $outLog } else { @() }
 
 $reloads = Parse-HotReloadPhases $errLines
-$loadsUs = if ($Mode -eq "jit") { @() } else { Parse-HotSwapLoadUs $outLines }
+$loadsMs = if ($Mode -eq "jit") { @() } else { Parse-HotSwapLoadUs $outLines }
 
 $reloadTotals = $reloads | ForEach-Object { $_["total"] }
 $reloadLinks = $reloads | ForEach-Object { $_["link"] }
-$loadMs = $loadsUs | ForEach-Object { [math]::Round($_ / 1000.0, 3) }
+$loadMs = $loadsMs | ForEach-Object { [math]::Round($_, 3) }
 
 Write-Host ("Reloads: {0} Swaps: {1}" -f $reloads.Count, $loadMs.Count)
 Write-Host (Summarize "HOTRELOAD total" $reloadTotals "ms")
 Write-Host (Summarize "HOTRELOAD link" $reloadLinks "ms")
 if ($Mode -eq "jit") {
-    Write-Host "HOTSWAP load: n/a (jit mode does not emit HOTSWAP load(us))"
+    Write-Host "HOTSWAP load: n/a (jit mode does not emit HOTSWAP load(ms))"
 } else {
     Write-Host (SummarizeFloat "HOTSWAP load" $loadMs "ms")
 }
