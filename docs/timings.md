@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\hotswap_timing_bri
 ```
 
 Metric:
-- Parse `HOTSWAP ok: ... load=...us` from `build/hotstate/brickout_revenge_v1.brick.runner.err.log` (DLL load time only).
+- Parse `HOTSWAP ok: ... load=...ms` from `build/hotstate/brickout_revenge_v1.brick.runner.err.log` (DLL load time only).
 
 Samples (ms):
 - 782.724, 921.693, 898.394, 1208.455, 889.309, 878.257, 874.238, 703.424

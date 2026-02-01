@@ -469,6 +469,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        MaybeLogGlobalMemoryUsageOnLayoutChange(path, moduleName, layout);
         if (logPhaseTiming)
         {
             layoutMs = phaseStopwatch.ElapsedMilliseconds;
@@ -3195,6 +3196,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
         layoutMs = phase.ElapsedMilliseconds;
         phase.Restart();
         var options = new CodeGenerationOptions(
@@ -3824,6 +3826,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
 
         if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
         {
@@ -4067,7 +4070,7 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
     var defPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{hashHex}.exports.def");
     var hotExitPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.hot-exit");
 
-    // Emit map/exports/metadata only when missing to keep hot-reload fast.
+    // Emit map/exports only when missing to keep hot-reload fast.
     var structMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.struct-meta.json");
     if (!File.Exists(mapPath) || !File.Exists(defPath) || !File.Exists(structMetaPath))
     {
@@ -4082,10 +4085,10 @@ static bool TryCreateHotStatePlan(string sourcePath, LayoutPlan layout, string m
             map.Append('\n');
         }
         WriteAllTextAtomic(mapPath, map.ToString(), Encoding.ASCII);
-
-        // Emit struct metadata JSON for data binding
-        EmitStructMetadataJson(structMetaPath, state, entries);
     }
+
+    // Always keep struct metadata in sync (the path is stable across hashes).
+    EmitStructMetadataJson(structMetaPath, state, entries);
 
     // The export list is cheap to regenerate and may grow when additional globals are added.
     var def = new StringBuilder();
@@ -4172,8 +4175,115 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     };
 
     var json = JsonSerializer.Serialize(metadata, StasisCliJson.Indented.StructMetadata);
+    if (File.Exists(path) && TryReadTextShared(path, out var existing) && string.Equals(existing, json, StringComparison.Ordinal))
+    {
+        return;
+    }
+
     // Write UTF-8 without BOM so non-.NET parsers (e.g., Rust serde_json) can read it reliably.
     WriteAllTextAtomic(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+}
+
+static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string moduleName, LayoutPlan layout)
+{
+    try
+    {
+        var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+        var cacheDir = Path.Combine(repoRoot, ".stasis_cache", "layout");
+        Directory.CreateDirectory(cacheDir);
+
+        var fullPath = Path.GetFullPath(sourcePath);
+        var pathHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(fullPath))).Substring(0, 12).ToLowerInvariant();
+        var baseName = Path.GetFileNameWithoutExtension(fullPath);
+        var cachePath = Path.Combine(cacheDir, $"{baseName}.{moduleName}.{pathHash}.globals.v1.txt");
+
+        var layoutHash = HashGlobalLayout(layout);
+        var layoutHashHex = layoutHash.ToString("x16");
+        var totalBytes = layout.TotalSize;
+
+        var stateBytes = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal))?.Size ?? 0;
+        var totalKiB = totalBytes / 1024.0;
+
+        var isNew = !File.Exists(cachePath);
+        var changed = isNew;
+        if (!isNew && TryReadTextShared(cachePath, out var prevText))
+        {
+            var prevHashLine = prevText.Split('\n').FirstOrDefault(l => l.StartsWith("layoutHash=", StringComparison.Ordinal));
+            if (prevHashLine is null || !string.Equals(prevHashLine.Trim(), $"layoutHash={layoutHashHex}", StringComparison.Ordinal))
+            {
+                changed = true;
+            }
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        var tag = isNew ? "new" : "changed";
+        Console.Error.WriteLine($"GLOBAL memory: total={totalBytes} bytes ({totalKiB:0.00} KiB) state={stateBytes} bytes ({stateBytes / 1024.0:0.00} KiB) [{tag}]");
+
+        var sb = new StringBuilder();
+        sb.AppendLine("version=1");
+        sb.AppendLine($"layoutHash={layoutHashHex}");
+        sb.AppendLine($"totalBytes={totalBytes}");
+        sb.AppendLine($"stateBytes={stateBytes}");
+        sb.AppendLine($"path={fullPath}");
+        WriteAllTextAtomic(cachePath, sb.ToString(), Encoding.ASCII);
+    }
+    catch
+    {
+        // Best-effort diagnostics only.
+    }
+}
+
+static ulong HashGlobalLayout(LayoutPlan layout)
+{
+    // FNV-1a 64
+    ulong hash = 14695981039346656037UL;
+
+    static void AddBytes(ref ulong h, ReadOnlySpan<byte> bytes)
+    {
+        foreach (var b in bytes)
+        {
+            h ^= b;
+            h *= 1099511628211UL;
+        }
+    }
+
+    static void AddInt(ref ulong h, int value)
+    {
+        unchecked
+        {
+            var u = (uint)value;
+            for (var i = 0; i < 4; i++)
+            {
+                h ^= (byte)(u & 0xFF);
+                h *= 1099511628211UL;
+                u >>= 8;
+            }
+        }
+    }
+
+    foreach (var global in layout.Globals)
+    {
+        AddBytes(ref hash, Encoding.UTF8.GetBytes(global.Name));
+        AddInt(ref hash, global.Offset);
+        AddInt(ref hash, global.Size);
+        AddInt(ref hash, global.Fields.Count);
+
+        foreach (var field in global.Fields)
+        {
+            AddBytes(ref hash, Encoding.UTF8.GetBytes(field.Name));
+            AddInt(ref hash, field.Offset);
+            AddInt(ref hash, field.Size);
+            AddInt(ref hash, (int)field.Type);
+            AddInt(ref hash, field.ArrayCount);
+        }
+    }
+
+    AddInt(ref hash, layout.TotalSize);
+    return hash;
 }
 
 static int WatchFile(string path, string mode, bool includeTests, string moduleName, bool emitIrOnly, string? outputPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, BackendType backend, bool useCraneliftRunner, bool enableHotState, int tickHostFps, string? llvmTargetTriple)
