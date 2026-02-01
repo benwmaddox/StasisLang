@@ -167,7 +167,11 @@ do {
             $fields = @{}
             $parts = $line -replace ".*HOTSWAP ok:\s*", "" -split "\s+"
             foreach ($p in $parts) {
-                if ($p -match "^(\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+                if ($p -match "^(\w+)=([0-9]+(?:\\.[0-9]+)?)(ms|us)?$") {
+                    $v = [double]$matches[2]
+                    if ($matches[3] -eq "us") { $v = $v / 1000.0 }
+                    $fields[$matches[1]] = $v
+                }
             }
             if ($fields.ContainsKey("load")) { $swaps += $fields }
         }
@@ -190,7 +194,11 @@ if ($swaps.Count -eq 0) {
                 $fields = @{}
                 $parts = $m.Value -replace ".*HOTSWAP ok:\s*", "" -split "\s+"
                 foreach ($p in $parts) {
-                    if ($p -match "^(\w+)=([0-9]+)(us)?$") { $fields[$matches[1]] = [int]$matches[2] }
+                    if ($p -match "^(\w+)=([0-9]+(?:\\.[0-9]+)?)(ms|us)?$") {
+                        $v = [double]$matches[2]
+                        if ($matches[3] -eq "us") { $v = $v / 1000.0 }
+                        $fields[$matches[1]] = $v
+                    }
                 }
                 if ($fields.ContainsKey("load")) { $swaps += $fields }
             }
@@ -204,11 +212,13 @@ if ($layoutWarnings.Count -gt 0) {
     Write-Host "State layout warning detected during hot-swap (continuing to report timings)."
 }
 
-function Summarize([string]$label, [int[]]$values, [string]$unit) {
+function Summarize([string]$label, [double[]]$values, [string]$unit) {
     if ($values.Count -eq 0) { return "${label}: n/a" }
     $min = ($values | Measure-Object -Minimum).Minimum
     $max = ($values | Measure-Object -Maximum).Maximum
-    $avg = [math]::Round(($values | Measure-Object -Average).Average, 2)
+    $avg = [math]::Round(($values | Measure-Object -Average).Average, 3)
+    $min = [math]::Round($min, 3)
+    $max = [math]::Round($max, 3)
     return "${label}: min=${min}${unit} avg=${avg}${unit} max=${max}${unit}"
 }
 
@@ -221,6 +231,6 @@ $swapRestores = $swaps | ForEach-Object { $_["restore"] }
 Write-Host ("Reloads: {0} Swaps: {1}" -f $reloads.Count, $swaps.Count)
 Write-Host (Summarize "HOTRELOAD total" $reloadTotals "ms")
 Write-Host (Summarize "HOTRELOAD link" $reloadLinks "ms")
-Write-Host (Summarize "HOTSWAP load" $swapLoads "us")
-Write-Host (Summarize "HOTSWAP save" $swapSaves "us")
-Write-Host (Summarize "HOTSWAP restore" $swapRestores "us")
+Write-Host (Summarize "HOTSWAP load" $swapLoads "ms")
+Write-Host (Summarize "HOTSWAP save" $swapSaves "ms")
+Write-Host (Summarize "HOTSWAP restore" $swapRestores "ms")

@@ -1910,7 +1910,15 @@ int main(int argc, char **argv)
                                 QueryPerformanceCounter(&sw_t1);
                                 restore_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
                                 free(buffer);
-                                fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, next_total_bytes, next_sym_count);
+                                fprintf(
+                                    stderr,
+                                    "HOTSWAP ok: save=%.3fms load=%.3fms tick=%.3fms restore=%.3fms bytes=%u symbols=%u\n",
+                                    (double)save_us / 1000.0,
+                                    (double)load_us / 1000.0,
+                                    (double)tick_us / 1000.0,
+                                    (double)restore_us / 1000.0,
+                                    next_total_bytes,
+                                    next_sym_count);
                                 fflush(stderr);
                                 if (missing_save > 0 || missing_restore > 0 || truncated > 0)
                                 {
@@ -1920,7 +1928,7 @@ int main(int argc, char **argv)
                             }
                             else
                             {
-                                fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                                fprintf(stderr, "HOTSWAP ok: load=%.3fms tick=%.3fms\n", (double)load_us / 1000.0, (double)tick_us / 1000.0);
                                 fflush(stderr);
                             }
 
@@ -2495,7 +2503,15 @@ int main(int argc, char **argv)
                         clock_gettime(CLOCK_MONOTONIC, &t1);
                         restore_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                         free(buffer);
-                        fprintf(stderr, "HOTSWAP ok: save=%lldus load=%lldus tick=%lldus restore=%lldus bytes=%u symbols=%u\n", save_us, load_us, tick_us, restore_us, next_total_bytes, next_sym_count);
+                        fprintf(
+                            stderr,
+                            "HOTSWAP ok: save=%.3fms load=%.3fms tick=%.3fms restore=%.3fms bytes=%u symbols=%u\n",
+                            (double)save_us / 1000.0,
+                            (double)load_us / 1000.0,
+                            (double)tick_us / 1000.0,
+                            (double)restore_us / 1000.0,
+                            next_total_bytes,
+                            next_sym_count);
                         fflush(stderr);
                         if (missing_save > 0 || missing_restore > 0 || truncated > 0)
                         {
@@ -2505,7 +2521,7 @@ int main(int argc, char **argv)
                     }
                     else
                     {
-                        fprintf(stderr, "HOTSWAP ok: load=%lldus tick=%lldus\n", load_us, tick_us);
+                        fprintf(stderr, "HOTSWAP ok: load=%.3fms tick=%.3fms\n", (double)load_us / 1000.0, (double)tick_us / 1000.0);
                         fflush(stderr);
                     }
 
