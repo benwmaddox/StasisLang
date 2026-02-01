@@ -2514,6 +2514,29 @@ int main(int argc, char **argv)
                     tick = (stasis_tick_fn)new_tick_sym;
                     stasis_try_set_sys_args(lib, argc, argv);
                     stasis_data_set_dll(new_lib);
+                    if (bulk_enabled)
+                    {
+                        host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
+                        host_req_flags = (int32_t *)dlsym(lib, "host_req_flags");
+                        host_req_window_w_px = (int32_t *)dlsym(lib, "host_req_window_w_px");
+                        host_req_window_h_px = (int32_t *)dlsym(lib, "host_req_window_h_px");
+
+                        host_i32 = (int32_t *)dlsym(lib, "host_i32");
+                        host_f32 = (float *)dlsym(lib, "host_f32");
+                        host_keys = (uint8_t *)dlsym(lib, "host_keys");
+                        gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
+                        gfx_cmd_f32 = (float *)dlsym(lib, "gfx_cmd_f32");
+                        gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
+
+                        bulk_active = (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+                                       (host_bulk_step || (host_get_frame && gfx_submit_u8))) ? 1 : 0;
+                        last_req_seq = host_req_seq ? *host_req_seq : 0;
+
+                        if (host_bulk_init && host_req_seq)
+                        {
+                            host_bulk_init(host_req_seq);
+                        }
+                    }
 
                     if (next_map_owned)
                     {
