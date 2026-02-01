@@ -3132,7 +3132,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     string? activeDll = null;
     Process? runner = null;
     var runnerHotSwapOkCount = 0;
-    long runnerHotSwapLoadUs = -1;
+    double runnerHotSwapLoadMs = -1;
     var swapDllSerial = 0;
 
     int BuildAndSwap(bool startRunner, out string timingLine)
@@ -3340,10 +3340,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                         if (line.Contains("HOTSWAP ok:", StringComparison.Ordinal))
                         {
                             Interlocked.Increment(ref runnerHotSwapOkCount);
-                            var loadUs = TryParseHotSwapLoadUs(line);
-                            if (loadUs >= 0)
+                            var loadMs = TryParseHotSwapLoadMs(line);
+                            if (loadMs >= 0)
                             {
-                                Interlocked.Exchange(ref runnerHotSwapLoadUs, loadUs);
+                                Interlocked.Exchange(ref runnerHotSwapLoadMs, loadMs);
                             }
                         }
                     });
@@ -3377,7 +3377,15 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     prevOkCount,
                     timeoutMs: 20000);
             Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
-            Console.WriteLine($"HOTSWAP load(us): {Volatile.Read(ref runnerHotSwapLoadUs)}");
+            var loadMs = Volatile.Read(ref runnerHotSwapLoadMs);
+            if (loadMs < 0)
+            {
+                Console.WriteLine("HOTSWAP load(ms): -1");
+            }
+            else
+            {
+                Console.WriteLine($"HOTSWAP load(ms): {loadMs:0.###}");
+            }
             return 0;
         }
         finally
@@ -3400,7 +3408,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
     }
 
-    static long TryParseHotSwapLoadUs(string line)
+    static double TryParseHotSwapLoadMs(string line)
     {
         const string needle = "load=";
         var idx = line.IndexOf(needle, StringComparison.Ordinal);
@@ -3409,17 +3417,49 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             return -1;
         }
         idx += needle.Length;
+
+        // Token is something like:
+        // - legacy: "12345us"
+        // - new:    "123.456ms"
+        // - legacy (no unit): "12345"
         var end = idx;
-        while (end < line.Length && char.IsDigit(line[end]))
+        while (end < line.Length && !char.IsWhiteSpace(line[end]))
         {
             end++;
         }
-        if (end == idx)
+        if (end <= idx)
         {
             return -1;
         }
-        var span = line.AsSpan(idx, end - idx);
-        return long.TryParse(span, out var value) ? value : -1;
+
+        var token = line.AsSpan(idx, end - idx).Trim();
+        if (token.EndsWith("us", StringComparison.Ordinal))
+        {
+            var num = token[..^2];
+            if (!double.TryParse(num, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var us))
+            {
+                return -1;
+            }
+            return us / 1000.0;
+        }
+
+        if (token.EndsWith("ms", StringComparison.Ordinal))
+        {
+            var num = token[..^2];
+            if (!double.TryParse(num, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ms))
+            {
+                return -1;
+            }
+            return ms;
+        }
+
+        if (!double.TryParse(token, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var raw))
+        {
+            return -1;
+        }
+
+        // Backward-compat: missing unit means microseconds.
+        return raw / 1000.0;
     }
 
     var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);

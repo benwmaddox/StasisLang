@@ -63,7 +63,7 @@ while true; do
   sleep 0.05
 done
 
-load_needle="HOTSWAP load(us):"
+load_needle="HOTSWAP load(ms):"
 exit_needle="warning: runner exited with code"
 reload_needle="HOTRELOAD phases(ms):"
 prev_count=0
@@ -135,18 +135,18 @@ for i in $(seq 1 "$iterations"); do
   done
 done
 
-loads=$(grep "$load_needle" "$out_log" | sed -n 's/.*: \([-0-9][0-9]*\).*/\1/p' | awk '$1 >= 0')
+loads=$(grep "$load_needle" "$out_log" | sed -n 's/.*: \([-0-9][0-9.]*\).*/\1/p' | awk '$1 >= 0')
 
-echo "load_us: $(printf "%s" "$loads" | tr '\n' ' ')"
+echo "load_ms: $(printf "%s" "$loads" | tr '\n' ' ')"
 
 if [[ -z "$loads" ]]; then
   echo "summary: n/a"
   exit 0
 fi
 
-summary=$(printf "%s\n" "$loads" | awk 'NR==1{min=$1;max=$1;sum=$1;count=1;next}{if($1<min)min=$1;if($1>max)max=$1;sum+=$1;count++}END{printf "%d %d %.3f", min, max, sum/count}')
+summary=$(printf "%s\n" "$loads" | awk 'NR==1{min=$1;max=$1;sum=$1;count=1;next}{if($1<min)min=$1;if($1>max)max=$1;sum+=$1;count++}END{printf "%.3f %.3f %.3f", min, max, sum/count}')
 set -- $summary
-min_ms=$(awk "BEGIN{printf \"%.3f\", $1/1000}")
-max_ms=$(awk "BEGIN{printf \"%.3f\", $2/1000}")
-avg_ms=$(awk "BEGIN{printf \"%.3f\", $3/1000}")
+min_ms=$(awk "BEGIN{printf \"%.3f\", $1}")
+max_ms=$(awk "BEGIN{printf \"%.3f\", $2}")
+avg_ms=$(awk "BEGIN{printf \"%.3f\", $3}")
 echo "summary: min=${min_ms}ms avg=${avg_ms}ms max=${max_ms}ms"
