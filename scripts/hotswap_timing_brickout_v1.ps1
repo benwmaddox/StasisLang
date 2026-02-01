@@ -108,8 +108,12 @@ function Parse-HotSwapOk([string[]]$lines) {
     foreach ($line in $lines) {
         if ($line -like "*HOTSWAP ok:*") {
             $fields = @{}
-            foreach ($m in [regex]::Matches($line, "([A-Za-z_]+)=([0-9]+)(us)?")) {
-                $fields[$m.Groups[1].Value] = [int]$m.Groups[2].Value
+            foreach ($m in [regex]::Matches($line, "([A-Za-z_]+)=([0-9]+(?:\\.[0-9]+)?)(ms|us)?")) {
+                $name = $m.Groups[1].Value
+                $value = [double]$m.Groups[2].Value
+                $unit = $m.Groups[3].Value
+                if ($unit -eq "us") { $value = $value / 1000.0 }
+                $fields[$name] = $value
             }
             if ($fields.ContainsKey("load")) { $swaps += $fields }
         }
