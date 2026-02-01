@@ -115,6 +115,91 @@ static void stasis_sleep_us(long long usec)
         /* retry */
     }
 }
+
+static int stasis_rebind_bulk_pointers_linux(
+    void *lib,
+    stasis_host_bulk_init_fn host_bulk_init,
+    stasis_host_bulk_step_fn host_bulk_step,
+    stasis_host_get_frame_fn host_get_frame,
+    stasis_gfx_submit_u8_fn gfx_submit_u8,
+    int32_t **host_req_seq,
+    int32_t **host_req_flags,
+    int32_t **host_req_window_w_px,
+    int32_t **host_req_window_h_px,
+    int32_t **host_i32,
+    float **host_f32,
+    uint8_t **host_keys,
+    int32_t **gfx_cmd_i32,
+    float **gfx_cmd_f32,
+    uint8_t **gfx_cmd_u8,
+    int32_t *last_req_seq)
+{
+    if (!lib)
+    {
+        return 0;
+    }
+
+    if (host_req_seq)
+    {
+        *host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
+    }
+    if (host_req_flags)
+    {
+        *host_req_flags = (int32_t *)dlsym(lib, "host_req_flags");
+    }
+    if (host_req_window_w_px)
+    {
+        *host_req_window_w_px = (int32_t *)dlsym(lib, "host_req_window_w_px");
+    }
+    if (host_req_window_h_px)
+    {
+        *host_req_window_h_px = (int32_t *)dlsym(lib, "host_req_window_h_px");
+    }
+
+    if (host_i32)
+    {
+        *host_i32 = (int32_t *)dlsym(lib, "host_i32");
+    }
+    if (host_f32)
+    {
+        *host_f32 = (float *)dlsym(lib, "host_f32");
+    }
+    if (host_keys)
+    {
+        *host_keys = (uint8_t *)dlsym(lib, "host_keys");
+    }
+    if (gfx_cmd_i32)
+    {
+        *gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
+    }
+    if (gfx_cmd_f32)
+    {
+        *gfx_cmd_f32 = (float *)dlsym(lib, "gfx_cmd_f32");
+    }
+    if (gfx_cmd_u8)
+    {
+        *gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
+    }
+
+    if (host_bulk_init && host_req_seq && *host_req_seq)
+    {
+        host_bulk_init(*host_req_seq);
+    }
+
+    if (last_req_seq && host_req_seq)
+    {
+        *last_req_seq = *host_req_seq ? **host_req_seq : 0;
+    }
+
+    if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+        *host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 &&
+        (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+    {
+        return 1;
+    }
+
+    return 0;
+}
 #endif
 
 typedef struct stasis_state_symbol
@@ -2287,10 +2372,10 @@ int main(int argc, char **argv)
         host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)dlsym(gfx_lib, "stasis_host_get_keyboard_state");
         gfx_submit_u8 = (stasis_gfx_submit_u8_fn)dlsym(gfx_lib, "stasis_gfx_submit_u8");
 
-        int32_t *host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
-        int32_t *host_req_flags = (int32_t *)dlsym(lib, "host_req_flags");
-        int32_t *host_req_window_w_px = (int32_t *)dlsym(lib, "host_req_window_w_px");
-        int32_t *host_req_window_h_px = (int32_t *)dlsym(lib, "host_req_window_h_px");
+        int32_t *host_req_seq = NULL;
+        int32_t *host_req_flags = NULL;
+        int32_t *host_req_window_w_px = NULL;
+        int32_t *host_req_window_h_px = NULL;
 
         const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
         int bulk_active = 0;
@@ -2304,30 +2389,29 @@ int main(int argc, char **argv)
 
         if (bulk_enabled)
         {
-            host_i32 = (int32_t *)dlsym(lib, "host_i32");
-            host_f32 = (float *)dlsym(lib, "host_f32");
-            host_keys = (uint8_t *)dlsym(lib, "host_keys");
-            gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
-            gfx_cmd_f32 = (float *)dlsym(lib, "gfx_cmd_f32");
-            gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
-
-            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
-                (host_bulk_step || (host_get_frame && gfx_submit_u8)))
-            {
-                bulk_active = 1;
-            }
-        }
-
-        if (host_bulk_init && host_req_seq)
-        {
-            host_bulk_init(host_req_seq);
+            bulk_active = stasis_rebind_bulk_pointers_linux(
+                lib,
+                host_bulk_init,
+                host_bulk_step,
+                host_get_frame,
+                gfx_submit_u8,
+                &host_req_seq,
+                &host_req_flags,
+                &host_req_window_w_px,
+                &host_req_window_h_px,
+                &host_i32,
+                &host_f32,
+                &host_keys,
+                &gfx_cmd_i32,
+                &gfx_cmd_f32,
+                &gfx_cmd_u8,
+                &last_req_seq);
         }
 
         if (bulk_active && host_bulk_apply_requests)
         {
             host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
         }
-
         for (;;)
         {
             if (swap_file_path && file_exists(swap_file_path))
@@ -2516,26 +2600,23 @@ int main(int argc, char **argv)
                     stasis_data_set_dll(new_lib);
                     if (bulk_enabled)
                     {
-                        host_req_seq = (int32_t *)dlsym(lib, "host_req_seq");
-                        host_req_flags = (int32_t *)dlsym(lib, "host_req_flags");
-                        host_req_window_w_px = (int32_t *)dlsym(lib, "host_req_window_w_px");
-                        host_req_window_h_px = (int32_t *)dlsym(lib, "host_req_window_h_px");
-
-                        host_i32 = (int32_t *)dlsym(lib, "host_i32");
-                        host_f32 = (float *)dlsym(lib, "host_f32");
-                        host_keys = (uint8_t *)dlsym(lib, "host_keys");
-                        gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
-                        gfx_cmd_f32 = (float *)dlsym(lib, "gfx_cmd_f32");
-                        gfx_cmd_u8 = (uint8_t *)dlsym(lib, "gfx_cmd_u8");
-
-                        bulk_active = (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
-                                       (host_bulk_step || (host_get_frame && gfx_submit_u8))) ? 1 : 0;
-                        last_req_seq = host_req_seq ? *host_req_seq : 0;
-
-                        if (host_bulk_init && host_req_seq)
-                        {
-                            host_bulk_init(host_req_seq);
-                        }
+                        bulk_active = stasis_rebind_bulk_pointers_linux(
+                            lib,
+                            host_bulk_init,
+                            host_bulk_step,
+                            host_get_frame,
+                            gfx_submit_u8,
+                            &host_req_seq,
+                            &host_req_flags,
+                            &host_req_window_w_px,
+                            &host_req_window_h_px,
+                            &host_i32,
+                            &host_f32,
+                            &host_keys,
+                            &gfx_cmd_i32,
+                            &gfx_cmd_f32,
+                            &gfx_cmd_u8,
+                            &last_req_seq);
                     }
 
                     if (next_map_owned)
@@ -2551,6 +2632,31 @@ int main(int argc, char **argv)
                         fprintf(stderr, "HOTSWAP map: %s\n", state_map_path);
                         fflush(stderr);
                     }
+                }
+            }
+
+            if (bulk_enabled)
+            {
+                void *current_host_i32 = dlsym(lib, "host_i32");
+                if (current_host_i32 && current_host_i32 != (void *)host_i32)
+                {
+                    bulk_active = stasis_rebind_bulk_pointers_linux(
+                        lib,
+                        host_bulk_init,
+                        host_bulk_step,
+                        host_get_frame,
+                        gfx_submit_u8,
+                        &host_req_seq,
+                        &host_req_flags,
+                        &host_req_window_w_px,
+                        &host_req_window_h_px,
+                        &host_i32,
+                        &host_f32,
+                        &host_keys,
+                        &gfx_cmd_i32,
+                        &gfx_cmd_f32,
+                        &gfx_cmd_u8,
+                        &last_req_seq);
                 }
             }
 
