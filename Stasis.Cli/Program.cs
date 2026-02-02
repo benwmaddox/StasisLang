@@ -469,7 +469,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(path, moduleName, layout);
+        var logGlobalMem = string.Equals(Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_LOG"), "1", StringComparison.Ordinal) ||
+                           string.Equals(Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_DETAIL"), "1", StringComparison.Ordinal);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(path, moduleName, layout, enable: logGlobalMem);
         if (logPhaseTiming)
         {
             layoutMs = phaseStopwatch.ElapsedMilliseconds;
@@ -3038,6 +3040,7 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     var entryAssetRoot = GetEntryAssetRoot(sourcePath);
+    var oneLineHotSwap = string.Equals(Environment.GetEnvironmentVariable("STASIS_HOTSWAP_ONE_LINE"), "1", StringComparison.Ordinal);
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
         Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
@@ -3196,7 +3199,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
         layoutMs = phase.ElapsedMilliseconds;
         phase.Restart();
         var options = new CodeGenerationOptions(
@@ -3378,15 +3381,27 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     () => Volatile.Read(ref runnerHotSwapOkCount),
                     prevOkCount,
                     timeoutMs: 20000);
-            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
             var loadMs = Volatile.Read(ref runnerHotSwapLoadMs);
-            if (loadMs < 0)
+
+            if (oneLineHotSwap)
             {
-                Console.WriteLine("HOTSWAP load(ms): -1");
+                var loadText = loadMs < 0
+                    ? "-1"
+                    : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                Console.WriteLine(
+                    $"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs} load={loadText}");
             }
             else
             {
-                Console.WriteLine($"HOTSWAP load(ms): {loadMs:0.###}");
+                Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+                if (loadMs < 0)
+                {
+                    Console.WriteLine("HOTSWAP load(ms): -1");
+                }
+                else
+                {
+                    Console.WriteLine($"HOTSWAP load(ms): {loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}");
+                }
             }
             return 0;
         }
@@ -3467,7 +3482,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
     var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);
     if (initial == 0)
     {
-        Console.Error.WriteLine(initialTimingLine);
+        if (!oneLineHotSwap)
+        {
+            Console.Error.WriteLine(initialTimingLine);
+        }
     }
     else
     {
@@ -3531,7 +3549,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var exit = BuildAndSwap(startRunner: runner is null, out var timingLine);
         if (exit == 0)
         {
-            Console.Error.WriteLine(timingLine);
+            if (!oneLineHotSwap)
+            {
+                Console.Error.WriteLine(timingLine);
+            }
         }
         else if (runner is not null)
         {
@@ -3550,6 +3571,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
 static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableGraphics, string? graphicsLibPath)
 {
+    var oneLineHotSwap = string.Equals(Environment.GetEnvironmentVariable("STASIS_HOTSWAP_ONE_LINE"), "1", StringComparison.Ordinal);
     if (!TryFindCraneliftJitRunner(out var runnerPath))
     {
         Console.Error.WriteLine("error: stasis-cranelift-jit-runner not found. Build it with `cargo build -p stasis-cranelift-jit-runner` (in tools/cranelift-jit-runner) or set STASIS_CRANELIFT_JIT_RUNNER_EXE.");
@@ -3826,7 +3848,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
 
         if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
         {
@@ -3879,7 +3901,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         lastGoodClif = initialClif;
-        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
+        if (!oneLineHotSwap)
+        {
+            Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
+        }
     }
 
     var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
@@ -3969,7 +3994,14 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
-        Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+        if (oneLineHotSwap)
+        {
+            Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs}");
+        }
+        else
+        {
+            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+        }
         if (!swapOk)
         {
             Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
@@ -3987,7 +4019,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         lastGoodClif = clif;
         swTotal.Stop();
-        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
+        if (!oneLineHotSwap)
+        {
+            Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
+        }
     }
 
     try
@@ -4184,10 +4219,15 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     WriteAllTextAtomic(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 }
 
-static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string moduleName, LayoutPlan layout)
+static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string moduleName, LayoutPlan layout, bool enable)
 {
     try
     {
+        if (!enable)
+        {
+            return;
+        }
+
         var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
         var cacheDir = Path.Combine(repoRoot, ".stasis_cache", "layout");
         Directory.CreateDirectory(cacheDir);

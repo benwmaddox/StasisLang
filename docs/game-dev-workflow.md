@@ -124,6 +124,11 @@ The CLI prints a per-phase breakdown for each hot reload:
 
 - `HOTRELOAD phases(ms): read=... parse=... sema=... layout=... lower=... aotCompile=... link=... total=...`
 
+If you want less console spam, set `STASIS_HOTSWAP_ONE_LINE=1` to suppress the per-phase line and instead print a single summary per swap:
+
+- AOT hot-swap: `HOTSWAP(ms): total=... latency=... load=...`
+- JIT hot-swap: `HOTSWAP(ms): total=... latency=...`
+
 The runner prints per-swap timings:
 
 - `HOTSWAP ok: save=...ms load=...ms restore=...ms bytes=... symbols=...`
