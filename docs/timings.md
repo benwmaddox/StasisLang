@@ -76,3 +76,21 @@ Samples (ms):
 
 Summary:
 - count=10 min=0.100ms avg=0.100ms max=0.100ms
+
+## Brickout Revenge v1 global memory size (layout)
+
+Date: 2026-02-02
+
+Repo:
+- Branch: main
+- Commit: bed0a92
+
+Command:
+
+```bat
+.\stasis.bat run .\samples\brickout_revenge\brickout_revenge_v1.stasis --backend cranelift --module brick --emit-ir --out .\.stasis_cache\tmp_ir.txt
+```
+
+Result:
+- total globals: 626180 bytes (611.50 KiB)
+- state: 44562 bytes (43.52 KiB)
