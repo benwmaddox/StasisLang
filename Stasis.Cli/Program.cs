@@ -4223,6 +4223,31 @@ static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string mo
         var tag = isNew ? "new" : "changed";
         Console.Error.WriteLine($"GLOBAL memory: total={totalBytes} bytes ({totalKiB:0.00} KiB) state={stateBytes} bytes ({stateBytes / 1024.0:0.00} KiB) [{tag}]");
 
+        if (string.Equals(Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_DETAIL"), "1", StringComparison.Ordinal))
+        {
+            var topN = 30;
+            var envTopN = Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_TOP_N");
+            if (!string.IsNullOrWhiteSpace(envTopN) && int.TryParse(envTopN, out var parsedTopN))
+            {
+                topN = Math.Clamp(parsedTopN, 1, 200);
+            }
+
+            var stateGlobal = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
+            var top = layout.Globals
+                .OrderByDescending(g => g.Size)
+                .ThenBy(g => g.Name, StringComparer.Ordinal)
+                .Take(topN)
+                .ToArray();
+
+            Console.Error.WriteLine($"GLOBAL memory top {top.Length} (by global size):");
+            for (var i = 0; i < top.Length; i++)
+            {
+                var g = top[i];
+                var label = stateGlobal is not null && string.Equals(g.Name, stateGlobal.Name, StringComparison.Ordinal) ? " [state]" : string.Empty;
+                Console.Error.WriteLine($"  {(i + 1),2}. {g.Size,8} bytes ({g.Size / 1024.0,7:0.00} KiB) off={g.Offset,8}  {g.Name}{label}");
+            }
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("version=1");
         sb.AppendLine($"layoutHash={layoutHashHex}");
