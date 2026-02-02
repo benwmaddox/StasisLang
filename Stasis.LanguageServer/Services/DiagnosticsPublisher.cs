@@ -6,6 +6,7 @@ using OmniSharp.Extensions.LanguageServer.Protocol.Workspace;
 using Stasis.LanguageServer.Models;
 using CompilerDiagnostic = Stasis.Compiler.Diagnostic;
 using CompilerSourceSpan = Stasis.Compiler.SourceSpan;
+using CompilerSeverity = Stasis.Compiler.DiagnosticSeverity;
 
 /// <summary>
 /// Service responsible for converting Stasis diagnostics to LSP format and publishing them to the client.
@@ -50,7 +51,7 @@ public class DiagnosticsPublisher
             {
                 Range = range,
                 Message = diag.Message,
-                Severity = DiagnosticSeverity.Error,
+                Severity = diag.Severity == CompilerSeverity.Warning ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error,
                 Source = "Stasis"
             });
         }

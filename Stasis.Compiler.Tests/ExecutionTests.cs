@@ -62,7 +62,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "execmodule", LowerOptions.Production);
@@ -219,7 +219,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "testmodule", LowerOptions.Default);
@@ -258,7 +258,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "execops", LowerOptions.Production);
@@ -301,7 +301,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "gfxmodule", LowerOptions.Production);
@@ -347,7 +347,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "substr_ok", LowerOptions.Production);
@@ -392,7 +392,7 @@ public class ExecutionTests
         Assert.Empty(parse.Diagnostics);
 
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         var lower = new ModuleLowerer().LowerToIr(parse.CompilationUnit, sema, layout, "substr_abort", LowerOptions.Production);

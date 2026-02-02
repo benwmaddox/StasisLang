@@ -547,7 +547,7 @@ function add(a: i32, b: i32): i32 {
         }
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        if (semantic.Diagnostics.Count > 0)
+        if (semantic.Diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
         {
             return new CodeGenerationResult(string.Empty, semantic.Diagnostics);
         }
