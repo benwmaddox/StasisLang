@@ -200,7 +200,10 @@ For struct-typed assignment targets, Stasis supports a **field initializer** for
 Syntax:
 
 ```stasis
-target = { field_a = expr, field_b = expr, ... };
+target = {
+    field_a = expr,
+    field_b = expr,
+};
 ```
 
 Semantics:
@@ -215,7 +218,12 @@ Example:
 
 ```stasis
 if (!state.balls[i].active) {
-    state.balls[i] = { active = true, x = 120, y = -10, vy = 4 };
+    state.balls[i] = {
+        active = true,
+        x = 120,
+        y = -10,
+        vy = 4,
+    };
 }
 ```
 
