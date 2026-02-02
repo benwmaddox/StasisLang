@@ -53,12 +53,6 @@ struct BucketConfig {
     background_red: f32;
     background_green: f32;
     background_blue: f32;
-    bucket_red: f32;
-    bucket_green: f32;
-    bucket_blue: f32;
-    ball_red: f32;
-    ball_green: f32;
-    ball_blue: f32;
     ui_red: f32;
     ui_green: f32;
     ui_blue: f32;
