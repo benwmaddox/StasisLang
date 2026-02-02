@@ -1851,6 +1851,12 @@ public sealed class SemanticAnalyzer
 
         foreach (var sym in _symbols.Values)
         {
+            // Only consider value-bearing symbols as evidence that a struct is "used".
+            // Otherwise, we'd warn on fields for structs that are declared but never referenced anywhere.
+            if (sym.Kind is SymbolKind.Struct or SymbolKind.Enum)
+            {
+                continue;
+            }
             AddType(sym.Type);
         }
 
