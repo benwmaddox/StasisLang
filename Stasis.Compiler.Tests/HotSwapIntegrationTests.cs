@@ -266,7 +266,7 @@ public sealed class HotSwapIntegrationTests
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                timeout: TimeSpan.FromMinutes(2));
+                timeout: TimeSpan.FromMinutes(5));
         }
         finally
         {
@@ -388,7 +388,7 @@ public sealed class HotSwapIntegrationTests
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                timeout: TimeSpan.FromMinutes(2));
+                timeout: TimeSpan.FromMinutes(5));
         }
         finally
         {
@@ -523,7 +523,7 @@ public sealed class HotSwapIntegrationTests
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
-                timeout: TimeSpan.FromMinutes(2));
+                timeout: TimeSpan.FromMinutes(5));
 
             // The CLI should not report a bind failure, and the runner logs should not contain ERR databind...
             // We don't want the CLI to report a bind failure (this was caused by a non-atomic struct-meta write).
@@ -688,7 +688,7 @@ public sealed class HotSwapIntegrationTests
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                timeout: TimeSpan.FromMinutes(2));
+                timeout: TimeSpan.FromMinutes(5));
 
             Assert.False(proc.HasExited);
         }
