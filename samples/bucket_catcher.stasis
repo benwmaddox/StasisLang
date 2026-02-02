@@ -37,15 +37,17 @@ struct BucketConfig {
     font_size_pixels: i32;
     bucket_sprite_path: utf8[256];
     ball_sprite_path: utf8[256];
-    tick_delta_seconds: f32;
     bucket_width: f32;
     bucket_height: f32;
     bucket_bottom_padding: f32;
+    // Per-tick movement tuning (not per-second).
     bucket_speed: f32;
     bucket_turn_rate: f32;
     ball_radius: f32;
+    // Per-tick fall speed (pixels per tick).
     ball_fall_speed: f32;
-    ball_spawn_seconds: f32;
+    // Spawn cadence in ticks.
+    ball_spawn_ticks: i32;
     background_red: f32;
     background_green: f32;
     background_blue: f32;
@@ -68,7 +70,7 @@ struct GameState {
     misses: i32;
 
     balls: Ball[24];
-    spawn_timer_seconds: f32;
+    spawn_timer_ticks: i32;
 
     ui_font: i32;
     bucket_sprite: i32;
@@ -126,7 +128,7 @@ function init_game(): void {
     state.bucket_target_x = state.bucket_x;
     state.catches = 0;
     state.misses = 0;
-    state.spawn_timer_seconds = 0.0;
+    state.spawn_timer_ticks = 0;
 
     foreach (let ball in state.balls) {
         ball.active = false;
@@ -205,7 +207,7 @@ function update_input(): void {
     if (input_key_down(Scancode.Left)) { move = move - 1.0; }
     if (input_key_down(Scancode.Right)) { move = move + 1.0; }
     if (move != 0.0) {
-        state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed * state.config.tick_delta_seconds;
+        state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed;
     }
 
     let half_w: f32 = state.config.bucket_width * 0.5;
@@ -216,7 +218,7 @@ function update_bucket(): void {
     // Smoothly approach the target to avoid jittery motion.
     let half_w: f32 = state.config.bucket_width * 0.5;
     let dx: f32 = state.bucket_target_x - state.bucket_x;
-    state.bucket_x = state.bucket_x + dx * state.config.bucket_turn_rate * state.config.tick_delta_seconds;
+    state.bucket_x = state.bucket_x + dx * state.config.bucket_turn_rate;
     state.bucket_x = clamp(state.bucket_x, half_w, i32_to_f32(state.config.screen_width) - half_w);
 }
 
@@ -227,7 +229,7 @@ function update_balls(): void {
 
     foreach (let ball in state.balls) {
         if (ball.active) {
-            ball.y = ball.y + ball.vy * state.config.tick_delta_seconds;
+            ball.y = ball.y + ball.vy;
 
             // Catch: circle overlaps the bucket rectangle.
             if (ball.y + state.config.ball_radius >= bucket_top &&
@@ -248,9 +250,9 @@ function update_balls(): void {
 }
 
 function update_spawns(): void {
-    state.spawn_timer_seconds = state.spawn_timer_seconds + state.config.tick_delta_seconds;
-    if (state.spawn_timer_seconds >= state.config.ball_spawn_seconds) {
-        state.spawn_timer_seconds = 0.0;
+    state.spawn_timer_ticks = state.spawn_timer_ticks + 1;
+    if (state.spawn_timer_ticks >= state.config.ball_spawn_ticks) {
+        state.spawn_timer_ticks = 0;
         spawn_ball();
     }
 }
