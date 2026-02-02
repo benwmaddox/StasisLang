@@ -47,36 +47,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# wait for initial HOTRELOAD
+# wait for initial compile/runner start marker
 initial_timeout_s=180
 start_ts=$(date +%s)
 while true; do
-  if grep -q "HOTRELOAD phases(ms):" "$err_log" 2>/dev/null; then
+  if grep -q "HOTSWAP(ms):" "$out_log" 2>/dev/null; then
     break
   fi
   now=$(date +%s)
   if (( now - start_ts >= initial_timeout_s )); then
-    echo "error: timed out waiting for initial HOTRELOAD" >&2
-    tail -n 50 "$err_log" >&2 || true
+    echo "error: timed out waiting for initial HOTSWAP(ms) marker" >&2
+    tail -n 50 "$out_log" >&2 || true
     exit 1
   fi
   sleep 0.05
 done
 
-load_needle="HOTSWAP load(ms):"
+swap_any_needle="HOTSWAP(ms):"
+swap_ok_pattern='HOTSWAP\(ms\):.*load=[0-9]'
 exit_needle="warning: runner exited with code"
-reload_needle="HOTRELOAD phases(ms):"
-prev_count=0
+prev_any_count=0
 if [[ -f "$out_log" ]]; then
-  prev_count=$(grep -c "$load_needle" "$out_log" || true)
+  prev_any_count=$(grep -c "$swap_any_needle" "$out_log" || true)
+fi
+prev_ok_count=0
+if [[ -f "$out_log" ]]; then
+  prev_ok_count=$(grep -E -c "$swap_ok_pattern" "$out_log" || true)
 fi
 prev_exit_count=0
 if [[ -f "$err_log" ]]; then
   prev_exit_count=$(grep -c "$exit_needle" "$err_log" || true)
-fi
-prev_reload_count=0
-if [[ -f "$err_log" ]]; then
-  prev_reload_count=$(grep -c "$reload_needle" "$err_log" || true)
 fi
 max_retries="${MAX_RETRIES:-3}"
 
@@ -90,9 +90,9 @@ for i in $(seq 1 "$iterations"); do
     start_ts=$(date +%s%N)
     while true; do
       if [[ -f "$out_log" ]]; then
-        count=$(grep -c "$load_needle" "$out_log" || true)
-        if (( count > prev_count )); then
-          prev_count=$count
+        ok_count=$(grep -E -c "$swap_ok_pattern" "$out_log" || true)
+        if (( ok_count > prev_ok_count )); then
+          prev_ok_count=$ok_count
           break 2
         fi
       fi
@@ -100,17 +100,21 @@ for i in $(seq 1 "$iterations"); do
         exit_count=$(grep -c "$exit_needle" "$err_log" || true)
         if (( exit_count > prev_exit_count )); then
           prev_exit_count=$exit_count
-          start_reload_ts=$(date +%s)
+          start_restart_ts=$(date +%s%N)
           while true; do
-            reload_count=$(grep -c "$reload_needle" "$err_log" || true)
-            if (( reload_count > prev_reload_count )); then
-              prev_reload_count=$reload_count
-              break
+            if [[ -f "$out_log" ]]; then
+              any_count=$(grep -c "$swap_any_needle" "$out_log" || true)
+              if (( any_count > prev_any_count )); then
+                prev_any_count=$any_count
+                break
+              fi
             fi
-            now_reload=$(date +%s)
-            if (( now_reload - start_reload_ts >= swap_timeout_ms / 1000 )); then
-              echo "error: timed out waiting for restart after runner exit (edit $i)" >&2
-              tail -n 50 "$err_log" >&2 || true
+            now_ns=$(date +%s%N)
+            elapsed_ms=$(( (now_ns - start_restart_ts) / 1000000 ))
+            if (( elapsed_ms >= swap_timeout_ms )); then
+              echo "error: timed out waiting for restart marker after runner exit (edit $i)" >&2
+              tail -n 80 "$out_log" >&2 || true
+              tail -n 80 "$err_log" >&2 || true
               exit 1
             fi
             sleep 0.05
@@ -126,7 +130,7 @@ for i in $(seq 1 "$iterations"); do
       now_ts=$(date +%s%N)
       elapsed_ms=$(( (now_ts - start_ts) / 1000000 ))
       if (( elapsed_ms >= swap_timeout_ms )); then
-        echo "error: timed out waiting for HOTSWAP load after edit $i (attempt $attempt)" >&2
+        echo "error: timed out waiting for HOTSWAP(ms) after edit $i (attempt $attempt)" >&2
         tail -n 50 "$out_log" >&2 || true
         exit 1
       fi
@@ -135,7 +139,7 @@ for i in $(seq 1 "$iterations"); do
   done
 done
 
-loads=$(grep "$load_needle" "$out_log" | sed -n 's/.*: \([-0-9][0-9.]*\).*/\1/p' | awk '$1 >= 0')
+loads=$(grep -E "$swap_ok_pattern" "$out_log" | sed -n 's/.*load=\\([-0-9][0-9.]*\\).*/\\1/p' | awk '$1 >= 0')
 
 echo "load_ms: $(printf "%s" "$loads" | tr '\n' ' ')"
 
