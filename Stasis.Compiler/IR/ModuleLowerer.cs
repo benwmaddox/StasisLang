@@ -1844,6 +1844,19 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
+            if (assign.Right is StructInitializerExpressionSyntax init)
+            {
+                if (assign.OperatorToken.Kind != TokenKind.Equal)
+                {
+                    AddDiagnostic("Struct initializer only supports '=' assignment.", assign.OperatorToken.Span);
+                    return ConstI32(0);
+                }
+
+                var targetType = ResolveExpressionType(assign.Left);
+                LowerStructInitializerAssignment(builder, assign.Left, init, targetType, locals);
+                return builder.BuildLoad2(ptrType, ptr, "assign.struct");
+            }
+
             var rhs = LowerExpression(builder, assign.Right, locals);
             // Convert RHS to target type if needed (e.g., i32 -> f32)
             if (TryLowerIntegerLiteralToType(assign.Right, ptrType, out var loweredInt))
@@ -1883,6 +1896,135 @@ public sealed class ModuleLowerer
             builder.BuildStore(combined, ptr);
             return combined;
         }
+
+        private void LowerStructInitializerAssignment(LLVMBuilderRef builder, ExpressionSyntax targetExpr, StructInitializerExpressionSyntax init, TypeSymbol? targetType, Dictionary<string, LocalBinding> locals)
+        {
+            if (targetType is not NamedTypeSymbol named || !_structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                AddDiagnostic("Struct initializer requires a struct assignment target.", init.Span);
+                return;
+            }
+
+            foreach (var field in structDecl.Fields)
+            {
+                var fieldType = ResolveType(field.Type, _symbols);
+                if (fieldType is ArrayTypeSymbol)
+                {
+                    AddDiagnostic($"Struct initializer does not support array field '{field.Identifier.Text}'.", init.Span);
+                    return;
+                }
+            }
+
+            var byName = new Dictionary<string, StructInitializerFieldSyntax>(StringComparer.Ordinal);
+            foreach (var f in init.Fields)
+            {
+                byName[f.Name.Text] = f;
+            }
+
+            var dot = new Token(TokenKind.Dot, ".", init.OpenBrace.Span);
+
+            foreach (var field in structDecl.Fields)
+            {
+                var fieldType = ResolveType(field.Type, _symbols);
+                var memberAccess = new MemberAccessExpressionSyntax(targetExpr, dot, field.Identifier);
+
+                if (fieldType is NamedTypeSymbol && byName.TryGetValue(field.Identifier.Text, out var initField) && initField.Value is StructInitializerExpressionSyntax nested)
+                {
+                    LowerStructInitializerAssignment(builder, memberAccess, nested, fieldType, locals);
+                    continue;
+                }
+
+                if (byName.TryGetValue(field.Identifier.Text, out initField))
+                {
+                    if (initField.Value is StructInitializerExpressionSyntax)
+                    {
+                        AddDiagnostic($"Nested struct initializer requires a struct field target; field '{field.Identifier.Text}' is '{DescribeType(fieldType)}'.", initField.Value.Span);
+                        continue;
+                    }
+
+                    var value = LowerExpression(builder, initField.Value, locals);
+                    if (!TryGetPointer(builder, memberAccess, locals, out var fieldPtr, out var fieldPtrType))
+                    {
+                        AddDiagnostic($"Unable to assign to field '{field.Identifier.Text}' in struct initializer.", initField.Value.Span);
+                        continue;
+                    }
+
+                    if (TryLowerIntegerLiteralToType(initField.Value, fieldPtrType, out var loweredInt))
+                    {
+                        value = loweredInt;
+                    }
+                    else if (TryLowerFloatLiteralToType(initField.Value, fieldPtrType, out var loweredFloat))
+                    {
+                        value = loweredFloat;
+                    }
+
+                    value = ConvertToType(builder, value, fieldPtrType);
+                    builder.BuildStore(value, fieldPtr);
+                }
+                else
+                {
+                    ZeroStructField(builder, memberAccess, fieldType, init.Span, locals);
+                }
+            }
+        }
+
+        private void ZeroStructField(LLVMBuilderRef builder, ExpressionSyntax targetExpr, TypeSymbol fieldType, SourceSpan span, Dictionary<string, LocalBinding> locals)
+        {
+            if (fieldType is PrimitiveTypeSymbol prim)
+            {
+                LLVMValueRef zero = prim.PrimitiveName switch
+                {
+                    "f32" => LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(prim), 0.0),
+                    "f64" => LLVMValueRef.CreateConstReal(_moduleBuilder.TypeMapper.Map(prim), 0.0),
+                    _ => ConstI32(0)
+                };
+
+                var fieldLlvmType = _moduleBuilder.TypeMapper.Map(fieldType);
+                if (fieldLlvmType.Kind == LLVMTypeKind.LLVMIntegerTypeKind && fieldLlvmType.IntWidth != 32)
+                {
+                    zero = LLVMValueRef.CreateConstInt(fieldLlvmType, 0, false);
+                }
+
+                if (!TryGetPointer(builder, targetExpr, locals, out var ptr, out var ptrType))
+                {
+                    AddDiagnostic("Unable to zero struct field in initializer.", span);
+                    return;
+                }
+
+                zero = ConvertToType(builder, zero, ptrType);
+                builder.BuildStore(zero, ptr);
+                return;
+            }
+
+            if (fieldType is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+            {
+                var dot = new Token(TokenKind.Dot, ".", span);
+                foreach (var f in structDecl.Fields)
+                {
+                    var nestedType = ResolveType(f.Type, _symbols);
+                    if (nestedType is ArrayTypeSymbol)
+                    {
+                        AddDiagnostic($"Struct initializer does not support array field '{f.Identifier.Text}'.", span);
+                        continue;
+                    }
+                    var member = new MemberAccessExpressionSyntax(targetExpr, dot, f.Identifier);
+                    ZeroStructField(builder, member, nestedType, span, locals);
+                }
+                return;
+            }
+
+            AddDiagnostic($"Struct initializer cannot zero field of type '{DescribeType(fieldType)}'.", span);
+        }
+
+        private static string DescribeType(TypeSymbol type) =>
+            type switch
+            {
+                PrimitiveTypeSymbol prim => prim.PrimitiveName,
+                NamedTypeSymbol named => named.TypeName,
+                ArrayTypeSymbol arr => $"{DescribeType(arr.ElementType)}[{arr.Size}]",
+                VoidTypeSymbol => "void",
+                _ => "unknown"
+            };
 
         private bool TryGetPointer(LLVMBuilderRef builder, ExpressionSyntax target, Dictionary<string, LocalBinding> locals, out LLVMValueRef ptr, out LLVMTypeRef type)
         {
@@ -6592,6 +6734,8 @@ public sealed class ModuleLowerer
                         return sym.Type;
                     }
 
+                    return null;
+                case StructInitializerExpressionSyntax:
                     return null;
                 case MemberAccessExpressionSyntax member:
                     var receiverType = ResolveExpressionType(member.Receiver);

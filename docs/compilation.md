@@ -362,6 +362,20 @@ OperatorToken    -> "+"
 PrimaryExpr      -> Literal
                   | Identifier
                   | "(" Expression ")"
+                  | StructInitializer
+```
+
+```
+StructInitializer -> "{" StructInitFieldsOpt "}"
+StructInitFieldsOpt
+                 -> StructInitFields
+                  | <empty>
+StructInitFields -> StructInitField StructInitFieldsRest
+StructInitFieldsRest
+                 -> "," StructInitField StructInitFieldsRest
+                  | ","              # trailing comma
+                  | <empty>
+StructInitField  -> Identifier "=" Expression
 ```
 
 ---
