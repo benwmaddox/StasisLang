@@ -155,7 +155,7 @@ public class CraneliftBackendConfirmationTests
         Assert.Empty(parse.Diagnostics);
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(semantic.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(semantic.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, semantic.Symbols).Plan();
         var options = new CodeGenerationOptions(ModuleName: "cranelift_confirm", IncludeTests: false, EmitTestHarness: false);
@@ -533,7 +533,7 @@ public class CraneliftBackendConfirmationTests
         Assert.Empty(parse.Diagnostics);
 
         var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
-        Assert.Empty(semantic.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(semantic.Diagnostics);
 
         var layout = new LayoutPlanner(parse.CompilationUnit, semantic.Symbols).Plan();
 

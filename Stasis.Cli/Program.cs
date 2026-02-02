@@ -433,16 +433,16 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             parseMs = phaseStopwatch.ElapsedMilliseconds;
             phaseStopwatch.Restart();
         }
-        if (parse.Diagnostics.Count > 0)
+        if (HasErrors(parse.Diagnostics))
         {
-            
+             
             PrintDiagnostics(parse.Diagnostics, source, path);
             return 1;
         }
 
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
-        if (linkDiagnostics.Count > 0)
+        if (HasErrors(linkDiagnostics))
         {
             PrintDiagnostics(linkDiagnostics, source, path);
             return 1;
@@ -465,7 +465,10 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         if (sema.Diagnostics.Count > 0)
         {
             PrintDiagnostics(sema.Diagnostics, source, path);
-            return 1;
+            if (HasErrors(sema.Diagnostics))
+            {
+                return 1;
+            }
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
@@ -531,13 +534,13 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             {
                 WriteIrOutput(ir, outputPath);
             }
-            return 1;
+            return HasErrors(lowerDiagnostics) ? 1 : 0;
         }
 
         if (emitIrOnly)
         {
             WriteIrOutput(ir, outputPath);
-            return lowerDiagnostics.Count > 0 ? 1 : 0;
+            return HasErrors(lowerDiagnostics) ? 1 : 0;
         }
 
         if (backend == BackendType.Cranelift)
@@ -3168,14 +3171,14 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var parse = Parser.Parse(source);
         parseMs = phase.ElapsedMilliseconds;
         phase.Restart();
-        if (parse.Diagnostics.Count > 0)
+        if (HasErrors(parse.Diagnostics))
         {
             PrintDiagnostics(parse.Diagnostics, source, sourcePath);
             return 1;
         }
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
-        if (linkDiagnostics.Count > 0)
+        if (HasErrors(linkDiagnostics))
         {
             PrintDiagnostics(linkDiagnostics, source, sourcePath);
             return 1;
@@ -3188,7 +3191,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         if (sema.Diagnostics.Count > 0)
         {
             PrintDiagnostics(sema.Diagnostics, source, sourcePath);
-            return 1;
+            if (HasErrors(sema.Diagnostics))
+            {
+                return 1;
+            }
         }
 
         if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
@@ -3216,7 +3222,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         {
             PrintDiagnostics(result.Diagnostics, source, sourcePath);
             Console.WriteLine(result.Ir);
-            return 1;
+            return HasErrors(result.Diagnostics) ? 1 : 0;
         }
 
         // On Windows, loaded DLLs stay file-locked even after swap, so alternating between swapA/swapB
@@ -3815,7 +3821,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var parse = Parser.Parse(source);
-        if (parse.Diagnostics.Count > 0)
+        if (HasErrors(parse.Diagnostics))
         {
             PrintDiagnostics(parse.Diagnostics, source, sourcePath);
             clif = string.Empty;
@@ -3825,7 +3831,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
-        if (linkDiagnostics.Count > 0)
+        if (HasErrors(linkDiagnostics))
         {
             PrintDiagnostics(linkDiagnostics, source, sourcePath);
             clif = string.Empty;
@@ -3841,7 +3847,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             PrintDiagnostics(sema.Diagnostics, source, sourcePath);
             clif = string.Empty;
             lowerMs = 0;
-            return 1;
+            return HasErrors(sema.Diagnostics) ? 1 : 0;
         }
 
         if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
@@ -4849,7 +4855,7 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
         var runtimeImports = GetRuntimeImportFlags(path);
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         diagnostics.AddRange(sema.Diagnostics);
-        if (sema.Diagnostics.Count > 0)
+        if (HasErrors(sema.Diagnostics))
         {
             return new PrepareResult(null, new CompileResult(path, source, hasTests, usesGraphics, linkLibraries, backend, null, null, diagnostics, emitIrOnly, stopwatch.ElapsedMilliseconds, false));
         }
@@ -5392,7 +5398,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
         }
 
         Console.WriteLine($"Total time={result.CompileMilliseconds}ms");
-        return 1;
+        return HasErrors(result.Diagnostics) ? 1 : 0;
     }
 
     if (emitIrOnly)
@@ -5543,15 +5549,33 @@ static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source,
 {
     foreach (var d in diagnostics)
     {
+        if (d.Severity == DiagnosticSeverity.Warning && ShouldSuppressWarnings())
+        {
+            continue;
+        }
+
         var (line, column, lineText) = GetLineInfo(source, d.Span.Start);
         var length = Math.Max(1, d.Span.Length);
         var markerLen = Math.Min(length, Math.Max(1, Math.Max(0, lineText.Length - (column - 1))));
         var marker = new string(' ', Math.Max(0, column - 1)) + new string('^', markerLen);
         var location = filePath is null ? $"line {line}, column {column}" : $"{filePath}:{line}:{column}";
-        Console.Error.WriteLine($"error: {d.Message} ({location})");
+        var prefix = d.Severity == DiagnosticSeverity.Warning ? "warning" : "error";
+        Console.Error.WriteLine($"{prefix}: {d.Message} ({location})");
         Console.Error.WriteLine(lineText);
         Console.Error.WriteLine(marker);
     }
+}
+
+static bool HasErrors(IEnumerable<Diagnostic> diagnostics)
+{
+    foreach (var d in diagnostics)
+    {
+        if (d.Severity == DiagnosticSeverity.Error)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static (int line, int column, string lineText) GetLineInfo(string source, int offset)
