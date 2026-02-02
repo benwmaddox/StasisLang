@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 
-namespace Stasis.Compiler.Tests;
+namespace Stasis.Cli.Tests;
 
 public class TemplateOutputTests
 {
