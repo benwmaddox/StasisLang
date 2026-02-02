@@ -33,3 +33,9 @@ public sealed record AssignmentExpressionSyntax(ExpressionSyntax Left, Token Ope
 
 public sealed record BinaryExpressionSyntax(ExpressionSyntax Left, Token OperatorToken, ExpressionSyntax Right)
     : ExpressionSyntax(new SourceSpan(Left.Span.Start, Right.Span.End - Left.Span.Start));
+
+public sealed record StructInitializerFieldSyntax(Token Name, Token EqualsToken, ExpressionSyntax Value, Token? TrailingComma)
+    : SyntaxNode(new SourceSpan(Name.Span.Start, (TrailingComma is not null ? TrailingComma.Span.End : Value.Span.End) - Name.Span.Start));
+
+public sealed record StructInitializerExpressionSyntax(Token OpenBrace, IReadOnlyList<StructInitializerFieldSyntax> Fields, Token CloseBrace)
+    : ExpressionSyntax(new SourceSpan(OpenBrace.Span.Start, CloseBrace.Span.End - OpenBrace.Span.Start));

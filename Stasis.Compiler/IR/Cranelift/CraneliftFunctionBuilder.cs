@@ -3819,6 +3819,18 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerAssignment(AssignmentExpressionSyntax assign)
     {
+        if (assign.Right is StructInitializerExpressionSyntax init)
+        {
+            if (assign.OperatorToken.Kind != TokenKind.Equal)
+            {
+                _diagnostics.Add(new Diagnostic("Struct initializer only supports '=' assignment.", assign.OperatorToken.Span));
+                return ZeroI32();
+            }
+
+            LowerStructInitializerAssignment(assign.Left, init);
+            return ZeroI32();
+        }
+
         var targetType = GetExpressionType(assign.Left);
         var value = TryEmitNumericLiteral(assign.Right, targetType, out var literalValue)
             ? literalValue
@@ -3894,6 +3906,128 @@ public sealed class CraneliftFunctionBuilder
         }
 
         return value;
+    }
+
+    private void LowerStructInitializerAssignment(ExpressionSyntax target, StructInitializerExpressionSyntax init)
+    {
+        var targetType = GetExpressionType(target);
+        if (targetType is not NamedTypeSymbol named || !_structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            _diagnostics.Add(new Diagnostic("Struct initializer requires a struct assignment target.", init.Span));
+            return;
+        }
+
+        var byName = new Dictionary<string, StructInitializerFieldSyntax>(StringComparer.Ordinal);
+        foreach (var f in init.Fields)
+        {
+            // Semantic analyzer already validated duplicates; last one wins if we get here anyway.
+            byName[f.Name.Text] = f;
+        }
+
+        var dot = new Token(TokenKind.Dot, ".", init.OpenBrace.Span);
+
+        foreach (var field in structDecl.Fields)
+        {
+            var fieldType = ResolveType(field.Type);
+            if (fieldType is ArrayTypeSymbol)
+            {
+                _diagnostics.Add(new Diagnostic($"Struct initializer does not support array field '{field.Identifier.Text}'.", init.Span));
+                continue;
+            }
+
+            var memberAccess = new MemberAccessExpressionSyntax(target, dot, field.Identifier);
+            if (byName.TryGetValue(field.Identifier.Text, out var initField))
+            {
+                if (fieldType is NamedTypeSymbol && initField.Value is StructInitializerExpressionSyntax nested)
+                {
+                    LowerStructInitializerAssignment(memberAccess, nested);
+                    continue;
+                }
+
+                if (initField.Value is StructInitializerExpressionSyntax)
+                {
+                    _diagnostics.Add(new Diagnostic($"Nested struct initializer requires a struct field target; '{field.Identifier.Text}' is '{FormatType(_typeMapper.Map(fieldType))}'.", initField.Value.Span));
+                    continue;
+                }
+
+                var value = LowerExpression(initField.Value);
+                var valueType = GetExpressionType(initField.Value);
+                LowerMemberStore(memberAccess, value, valueType);
+            }
+            else
+            {
+                ZeroStructField(memberAccess, fieldType, init.Span);
+            }
+        }
+    }
+
+    private void ZeroStructField(ExpressionSyntax target, TypeSymbol fieldType, SourceSpan span)
+    {
+        if (fieldType is PrimitiveTypeSymbol prim)
+        {
+            var clifType = _typeMapper.Map(prim);
+            var zero = clifType switch
+            {
+                CraneliftTypeMapper.ClifType.I8 => ZeroI8(),
+                CraneliftTypeMapper.ClifType.I16 => ConstI16(0),
+                CraneliftTypeMapper.ClifType.I32 => ZeroI32(),
+                CraneliftTypeMapper.ClifType.I64 => ConstI64(0),
+                CraneliftTypeMapper.ClifType.F32 => ConstF32(0.0),
+                CraneliftTypeMapper.ClifType.F64 => ConstF64(0.0),
+                _ => ZeroI32()
+            };
+
+            if (target is MemberAccessExpressionSyntax member)
+            {
+                LowerMemberStore(member, zero, prim);
+            }
+            else if (target is ArrayAccessExpressionSyntax arr)
+            {
+                LowerArrayStore(arr, zero, prim);
+            }
+            return;
+        }
+
+        if (fieldType is NamedTypeSymbol named && _structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            // Zero nested struct by zeroing each leaf field.
+            var dot = new Token(TokenKind.Dot, ".", span);
+            foreach (var field in structDecl.Fields)
+            {
+                var nestedType = ResolveType(field.Type);
+                if (nestedType is ArrayTypeSymbol)
+                {
+                    _diagnostics.Add(new Diagnostic($"Struct initializer does not support array field '{field.Identifier.Text}'.", span));
+                    continue;
+                }
+                var member = new MemberAccessExpressionSyntax(target, dot, field.Identifier);
+                ZeroStructField(member, nestedType, span);
+            }
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic($"Struct initializer cannot zero field of type '{FormatType(_typeMapper.Map(fieldType))}'.", span));
+    }
+
+    private string ConstI16(int value)
+    {
+        var val = NewValue();
+        _instructions.AppendLine($"    {val} = iconst.i16 {value}");
+        return val;
+    }
+
+    private string ConstF32(double value)
+    {
+        var val = NewValue();
+        _instructions.AppendLine($"    {val} = f32const {value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        return val;
+    }
+
+    private string ConstF64(double value)
+    {
+        var val = NewValue();
+        _instructions.AppendLine($"    {val} = f64const {value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        return val;
     }
 
     private bool TryEmitNumericLiteral(ExpressionSyntax expr, TypeSymbol? targetType, out string value)

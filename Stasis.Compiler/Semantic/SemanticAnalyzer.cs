@@ -1039,6 +1039,11 @@ public sealed class SemanticAnalyzer
         if (v.Initializer is not null)
         {
             AnalyzeExpression(v.Initializer, scope);
+            if (v.Initializer is StructInitializerExpressionSyntax init && varType is not null)
+            {
+                ValidateStructInitializerAgainstType(init, varType, scope);
+                return;
+            }
             // Type check: ensure initializer type matches variable type
             var initType = ResolveExpressionType(v.Initializer, scope);
             if (varType is not null && initType is not null && !AreTypesCompatible(varType, initType))
@@ -1074,6 +1079,12 @@ public sealed class SemanticAnalyzer
                 break;
             case UnaryExpressionSyntax u:
                 AnalyzeExpression(u.Operand, scope);
+                break;
+            case StructInitializerExpressionSyntax init:
+                foreach (var f in init.Fields)
+                {
+                    AnalyzeExpression(f.Value, scope);
+                }
                 break;
             case MemberAccessExpressionSyntax m:
                 // Check if this is an enum member access (e.g., State.Idle)
@@ -1249,6 +1260,18 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(assign.Right, scope);
                 ValidateAssignment(assign.Left, assign.OperatorToken);
                 ValidateSingleAssignment(assign);
+
+                if (assign.Right is StructInitializerExpressionSyntax initExpr)
+                {
+                    if (assign.OperatorToken.Kind != TokenKind.Equal)
+                    {
+                        AddDiagnostic("Struct initializer only supports '=' assignment.", assign.OperatorToken.Span);
+                    }
+                    var targetType = ResolveExpressionType(assign.Left, scope);
+                    ValidateStructInitializerAgainstType(initExpr, targetType, scope);
+                    break;
+                }
+
                 // Type check: ensure right side type matches left side type
                 var leftType = ResolveExpressionType(assign.Left, scope);
                 var rightType = ResolveExpressionType(assign.Right, scope);
@@ -1802,6 +1825,9 @@ public sealed class SemanticAnalyzer
                 return ResolveExpressionType(paren.Expression, scope);
             case AssignmentExpressionSyntax assign:
                 return ResolveExpressionType(assign.Left, scope);
+            case StructInitializerExpressionSyntax:
+                // Struct initializer is context-typed (validated against the assignment target).
+                return null;
             case MemberAccessExpressionSyntax member:
                 // Check if this is an enum member access (e.g., State.Idle)
                 if (member.Receiver is IdentifierExpressionSyntax enumId &&
@@ -1907,6 +1933,98 @@ public sealed class SemanticAnalyzer
                 }
             default:
                 return null;
+        }
+    }
+
+    private void ValidateStructInitializerAgainstType(StructInitializerExpressionSyntax init, TypeSymbol? targetType, IReadOnlyDictionary<string, Symbol> scope)
+    {
+        if (targetType is null)
+        {
+            AddDiagnostic("Struct initializer requires a known struct target type.", init.Span);
+            return;
+        }
+
+        if (targetType is not NamedTypeSymbol named || !_structs.TryGetValue(named.TypeName, out var structDecl))
+        {
+            AddDiagnostic($"Struct initializer can only assign to a struct type; got '{FormatType(targetType)}'.", init.Span);
+            return;
+        }
+
+        foreach (var field in structDecl.Fields)
+        {
+            var fieldType = ResolveType(field.Type);
+            if (fieldType is null)
+            {
+                AddDiagnostic($"Unknown type for field '{field.Identifier.Text}' on struct '{structDecl.Name.Text}'.", field.Type.Span);
+                return;
+            }
+            if (fieldType is ArrayTypeSymbol)
+            {
+                AddDiagnostic(
+                    $"Struct initializer does not currently support structs with array fields (field '{field.Identifier.Text}' on '{structDecl.Name.Text}').",
+                    init.Span);
+                return;
+            }
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in init.Fields)
+        {
+            if (!seen.Add(f.Name.Text))
+            {
+                AddDiagnostic($"Duplicate field '{f.Name.Text}' in struct initializer.", f.Name.Span);
+                continue;
+            }
+
+            var field = structDecl.Fields.FirstOrDefault(x => string.Equals(x.Identifier.Text, f.Name.Text, StringComparison.Ordinal));
+            if (field is null)
+            {
+                var candidates = structDecl.Fields.Select(x => x.Identifier.Text);
+                var matches = GetClosestMatches(f.Name.Text, candidates).ToArray();
+                var hint = matches.Length switch
+                {
+                    0 => "Hint: check the field name.",
+                    1 => $"Hint: did you mean '{matches[0]}'?",
+                    _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(m => $"'{m}'"))}?"
+                };
+                AddDiagnostic($"Unknown field '{f.Name.Text}' on struct '{structDecl.Name.Text}'. {hint}", f.Name.Span);
+                continue;
+            }
+
+            var fieldType = ResolveType(field.Type);
+            if (fieldType is null)
+            {
+                continue;
+            }
+            if (fieldType is NamedTypeSymbol && f.Value is StructInitializerExpressionSyntax nested)
+            {
+                ValidateStructInitializerAgainstType(nested, fieldType, scope);
+                continue;
+            }
+
+            if (f.Value is StructInitializerExpressionSyntax)
+            {
+                AddDiagnostic($"Nested struct initializer requires a struct field target; field '{field.Identifier.Text}' is '{FormatType(fieldType)}'.", f.Value.Span);
+                continue;
+            }
+
+            var valueType = ResolveExpressionType(f.Value, scope);
+            if (valueType is null)
+            {
+                continue;
+            }
+
+            if (!AreTypesCompatible(fieldType, valueType))
+            {
+                if (!TryAllowNumericLiteralAssignment(fieldType, f.Value, out var literalError))
+                {
+                    AddDiagnostic($"Cannot assign value of type '{FormatType(valueType)}' to field '{field.Identifier.Text}' of type '{FormatType(fieldType)}'.", f.Value.Span);
+                }
+                else if (literalError is not null)
+                {
+                    AddDiagnostic(literalError, f.Value.Span);
+                }
+            }
         }
     }
 

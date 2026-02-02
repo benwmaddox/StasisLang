@@ -602,8 +602,51 @@ public sealed class Parser
             TokenKind.IntegerLiteral or TokenKind.U8Literal or TokenKind.FloatLiteral or TokenKind.StringLiteral or TokenKind.BacktickLiteral => new LiteralExpressionSyntax(NextToken()),
             TokenKind.TrueKeyword or TokenKind.FalseKeyword => new LiteralExpressionSyntax(NextToken()),
             TokenKind.LParen => ParseParenthesized(),
+            TokenKind.LBrace => ParseStructInitializer(),
             _ => UnexpectedPrimary()
         };
+    }
+
+    private ExpressionSyntax ParseStructInitializer()
+    {
+        var openBrace = Consume(TokenKind.LBrace, "Expected '{'.");
+
+        var fields = new List<StructInitializerFieldSyntax>();
+        if (Current.Kind != TokenKind.RBrace && Current.Kind != TokenKind.EndOfFile)
+        {
+            while (true)
+            {
+                var name = Consume(TokenKind.Identifier, "Expected field name in struct initializer.");
+                var equals = Consume(TokenKind.Equal, "Expected '=' after field name in struct initializer.");
+                var value = ParseExpression();
+
+                Token? trailingComma = null;
+                if (Match(TokenKind.Comma))
+                {
+                    trailingComma = Previous;
+                    if (Current.Kind == TokenKind.RBrace)
+                    {
+                        // allow trailing comma
+                    }
+                }
+
+                fields.Add(new StructInitializerFieldSyntax(name, equals, value, trailingComma));
+
+                if (Current.Kind == TokenKind.RBrace || IsAtEnd())
+                {
+                    break;
+                }
+
+                if (trailingComma is null)
+                {
+                    // Recover: require separators between fields.
+                    AddDiagnostic("Expected ',' or '}' after struct initializer field.", Current.Span);
+                }
+            }
+        }
+
+        var closeBrace = Consume(TokenKind.RBrace, "Expected '}' to close struct initializer.");
+        return new StructInitializerExpressionSyntax(openBrace, fields, closeBrace);
     }
 
     private ExpressionSyntax ParseParenthesized()

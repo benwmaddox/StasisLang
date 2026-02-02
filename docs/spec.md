@@ -193,6 +193,32 @@ Named via:
 struct Player { ... }
 ```
 
+### Struct initializer (zero-fill)
+
+For struct-typed assignment targets, Stasis supports a **field initializer** form that assigns multiple fields at once and **zero-fills** every other field on that struct value.
+
+Syntax:
+
+```stasis
+target = { field_a = expr, field_b = expr, ... };
+```
+
+Semantics:
+
+- Only valid when `target` has a known struct type (e.g. `state.ball`, `units[i]`, `state.units[i]`).
+- Each listed `field = expr` is assigned.
+- Every other field on that struct value is set to `0`/`false` (recursively for nested structs).
+- Unknown field names and duplicate field names are diagnostics.
+- Only `=` is supported (no `+=`/`-=` etc).
+
+Example:
+
+```stasis
+if (!state.balls[i].active) {
+    state.balls[i] = { active = true, x = 120, y = -10, vy = 4 };
+}
+```
+
 ### clear()
 
 `clear()` is a convenience operation for bulk-zeroing global state. It is *not* a general-purpose memory primitive and does not expose `memset` to user code.
