@@ -89,7 +89,9 @@ function seed_rng(seed: i32): void {
 function next_rand_u32(): i32 {
     // LCG (fast, deterministic, good enough for simple gameplay).
     state.rng_state = state.rng_state * 1103515245 + 12345;
-    if (state.rng_state < 0) { state.rng_state = 0 - state.rng_state; }
+    // Map the signed i32 output into a non-negative range deterministically.
+    // Note: `abs(i32)` has a sharp edge at INT_MIN (-2147483648), so avoid negation.
+    if (state.rng_state < 0) { state.rng_state = state.rng_state + 1073741824 + 1073741824; }
     return state.rng_state;
 }
 
