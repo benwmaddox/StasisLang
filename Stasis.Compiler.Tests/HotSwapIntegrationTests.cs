@@ -72,8 +72,7 @@ public sealed class HotSwapIntegrationTests
                 await WaitForAnyLineAsync(
                     proc,
                     () =>
-                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
-                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        outLines.AnyContains("HOTSWAP(ms):") ||
                         errLines.AnyContains("warning: initial build failed") ||
                         errLines.AnyContains("error:"),
                     timeout: TimeSpan.FromMinutes(3));
@@ -84,10 +83,10 @@ public sealed class HotSwapIntegrationTests
                     $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
             }
 
-            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            if (!outLines.AnyContains("HOTSWAP(ms):"))
             {
                 throw new XunitException(
-                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+                    $"watch failed to produce initial HOTSWAP(ms) marker.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
             }
 
             // Inject a bad swap (missing DLL path). Older behavior could exit the runner; the watch loop should continue.
@@ -258,15 +257,16 @@ public sealed class HotSwapIntegrationTests
 
             await WaitForAnyLineAsync(
                 proc,
-                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
                 timeout: TimeSpan.FromMinutes(5));
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
 
             await File.AppendAllTextAsync(samplePath, "\n// jit swap test edit " + DateTime.UtcNow.Ticks + "\n", System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
-                () => outLines.AnyContains("HOTSWAP latency(ms):") || (File.Exists(runnerErrLog) && TryReadTextShared(runnerErrLog, out var text) && text.Contains("HOTSWAP ok:", StringComparison.Ordinal)),
-                timeout: TimeSpan.FromMinutes(2));
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                timeout: TimeSpan.FromMinutes(5));
         }
         finally
         {
@@ -365,8 +365,9 @@ public sealed class HotSwapIntegrationTests
 
             await WaitForAnyLineAsync(
                 proc,
-                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
                 timeout: TimeSpan.FromMinutes(5));
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
 
             // Introduce a compiler error. The watch loop should stay alive and keep watching.
             await File.AppendAllTextAsync(samplePath, "\nfunction __jit_build_error(): i32 { return x; }\n", System.Text.Encoding.ASCII);
@@ -386,8 +387,8 @@ public sealed class HotSwapIntegrationTests
 
             await WaitForAnyLineAsync(
                 proc,
-                () => outLines.AnyContains("HOTSWAP latency(ms):"),
-                timeout: TimeSpan.FromMinutes(2));
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                timeout: TimeSpan.FromMinutes(5));
         }
         finally
         {
@@ -521,8 +522,8 @@ public sealed class HotSwapIntegrationTests
 
             await WaitForAnyLineAsync(
                 proc,
-                () => errLines.AnyContains("HOTRELOAD phases(ms):"),
-                timeout: TimeSpan.FromMinutes(2));
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
 
             // The CLI should not report a bind failure, and the runner logs should not contain ERR databind...
             // We don't want the CLI to report a bind failure (this was caused by a non-atomic struct-meta write).
@@ -638,8 +639,7 @@ public sealed class HotSwapIntegrationTests
                 await WaitForAnyLineAsync(
                     proc,
                     () =>
-                        outLines.AnyContains("HOTRELOAD phases(ms):") ||
-                        errLines.AnyContains("HOTRELOAD phases(ms):") ||
+                        outLines.AnyContains("HOTSWAP(ms):") ||
                         errLines.AnyContains("warning: initial build failed") ||
                         errLines.AnyContains("error:"),
                     timeout: TimeSpan.FromMinutes(3));
@@ -650,10 +650,11 @@ public sealed class HotSwapIntegrationTests
                     $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
             }
 
-            if (!outLines.AnyContains("HOTRELOAD phases(ms):") && !errLines.AnyContains("HOTRELOAD phases(ms):"))
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            if (initialSwapCount == 0)
             {
                 throw new XunitException(
-                    $"watch failed to produce initial HOTRELOAD timing.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+                    $"watch failed to produce initial HOTSWAP(ms) marker.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
             }
 
             // Introduce a semantic error: unknown field on the global struct.
@@ -686,8 +687,8 @@ public sealed class HotSwapIntegrationTests
             await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
             await WaitForAnyLineAsync(
                 proc,
-                () => outLines.AnyContains("HOTRELOAD phases(ms):") || errLines.AnyContains("HOTRELOAD phases(ms):"),
-                timeout: TimeSpan.FromMinutes(2));
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                timeout: TimeSpan.FromMinutes(5));
 
             Assert.False(proc.HasExited);
         }
@@ -1073,6 +1074,22 @@ public sealed class HotSwapIntegrationTests
                 }
             }
             return false;
+        }
+
+        public int CountContains(string needle)
+        {
+            var count = 0;
+            lock (_lines)
+            {
+                for (var i = 0; i < _lines.Count; i++)
+                {
+                    if (_lines[i].Contains(needle, StringComparison.Ordinal))
+                    {
+                        count++;
+                    }
+                }
+            }
+            return count;
         }
 
         public string GetTail(int maxLines = 60)

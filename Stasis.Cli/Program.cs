@@ -469,7 +469,9 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(path, moduleName, layout);
+        var logGlobalMem = string.Equals(Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_LOG"), "1", StringComparison.Ordinal) ||
+                           string.Equals(Environment.GetEnvironmentVariable("STASIS_GLOBAL_MEM_DETAIL"), "1", StringComparison.Ordinal);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(path, moduleName, layout, enable: logGlobalMem);
         if (logPhaseTiming)
         {
             layoutMs = phaseStopwatch.ElapsedMilliseconds;
@@ -3196,7 +3198,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
         layoutMs = phase.ElapsedMilliseconds;
         phase.Restart();
         var options = new CodeGenerationOptions(
@@ -3378,16 +3380,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     () => Volatile.Read(ref runnerHotSwapOkCount),
                     prevOkCount,
                     timeoutMs: 20000);
-            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
             var loadMs = Volatile.Read(ref runnerHotSwapLoadMs);
-            if (loadMs < 0)
-            {
-                Console.WriteLine("HOTSWAP load(ms): -1");
-            }
-            else
-            {
-                Console.WriteLine($"HOTSWAP load(ms): {loadMs:0.###}");
-            }
+
+            var loadText = loadMs < 0
+                ? "-1"
+                : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs} load={loadText}");
             return 0;
         }
         finally
@@ -3464,10 +3462,34 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         return raw / 1000.0;
     }
 
+    static long TryParseHotReloadTotalMs(string timingLine)
+    {
+        const string needle = "total=";
+        var idx = timingLine.LastIndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return -1;
+        }
+        idx += needle.Length;
+
+        var end = idx;
+        while (end < timingLine.Length && char.IsDigit(timingLine[end]))
+        {
+            end++;
+        }
+        if (end <= idx)
+        {
+            return -1;
+        }
+
+        return long.TryParse(timingLine.AsSpan(idx, end - idx), out var value) ? value : -1;
+    }
+
     var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);
     if (initial == 0)
     {
-        Console.Error.WriteLine(initialTimingLine);
+        var totalMs = TryParseHotReloadTotalMs(initialTimingLine);
+        Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
     }
     else
     {
@@ -3528,10 +3550,15 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         changeSignal.Reset();
 
-        var exit = BuildAndSwap(startRunner: runner is null, out var timingLine);
+        var runnerWasNull = runner is null;
+        var exit = BuildAndSwap(startRunner: runnerWasNull, out var timingLine);
         if (exit == 0)
         {
-            Console.Error.WriteLine(timingLine);
+            if (runnerWasNull)
+            {
+                var totalMs = TryParseHotReloadTotalMs(timingLine);
+                Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
+            }
         }
         else if (runner is not null)
         {
@@ -3826,7 +3853,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
-        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout);
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
 
         if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
         {
@@ -3879,7 +3906,8 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         lastGoodClif = initialClif;
-        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
+        _ = initialLowerMs;
+        Console.WriteLine($"HOTSWAP(ms): total={initialLowerMs} latency=-1");
     }
 
     var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
@@ -3965,11 +3993,12 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 return 1;
             }
             lastGoodClif = clif;
+            Console.WriteLine($"HOTSWAP(ms): total={lowerMs} latency=-1");
             continue;
         }
 
         var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
-        Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
+        Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs}");
         if (!swapOk)
         {
             Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
@@ -3987,7 +4016,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         lastGoodClif = clif;
         swTotal.Stop();
-        Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
+        _ = lowerMs;
     }
 
     try
@@ -4184,10 +4213,15 @@ static void EmitStructMetadataJson(string path, GlobalLayout state, IReadOnlyLis
     WriteAllTextAtomic(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 }
 
-static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string moduleName, LayoutPlan layout)
+static void MaybeLogGlobalMemoryUsageOnLayoutChange(string sourcePath, string moduleName, LayoutPlan layout, bool enable)
 {
     try
     {
+        if (!enable)
+        {
+            return;
+        }
+
         var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
         var cacheDir = Path.Combine(repoRoot, ".stasis_cache", "layout");
         Directory.CreateDirectory(cacheDir);

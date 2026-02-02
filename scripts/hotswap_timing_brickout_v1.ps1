@@ -89,20 +89,6 @@ function Wait-ForText {
     return $false
 }
 
-function Parse-HotReloadPhases([string[]]$lines) {
-    $reloads = @()
-    foreach ($line in $lines) {
-        if ($line -like "*HOTRELOAD phases(ms):*") {
-            $fields = @{}
-            foreach ($m in [regex]::Matches($line, "([A-Za-z_]+)=([0-9]+)")) {
-                $fields[$m.Groups[1].Value] = [int]$m.Groups[2].Value
-            }
-            if ($fields.ContainsKey("total")) { $reloads += $fields }
-        }
-    }
-    return $reloads
-}
-
 function Parse-HotSwapOk([string[]]$lines) {
     $swaps = @()
     foreach ($line in $lines) {
@@ -121,16 +107,42 @@ function Parse-HotSwapOk([string[]]$lines) {
     return $swaps
 }
 
-function Parse-HotSwapLoadUs([string[]]$lines) {
-    $loads = @()
+function Parse-HotSwapSummary([string[]]$lines) {
+    $swaps = @()
     foreach ($line in $lines) {
-        if ($line -like "*HOTSWAP load(ms):*") {
-            foreach ($m in [regex]::Matches($line, "HOTSWAP load\\(ms\\):\\s*([0-9]+(?:\\.[0-9]+)?)")) {
-                $loads += [double]$m.Groups[1].Value
+        if ($line -like "*HOTSWAP(ms):*") {
+            $fields = @{}
+            foreach ($m in [regex]::Matches($line, "([A-Za-z_]+)=(-?[0-9]+(?:\\.[0-9]+)?)")) {
+                $fields[$m.Groups[1].Value] = [double]$m.Groups[2].Value
             }
+            if ($fields.ContainsKey("latency")) { $swaps += $fields }
         }
     }
-    return $loads
+    return $swaps
+}
+
+function Wait-ForSwapCountIncrease {
+    param(
+        [string]$Path,
+        [string]$Pattern,
+        [int]$PrevCount,
+        [int]$TimeoutMs
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path $Path) {
+            try {
+                $text = Read-TextFileShared -Path $Path
+                $count = ([regex]::Matches($text, $Pattern)).Count
+                if ($count -gt $PrevCount) { return $count }
+            } catch {
+                # ignore
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    return -1
 }
 
 Write-Host ("Mode: {0}" -f $Mode)
@@ -159,16 +171,16 @@ if (-not $env:STASIS_CLANG) {
 $proc = Start-Process -FilePath (Join-Path $root "stasis.bat") -ArgumentList $cliArgs -WorkingDirectory $root -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 try {
     $initialTimeoutMs = if ($Mode -eq "jit") { 600000 } else { 180000 }
-    if (-not (Wait-ForText -Path $errLog -Needle "HOTRELOAD phases(ms):" -TimeoutMs $initialTimeoutMs)) {
-        throw "Timed out waiting for initial HOTRELOAD output."
+    if (-not (Wait-ForText -Path $outLog -Needle "HOTSWAP(ms):" -TimeoutMs $initialTimeoutMs)) {
+        throw "Timed out waiting for initial HOTSWAP(ms) marker."
     }
 
-    $swapLog = if ($Mode -eq "jit") { $outLog } else { $outLog }
-    $swapNeedle = if ($Mode -eq "jit") { "HOTSWAP latency(ms):" } else { "HOTSWAP load(ms):" }
+    $swapLog = $outLog
+    $swapPattern = if ($Mode -eq "jit") { "HOTSWAP\\(ms\\):.*latency=[0-9]" } else { "HOTSWAP\\(ms\\):.*load=[0-9]" }
 
     $prevSwapCount = 0
     if (Test-Path $swapLog) {
-        try { $prevSwapCount = ([regex]::Matches((Read-TextFileShared $swapLog), [regex]::Escape($swapNeedle))).Count } catch {}
+        try { $prevSwapCount = ([regex]::Matches((Read-TextFileShared $swapLog), $swapPattern)).Count } catch {}
     }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
@@ -177,14 +189,9 @@ try {
         $sampleTouched = $true
         Start-Sleep -Milliseconds $SleepAfterEditMs
 
-        $ok = Wait-ForText -Path $swapLog -Needle $swapNeedle -TimeoutMs $SwapTimeoutMs
-        if (-not $ok) {
-            throw "Timed out waiting for hot-swap signal after edit $i."
-        }
-
-        $count = ([regex]::Matches((Read-TextFileShared $swapLog), [regex]::Escape($swapNeedle))).Count
-        if ($count -le $prevSwapCount) {
-            throw "Hot-swap signal did not advance after edit $i (count=$count prev=$prevSwapCount)."
+        $count = Wait-ForSwapCountIncrease -Path $swapLog -Pattern $swapPattern -PrevCount $prevSwapCount -TimeoutMs $SwapTimeoutMs
+        if ($count -lt 0) {
+            throw "Timed out waiting for HOTSWAP(ms) after edit $i."
         }
         $prevSwapCount = $count
     }
@@ -201,18 +208,23 @@ finally {
 $errLines = if (Test-Path $errLog) { Get-Content $errLog } else { @() }
 $outLines = if (Test-Path $outLog) { Get-Content $outLog } else { @() }
 
-$reloads = Parse-HotReloadPhases $errLines
-$loadsMs = if ($Mode -eq "jit") { @() } else { Parse-HotSwapLoadUs $outLines }
+$summaries = Parse-HotSwapSummary $outLines
 
-$reloadTotals = $reloads | ForEach-Object { $_["total"] }
-$reloadLinks = $reloads | ForEach-Object { $_["link"] }
-$loadMs = $loadsMs | ForEach-Object { [math]::Round($_, 3) }
+$swaps = if ($Mode -eq "jit") {
+    $summaries | Where-Object { $_.ContainsKey("latency") -and $_["latency"] -ge 0 }
+} else {
+    $summaries | Where-Object { $_.ContainsKey("load") -and $_["load"] -ge 0 }
+}
 
-Write-Host ("Reloads: {0} Swaps: {1}" -f $reloads.Count, $loadMs.Count)
-Write-Host (Summarize "HOTRELOAD total" $reloadTotals "ms")
-Write-Host (Summarize "HOTRELOAD link" $reloadLinks "ms")
+$totals = $swaps | ForEach-Object { [int]([math]::Round($_["total"], 0)) }
+$latencies = $swaps | ForEach-Object { [int]([math]::Round($_["latency"], 0)) }
+$loadMs = if ($Mode -eq "jit") { @() } else { $swaps | ForEach-Object { [math]::Round($_["load"], 3) } }
+
+Write-Host ("Swaps: {0}" -f $swaps.Count)
+Write-Host (Summarize "HOTSWAP total" $totals "ms")
+Write-Host (Summarize "HOTSWAP latency" $latencies "ms")
 if ($Mode -eq "jit") {
-    Write-Host "HOTSWAP load: n/a (jit mode does not emit HOTSWAP load(ms))"
+    Write-Host "HOTSWAP load: n/a (jit mode does not emit load=...)"
 } else {
     Write-Host (SummarizeFloat "HOTSWAP load" $loadMs "ms")
 }
