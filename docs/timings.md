@@ -43,7 +43,7 @@ STASIS_DISABLE_AUDIO=1 SDL_AUDIODRIVER=dummy scripts/hotswap_timing_brickout_v1.
 ```
 
 Metric:
-- Parse `HOTSWAP load(ms): ...` from `build/hotswap_brickout_v1.out.log` (DLL load time only, same as Windows).
+- Parse `load=...` from `HOTSWAP(ms): total=... latency=... load=...` in `build/hotswap_brickout_v1.out.log` (DLL load time only, same as Windows).
 
 Samples (ms):
 - 0.321, 0.340, 0.336, 0.368, 0.368, 0.368, 0.368, 0.368

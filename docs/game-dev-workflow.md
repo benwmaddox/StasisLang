@@ -120,16 +120,12 @@ This is a same-process swap: your game keeps running, and state stays in memory.
 
 ### Reading the timing logs
 
-The CLI prints a per-phase breakdown for each hot reload:
-
-- `HOTRELOAD phases(ms): read=... parse=... sema=... layout=... lower=... aotCompile=... link=... total=...`
-
-If you want less console spam, set `STASIS_HOTSWAP_ONE_LINE=1` to suppress the per-phase line and instead print a single summary per swap:
+The watch loop prints a single summary line per swap:
 
 - AOT hot-swap: `HOTSWAP(ms): total=... latency=... load=...`
 - JIT hot-swap: `HOTSWAP(ms): total=... latency=...`
 
-The runner prints per-swap timings:
+The runner prints per-swap timings (more detailed):
 
 - `HOTSWAP ok: save=...ms load=...ms restore=...ms bytes=... symbols=...`
 

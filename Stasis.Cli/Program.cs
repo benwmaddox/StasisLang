@@ -3040,7 +3040,6 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     var entryAssetRoot = GetEntryAssetRoot(sourcePath);
-    var oneLineHotSwap = string.Equals(Environment.GetEnvironmentVariable("STASIS_HOTSWAP_ONE_LINE"), "1", StringComparison.Ordinal);
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
         Console.Error.WriteLine("error: stasis_runner not found. Build it in runtime/ and set STASIS_CRANELIFT_RUNNER_EXE if needed.");
@@ -3383,26 +3382,10 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                     timeoutMs: 20000);
             var loadMs = Volatile.Read(ref runnerHotSwapLoadMs);
 
-            if (oneLineHotSwap)
-            {
-                var loadText = loadMs < 0
-                    ? "-1"
-                    : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-                Console.WriteLine(
-                    $"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs} load={loadText}");
-            }
-            else
-            {
-                Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
-                if (loadMs < 0)
-                {
-                    Console.WriteLine("HOTSWAP load(ms): -1");
-                }
-                else
-                {
-                    Console.WriteLine($"HOTSWAP load(ms): {loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}");
-                }
-            }
+            var loadText = loadMs < 0
+                ? "-1"
+                : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs} load={loadText}");
             return 0;
         }
         finally
@@ -3479,13 +3462,34 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         return raw / 1000.0;
     }
 
+    static long TryParseHotReloadTotalMs(string timingLine)
+    {
+        const string needle = "total=";
+        var idx = timingLine.LastIndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return -1;
+        }
+        idx += needle.Length;
+
+        var end = idx;
+        while (end < timingLine.Length && char.IsDigit(timingLine[end]))
+        {
+            end++;
+        }
+        if (end <= idx)
+        {
+            return -1;
+        }
+
+        return long.TryParse(timingLine.AsSpan(idx, end - idx), out var value) ? value : -1;
+    }
+
     var initial = BuildAndSwap(startRunner: true, out var initialTimingLine);
     if (initial == 0)
     {
-        if (!oneLineHotSwap)
-        {
-            Console.Error.WriteLine(initialTimingLine);
-        }
+        var totalMs = TryParseHotReloadTotalMs(initialTimingLine);
+        Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
     }
     else
     {
@@ -3546,12 +3550,14 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         }
         changeSignal.Reset();
 
-        var exit = BuildAndSwap(startRunner: runner is null, out var timingLine);
+        var runnerWasNull = runner is null;
+        var exit = BuildAndSwap(startRunner: runnerWasNull, out var timingLine);
         if (exit == 0)
         {
-            if (!oneLineHotSwap)
+            if (runnerWasNull)
             {
-                Console.Error.WriteLine(timingLine);
+                var totalMs = TryParseHotReloadTotalMs(timingLine);
+                Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
             }
         }
         else if (runner is not null)
@@ -3571,7 +3577,6 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
 static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableGraphics, string? graphicsLibPath)
 {
-    var oneLineHotSwap = string.Equals(Environment.GetEnvironmentVariable("STASIS_HOTSWAP_ONE_LINE"), "1", StringComparison.Ordinal);
     if (!TryFindCraneliftJitRunner(out var runnerPath))
     {
         Console.Error.WriteLine("error: stasis-cranelift-jit-runner not found. Build it with `cargo build -p stasis-cranelift-jit-runner` (in tools/cranelift-jit-runner) or set STASIS_CRANELIFT_JIT_RUNNER_EXE.");
@@ -3901,10 +3906,8 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         lastGoodClif = initialClif;
-        if (!oneLineHotSwap)
-        {
-            Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={initialLowerMs} total={initialLowerMs}");
-        }
+        _ = initialLowerMs;
+        Console.WriteLine($"HOTSWAP(ms): total={initialLowerMs} latency=-1");
     }
 
     var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
@@ -3990,18 +3993,12 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 return 1;
             }
             lastGoodClif = clif;
+            Console.WriteLine($"HOTSWAP(ms): total={lowerMs} latency=-1");
             continue;
         }
 
         var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
-        if (oneLineHotSwap)
-        {
-            Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs}");
-        }
-        else
-        {
-            Console.WriteLine($"HOTSWAP latency(ms): {swapLatencyMs}");
-        }
+        Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs}");
         if (!swapOk)
         {
             Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
@@ -4019,10 +4016,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         lastGoodClif = clif;
         swTotal.Stop();
-        if (!oneLineHotSwap)
-        {
-            Console.Error.WriteLine($"HOTRELOAD phases(ms): lower={lowerMs} link=0 swapWrite=0 total={swTotal.ElapsedMilliseconds}");
-        }
+        _ = lowerMs;
     }
 
     try
