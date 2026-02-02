@@ -16,78 +16,11 @@ Install toolchains if you don't already have them.
 
 ### .NET SDK (Ubuntu)
 
-This repo targets .NET 9.x. On Ubuntu in WSL, the most reliable approach is to install the Microsoft package feed for your Ubuntu version and then install `dotnet-sdk-9.0`.
+This repo targets .NET 9.x.
 
-First, check your Ubuntu version (pick the matching install block below):
+#### Copy/paste (recommended): install .NET 9 SDK via `dotnet-install.sh`
 
-```bash
-cat /etc/os-release
-# Look for: VERSION_ID="24.04" (or "22.04", etc.)
-```
-
-#### Ubuntu 24.04 (VERSION_ID="24.04")
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates wget apt-transport-https
-
-wget "https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb" \
-  -O /tmp/packages-microsoft-prod.deb
-sudo dpkg -i /tmp/packages-microsoft-prod.deb
-rm -f /tmp/packages-microsoft-prod.deb
-
-sudo apt-get update
-sudo apt-get install -y dotnet-sdk-9.0
-
-dotnet --info
-```
-
-#### Ubuntu 22.04 (VERSION_ID="22.04")
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates wget apt-transport-https
-
-wget "https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb" \
-  -O /tmp/packages-microsoft-prod.deb
-sudo dpkg -i /tmp/packages-microsoft-prod.deb
-rm -f /tmp/packages-microsoft-prod.deb
-
-sudo apt-get update
-sudo apt-get install -y dotnet-sdk-9.0
-
-dotnet --info
-```
-
-#### Auto-detect (works if Microsoft publishes a config for your VERSION_ID)
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates wget apt-transport-https
-
-source /etc/os-release
-wget "https://packages.microsoft.com/config/ubuntu/$VERSION_ID/packages-microsoft-prod.deb" \
-  -O /tmp/packages-microsoft-prod.deb
-sudo dpkg -i /tmp/packages-microsoft-prod.deb
-rm -f /tmp/packages-microsoft-prod.deb
-
-sudo apt-get update
-sudo apt-get install -y dotnet-sdk-9.0
-
-dotnet --info
-```
-
-#### If apt can't find `dotnet-sdk-9.0` (common on new Ubuntu releases)
-
-If you see `E: Unable to locate package dotnet-sdk-9.0`, first sanity-check what packages the repo is exposing:
-
-```bash
-grep -R "packages.microsoft.com" /etc/apt/sources.list /etc/apt/sources.list.d || true
-sudo apt-get update
-apt-cache search dotnet-sdk | head -n 20
-```
-
-If `dotnet-sdk-9.0` still doesn't appear, use the official installer script (installs into your home dir; no apt repo required):
+This works even when `apt` can't find `dotnet-sdk-9.0` (a common issue on some Ubuntu/WSL combinations):
 
 ```bash
 sudo apt-get update
@@ -106,7 +39,31 @@ dotnet --info
 dotnet --list-sdks
 ```
 
-If you prefer to manage multiple SDKs, install `dotnet` via `asdf` or `dotnet-install.sh`, but the apt-based install above tends to be the least surprising for WSL dev.
+#### Optional: install via `apt` (Microsoft feed)
+
+If you prefer `apt`, you can install the Microsoft package feed for your Ubuntu version and then install `dotnet-sdk-9.0`.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates wget apt-transport-https
+
+source /etc/os-release
+wget "https://packages.microsoft.com/config/ubuntu/$VERSION_ID/packages-microsoft-prod.deb" \
+  -O /tmp/packages-microsoft-prod.deb
+sudo dpkg -i /tmp/packages-microsoft-prod.deb
+rm -f /tmp/packages-microsoft-prod.deb
+
+sudo apt-get update
+sudo apt-get install -y dotnet-sdk-9.0
+
+dotnet --info
+```
+
+If you hit `E: Unable to locate package dotnet-sdk-9.0`, double-check what packages are available:
+
+```bash
+apt-cache search dotnet-sdk | head -n 20
+```
 
 ### Rust (rustup + stable toolchain)
 

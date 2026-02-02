@@ -94,3 +94,38 @@ Command:
 Result:
 - total globals: 626180 bytes (611.50 KiB)
 - state: 44562 bytes (43.52 KiB)
+
+Top 30 globals by size (bytes):
+- 369168 gfx_cmd_f32
+- 139392 gfx_cmd_i32
+- 65536 gfx_cmd_u8
+- 44562 state
+- 3072 host_i32
+- 2048 audio_buf
+- 768 brickout_level_event_preset
+- 768 brickout_level_event_tick
+- 288 sfx_voices
+- 256 host_f32
+- 68 brickout_level_name_tmp
+- 40 brickout_level_name_0
+- 40 brickout_level_name_1
+- 40 brickout_level_name_2
+- 12 brickout_digits_tmp
+- 12 brickout_level_event_count
+- 12 brickout_level_event_offset
+- 12 brickout_level_initial_power_cap
+- 12 brickout_level_initial_scraps
+- 4 audio_sr
+- 4 bench_count
+- 4 bench_frame
+- 4 bench_sum_ms
+- 4 bench_sum_us
+- 4 brickout_level_done
+- 4 brickout_level_next_event_index
+- 4 brickout_level_tick
+- 4 brickout_levels_magic
+- 4 brickout_ui_font
+- 4 desktop_size_h
+
+Note:
+- `total globals` includes graphics/audio/input buffers and other globals (e.g. `gfx_cmd_*`, `host_*`) in addition to the game `state` struct.
