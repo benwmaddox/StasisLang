@@ -255,9 +255,12 @@ STASIS_CRANELIFT_JIT_RUNNER=1 ./dev_brickout_revenge_wsl.sh
 
 ## 5) Measuring hot-swap latency
 
-The `--watch` loop prints `HOTRELOAD phases(ms): ...` and `HOTSWAP latency(ms): ...` after an edit triggers a rebuild/swap.
+The `--watch` loop prints a single timing line after an edit triggers a rebuild/swap:
 
-For apples-to-apples timing, use a repo-local workspace under WSL (not `/mnt/*`), make a single small edit, and compare the printed `HOTSWAP latency(ms)` between:
+- AOT hot-swap: `HOTSWAP(ms): total=... latency=... load=...`
+- JIT hot-swap: `HOTSWAP(ms): total=... latency=...`
+
+For apples-to-apples timing, use a repo-local workspace under WSL (not `/mnt/*`), make a single small edit, and compare the printed `HOTSWAP(ms): ...` between:
 
 - Windows native (`dev_brickout_revenge*.bat`)
 - WSL (`dev_brickout_revenge*_wsl.sh`)

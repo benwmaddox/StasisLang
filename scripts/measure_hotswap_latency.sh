@@ -39,9 +39,7 @@ watch_pid="$!"
 
 deadline=$((SECONDS + 180))
 while [[ "${SECONDS}" -lt "${deadline}" ]]; do
-  if grep -q "HOTRELOAD phases(ms):" "${log}"; then
-    break
-  fi
+  if grep -q "HOTSWAP(ms):" "${log}"; then break; fi
   if ! kill -0 "${watch_pid}" >/dev/null 2>&1; then
     echo "error: watch process exited before initial compile. log tail:" 1>&2
     tail -n 80 "${log}" 1>&2 || true
@@ -50,33 +48,33 @@ while [[ "${SECONDS}" -lt "${deadline}" ]]; do
   sleep 0.1
 done
 
-if ! grep -q "HOTRELOAD phases(ms):" "${log}"; then
+if ! grep -q "HOTSWAP(ms):" "${log}"; then
   echo "error: timed out waiting for initial compile. log tail:" 1>&2
   tail -n 80 "${log}" 1>&2 || true
   exit 1
 fi
 
+initial_count="$(grep -c "HOTSWAP(ms):" "${log}" || true)"
+
 printf "\n// measure_hotswap_latency %s\n" "$(date +%s%N)" >> "${file}"
 
 deadline=$((SECONDS + 60))
 while [[ "${SECONDS}" -lt "${deadline}" ]]; do
-  if grep -q "HOTSWAP latency(ms):" "${log}"; then
-    break
-  fi
+  count="$(grep -c "HOTSWAP(ms):" "${log}" || true)"
+  if (( count > initial_count )); then break; fi
   if ! kill -0 "${watch_pid}" >/dev/null 2>&1; then
-    echo "error: watch process exited before reporting HOTSWAP latency. log tail:" 1>&2
+    echo "error: watch process exited before reporting HOTSWAP. log tail:" 1>&2
     tail -n 120 "${log}" 1>&2 || true
     exit 1
   fi
   sleep 0.1
 done
 
-line="$(grep "HOTSWAP latency(ms):" "${log}" | tail -n 1 || true)"
+line="$(grep "HOTSWAP(ms):" "${log}" | tail -n 1 || true)"
 if [[ -z "${line}" ]]; then
-  echo "error: timed out waiting for HOTSWAP latency(ms). log tail:" 1>&2
+  echo "error: timed out waiting for HOTSWAP(ms). log tail:" 1>&2
   tail -n 120 "${log}" 1>&2 || true
   exit 1
 fi
 
 echo "${line}"
-
