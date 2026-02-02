@@ -132,6 +132,24 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Rejects_struct_initializer_as_standalone_expression()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): i32 {
+                return { a = 1 };
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Struct initializer may only appear", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_receiver_form_arity_mismatch_for_receiver_scoped_callable()
     {
         var source = """

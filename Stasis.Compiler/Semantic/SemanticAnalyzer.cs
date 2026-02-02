@@ -1038,12 +1038,15 @@ public sealed class SemanticAnalyzer
 
         if (v.Initializer is not null)
         {
-            AnalyzeExpression(v.Initializer, scope);
             if (v.Initializer is StructInitializerExpressionSyntax init && varType is not null)
             {
+                AnalyzeStructInitializerExpression(init, scope);
                 ValidateStructInitializerAgainstType(init, varType, scope);
                 return;
             }
+
+            AnalyzeExpression(v.Initializer, scope);
+
             // Type check: ensure initializer type matches variable type
             var initType = ResolveExpressionType(v.Initializer, scope);
             if (varType is not null && initType is not null && !AreTypesCompatible(varType, initType))
@@ -1081,10 +1084,7 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(u.Operand, scope);
                 break;
             case StructInitializerExpressionSyntax init:
-                foreach (var f in init.Fields)
-                {
-                    AnalyzeExpression(f.Value, scope);
-                }
+                AddDiagnostic("Struct initializer may only appear on the right side of '=' assignment or in a variable initializer.", init.Span);
                 break;
             case MemberAccessExpressionSyntax m:
                 // Check if this is an enum member access (e.g., State.Idle)
@@ -1257,7 +1257,6 @@ public sealed class SemanticAnalyzer
                 break;
             case AssignmentExpressionSyntax assign:
                 AnalyzeExpression(assign.Left, scope);
-                AnalyzeExpression(assign.Right, scope);
                 ValidateAssignment(assign.Left, assign.OperatorToken);
                 ValidateSingleAssignment(assign);
 
@@ -1267,10 +1266,13 @@ public sealed class SemanticAnalyzer
                     {
                         AddDiagnostic("Struct initializer only supports '=' assignment.", assign.OperatorToken.Span);
                     }
+                    AnalyzeStructInitializerExpression(initExpr, scope);
                     var targetType = ResolveExpressionType(assign.Left, scope);
                     ValidateStructInitializerAgainstType(initExpr, targetType, scope);
                     break;
                 }
+
+                AnalyzeExpression(assign.Right, scope);
 
                 // Type check: ensure right side type matches left side type
                 var leftType = ResolveExpressionType(assign.Left, scope);
@@ -1292,6 +1294,19 @@ public sealed class SemanticAnalyzer
                 AnalyzeExpression(bin.Right, scope);
                 ValidateBinary(bin, scope);
                 break;
+        }
+    }
+
+    private void AnalyzeStructInitializerExpression(StructInitializerExpressionSyntax init, Dictionary<string, Symbol> scope)
+    {
+        foreach (var f in init.Fields)
+        {
+            if (f.Value is StructInitializerExpressionSyntax nested)
+            {
+                AnalyzeStructInitializerExpression(nested, scope);
+                continue;
+            }
+            AnalyzeExpression(f.Value, scope);
         }
     }
 
