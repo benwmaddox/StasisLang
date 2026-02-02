@@ -132,24 +132,6 @@ function clamp_i32(v: i32, lo: i32, hi: i32): i32 {
     return v;
 }
 
-function init_game(): void {
-    ensure_config_loaded();
-    if (!state.config.json_loaded) {
-        return;
-    }
-    seed_rng(get_time_ms());
-
-    state.bucket_x = state.config.screen_width / 2;
-    state.bucket_target_x = state.bucket_x;
-    state.catches = 0;
-    state.misses = 0;
-    state.spawn_timer_ticks = 0;
-
-    foreach (let ball in state.balls) {
-        ball.active = false;
-    }
-}
-
 function ensure_window(): bool {
     if (!state.config.json_loaded) {
         ensure_config_loaded();
@@ -339,10 +321,23 @@ function tick(): i32 {
 }
 
 function main(): i32 {
-    init_game();
+    ensure_config_loaded();
     if (!state.config.json_loaded) {
         return 1;
     }
+
+    seed_rng(get_time_ms());
+
+    state.bucket_x = state.config.screen_width / 2;
+    state.bucket_target_x = state.bucket_x;
+    state.catches = 0;
+    state.misses = 0;
+    state.spawn_timer_ticks = 0;
+
+    foreach (let ball in state.balls) {
+        ball.active = false;
+    }
+
     if (!ensure_window()) {
         return 1;
     }
