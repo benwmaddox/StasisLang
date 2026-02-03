@@ -83,7 +83,7 @@ public class ParserTests
         var func = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(result.CompilationUnit.Declarations));
         Assert.IsType<VariableDeclarationSyntax>(Assert.Single(func.Body!.Statements));
         var sema = new SemanticAnalyzer().Analyze(result.CompilationUnit);
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]

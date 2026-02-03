@@ -26,7 +26,7 @@ public class LoweringTests
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
         if (!allowSemanticDiagnostics)
         {
-            Assert.Empty(sema.Diagnostics);
+            DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
         }
 
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();

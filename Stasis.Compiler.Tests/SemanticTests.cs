@@ -47,7 +47,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -127,6 +127,28 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Warns_on_struct_fields_that_are_never_used()
+    {
+        var source = """
+            struct S { used: i32; unused: i32; }
+            global state: S;
+            function f(): void {
+                state.used = 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+        Assert.Contains(sema.Diagnostics, d =>
+            d.Severity == DiagnosticSeverity.Warning &&
+            d.Message.Contains("S.unused", StringComparison.Ordinal) &&
+            d.Message.Contains("never assigned or referenced", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_calling_non_function_symbol()
     {
         var source = """
@@ -174,7 +196,7 @@ public class SemanticTests
         Assert.Empty(parse.Diagnostics);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -206,7 +228,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -253,7 +275,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -293,7 +315,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -308,7 +330,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -322,7 +344,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
         Assert.Contains("players", sema.Symbols.Keys);
     }
 
@@ -437,7 +459,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
         Assert.Contains("State", sema.Symbols.Keys);
         Assert.Equal(SymbolKind.Enum, sema.Symbols["State"].Kind);
     }
@@ -452,7 +474,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
         Assert.Contains("State.Idle", sema.Symbols.Keys);
         Assert.Contains("State.Jump", sema.Symbols.Keys);
         Assert.Contains("State.Run", sema.Symbols.Keys);
@@ -473,7 +495,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -505,7 +527,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -521,7 +543,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -571,7 +593,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -587,7 +609,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
@@ -640,7 +662,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]

@@ -29,7 +29,10 @@ public sealed class SemanticAnalyzer
     private readonly List<Diagnostic> _diagnostics = new();
     private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
 
-    private bool AtDiagnosticLimit => _diagnostics.Count >= DiagnosticPolicy.MaxErrors;
+    private int _errorCount;
+    private bool AtDiagnosticLimit => _errorCount >= DiagnosticPolicy.MaxErrors;
+
+    private readonly HashSet<string> _usedStructFields = new(StringComparer.Ordinal);
 
     private static IEnumerable<string> GetClosestMatches(string target, IEnumerable<string> candidates, int maxCount = 3)
     {
@@ -158,6 +161,11 @@ public sealed class SemanticAnalyzer
             }
         }
 
+        if (!AtDiagnosticLimit)
+        {
+            EmitUnusedStructFieldWarnings();
+        }
+
         return new SemanticResult(_diagnostics, new Dictionary<string, Symbol>(_symbols));
     }
 
@@ -179,7 +187,25 @@ public sealed class SemanticAnalyzer
             }
         }
 
-        _diagnostics.Add(new Diagnostic(message, span));
+        _diagnostics.Add(new Diagnostic(message, span, Severity: DiagnosticSeverity.Error));
+        _errorCount++;
+    }
+
+    private void AddWarning(string message, SourceSpan span)
+    {
+        for (var i = 0; i < _diagnostics.Count; i++)
+        {
+            var d = _diagnostics[i];
+            if (d.Span.Start == span.Start &&
+                d.Span.Length == span.Length &&
+                string.Equals(d.Message, message, StringComparison.Ordinal) &&
+                d.Severity == DiagnosticSeverity.Warning)
+            {
+                return;
+            }
+        }
+
+        _diagnostics.Add(new Diagnostic(message, span, Severity: DiagnosticSeverity.Warning));
     }
 
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
@@ -1785,10 +1811,75 @@ public sealed class SemanticAnalyzer
                 return new PrimitiveTypeSymbol("i32");
             }
 
+            _usedStructFields.Add($"{named.TypeName}.{field.Identifier.Text}");
             currentType = ResolveType(field.Type);
         }
 
         return currentType;
+    }
+
+    private void EmitUnusedStructFieldWarnings()
+    {
+        var usedStructs = new HashSet<string>(StringComparer.Ordinal);
+
+        void AddType(TypeSymbol? type)
+        {
+            if (type is null)
+            {
+                return;
+            }
+
+            switch (type)
+            {
+                case NamedTypeSymbol named:
+                    if (_symbols.TryGetValue(named.TypeName, out var sym) && sym.Kind == SymbolKind.Struct)
+                    {
+                        if (usedStructs.Add(named.TypeName) && _structs.TryGetValue(named.TypeName, out var decl))
+                        {
+                            foreach (var field in decl.Fields)
+                            {
+                                AddType(ResolveType(field.Type));
+                            }
+                        }
+                    }
+                    break;
+                case ArrayTypeSymbol arr:
+                    AddType(arr.ElementType);
+                    break;
+            }
+        }
+
+        foreach (var sym in _symbols.Values)
+        {
+            // Only consider value-bearing symbols as evidence that a struct is "used".
+            // Otherwise, we'd warn on fields for structs that are declared but never referenced anywhere.
+            if (sym.Kind is SymbolKind.Struct or SymbolKind.Enum)
+            {
+                continue;
+            }
+            AddType(sym.Type);
+        }
+
+        foreach (var (structName, structDecl) in _structs)
+        {
+            if (!usedStructs.Contains(structName))
+            {
+                continue;
+            }
+
+            foreach (var field in structDecl.Fields)
+            {
+                var key = $"{structName}.{field.Identifier.Text}";
+                if (_usedStructFields.Contains(key))
+                {
+                    continue;
+                }
+
+                AddWarning(
+                    $"Struct field '{key}' is never assigned or referenced. Hint: remove it, or add a use so the intent is explicit.",
+                    field.Identifier.Span);
+            }
+        }
     }
 
     private bool AreTypesCompatible(TypeSymbol target, TypeSymbol source)
