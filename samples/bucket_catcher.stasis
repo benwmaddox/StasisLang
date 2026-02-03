@@ -11,7 +11,7 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Demonstrate keyboard + pointer input.
 // - Keep state in explicit globals (no hidden allocation).
 // - Keep most tuning data in JSON so learners can edit without recompiling.
-// - Use PNG sprites for the bucket/ball to show asset binding.
+// - Use SVG sprites for the bucket/ball to show asset binding.
 //
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
@@ -37,6 +37,7 @@ struct BucketConfig {
     font_size_pixels: i32;
     bucket_sprite_path: utf8[256];
     ball_sprite_path: utf8[256];
+    // Sprite colors come from the SVG assets.
     bucket_width: i32;
     bucket_height: i32;
     bucket_bottom_padding: i32;
@@ -53,12 +54,6 @@ struct BucketConfig {
     background_red: f32;
     background_green: f32;
     background_blue: f32;
-    bucket_red: f32;
-    bucket_green: f32;
-    bucket_blue: f32;
-    ball_red: f32;
-    ball_green: f32;
-    ball_blue: f32;
     ui_red: f32;
     ui_green: f32;
     ui_blue: f32;
@@ -71,6 +66,7 @@ struct GameState {
     catches: i32;
     misses: i32;
 
+    // Keep this in sync with MAX_BALLS.
     balls: Ball[24];
     spawn_timer_ticks: i32;
 
@@ -87,22 +83,28 @@ struct GameState {
 global state: GameState;
 
 function seed_rng(seed: i32): void {
-    state.rng_state = seed;
+    // Park-Miller "minimal standard" RNG (31-bit, no overflow with i32 math).
+    // State is in [1, 2147483646].
+    let s: i32 = seed;
+    if (s == -2147483648) {
+        state.rng_state = 2147483646;
+        return;
+    }
+
+    if (s < 0) { s = 0 - s; }
+    s = s % 2147483646;
+    if (s <= 0) { s = s + 2147483646; }
+
+    state.rng_state = s;
 }
 
 function next_rand_u32(): i32 {
-    // LCG (fast, deterministic, good enough for simple gameplay).
-    state.rng_state = state.rng_state * 1103515245 + 12345;
-    // Map the signed i32 output into a non-negative range deterministically.
-    // Note: `abs(i32)` has a sharp edge at INT_MIN (-2147483648), so avoid negation.
-    if (state.rng_state < 0) { state.rng_state = state.rng_state + 1073741824 + 1073741824; }
-    return state.rng_state;
-}
-
-function rand_range_f32(min_v: f32, max_v: f32): f32 {
-    let r: i32 = next_rand_u32();
-    let f: f32 = i32_to_f32(r % 65536) / 65535.0;
-    return min_v + (max_v - min_v) * f;
+    let hi: i32 = state.rng_state / 127773;
+    let lo: i32 = state.rng_state - hi * 127773;
+    let next: i32 = 16807 * lo - 2836 * hi;
+    if (next <= 0) { next = next + 2147483646; }
+    state.rng_state = next;
+    return next;
 }
 
 function rand_range_i32(min_v: i32, max_exclusive: i32): i32 {
@@ -118,12 +120,6 @@ function ensure_config_loaded(): void {
     }
 
     print_string("error: config.json not bound; start the sample with data binding enabled.\n");
-}
-
-function clamp_f32(v: f32, lo: f32, hi: f32): f32 {
-    if (v < lo) { return lo; }
-    if (v > hi) { return hi; }
-    return v;
 }
 
 function clamp_i32(v: i32, lo: i32, hi: i32): i32 {
@@ -322,7 +318,7 @@ function tick(): i32 {
     }
 
     if (should_quit()) {
-        return 0;
+        return 1;
     }
 
     update_input();
