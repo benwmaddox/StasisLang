@@ -40,13 +40,11 @@ if (-not $code) {
   throw "VS Code CLI (code) not found in PATH. Enable it from the VS Code command palette."
 }
 
-if (Test-Path $serverOut) {
-  Remove-Item -Recurse -Force $serverOut
-}
 New-Item -ItemType Directory -Force -Path $serverOut | Out-Null
 New-Item -ItemType File -Force -Path (Join-Path $serverOut ".gitkeep") | Out-Null
 
 $publishArgs = @("publish", $serverProject, "-c", $Configuration, "-o", $serverOut,
+  "-p:StasisIncludeLibLLVM=false",
   "-p:SelfContained=false",
   "-p:PublishSingleFile=false",
   "-p:PublishReadyToRun=false",
