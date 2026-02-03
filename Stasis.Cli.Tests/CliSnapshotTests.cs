@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using VerifyXunit;
 
-namespace Stasis.Compiler.Tests;
+namespace Stasis.Cli.Tests;
 
 public class CliSnapshotTests
 {
