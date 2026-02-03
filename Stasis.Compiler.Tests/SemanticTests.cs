@@ -979,7 +979,7 @@ public class SemanticTests
         var parse = Parser.Parse(source);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Empty(sema.Diagnostics);
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
     }
 
     [Fact]
