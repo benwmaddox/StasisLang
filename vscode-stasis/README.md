@@ -17,6 +17,11 @@ This builds/publishes the language server, packages the VSIX, and installs it vi
 
 - `powershell -ExecutionPolicy Bypass -File .\\scripts\\install_vscode_stasis_lsp.ps1 -Force`
 
+Notes:
+
+- If you're using VS Code Remote - WSL, install the extension into the WSL environment (not Windows). In WSL, use `./scripts/install_vscode_stasis_lsp_wsl.sh --force`.
+- If you pass `-Runtime linux-x64` you may pull in large native artifacts; prefer omitting `-Runtime` unless you specifically need a RID-specific publish.
+
 ## Development
 
 1. Build the language server:
