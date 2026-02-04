@@ -11,6 +11,11 @@ public enum BackendType
     Cranelift,
 
     /// <summary>
+    /// Bytecode backend - interpreter-friendly, intended for ultra-fast dev hot swaps.
+    /// </summary>
+    Bytecode,
+
+    /// <summary>
     /// LLVM backend - optimized compilation, suitable for release builds.
     /// </summary>
     Llvm

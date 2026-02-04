@@ -17,6 +17,7 @@ public static class CodeGeneratorFactory
         {
             BackendType.Llvm => new Llvm.LlvmCodeGenerator(moduleName),
             BackendType.Cranelift => new Cranelift.CraneliftCodeGenerator(moduleName),
+            // Bytecode backend not wired into the CLI yet; VM + format lives under IR/Bytecode/.
             _ => throw new ArgumentException($"Unknown backend type: {backend}", nameof(backend))
         };
     }
@@ -42,6 +43,7 @@ public static class CodeGeneratorFactory
         {
             BackendType.Llvm => true,
             BackendType.Cranelift => true,
+            BackendType.Bytecode => false,
             _ => false
         };
     }
@@ -57,6 +59,7 @@ public static class CodeGeneratorFactory
         {
             BackendType.Llvm => true,
             BackendType.Cranelift => true, // Can generate CLIF text
+            BackendType.Bytecode => false,
             _ => false
         };
     }
