@@ -43,7 +43,7 @@ public static class CodeGeneratorFactory
         {
             BackendType.Llvm => true,
             BackendType.Cranelift => true,
-            BackendType.Bytecode => false,
+            BackendType.Bytecode => true,
             _ => false
         };
     }
@@ -59,7 +59,7 @@ public static class CodeGeneratorFactory
         {
             BackendType.Llvm => true,
             BackendType.Cranelift => true, // Can generate CLIF text
-            BackendType.Bytecode => false,
+            BackendType.Bytecode => true,
             _ => false
         };
     }

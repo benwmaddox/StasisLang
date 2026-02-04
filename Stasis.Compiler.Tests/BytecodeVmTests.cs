@@ -1,5 +1,6 @@
 using Stasis.Compiler.IR.Bytecode;
 using Xunit;
+using System.Collections.Immutable;
 
 namespace Stasis.Compiler.Tests;
 
@@ -10,7 +11,7 @@ public sealed class BytecodeVmTests
     {
         var b1 = new BytecodeBuilder();
         var gCounter = b1.DeclareGlobalI32("counter");
-        var f1 = b1.DefineFunction("tick", localCount: 0);
+        var f1 = b1.DefineFunction("tick", BytecodeValueKind.I32, ImmutableArray<BytecodeValueKind>.Empty, localCount: 0);
         f1.Emit(BytecodeOp.LoadGlobalI32, gCounter);
         f1.Emit(BytecodeOp.ConstI32, 1);
         f1.Emit(BytecodeOp.AddI32);
@@ -27,7 +28,7 @@ public sealed class BytecodeVmTests
 
         var b2 = new BytecodeBuilder();
         var gCounter2 = b2.DeclareGlobalI32("counter");
-        var f2 = b2.DefineFunction("tick", localCount: 0);
+        var f2 = b2.DefineFunction("tick", BytecodeValueKind.I32, ImmutableArray<BytecodeValueKind>.Empty, localCount: 0);
         f2.Emit(BytecodeOp.LoadGlobalI32, gCounter2);
         f2.Emit(BytecodeOp.ConstI32, 2);
         f2.Emit(BytecodeOp.AddI32);
@@ -47,7 +48,7 @@ public sealed class BytecodeVmTests
     public void JumpIfZero_SkipsAdd_WhenConditionIsZero()
     {
         var b = new BytecodeBuilder();
-        var f = b.DefineFunction("f", localCount: 0);
+        var f = b.DefineFunction("f", BytecodeValueKind.I32, ImmutableArray<BytecodeValueKind>.Empty, localCount: 0);
 
         // if (0) { return 123 } else { return 7 }
         f.Emit(BytecodeOp.ConstI32, 0);
@@ -64,4 +65,3 @@ public sealed class BytecodeVmTests
         Assert.Equal(7, vm.CallI32("f"));
     }
 }
-

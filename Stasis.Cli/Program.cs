@@ -11,6 +11,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Stasis.Compiler;
 using Stasis.Compiler.IR;
+using Stasis.Compiler.IR.Bytecode;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
@@ -117,11 +118,12 @@ while (cliArgs.Count > 0)
             {
                 "llvm" => BackendType.Llvm,
                 "cranelift" => BackendType.Cranelift,
+                "bytecode" => BackendType.Bytecode,
                 _ => null
             };
             if (selectedBackend is null)
             {
-                Console.Error.WriteLine($"error: invalid --backend '{backendArg}'. Use 'llvm' or 'cranelift'.");
+                Console.Error.WriteLine($"error: invalid --backend '{backendArg}'. Use 'llvm', 'cranelift', or 'bytecode'.");
                 Environment.Exit(1);
             }
             break;
@@ -484,6 +486,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         // Generate code using selected backend
         string ir;
         IReadOnlyList<Diagnostic> lowerDiagnostics;
+        BytecodeModule? bytecodeModule = null;
 
         if (backend == BackendType.Cranelift)
         {
@@ -499,6 +502,13 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
             ir = result.Ir;
             lowerDiagnostics = result.Diagnostics;
+        }
+        else if (backend == BackendType.Bytecode)
+        {
+            var result = BytecodeCompiler.Compile(parse.CompilationUnit, moduleName);
+            ir = result.Disassembly;
+            lowerDiagnostics = result.Diagnostics;
+            bytecodeModule = result.Module;
         }
         else
         {
@@ -541,6 +551,29 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         {
             WriteIrOutput(ir, outputPath);
             return HasErrors(lowerDiagnostics) ? 1 : 0;
+        }
+
+        if (backend == BackendType.Bytecode)
+        {
+            if (bytecodeModule is null)
+            {
+                Console.Error.WriteLine("error: bytecode backend internal error (no module produced).");
+                return 1;
+            }
+
+            if (!string.Equals(mode, "run", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("error: bytecode backend currently supports only `run` or `--emit-ir`.");
+                return 1;
+            }
+
+            if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
+            {
+                Console.Error.WriteLine("error: bytecode backend currently requires a top-level `function tick()`.");
+                return 1;
+            }
+
+            return RunBytecodeTickVm(bytecodeModule, moduleName, tickHostFps);
         }
 
         if (backend == BackendType.Cranelift)
@@ -3040,6 +3073,279 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
     return results;
 }
 
+static int RunBytecodeTickVm(BytecodeModule module, string moduleName, int fps)
+{
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    var vm = new BytecodeVm(module);
+    var tickName = $"{moduleName}__tick";
+    return RunBytecodeTickLoop(vm, tickName, fps, gate: null, cts.Token);
+}
+
+static int WatchBytecodeTick(string sourcePath, string moduleName, int fps)
+{
+    var fullPath = Path.GetFullPath(sourcePath);
+    var dir = Path.GetDirectoryName(fullPath) ?? Directory.GetCurrentDirectory();
+    var fileName = Path.GetFileName(fullPath);
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    using var watcher = new FileSystemWatcher(dir, fileName)
+    {
+        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+    };
+
+    using var changeSignal = new ManualResetEventSlim(false);
+    void OnChange(object? _, FileSystemEventArgs __)
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    watcher.Changed += OnChange;
+    watcher.Created += OnChange;
+    watcher.Renamed += OnChange;
+    watcher.EnableRaisingEvents = true;
+
+    static bool TryCompile(string path, string moduleName, bool printDiagnostics, out BytecodeModule module, out string sourceText)
+    {
+        module = null!;
+        sourceText = string.Empty;
+
+        var source = LoadSourceWithImports(path, out var importDiagnostics, out var importSource);
+        if (importDiagnostics.Count > 0)
+        {
+            if (printDiagnostics)
+            {
+                PrintDiagnostics(importDiagnostics, importSource, path);
+            }
+            return false;
+        }
+
+        var parse = Parser.Parse(source);
+        if (HasErrors(parse.Diagnostics))
+        {
+            if (printDiagnostics)
+            {
+                PrintDiagnostics(parse.Diagnostics, source, path);
+            }
+            return false;
+        }
+
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        if (HasErrors(sema.Diagnostics))
+        {
+            if (printDiagnostics)
+            {
+                PrintDiagnostics(sema.Diagnostics, source, path);
+            }
+            return false;
+        }
+
+        var bc = BytecodeCompiler.Compile(parse.CompilationUnit, moduleName);
+        if (!bc.Success || bc.Module is null)
+        {
+            if (printDiagnostics)
+            {
+                PrintDiagnostics(bc.Diagnostics, source, path);
+            }
+            return false;
+        }
+
+        module = bc.Module;
+        sourceText = source;
+        return true;
+    }
+
+    var swInitial = Stopwatch.StartNew();
+    if (!TryCompile(fullPath, moduleName, printDiagnostics: true, out var initialModule, out _))
+    {
+        return 1;
+    }
+    swInitial.Stop();
+    Console.WriteLine($"HOTSWAP(ms): total={swInitial.Elapsed.TotalMilliseconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} latency=-1 load=-1");
+
+    var vm = new BytecodeVm(initialModule);
+    var gate = new object();
+    var tickName = $"{moduleName}__tick";
+
+    var tickTask = Task.Run(() => RunBytecodeTickLoop(vm, tickName, fps, gate, cts.Token), cts.Token);
+
+    while (!cts.IsCancellationRequested)
+    {
+        try
+        {
+            changeSignal.Wait(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+
+        changeSignal.Reset();
+
+        while (!cts.IsCancellationRequested && DateTime.UtcNow - lastChange < debounce)
+        {
+            Thread.Sleep(10);
+        }
+
+        if (cts.IsCancellationRequested)
+        {
+            break;
+        }
+
+        var swTotal = Stopwatch.StartNew();
+        var swapLatencyMs = (int)Math.Max(0, (DateTime.UtcNow - lastChange).TotalMilliseconds);
+
+        BytecodeModule? nextModule = null;
+        var attempt = 0;
+        while (nextModule is null)
+        {
+            if (TryCompile(fullPath, moduleName, printDiagnostics: false, out var compiled, out _))
+            {
+                nextModule = compiled;
+                break;
+            }
+
+            attempt++;
+            if (attempt >= 10)
+            {
+                _ = TryCompile(fullPath, moduleName, printDiagnostics: true, out _, out _);
+                break;
+            }
+
+            Thread.Sleep(15);
+        }
+        if (nextModule is null)
+        {
+            continue;
+        }
+
+        var swLoad = Stopwatch.StartNew();
+        lock (gate)
+        {
+            vm.HotSwap(nextModule);
+        }
+        swLoad.Stop();
+
+        swTotal.Stop();
+        Console.WriteLine($"HOTSWAP(ms): total={swTotal.Elapsed.TotalMilliseconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} latency={swapLatencyMs} load={swLoad.Elapsed.TotalMilliseconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}");
+    }
+
+    try
+    {
+        cts.Cancel();
+        tickTask.Wait(TimeSpan.FromSeconds(1));
+    }
+    catch
+    {
+        // ignore
+    }
+
+    return 0;
+}
+
+static int RunBytecodeTickLoop(BytecodeVm vm, string tickName, int fps, object? gate, CancellationToken token)
+{
+    if (fps < 1 || fps > 240) fps = 60;
+
+    var frameTicks = Math.Max(1L, Stopwatch.Frequency / fps);
+    var next = Stopwatch.GetTimestamp();
+
+    while (!token.IsCancellationRequested)
+    {
+        next += frameTicks;
+
+        try
+        {
+            if (gate is null)
+            {
+                if (!TryCallTick(vm, tickName, out var exitCode, out var error))
+                {
+                    Console.Error.WriteLine($"error: bytecode tick failed: {error}");
+                    return 1;
+                }
+                if (exitCode != 0) return exitCode;
+            }
+            else
+            {
+                lock (gate)
+                {
+                    if (!TryCallTick(vm, tickName, out var exitCode, out var error))
+                    {
+                        Console.Error.WriteLine($"error: bytecode tick failed: {error}");
+                        return 1;
+                    }
+                    if (exitCode != 0) return exitCode;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: bytecode tick crashed: {ex.Message}");
+            return 1;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var remaining = next - now;
+        if (remaining <= 0)
+        {
+            next = now;
+            continue;
+        }
+
+        var sleepMs = (int)(remaining * 1000 / Stopwatch.Frequency);
+        if (sleepMs > 0)
+        {
+            Thread.Sleep(Math.Min(sleepMs, 50));
+        }
+    }
+
+    return 0;
+
+    static bool TryCallTick(BytecodeVm vm, string tickName, out int exitCode, out string? error)
+    {
+        exitCode = 0;
+        error = null;
+
+        var idx = vm.Module.FindFunctionIndex(tickName);
+        if (idx < 0)
+        {
+            error = $"function not found: {tickName}";
+            return false;
+        }
+
+        var fn = vm.Module.Functions[idx];
+        if (fn.ReturnKind == BytecodeValueKind.Void)
+        {
+            vm.CallVoid(tickName);
+            exitCode = 0;
+            return true;
+        }
+
+        if (fn.ReturnKind == BytecodeValueKind.I32)
+        {
+            exitCode = vm.CallI32(tickName);
+            return true;
+        }
+
+        error = $"unsupported tick return kind: {fn.ReturnKind}";
+        return false;
+    }
+}
+
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
 {
     var entryAssetRoot = GetEntryAssetRoot(sourcePath);
@@ -4363,6 +4669,13 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var hotExitPath = enableHotState && mode == "run" ? GetHotExitFilePath(fullPath, moduleName) : null;
 
     if (mode == "run" &&
+        backend == BackendType.Bytecode &&
+        DetectsTickUsage(File.ReadAllText(fullPath)))
+    {
+        return WatchBytecodeTick(fullPath, moduleName, tickHostFps);
+    }
+
+    if (mode == "run" &&
         backend == BackendType.Cranelift &&
         useCraneliftRunner &&
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
@@ -4622,8 +4935,8 @@ static void PrintUsage()
     Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
     Console.WriteLine();
     Console.WriteLine("Other commands:");
-    Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
+    Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift|bytecode>]");
+    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift|bytecode>] [--graphics] [--graphics-lib <path>]");
     Console.WriteLine("  stasisc format <file>");
     Console.WriteLine();
     Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
@@ -4631,7 +4944,7 @@ static void PrintUsage()
     Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
     Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
-    Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
+    Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; bytecode is a dev-focused interpreter backend.");
     Console.WriteLine("LLVM: pass --llvm-target <triple> to set the LLVM module target triple (useful for cross-compiling emitted IR).");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");

@@ -55,7 +55,8 @@ Planned extensions:
 ## Integration plan (incremental)
 
 Phase 0 (this branch):
-- implement VM + module model + hot-swap global migration (i32 only)
+- implement VM + module model + hot-swap global migration (i32/f32)
+- implement minimal compiler emitter for a headless subset (locals/globals, if/for, + - * /, comparisons, assignment)
 - tests for VM execution and hot swap
 
 Phase 1:
@@ -65,3 +66,38 @@ Phase 1:
 Phase 2:
 - move VM into the native runner (or add a stable host-import layer) so games can run with SDL/graphics and still hot swap in milliseconds.
 
+## Current status (prototype)
+
+- CLI supports `--backend bytecode` for `--emit-ir` (prints disassembly) and a dev-only `run` path that requires a top-level `function tick()`.
+- `--watch` + `tick()` runs an in-process C# VM and hot-swaps by recompiling + `vm.HotSwap(...)`.
+- No structs/arrays/member access, no externs, no function calls. This is intentionally minimal to measure "edit -> swap" overhead.
+
+## Benchmarking hot swap
+
+Run the headless timing harness:
+
+- `powershell -ExecutionPolicy Bypass -File scripts/hotswap_timing_bytecode_counter.ps1`
+
+It edits `examples/bytecode_counter.stasis` in a loop and summarizes:
+
+- `HOTSWAP(ms): total=... latency=... load=...`
+
+`load` is the in-memory swap time (no `LoadLibrary`), and should be near-zero.
+
+### Example results (Windows, Feb 4 2026)
+
+Command:
+
+- `powershell -ExecutionPolicy Bypass -File scripts/hotswap_timing_bytecode_counter.ps1 -Iterations 100 -SleepAfterEditMs 100`
+
+Observed:
+
+- Initial compile: ~24.57ms
+- HOTSWAP total (edit->recompile+swap): min~0.164ms avg~0.354ms max~4.365ms
+- HOTSWAP load (vm swap only): min~0.001ms avg~0.004ms max~0.313ms
+- HOTSWAP latency: ~75-90ms (dominated by the debounce window and filesystem notification timing, not compilation)
+
+## Windows Defender / Smart App Control notes
+
+- The bytecode watch loop avoids generating/loading new DLLs, so it should be far less sensitive to Windows Defender file scanning than the Cranelift hot-swap path.
+- If Smart App Control blocks execution of build outputs, prefer running via `dotnet` or ensure your build artifacts live in a trusted/excluded directory.
