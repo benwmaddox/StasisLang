@@ -1040,9 +1040,20 @@ static int BuildExecutableFromObject(string objPath, string outputPath, bool isT
 
 static string BuildClangArgsForObject(string objPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null, string? entryName = null, bool isDll = false, string? windowsDefFilePath = null, IReadOnlyList<string>? windowsExports = null)
 {
-    // Link the object file into a normal executable (use CRT defaults).
+    return BuildClangArgsForLinkInputs(new[] { $"\"{objPath}\"" }, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryName, isDll, windowsDefFilePath, windowsExports);
+}
+
+static string BuildClangArgsForResponseFile(string rspPath, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null, string? entryName = null, bool isDll = false, string? windowsDefFilePath = null, IReadOnlyList<string>? windowsExports = null)
+{
+    return BuildClangArgsForLinkInputs(new[] { $"@\"{rspPath}\"" }, outputPath, isTest, optLevel, enableLto, enableGraphics, graphicsLibPath, linkLibraries, entryName, isDll, windowsDefFilePath, windowsExports);
+}
+
+static string BuildClangArgsForLinkInputs(IEnumerable<string> inputs, string outputPath, bool isTest, string? optLevel, bool enableLto, bool enableGraphics = false, string? graphicsLibPath = null, IReadOnlyList<string>? linkLibraries = null, string? entryName = null, bool isDll = false, string? windowsDefFilePath = null, IReadOnlyList<string>? windowsExports = null)
+{
+    // Link the object file(s) into a normal executable (use CRT defaults).
     var effectiveLinkLibraries = PrepareLinkLibraries(linkLibraries, enableGraphics, ref graphicsLibPath);
-    var args = new List<string> { $"\"{objPath}\"" };
+    var args = new List<string>();
+    args.AddRange(inputs);
     if (isDll)
     {
         args.Add("-shared");
@@ -3237,13 +3248,122 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
 
         try
         {
-            var aotExit = RunCraneliftAot(aotTool, hotClifPath, hotObjPath, moduleName, optLevel, out var spawnFallback, out var compileFallback);
-            aotSpawnMs = spawnFallback ?? 0;
-            aotCompileMs = compileFallback;
-            if (aotExit != 0)
+            var clifHashSw = Stopwatch.StartNew();
+            if (!TryComputeClifSplitHashes(result.Ir, out var globalsHash, out var functionHashes, out var functionOrder))
             {
-                return aotExit;
+                Console.Error.WriteLine("error: failed to compute CLIF split hashes.");
+                return 1;
             }
+            clifHashSw.Stop();
+
+            var objCacheDir = Path.Combine(swapDir, $"{baseName}.{moduleName}.objcache");
+            Directory.CreateDirectory(objCacheDir);
+            var manifestPath = Path.Combine(objCacheDir, "manifest.json");
+            var globalsObjPath = Path.Combine(objCacheDir, "globals" + GetObjectFileExtension());
+
+            CraneliftSplitManifest? prev = null;
+            if (File.Exists(manifestPath) && TryReadTextShared(manifestPath, out var prevJson))
+            {
+                try
+                {
+                    prev = JsonSerializer.Deserialize<CraneliftSplitManifest>(prevJson);
+                }
+                catch
+                {
+                    prev = null;
+                }
+            }
+
+            var needsGlobals = prev is null ||
+                               !string.Equals(prev.GlobalsHash, globalsHash, StringComparison.Ordinal) ||
+                               !File.Exists(globalsObjPath);
+
+            var toCompile = new List<string>();
+            var currentFns = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var name in functionOrder)
+            {
+                currentFns.Add(name);
+                var objPath = Path.Combine(objCacheDir, "fn_" + SanitizeSymbolForFileName(name) + GetObjectFileExtension());
+
+                var prevHashOk = prev is not null &&
+                                 prev.FunctionHashes is not null &&
+                                 prev.FunctionHashes.TryGetValue(name, out var prevHash) &&
+                                 string.Equals(prevHash, functionHashes[name], StringComparison.Ordinal);
+
+                if (!prevHashOk || !File.Exists(objPath))
+                {
+                    toCompile.Add(name);
+                }
+            }
+
+            // Best-effort cleanup for removed functions (keeps link inputs small).
+            if (prev is not null && prev.FunctionHashes is not null)
+            {
+                foreach (var oldName in prev.FunctionHashes.Keys)
+                {
+                    if (currentFns.Contains(oldName))
+                    {
+                        continue;
+                    }
+
+                    var oldObjPath = Path.Combine(objCacheDir, "fn_" + SanitizeSymbolForFileName(oldName) + GetObjectFileExtension());
+                    try
+                    {
+                        if (File.Exists(oldObjPath))
+                        {
+                            File.Delete(oldObjPath);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+
+            // Compile only what changed.
+            var aotSw = Stopwatch.StartNew();
+            aotSpawnMs = 0;
+            aotCompileMs = 0;
+
+            var target = GetCraneliftTargetTriple();
+            if (string.IsNullOrEmpty(target))
+            {
+                Console.Error.WriteLine("error: unable to determine Cranelift target triple for this host. Set STASIS_CRANELIFT_TARGET to override.");
+                return 1;
+            }
+            var normalizedOpt = NormalizeCraneliftOptLevel(optLevel);
+
+            if (needsGlobals)
+            {
+                var args = $"--input \"{hotClifPath}\" --out-dir \"{objCacheDir}\" --globals-only --target {target} --module-name \"{moduleName}\" --opt-level {normalizedOpt}";
+                var exit = RunProcess(aotTool, args, suppressOutput: true);
+                if (exit != 0)
+                {
+                    return exit;
+                }
+            }
+
+            if (toCompile.Count > 0)
+            {
+                var sb = new StringBuilder();
+                sb.Append($"--input \"{hotClifPath}\" --out-dir \"{objCacheDir}\" --functions-only --target {target} --module-name \"{moduleName}\" --opt-level {normalizedOpt}");
+                foreach (var fn in toCompile)
+                {
+                    sb.Append(" --function \"");
+                    sb.Append(fn);
+                    sb.Append('"');
+                }
+
+                var exit = RunProcess(aotTool, sb.ToString(), suppressOutput: true);
+                if (exit != 0)
+                {
+                    return exit;
+                }
+            }
+
+            aotSw.Stop();
+            aotCompileMs = aotSw.ElapsedMilliseconds + clifHashSw.ElapsedMilliseconds;
             phase.Restart();
 
             if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
@@ -3253,7 +3373,29 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             planMs = phase.ElapsedMilliseconds;
             phase.Restart();
 
-            var linkArgs = BuildClangArgsForObject(hotObjPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, linkLibraries, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
+            var rspPath = Path.Combine(objCacheDir, $"link.{pid}.rsp");
+            {
+                var rsp = new StringBuilder();
+                static string ToRspPath(string path) => path.Replace('\\', '/');
+
+                void AddObj(string path)
+                {
+                    rsp.Append('"');
+                    rsp.Append(ToRspPath(path));
+                    rsp.Append('"');
+                    rsp.Append('\n');
+                }
+
+                AddObj(globalsObjPath);
+                foreach (var fn in functionOrder)
+                {
+                    var obj = Path.Combine(objCacheDir, "fn_" + SanitizeSymbolForFileName(fn) + GetObjectFileExtension());
+                    AddObj(obj);
+                }
+                WriteAllTextAtomic(rspPath, rsp.ToString(), Encoding.ASCII);
+            }
+
+            var linkArgs = BuildClangArgsForResponseFile(rspPath, hotDll, isTest: false, optLevel, enableLto, usesGraphics, graphicsLibPath, linkLibraries, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
             if (OperatingSystem.IsWindows())
             {
                 if (Environment.GetEnvironmentVariable("STASIS_HOTSWAP_USE_LLD") == "1")
@@ -3270,6 +3412,14 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
             {
                 return linkExit;
             }
+
+            var newManifest = new CraneliftSplitManifest
+            {
+                Version = 1,
+                GlobalsHash = globalsHash,
+                FunctionHashes = functionHashes
+            };
+            WriteAllTextAtomic(manifestPath, JsonSerializer.Serialize(newManifest), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
             var dllDir = Path.GetDirectoryName(hotDll);
             if (usesGraphics && !string.IsNullOrEmpty(dllDir))
@@ -3401,10 +3551,6 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
                 if (File.Exists(hotClifPath))
                 {
                     File.Delete(hotClifPath);
-                }
-                if (File.Exists(hotObjPath))
-                {
-                    File.Delete(hotObjPath);
                 }
             }
             catch
@@ -5622,6 +5768,115 @@ static bool LikelyContainsTestBlock(string path)
     return false;
 }
 
+static bool TryComputeClifSplitHashes(string clif, out string globalsHash, out Dictionary<string, string> functionHashes, out List<string> functionOrder)
+{
+    globalsHash = string.Empty;
+    functionHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+    functionOrder = new List<string>();
+
+    try
+    {
+        var normalized = clif.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var lines = normalized.Split('\n');
+
+        var globals = new StringBuilder();
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i].TrimEnd();
+            var t = line.Trim();
+            if (t.Length == 0 || t.StartsWith(';'))
+            {
+                continue;
+            }
+
+            if (t.StartsWith("global ", StringComparison.Ordinal) || t.StartsWith("external ", StringComparison.Ordinal))
+            {
+                globals.Append(t);
+                globals.Append('\n');
+                continue;
+            }
+
+            if (!t.StartsWith("function %", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var rest = t.Substring("function %".Length);
+            var paren = rest.IndexOf('(');
+            if (paren <= 0)
+            {
+                return false;
+            }
+            var name = rest.Substring(0, paren).Trim();
+            if (name.Length == 0)
+            {
+                return false;
+            }
+
+            functionOrder.Add(name);
+
+            var fnText = new StringBuilder();
+            fnText.Append(t);
+            fnText.Append('\n');
+
+            while (i + 1 < lines.Length)
+            {
+                i++;
+                var bodyLine = lines[i].TrimEnd();
+                fnText.Append(bodyLine);
+                fnText.Append('\n');
+                if (bodyLine.Trim() == "}")
+                {
+                    break;
+                }
+            }
+
+            functionHashes[name] = HashSha256Hex(fnText.ToString());
+        }
+
+        if (functionOrder.Count == 0)
+        {
+            return false;
+        }
+
+        globalsHash = HashSha256Hex(globals.ToString());
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+static string SanitizeSymbolForFileName(string sym)
+{
+    var sb = new StringBuilder(sym.Length);
+    foreach (var ch in sym)
+    {
+        if ((ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '_' ||
+            ch == '-')
+        {
+            sb.Append(ch);
+        }
+        else
+        {
+            sb.Append('_');
+        }
+    }
+    return sb.ToString();
+}
+
+static string HashSha256Hex(string text)
+{
+    var bytes = Encoding.UTF8.GetBytes(text);
+    var hash = SHA256.HashData(bytes);
+    return Convert.ToHexString(hash).ToLowerInvariant();
+}
+
 static class LlvmLock
 {
     public static readonly object Lower = new();
@@ -5976,6 +6231,13 @@ sealed record CompileResult(
     bool EmitIrOnly,
     long CompileMilliseconds,
     bool IsCacheArtifact);
+
+sealed class CraneliftSplitManifest
+{
+    public int Version { get; init; }
+    public string GlobalsHash { get; init; } = string.Empty;
+    public Dictionary<string, string> FunctionHashes { get; init; } = new(StringComparer.Ordinal);
+}
 
 sealed record PreparedForLower(
     string FilePath,

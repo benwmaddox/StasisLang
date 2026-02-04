@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::collections::HashSet;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -27,8 +28,28 @@ struct Args
     input: Option<PathBuf>,
 
     /// Output object file path.
-    #[arg(long, value_name = "PATH", required_unless_present = "server")]
+    #[arg(long, value_name = "PATH", required_unless_present_any = ["server", "out_dir"])]
     output: Option<PathBuf>,
+
+    /// Output directory for split-object mode.
+    /// Writes:
+    /// - globals.{obj|o} (unless --functions-only)
+    /// - fn_<symbol>.{obj|o} for each selected function (unless --globals-only)
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+
+    /// In split-object mode, emit only the globals object.
+    #[arg(long)]
+    globals_only: bool,
+
+    /// In split-object mode, emit only selected function objects (no globals object).
+    #[arg(long)]
+    functions_only: bool,
+
+    /// In split-object mode, emit only these functions (repeatable).
+    /// If omitted (and not --globals-only), all functions are emitted.
+    #[arg(long = "function", value_name = "NAME")]
+    functions: Vec<String>,
 
     /// Target triple (default: x86_64-pc-windows-msvc).
     #[arg(long, value_name = "TRIPLE", default_value = "x86_64-pc-windows-msvc")]
@@ -57,10 +78,19 @@ fn main() -> Result<()>
     }
 
     let input = args.input.context("missing --input")?;
-    let output = args.output.context("missing --output")?;
     let clif = fs::read_to_string(&input)
         .with_context(|| format!("failed to read input file: {}", input.display()))?;
 
+    if let Some(out_dir) = args.out_dir
+    {
+        if args.globals_only && args.functions_only
+        {
+            bail!("--globals-only and --functions-only are mutually exclusive");
+        }
+        return compile_split(&clif, &out_dir, &args.target, &args.module_name, &args.opt_level, args.globals_only, args.functions_only, &args.functions);
+    }
+
+    let output = args.output.context("missing --output")?;
     compile_clif(&clif, &output, &args.target, &args.module_name, &args.opt_level)
 }
 
@@ -158,6 +188,236 @@ fn compile_clif(clif: &str, output: &PathBuf, target: &str, module_name: &str, o
     fs::write(output, obj_bytes)
         .with_context(|| format!("failed to write object file: {}", output.display()))?;
 
+    Ok(())
+}
+
+fn compile_split(
+    clif: &str,
+    out_dir: &PathBuf,
+    target: &str,
+    module_name: &str,
+    opt_level: &str,
+    globals_only: bool,
+    functions_only: bool,
+    selected_functions: &[String],
+) -> Result<()>
+{
+    let triple = Triple::from_str(target)
+        .map_err(|_| anyhow::anyhow!("invalid target triple: {target}"))?;
+    let target_is_windows = matches!(triple.operating_system, OperatingSystem::Windows);
+    let ext = object_extension_for_target(&triple);
+
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create output dir: {}", out_dir.display()))?;
+
+    let flags = build_flags(opt_level, &triple)?;
+    let isa_for_parse = isa::lookup(triple.clone())
+        .context("failed to look up ISA for target")?
+        .finish(flags)
+        .context("failed to finalize ISA")?;
+    let default_cc = isa_for_parse.default_call_conv();
+
+    let parsed = parse_stasis_clif(clif, default_cc).context("failed to parse stasis CLIF")?;
+
+    if !functions_only
+    {
+        let globals_path = out_dir.join(format!("globals.{ext}"));
+        emit_globals_object(&parsed, &globals_path, &triple, module_name, opt_level)?;
+    }
+
+    if globals_only
+    {
+        return Ok(());
+    }
+
+    let mut requested: Vec<&ParsedFunction> = Vec::new();
+    if selected_functions.is_empty()
+    {
+        requested.extend(parsed.functions.iter());
+    }
+    else
+    {
+        let set: HashSet<&str> = selected_functions.iter().map(|s| s.as_str()).collect();
+        for f in &parsed.functions
+        {
+            if set.contains(f.name.as_str())
+            {
+                requested.push(f);
+            }
+        }
+        for name in selected_functions
+        {
+            if parsed.functions.iter().all(|f| f.name != *name)
+            {
+                bail!("unknown function requested via --function: {name}");
+            }
+        }
+    }
+
+    for f in requested
+    {
+        let file_name = format!("fn_{}.{}", sanitize_symbol_for_filename(&f.name), ext);
+        let out_path = out_dir.join(file_name);
+        emit_function_object(&parsed, f, &out_path, &triple, module_name, opt_level, target_is_windows)?;
+    }
+
+    Ok(())
+}
+
+fn object_extension_for_target(triple: &Triple) -> &'static str
+{
+    match triple.operating_system
+    {
+        OperatingSystem::Windows => "obj",
+        _ => "o",
+    }
+}
+
+fn sanitize_symbol_for_filename(sym: &str) -> String
+{
+    let mut out = String::with_capacity(sym.len());
+    for ch in sym.chars()
+    {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+        {
+            out.push(ch);
+        }
+        else
+        {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<()>
+{
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    fs::write(&tmp, bytes)
+        .with_context(|| format!("failed to write temp output: {}", tmp.display()))?;
+    if path.exists()
+    {
+        fs::remove_file(path).ok();
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("failed to move output into place: {}", path.display()))?;
+    Ok(())
+}
+
+fn emit_globals_object(parsed: &ParsedModule, output: &PathBuf, triple: &Triple, module_name: &str, opt_level: &str) -> Result<()>
+{
+    let flags = build_flags(opt_level, triple)?;
+    let isa = isa::lookup(triple.clone())
+        .context("failed to look up ISA for target")?
+        .finish(flags)
+        .context("failed to finalize ISA")?;
+    let builder = ObjectBuilder::new(isa, module_name.to_string(), default_libcall_names())
+        .context("failed to create ObjectBuilder")?;
+    let mut module = ObjectModule::new(builder);
+
+    // Define all globals in exactly one object to avoid duplicate definitions.
+    for g in &parsed.globals
+    {
+        let id = module
+            .declare_data(&g.name, Linkage::Export, true, false)
+            .with_context(|| format!("declare_data failed for {}", g.name))?;
+
+        let mut data_desc = DataDescription::new();
+        match &g.init_data
+        {
+            GlobalInitData::Zero => {
+                data_desc.define_zeroinit(g.size_bytes);
+            }
+            GlobalInitData::String(bytes) => {
+                data_desc.define(bytes.clone().into_boxed_slice());
+            }
+        }
+        module
+            .define_data(id, &data_desc)
+            .with_context(|| format!("define_data failed for {}", g.name))?;
+    }
+
+    let product = module.finish();
+    let obj_bytes = product.emit().context("failed to emit object")?;
+    write_atomic(output, &obj_bytes)
+        .with_context(|| format!("failed to write object file: {}", output.display()))?;
+    Ok(())
+}
+
+fn emit_function_object(
+    parsed: &ParsedModule,
+    function: &ParsedFunction,
+    output: &PathBuf,
+    triple: &Triple,
+    module_name: &str,
+    opt_level: &str,
+    target_is_windows: bool,
+) -> Result<()>
+{
+    let flags = build_flags(opt_level, triple)?;
+    let isa = isa::lookup(triple.clone())
+        .context("failed to look up ISA for target")?
+        .finish(flags)
+        .context("failed to finalize ISA")?;
+
+    let builder = ObjectBuilder::new(isa, module_name.to_string(), default_libcall_names())
+        .context("failed to create ObjectBuilder")?;
+    let mut module = ObjectModule::new(builder);
+
+    // Declare globals as imports (they are defined in globals.obj).
+    let mut data_ids = std::collections::HashMap::new();
+    for g in &parsed.globals
+    {
+        let id = module
+            .declare_data(&g.name, Linkage::Import, true, false)
+            .with_context(|| format!("declare_data failed for {}", g.name))?;
+        data_ids.insert(g.name.clone(), id);
+    }
+
+    // Declare external functions.
+    let mut function_ids = std::collections::HashMap::new();
+    for ext in &parsed.externals
+    {
+        let link_name =
+            if ext.name == "printf_str" || ext.name == "printf3"
+            {
+                if target_is_windows { "printf" } else { "stasis_printf3" }
+            }
+            else
+            {
+                &ext.name
+            };
+
+        let id = module
+            .declare_function(link_name, Linkage::Import, &ext.signature)
+            .with_context(|| format!("declare external function failed for {}", ext.name))?;
+        function_ids.insert(ext.name.clone(), id);
+    }
+
+    // Declare all stasis functions so calls can resolve. Import everything except the one we define.
+    for f in &parsed.functions
+    {
+        let linkage = if f.name == function.name { Linkage::Export } else { Linkage::Import };
+        let id = module
+            .declare_function(&f.name, linkage, &f.signature)
+            .with_context(|| format!("declare function failed for {}", f.name))?;
+        function_ids.insert(f.name.clone(), id);
+    }
+
+    let func = build_function_ir(&mut module, &function_ids, &data_ids, function)?;
+
+    let mut ctx = module.make_context();
+    ctx.func = func;
+
+    let func_id = *function_ids.get(&function.name).context("missing function id")?;
+    module
+        .define_function(func_id, &mut ctx)
+        .with_context(|| format!("define_function failed for {}", function.name))?;
+
+    let product = module.finish();
+    let obj_bytes = product.emit().context("failed to emit object")?;
+    write_atomic(output, &obj_bytes)
+        .with_context(|| format!("failed to write object file: {}", output.display()))?;
     Ok(())
 }
 
