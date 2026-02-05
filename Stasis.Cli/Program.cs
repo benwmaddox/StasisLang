@@ -3669,6 +3669,27 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
     }
 
+    async Task<string?> ReadRunnerLineUntil(int timeoutMs, Func<string, bool> predicate)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            var remaining = (int)Math.Max(1, timeoutMs - sw.ElapsedMilliseconds);
+            var line = await ReadRunnerLineWithTimeout(remaining);
+            if (line is null)
+            {
+                return null;
+            }
+
+            if (predicate(line))
+            {
+                return line;
+            }
+        }
+
+        return null;
+    }
+
     async Task<bool> EnsureRunnerStarted(string initialClif)
     {
         if (runner is not null && !runner.HasExited)
@@ -3828,9 +3849,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             }
         }, cts.Token);
 
-        // Wait for READY via stdout pump
-        var ready = await ReadRunnerLineWithTimeout(10000);
-        if (!string.Equals(ready?.Trim(), "READY", StringComparison.Ordinal))
+        // Wait for READY via stdout pump (ignore guest stdout noise).
+        var ready = await ReadRunnerLineUntil(10000, l => string.Equals(l.Trim(), "READY", StringComparison.Ordinal));
+        if (ready is null)
         {
             Console.Error.WriteLine("error: jit runner did not print READY.");
             return false;
@@ -3859,7 +3880,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         // Larger programs (e.g. Brickout) can take a while to JIT on the first load.
         // Larger programs (e.g. Brickout) can take a while to JIT on the first load,
         // especially on cold caches / under AV scanning. Keep this high to avoid false timeouts.
-        var initResp = await ReadRunnerLineWithTimeout(600000);
+        var initResp = await ReadRunnerLineUntil(
+            600000,
+            l => l.StartsWith("OK init", StringComparison.Ordinal) || l.StartsWith("ERR", StringComparison.Ordinal));
         if (initResp is null)
         {
             Console.Error.WriteLine("error: jit runner init timed out.");
@@ -3884,7 +3907,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 WriteUtf8(runnerIn, metaPath);
                 runnerIn.Flush();
 
-                var bindResp = await ReadRunnerLineWithTimeout(30000);
+                var bindResp = await ReadRunnerLineUntil(
+                    30000,
+                    l => l.StartsWith("OK", StringComparison.Ordinal) || l.StartsWith("ERR", StringComparison.Ordinal));
                 if (bindResp is null || !bindResp.StartsWith("OK", StringComparison.Ordinal))
                 {
                     Console.Error.WriteLine($"warning: jit runner data bind failed: {bindResp ?? "<timeout>"}");
