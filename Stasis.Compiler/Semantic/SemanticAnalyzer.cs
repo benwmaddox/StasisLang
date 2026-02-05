@@ -1760,18 +1760,14 @@ public sealed class SemanticAnalyzer
             current = m.Receiver;
         }
 
-        if (current is not IdentifierExpressionSyntax rootId)
+        // Support member access rooted at any expression (e.g., `xs[0].field`, `state.arr[i].x`).
+        // The previous Identifier-only restriction caused false unused-field warnings because
+        // field uses behind array indexing were not recorded.
+        var currentType = ResolveExpressionType(current, scope);
+        if (currentType is null)
         {
             return null;
         }
-
-        if (!scope.TryGetValue(rootId.Identifier.Text, out var rootSym) &&
-            !_symbols.TryGetValue(rootId.Identifier.Text, out rootSym))
-        {
-            return null;
-        }
-
-        var currentType = rootSym.Type;
         chain.Reverse();
 
         foreach (var (memberName, memberSpan) in chain)
