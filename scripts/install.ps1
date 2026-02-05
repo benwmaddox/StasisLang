@@ -5,7 +5,7 @@ param(
   [switch]$BrowserTests,
   [switch]$CheckOnly,
   [switch]$Force,
-  [string]$LspRuntime = "win-x64",
+  [string]$LspRuntime = "",
   [string]$LspConfiguration = "Release"
 )
 

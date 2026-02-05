@@ -17,6 +17,47 @@ namespace Stasis.LanguageServer.Tests;
 public sealed class LspCompletionTests
 {
     [Fact]
+    public async Task CompletesGlobalStateMembersAfterDot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_lsp_state_completion_");
+        try
+        {
+            var entryPath = Path.Combine(tempDir.FullName, "main.stasis");
+            var document = string.Join("\n", new[]
+            {
+                "struct GameState {",
+                "    score: i32;",
+                "    misses: i32;",
+                "}",
+                "",
+                "global state: GameState;",
+                "",
+                "function main(): i32 {",
+                "    state.",
+                "    return 0;",
+                "}"
+            });
+
+            var uri = new Uri(entryPath).AbsoluteUri;
+            var position = GetPositionAfter(document, "state.");
+
+            await using var harness = await LspTestHarness.StartAsync(cts.Token);
+            await harness.InitializeAsync(cts.Token);
+            await harness.DidOpenAsync(uri, document, cts.Token);
+
+            var labels = await harness.RequestCompletionLabelsAsync(uri, position.Line, position.Character, cts.Token);
+            Assert.Contains("score", labels);
+            Assert.Contains("misses", labels);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CompletesBrickoutStateMembersAfterDot()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
