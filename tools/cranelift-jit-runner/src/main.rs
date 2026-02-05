@@ -604,7 +604,7 @@ fn run_server(fps: u32) -> Result<()>
                     continue;
                 }
 
-                writeln!(stdout, "OK")?;
+                writeln!(stdout, "OK init")?;
                 stdout.flush()?;
 
                 let tick_loop_result = run_tick_loop(fps, &mut new_instance, &rx, &mut stdout);
@@ -622,7 +622,7 @@ fn run_server(fps: u32) -> Result<()>
             }
             Request::Quit =>
             {
-                writeln!(stdout, "OK")?;
+                writeln!(stdout, "OK quit")?;
                 stdout.flush()?;
                 break;
             }
@@ -683,9 +683,18 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     // The tick loop only does a fast apply step + pointer swap when compilation finishes.
     let (swap_job_tx, swap_job_rx) = mpsc::channel::<SwapJob>();
     let (swap_result_tx, swap_result_rx) = mpsc::channel::<SwapResult>();
+    let latest_requested_id = Arc::new(AtomicU64::new(0));
+    let latest_requested_id_worker = Arc::clone(&latest_requested_id);
     thread::spawn(move || {
         while let Ok(job) = swap_job_rx.recv()
         {
+            // Best-effort coalescing: if a newer swap request arrived before we started compiling this job,
+            // skip the work entirely. This keeps iteration responsive when edits arrive faster than compile time.
+            if job.id != latest_requested_id_worker.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+
             let t0 = Instant::now();
             let outcome = match JitInstance::compile(&job.module_name, &job.entry_name, &job.tick_name, &job.clif)
             {
@@ -802,8 +811,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
                     writeln!(
                         stdout,
-                        "OK id={} save_us={} compile_us={} restore_us={}",
-                        result.id, save_us, compile_us, restore_us
+                        "APPLIED id={} save_us={} compile_us={} restore_us={} missing_save={} missing_restore={}",
+                        result.id, save_us, compile_us, restore_us, missing_save, missing_restore
                     )?;
                     stdout.flush()?;
                 }
@@ -852,18 +861,12 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                 }
                 Request::Swap { clif } =>
                 {
-                    if pending_swap_id.is_some()
-                    {
-                        writeln!(stdout, "ERR swap already pending")?;
-                        stdout.flush()?;
-                        continue;
-                    }
-
                     let id = next_swap_id;
                     next_swap_id = next_swap_id.saturating_add(1);
-                    pending_swap_id = Some(id);
+                    let supersedes = pending_swap_id.replace(id).unwrap_or(0);
+                    latest_requested_id.store(id, Ordering::Relaxed);
 
-                    eprintln!("HOTSWAP queued: id={} bytes={}", id, clif.len());
+                    eprintln!("HOTSWAP queued: id={} bytes={} supersedes={}", id, clif.len(), supersedes);
                     let job = SwapJob {
                         id,
                         module_name: instance.module_name.clone(),
@@ -876,7 +879,12 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         pending_swap_id = None;
                         writeln!(stdout, "ERR swap worker unavailable")?;
                         stdout.flush()?;
+                        continue;
                     }
+
+                    // Acknowledge receipt immediately; compilation happens asynchronously.
+                    writeln!(stdout, "QUEUED id={} supersedes={}", id, supersedes)?;
+                    stdout.flush()?;
                 }
                 Request::Quit =>
                 {
@@ -1065,6 +1073,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
             let bytes = reader.read_line(&mut line).unwrap_or(0);
             if bytes == 0
             {
+                eprintln!("stasis-cranelift-jit-runner: stdin EOF (request reader exiting)");
                 let _ = tx2.send(Request::Quit);
                 break;
             }
@@ -1086,6 +1095,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 5
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad INIT header (expected 5 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1095,6 +1105,9 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let clif_len = parts[4].parse::<usize>().unwrap_or(0);
                 if module_len == 0 || entry_len == 0 || tick_len == 0 || clif_len == 0
                 {
+                    eprintln!(
+                        "stasis-cranelift-jit-runner: bad INIT lengths module={module_len} entry={entry_len} tick={tick_len} clif={clif_len} (line='{trimmed}')"
+                    );
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1111,12 +1124,14 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 2
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad SWAP header (expected 2 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
                 let clif_len = parts[1].parse::<usize>().unwrap_or(0);
                 if clif_len == 0
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad SWAP length clif={clif_len} (line='{trimmed}')");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1130,6 +1145,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 3
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad BIND header (expected 3 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1137,6 +1153,9 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let meta_len = parts[2].parse::<usize>().unwrap_or(0);
                 if json_len == 0 || meta_len == 0
                 {
+                    eprintln!(
+                        "stasis-cranelift-jit-runner: bad BIND lengths json={json_len} meta={meta_len} (line='{trimmed}')"
+                    );
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
