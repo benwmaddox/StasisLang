@@ -3606,6 +3606,15 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
     Process? runner = null;
     DataBindingPlan? dataBindingPlan = null;
+    Channel<string>? runnerOutLines = null;
+    Task? runnerOutPump = null;
+    Stream? runnerIn = null;
+    StreamWriter? runnerStdin = null;
+    StreamReader? runnerOut = null;
+
+    var pendingSwaps = new Dictionary<ulong, (DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
+    var sentButNotQueued = new Queue<(DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
+    var pendingLock = new object();
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
     {
@@ -3635,57 +3644,50 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }, token);
     }
 
-    static async Task<string?> ReadLineWithTimeout(StreamReader reader, int timeoutMs, CancellationToken token)
-    {
-        var readTask = Task.Run(() => reader.ReadLine(), token);
-        var done = await Task.WhenAny(readTask, Task.Delay(timeoutMs, token));
-        if (done == readTask)
-        {
-            return await readTask;
-        }
-        return null;
-    }
-
     static void WriteUtf8(Stream stream, string s)
     {
         var bytes = Encoding.UTF8.GetBytes(s);
         stream.Write(bytes, 0, bytes.Length);
     }
 
-    async Task<(bool ok, int latencyMs, string? response)> SendSwapAndWaitForAck(string clif, int timeoutMs)
+    async Task<string?> ReadRunnerLineWithTimeout(int timeoutMs)
     {
-        if (runner is null || runner.HasExited)
+        if (runnerOutLines is null)
         {
-            return (false, -1, "runner not running");
+            return null;
         }
 
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+        timeoutCts.CancelAfter(timeoutMs);
+        try
+        {
+            return await runnerOutLines.Reader.ReadAsync(timeoutCts.Token);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    async Task<string?> ReadRunnerLineUntil(int timeoutMs, Func<string, bool> predicate)
+    {
         var sw = Stopwatch.StartNew();
-        var clifBytes = Encoding.UTF8.GetByteCount(clif);
-        WriteUtf8(runner.StandardInput.BaseStream, $"SWAP {clifBytes}\n");
-        WriteUtf8(runner.StandardInput.BaseStream, clif);
-        runner.StandardInput.BaseStream.Flush();
-
-        var resp = await ReadLineWithTimeout(runner.StandardOutput, timeoutMs, cts.Token);
-        sw.Stop();
-
-        if (resp is not null)
+        while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            try
+            var remaining = (int)Math.Max(1, timeoutMs - sw.ElapsedMilliseconds);
+            var line = await ReadRunnerLineWithTimeout(remaining);
+            if (line is null)
             {
-                await File.AppendAllTextAsync(runnerOutLog, resp + Environment.NewLine, Encoding.UTF8, cts.Token);
+                return null;
             }
-            catch
+
+            if (predicate(line))
             {
-                // ignore
+                return line;
             }
         }
 
-        if (resp is null)
-        {
-            return (false, -1, null);
-        }
-
-        return (resp.StartsWith("OK", StringComparison.Ordinal), (int)sw.ElapsedMilliseconds, resp);
+        return null;
     }
 
     async Task<bool> EnsureRunnerStarted(string initialClif)
@@ -3693,6 +3695,13 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         if (runner is not null && !runner.HasExited)
         {
             return true;
+        }
+
+        // Reset pending swap tracking across restarts.
+        lock (pendingLock)
+        {
+            pendingSwaps.Clear();
+            sentButNotQueued.Clear();
         }
 
         try
@@ -3737,14 +3746,116 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             runnerErrLog,
             cts.Token);
 
-        // Wait for READY
-        var ready = await ReadLineWithTimeout(runner.StandardOutput, 10000, cts.Token);
-        if (!string.Equals(ready?.Trim(), "READY", StringComparison.Ordinal))
+        // Keep the StreamWriter alive for the lifetime of the runner process.
+        // Some platforms/drivers can close stdin early if the StandardInput writer is dropped.
+        runnerStdin = runner.StandardInput;
+        runnerStdin.AutoFlush = true;
+        runnerIn = runnerStdin.BaseStream;
+        runnerOut = runner.StandardOutput;
+        runnerOutLines = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = false });
+
+        runnerOutPump = Task.Run(async () =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(runnerOutLog)!);
+                using var fs = new FileStream(runnerOutLog, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+                while (!cts.IsCancellationRequested && runnerOut is not null)
+                {
+                    var line = await runnerOut.ReadLineAsync();
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    writer.WriteLine(line);
+
+                    if (line.StartsWith("APPLIED ", StringComparison.Ordinal))
+                    {
+                        // Example: APPLIED id=1 save_us=... compile_us=... restore_us=... missing_save=... missing_restore=...
+                        var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
+                        if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var appliedId))
+                        {
+                            (DateTime ChangeUtc, DateTime SendUtc, long LowerMs)? pending = null;
+                            lock (pendingLock)
+                            {
+                                if (pendingSwaps.TryGetValue(appliedId, out var p))
+                                {
+                                    pending = p;
+                                    pendingSwaps.Remove(appliedId);
+                                }
+                            }
+
+                            if (pending is not null)
+                            {
+                                static double ParseUs(string input, string name)
+                                {
+                                    var m = Regex.Match(input, $@"\b{name}=(\d+)\b");
+                                    if (!m.Success) return 0;
+                                    if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v)) return 0;
+                                    return v / 1000.0;
+                                }
+
+                                var nowUtc = DateTime.UtcNow;
+                                var endToEndMs = Math.Max(0, (nowUtc - pending.Value.ChangeUtc).TotalMilliseconds);
+                                var runnerMs = Math.Max(0, (nowUtc - pending.Value.SendUtc).TotalMilliseconds);
+                                var compileMs = ParseUs(line, "compile_us");
+                                var saveMs = ParseUs(line, "save_us");
+                                var restoreMs = ParseUs(line, "restore_us");
+                                var applyMs = saveMs + restoreMs;
+
+                                Console.WriteLine(
+                                    $"HOTSWAP(ms): total={endToEndMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
+                                    $"latency={runnerMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
+                                    $"lower={pending.Value.LowerMs} compile={compileMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
+                                    $"apply={applyMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} id={appliedId}");
+                            }
+                        }
+                    }
+                    else if (line.StartsWith("QUEUED ", StringComparison.Ordinal))
+                    {
+                        var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
+                        if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var queuedId))
+                        {
+                            lock (pendingLock)
+                            {
+                                var supersedesMatch = Regex.Match(line, @"\bsupersedes=(\d+)\b");
+                                if (supersedesMatch.Success &&
+                                    ulong.TryParse(supersedesMatch.Groups[1].Value, out var supersedesId) &&
+                                    supersedesId != 0)
+                                {
+                                    _ = pendingSwaps.Remove(supersedesId);
+                                }
+
+                                if (sentButNotQueued.Count > 0)
+                                {
+                                    pendingSwaps[queuedId] = sentButNotQueued.Dequeue();
+                                }
+                            }
+                        }
+                    }
+
+                    await runnerOutLines.Writer.WriteAsync(line, cts.Token);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+            finally
+            {
+                try { runnerOutLines.Writer.TryComplete(); } catch { }
+            }
+        }, cts.Token);
+
+        // Wait for READY via stdout pump (ignore guest stdout noise).
+        var ready = await ReadRunnerLineUntil(10000, l => string.Equals(l.Trim(), "READY", StringComparison.Ordinal));
+        if (ready is null)
         {
             Console.Error.WriteLine("error: jit runner did not print READY.");
             return false;
         }
-        await File.AppendAllTextAsync(runnerOutLog, ready + Environment.NewLine, Encoding.UTF8, cts.Token);
 
         var entry = $"{moduleName}__main";
         var tick = $"{moduleName}__tick";
@@ -3753,24 +3864,31 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var tickBytes = Encoding.UTF8.GetByteCount(tick);
         var clifBytes = Encoding.UTF8.GetByteCount(initialClif);
 
-        WriteUtf8(runner.StandardInput.BaseStream, $"INIT {moduleBytes} {entryBytes} {tickBytes} {clifBytes}\n");
-        WriteUtf8(runner.StandardInput.BaseStream, moduleName);
-        WriteUtf8(runner.StandardInput.BaseStream, entry);
-        WriteUtf8(runner.StandardInput.BaseStream, tick);
-        WriteUtf8(runner.StandardInput.BaseStream, initialClif);
-        runner.StandardInput.BaseStream.Flush();
+        if (runnerIn is null)
+        {
+            Console.Error.WriteLine("error: jit runner stdin not initialized.");
+            return false;
+        }
+
+        WriteUtf8(runnerIn, $"INIT {moduleBytes} {entryBytes} {tickBytes} {clifBytes}\n");
+        WriteUtf8(runnerIn, moduleName);
+        WriteUtf8(runnerIn, entry);
+        WriteUtf8(runnerIn, tick);
+        WriteUtf8(runnerIn, initialClif);
+        runnerIn.Flush();
 
         // Larger programs (e.g. Brickout) can take a while to JIT on the first load.
         // Larger programs (e.g. Brickout) can take a while to JIT on the first load,
         // especially on cold caches / under AV scanning. Keep this high to avoid false timeouts.
-        var initResp = await ReadLineWithTimeout(runner.StandardOutput, 600000, cts.Token);
+        var initResp = await ReadRunnerLineUntil(
+            600000,
+            l => l.StartsWith("OK init", StringComparison.Ordinal) || l.StartsWith("ERR", StringComparison.Ordinal));
         if (initResp is null)
         {
             Console.Error.WriteLine("error: jit runner init timed out.");
             return false;
         }
-        await File.AppendAllTextAsync(runnerOutLog, initResp + Environment.NewLine, Encoding.UTF8, cts.Token);
-        if (!initResp.StartsWith("OK", StringComparison.Ordinal))
+        if (!initResp.StartsWith("OK init", StringComparison.Ordinal))
         {
             Console.Error.WriteLine($"error: jit runner init failed: {initResp}");
             return false;
@@ -3784,16 +3902,14 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 var metaPath = dataBindingPlan.StructMetaPath;
                 var jsonBytes = Encoding.UTF8.GetByteCount(jsonPath);
                 var metaBytes = Encoding.UTF8.GetByteCount(metaPath);
-                WriteUtf8(runner.StandardInput.BaseStream, $"BIND {jsonBytes} {metaBytes}\n");
-                WriteUtf8(runner.StandardInput.BaseStream, jsonPath);
-                WriteUtf8(runner.StandardInput.BaseStream, metaPath);
-                runner.StandardInput.BaseStream.Flush();
+                WriteUtf8(runnerIn, $"BIND {jsonBytes} {metaBytes}\n");
+                WriteUtf8(runnerIn, jsonPath);
+                WriteUtf8(runnerIn, metaPath);
+                runnerIn.Flush();
 
-                var bindResp = await ReadLineWithTimeout(runner.StandardOutput, 30000, cts.Token);
-                if (bindResp is not null)
-                {
-                    await File.AppendAllTextAsync(runnerOutLog, bindResp + Environment.NewLine, Encoding.UTF8, cts.Token);
-                }
+                var bindResp = await ReadRunnerLineUntil(
+                    30000,
+                    l => l.StartsWith("OK", StringComparison.Ordinal) || l.StartsWith("ERR", StringComparison.Ordinal));
                 if (bindResp is null || !bindResp.StartsWith("OK", StringComparison.Ordinal))
                 {
                     Console.Error.WriteLine($"warning: jit runner data bind failed: {bindResp ?? "<timeout>"}");
@@ -3845,9 +3961,12 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         if (sema.Diagnostics.Count > 0)
         {
             PrintDiagnostics(sema.Diagnostics, source, sourcePath);
-            clif = string.Empty;
-            lowerMs = 0;
-            return HasErrors(sema.Diagnostics) ? 1 : 0;
+            if (HasErrors(sema.Diagnostics))
+            {
+                clif = string.Empty;
+                lowerMs = 0;
+                return 1;
+            }
         }
 
         if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
@@ -3887,9 +4006,12 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         if (result.Diagnostics.Count > 0)
         {
             PrintDiagnostics(result.Diagnostics, source, sourcePath);
-            Console.WriteLine(result.Ir);
-            clif = string.Empty;
-            return 1;
+            if (HasErrors(result.Diagnostics))
+            {
+                Console.WriteLine(result.Ir);
+                clif = string.Empty;
+                return 1;
+            }
         }
 
         clif = result.Ir;
@@ -3981,6 +4103,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         // Debounce quick successive writes
         Thread.Sleep(50);
 
+        var changeUtc = DateTime.UtcNow;
         var swTotal = Stopwatch.StartNew();
         var rc = BuildClif(out var clif, out var lowerMs);
         if (rc != 0)
@@ -4003,11 +4126,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             continue;
         }
 
-        var (swapOk, swapLatencyMs, resp) = SendSwapAndWaitForAck(clif, timeoutMs: 120000).GetAwaiter().GetResult();
-        Console.WriteLine($"HOTSWAP(ms): total={swTotal.ElapsedMilliseconds} latency={swapLatencyMs}");
-        if (!swapOk)
+        if (runnerIn is null)
         {
-            Console.Error.WriteLine($"warning: jit swap failed: {resp ?? "<timeout>"}; waiting for changes to retry.");
+            Console.Error.WriteLine("warning: jit runner stdin not available; restarting.");
             try
             {
                 runner?.Kill(entireProcessTree: true);
@@ -4017,7 +4138,21 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 // ignore
             }
             runner = null;
+            runnerIn = null;
+            runnerStdin = null;
+            runnerOut = null;
+            runnerOutLines = null;
             continue;
+        }
+
+        var sendUtc = DateTime.UtcNow;
+        var clifBytes = Encoding.UTF8.GetByteCount(clif);
+        WriteUtf8(runnerIn, $"SWAP {clifBytes}\n");
+        WriteUtf8(runnerIn, clif);
+        runnerIn.Flush();
+        lock (pendingLock)
+        {
+            sentButNotQueued.Enqueue((ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs));
         }
 
         lastGoodClif = clif;
@@ -4029,8 +4164,11 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     {
         if (runner is not null && !runner.HasExited)
         {
-            WriteUtf8(runner.StandardInput.BaseStream, "QUIT\n");
-            runner.StandardInput.BaseStream.Flush();
+            if (runnerIn is not null)
+            {
+                WriteUtf8(runnerIn, "QUIT\n");
+                runnerIn.Flush();
+            }
             runner.WaitForExit(1000);
         }
     }
@@ -4872,7 +5010,14 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
 
 static string LoadSourceWithImports(string path, out List<Diagnostic> importDiagnostics, out string sourceForDiagnostics)
 {
-    var original = File.ReadAllText(path);
+    static string ReadAllTextShared(string p)
+    {
+        using var fs = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var sr = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return sr.ReadToEnd();
+    }
+
+    var original = ReadAllTextShared(path);
     var diagnostics = new List<Diagnostic>();
     var result = SourceImporter.ExpandImports(path, original, diagnostics);
     importDiagnostics = diagnostics;
