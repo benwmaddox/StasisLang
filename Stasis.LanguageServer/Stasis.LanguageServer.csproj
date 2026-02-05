@@ -15,7 +15,7 @@
 
   <ItemGroup>
     <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.19.9" />
-    <ProjectReference Include="..\Stasis.Compiler\Stasis.Compiler.csproj" />
+    <ProjectReference Include="..\Stasis.Compiler\Stasis.Compiler.csproj" Properties="StasisIncludeLibLLVM=false" />
   </ItemGroup>
 
 </Project>

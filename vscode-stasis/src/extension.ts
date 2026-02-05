@@ -44,6 +44,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const output = vscode.window.createOutputChannel("Stasis");
   const server = tryServerCommand(context.extensionPath);
   if (!server) {
+    void vscode.window.showWarningMessage(
+      "Stasis LSP server binary not found; autocomplete/hover/diagnostics are disabled (syntax highlighting still works). See vscode-stasis/README.md for install steps."
+    );
     output.appendLine(
       "Stasis Language Server binary not found. LSP features are disabled; syntax highlighting still works."
     );

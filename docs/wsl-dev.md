@@ -143,6 +143,20 @@ cd StasisLang
 
 If you prefer to keep a single working copy, open `\\\\wsl$\\<distro>\\home\\<user>\\src\\StasisLang` in your editor (or use VS Code Remote - WSL).
 
+## VS Code: LSP/autocomplete in Remote - WSL
+
+If you're using VS Code Remote - WSL, make sure you install the Stasis extension into the WSL environment (extensions are installed per-remote).
+
+From the repo root (inside WSL), build + install the full extension (syntax + LSP):
+
+```bash
+# In WSL, "code" should be available when using VS Code Remote - WSL.
+code --version
+
+# Build/publish server, package VSIX, and install (force-reinstall)
+./scripts/install_vscode_stasis_lsp_wsl.sh --force
+```
+
 ### Optional: SSH clone instead of HTTPS
 
 If you prefer SSH (no HTTPS tokens), create an SSH key in WSL and add it to GitHub:
