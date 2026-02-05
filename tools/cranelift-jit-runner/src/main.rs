@@ -36,6 +36,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -106,9 +107,7 @@ fn env_u64(name: &str, default: u64) -> u64
 pub extern "win64" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
 {
     unsafe {
-        let fmt = fmt as *const i8;
-        let a0 = a0 as *const i8;
-        libc::printf(fmt, a0)
+        stasis_printf3_impl(fmt as *const i8, a0, _a1)
     }
 }
 
@@ -117,10 +116,121 @@ pub extern "win64" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
 pub extern "C" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
 {
     unsafe {
-        let fmt = fmt as *const libc::c_char;
-        let a0 = a0 as *const libc::c_char;
-        libc::printf(fmt, a0)
+        stasis_printf3_impl(fmt as *const libc::c_char, a0, _a1)
     }
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn stasis_printf3_impl(fmt: *const libc::c_char, arg1: i64, arg2: i64) -> i32
+{
+    if fmt.is_null()
+    {
+        return 0;
+    }
+
+    // Mirror runtime/stasis_sys.c behavior: support up to two format specifiers and pass
+    // correctly-typed args to the C variadic printf implementation.
+    //
+    // This avoids ABI issues (Cranelift calls fixed-arity imports) and prevents UB where
+    // integer args were previously treated as pointers.
+    let mut spec_count = 0usize;
+    let mut specs: [u8; 2] = [0, 0];
+    let mut lens: [u8; 2] = [0, 0]; // 0=default, 1=l, 2=ll
+
+    let mut p = fmt as *const u8;
+    while *p != 0 && spec_count < 2
+    {
+        if *p != b'%'
+        {
+            p = p.add(1);
+            continue;
+        }
+
+        p = p.add(1);
+        if *p == 0
+        {
+            break;
+        }
+        if *p == b'%'
+        {
+            p = p.add(1);
+            continue;
+        }
+
+        let mut len = 0u8;
+        if *p == b'l'
+        {
+            len = 1;
+            if *p.add(1) == b'l'
+            {
+                len = 2;
+                p = p.add(1);
+            }
+            p = p.add(1);
+        }
+
+        let s = *p;
+        if matches!(s, b'd' | b'i' | b'u' | b'x' | b'X' | b'c' | b's')
+        {
+            lens[spec_count] = len;
+            specs[spec_count] = s;
+            spec_count += 1;
+        }
+
+        p = p.add(1);
+    }
+
+    if spec_count == 0
+    {
+        return libc::printf(b"%s\0".as_ptr() as *const libc::c_char, fmt) as i32;
+    }
+
+    if spec_count == 1
+    {
+        match specs[0]
+        {
+            b's' => return libc::printf(fmt, arg1 as *const libc::c_char) as i32,
+            b'c' => return libc::printf(fmt, arg1 as libc::c_int) as i32,
+            b'u' | b'x' | b'X' =>
+            {
+                return match lens[0]
+                {
+                    2 => libc::printf(fmt, arg1 as libc::c_ulonglong) as i32,
+                    1 => libc::printf(fmt, arg1 as libc::c_ulong) as i32,
+                    _ => libc::printf(fmt, arg1 as libc::c_uint) as i32,
+                };
+            }
+            b'd' | b'i' | _ =>
+            {
+                return match lens[0]
+                {
+                    2 => libc::printf(fmt, arg1 as libc::c_longlong) as i32,
+                    1 => libc::printf(fmt, arg1 as libc::c_long) as i32,
+                    _ => libc::printf(fmt, arg1 as libc::c_int) as i32,
+                };
+            }
+        }
+    }
+
+    // spec_count == 2
+    if specs[0] == b's' && specs[1] == b's'
+    {
+        return libc::printf(fmt, arg1 as *const libc::c_char, arg2 as *const libc::c_char) as i32;
+    }
+    if specs[0] == b's' && (specs[1] == b'd' || specs[1] == b'i')
+    {
+        return libc::printf(fmt, arg1 as *const libc::c_char, arg2 as libc::c_int) as i32;
+    }
+    if (specs[0] == b'd' || specs[0] == b'i') && (specs[1] == b'd' || specs[1] == b'i')
+    {
+        return libc::printf(fmt, arg1 as libc::c_int, arg2 as libc::c_int) as i32;
+    }
+    if specs[0] == b'c' && specs[1] == b'c'
+    {
+        return libc::printf(fmt, arg1 as libc::c_int, arg2 as libc::c_int) as i32;
+    }
+
+    libc::printf(fmt, arg1 as libc::c_longlong, arg2 as libc::c_longlong) as i32
 }
 
 #[unsafe(no_mangle)]
@@ -604,7 +714,13 @@ fn run_server(fps: u32) -> Result<()>
                     continue;
                 }
 
-                writeln!(stdout, "OK")?;
+                // Match stasis_runner behavior: apply any window requests made during main()
+                // before entering the tick loop. Some games set initial portrait sizing via
+                // host window request globals and expect it to be applied immediately.
+                let mut last_req_seq = 0i32;
+                apply_window_requests(&mut new_instance, &mut last_req_seq);
+
+                writeln!(stdout, "OK init")?;
                 stdout.flush()?;
 
                 let tick_loop_result = run_tick_loop(fps, &mut new_instance, &rx, &mut stdout);
@@ -622,7 +738,7 @@ fn run_server(fps: u32) -> Result<()>
             }
             Request::Quit =>
             {
-                writeln!(stdout, "OK")?;
+                writeln!(stdout, "OK quit")?;
                 stdout.flush()?;
                 break;
             }
@@ -642,11 +758,29 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     let last_progress_ms = Arc::new(AtomicU64::new(now_ms()));
     let tick_counter = Arc::new(AtomicU64::new(0));
     let swap_counter = Arc::new(AtomicU64::new(0));
+    let stage = Arc::new(AtomicU32::new(0));
+
+    fn stage_name(stage: u32) -> &'static str
+    {
+        match stage
+        {
+            0 => "idle",
+            1 => "rx",
+            2 => "databind",
+            3 => "host_get_frame",
+            4 => "apply_window_requests",
+            5 => "tick",
+            6 => "gfx_submit",
+            7 => "bulk_step",
+            _ => "unknown",
+        }
+    }
 
     if watchdog_ms > 0
     {
         let last_progress_ms = Arc::clone(&last_progress_ms);
         let tick_counter = Arc::clone(&tick_counter);
+        let stage = Arc::clone(&stage);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(250));
             let last_ms = last_progress_ms.load(Ordering::Relaxed);
@@ -654,9 +788,11 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             if now.saturating_sub(last_ms) > watchdog_ms
             {
                 eprintln!(
-                    "error: jit runner watchdog fired (no tick progress for {}ms; ticks={}); exiting so watch can restart.",
+                    "error: jit runner watchdog fired (no tick progress for {}ms; ticks={}; stage={}({})); exiting so watch can restart.",
                     now.saturating_sub(last_ms),
-                    tick_counter.load(Ordering::Relaxed)
+                    tick_counter.load(Ordering::Relaxed),
+                    stage.load(Ordering::Relaxed),
+                    stage_name(stage.load(Ordering::Relaxed))
                 );
                 std::process::exit(124);
             }
@@ -669,12 +805,15 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     {
         let tick_counter = Arc::clone(&tick_counter);
         let swap_counter = Arc::clone(&swap_counter);
+        let stage = Arc::clone(&stage);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(heartbeat_ms.max(50)));
             eprintln!(
-                "HEARTBEAT ticks={} swaps={}",
+                "HEARTBEAT ticks={} swaps={} stage={}({})",
                 tick_counter.load(Ordering::Relaxed),
-                swap_counter.load(Ordering::Relaxed)
+                swap_counter.load(Ordering::Relaxed),
+                stage.load(Ordering::Relaxed),
+                stage_name(stage.load(Ordering::Relaxed))
             );
         });
     }
@@ -683,9 +822,18 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
     // The tick loop only does a fast apply step + pointer swap when compilation finishes.
     let (swap_job_tx, swap_job_rx) = mpsc::channel::<SwapJob>();
     let (swap_result_tx, swap_result_rx) = mpsc::channel::<SwapResult>();
+    let latest_requested_id = Arc::new(AtomicU64::new(0));
+    let latest_requested_id_worker = Arc::clone(&latest_requested_id);
     thread::spawn(move || {
         while let Ok(job) = swap_job_rx.recv()
         {
+            // Best-effort coalescing: if a newer swap request arrived before we started compiling this job,
+            // skip the work entirely. This keeps iteration responsive when edits arrive faster than compile time.
+            if job.id != latest_requested_id_worker.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+
             let t0 = Instant::now();
             let outcome = match JitInstance::compile(&job.module_name, &job.entry_name, &job.tick_name, &job.clif)
             {
@@ -802,8 +950,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
                     writeln!(
                         stdout,
-                        "OK id={} save_us={} compile_us={} restore_us={}",
-                        result.id, save_us, compile_us, restore_us
+                        "APPLIED id={} save_us={} compile_us={} restore_us={} missing_save={} missing_restore={}",
+                        result.id, save_us, compile_us, restore_us, missing_save, missing_restore
                     )?;
                     stdout.flush()?;
                 }
@@ -852,18 +1000,12 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                 }
                 Request::Swap { clif } =>
                 {
-                    if pending_swap_id.is_some()
-                    {
-                        writeln!(stdout, "ERR swap already pending")?;
-                        stdout.flush()?;
-                        continue;
-                    }
-
                     let id = next_swap_id;
                     next_swap_id = next_swap_id.saturating_add(1);
-                    pending_swap_id = Some(id);
+                    let supersedes = pending_swap_id.replace(id).unwrap_or(0);
+                    latest_requested_id.store(id, Ordering::Relaxed);
 
-                    eprintln!("HOTSWAP queued: id={} bytes={}", id, clif.len());
+                    eprintln!("HOTSWAP queued: id={} bytes={} supersedes={}", id, clif.len(), supersedes);
                     let job = SwapJob {
                         id,
                         module_name: instance.module_name.clone(),
@@ -876,7 +1018,12 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         pending_swap_id = None;
                         writeln!(stdout, "ERR swap worker unavailable")?;
                         stdout.flush()?;
+                        continue;
                     }
+
+                    // Acknowledge receipt immediately; compilation happens asynchronously.
+                    writeln!(stdout, "QUEUED id={} supersedes={}", id, supersedes)?;
+                    stdout.flush()?;
                 }
                 Request::Quit =>
                 {
@@ -894,6 +1041,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
 
         if let Some(b) = data_binding.as_mut()
         {
+            stage.store(2, Ordering::Relaxed);
             if b.apply_if_changed(instance).unwrap_or(false)
             {
                 eprintln!("DATABIND: reloaded {}", b.json_path);
@@ -915,6 +1063,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     )
                 {
                     unsafe {
+                        stage.store(7, Ordering::Relaxed);
+                        last_progress_ms.store(now_ms(), Ordering::Relaxed);
                         let rc = host_bulk_step(
                             host_i32,
                             host_f32,
@@ -944,6 +1094,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     (instance.graphics.as_ref().and_then(|x| x.host_get_frame), instance.host_i32, instance.host_f32)
                 {
                     unsafe {
+                        stage.store(3, Ordering::Relaxed);
+                        last_progress_ms.store(now_ms(), Ordering::Relaxed);
                         host_get_frame(host_i32, host_f32);
                         if *host_i32.add(9) != 0
                         {
@@ -952,8 +1104,11 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     }
                 }
 
+                stage.store(4, Ordering::Relaxed);
                 apply_window_requests(instance, &mut last_req_seq);
 
+                stage.store(5, Ordering::Relaxed);
+                last_progress_ms.store(now_ms(), Ordering::Relaxed);
                 let rc = (instance.tick_fn)();
                 if rc != 0
                 {
@@ -965,6 +1120,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     (instance.graphics.as_ref().and_then(|x| x.gfx_submit_u8), instance.gfx_cmd_i32, instance.gfx_cmd_f32, instance.gfx_cmd_u8)
                 {
                     unsafe {
+                        stage.store(6, Ordering::Relaxed);
+                        last_progress_ms.store(now_ms(), Ordering::Relaxed);
                         gfx_submit_u8(cmd_i32, cmd_f32, cmd_u8);
                     }
                 }
@@ -972,6 +1129,8 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
         }
         else
         {
+            stage.store(5, Ordering::Relaxed);
+            last_progress_ms.store(now_ms(), Ordering::Relaxed);
             let rc = (instance.tick_fn)();
             if rc != 0
             {
@@ -1065,6 +1224,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
             let bytes = reader.read_line(&mut line).unwrap_or(0);
             if bytes == 0
             {
+                eprintln!("stasis-cranelift-jit-runner: stdin EOF (request reader exiting)");
                 let _ = tx2.send(Request::Quit);
                 break;
             }
@@ -1086,6 +1246,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 5
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad INIT header (expected 5 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1095,6 +1256,9 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let clif_len = parts[4].parse::<usize>().unwrap_or(0);
                 if module_len == 0 || entry_len == 0 || tick_len == 0 || clif_len == 0
                 {
+                    eprintln!(
+                        "stasis-cranelift-jit-runner: bad INIT lengths module={module_len} entry={entry_len} tick={tick_len} clif={clif_len} (line='{trimmed}')"
+                    );
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1111,12 +1275,14 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 2
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad SWAP header (expected 2 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
                 let clif_len = parts[1].parse::<usize>().unwrap_or(0);
                 if clif_len == 0
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad SWAP length clif={clif_len} (line='{trimmed}')");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1130,6 +1296,7 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() != 3
                 {
+                    eprintln!("stasis-cranelift-jit-runner: bad BIND header (expected 3 parts): '{trimmed}'");
                     let _ = tx2.send(Request::Quit);
                     break;
                 }
@@ -1137,6 +1304,9 @@ fn spawn_request_reader(tx: mpsc::Sender<Request>) -> Result<()>
                 let meta_len = parts[2].parse::<usize>().unwrap_or(0);
                 if json_len == 0 || meta_len == 0
                 {
+                    eprintln!(
+                        "stasis-cranelift-jit-runner: bad BIND lengths json={json_len} meta={meta_len} (line='{trimmed}')"
+                    );
                     let _ = tx2.send(Request::Quit);
                     break;
                 }

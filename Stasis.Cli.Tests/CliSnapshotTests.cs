@@ -93,6 +93,35 @@ public class CliSnapshotTests
         return (process.ExitCode, stdout.ToString().TrimEnd(), stderr.ToString().TrimEnd());
     }
 
+    private static (int exitCode, string stdout, string stderr) RunProcess(ProcessStartInfo psi)
+    {
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+
+        using var process = new Process { StartInfo = psi };
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+            {
+                stdout.AppendLine(e.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data != null)
+            {
+                stderr.AppendLine(e.Data);
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+
+        return (process.ExitCode, stdout.ToString().TrimEnd(), stderr.ToString().TrimEnd());
+    }
+
     private static (int exitCode, string stdout, string stderr) RunCliWithEnv(IDictionary<string, string?> environment, params string[] args)
     {
         var root = GetRepoRoot();
@@ -216,13 +245,10 @@ public class CliSnapshotTests
                 WorkingDirectory = root
             };
 
-            using var process = Process.Start(psi)!;
-            process.WaitForExit();
-            if (process.ExitCode != 0)
+            var (exitCode, stdout, stderr) = RunProcess(psi);
+            if (exitCode != 0)
             {
-                var stdout = process.StandardOutput.ReadToEnd();
-                var stderr = process.StandardError.ReadToEnd();
-                throw new InvalidOperationException($"Failed to build CLI ({process.ExitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
+                throw new InvalidOperationException($"Failed to build CLI ({exitCode}).\nstdout:\n{stdout}\nstderr:\n{stderr}");
             }
 
             BuiltCliConfiguration = configuration;
