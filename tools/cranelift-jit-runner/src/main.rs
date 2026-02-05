@@ -714,6 +714,12 @@ fn run_server(fps: u32) -> Result<()>
                     continue;
                 }
 
+                // Match stasis_runner behavior: apply any window requests made during main()
+                // before entering the tick loop. Some games set initial portrait sizing via
+                // host window request globals and expect it to be applied immediately.
+                let mut last_req_seq = 0i32;
+                apply_window_requests(&mut new_instance, &mut last_req_seq);
+
                 writeln!(stdout, "OK init")?;
                 stdout.flush()?;
 
