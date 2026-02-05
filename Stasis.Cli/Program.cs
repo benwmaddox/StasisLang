@@ -3613,6 +3613,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     StreamReader? runnerOut = null;
 
     var pendingSwaps = new Dictionary<ulong, (DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
+    var sentButNotQueued = new Queue<(DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
     var pendingLock = new object();
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
@@ -3679,6 +3680,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         lock (pendingLock)
         {
             pendingSwaps.Clear();
+            sentButNotQueued.Clear();
         }
 
         try
@@ -3787,6 +3789,28 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                                     $"latency={runnerMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
                                     $"lower={pending.Value.LowerMs} compile={compileMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
                                     $"apply={applyMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} id={appliedId}");
+                            }
+                        }
+                    }
+                    else if (line.StartsWith("QUEUED ", StringComparison.Ordinal))
+                    {
+                        var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
+                        if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var queuedId))
+                        {
+                            lock (pendingLock)
+                            {
+                                var supersedesMatch = Regex.Match(line, @"\bsupersedes=(\d+)\b");
+                                if (supersedesMatch.Success &&
+                                    ulong.TryParse(supersedesMatch.Groups[1].Value, out var supersedesId) &&
+                                    supersedesId != 0)
+                                {
+                                    _ = pendingSwaps.Remove(supersedesId);
+                                }
+
+                                if (sentButNotQueued.Count > 0)
+                                {
+                                    pendingSwaps[queuedId] = sentButNotQueued.Dequeue();
+                                }
                             }
                         }
                     }
@@ -4101,43 +4125,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         WriteUtf8(runnerIn, $"SWAP {clifBytes}\n");
         WriteUtf8(runnerIn, clif);
         runnerIn.Flush();
-
-        var queuedLine = ReadRunnerLineWithTimeout(timeoutMs: 5000).GetAwaiter().GetResult();
-        if (queuedLine is null || !queuedLine.StartsWith("QUEUED ", StringComparison.Ordinal))
+        lock (pendingLock)
         {
-            Console.Error.WriteLine($"warning: jit swap queue failed: {queuedLine ?? "<timeout>"}; waiting for changes to retry.");
-            try
-            {
-                runner?.Kill(entireProcessTree: true);
-            }
-            catch
-            {
-                // ignore
-            }
-            runner = null;
-            runnerIn = null;
-            runnerStdin = null;
-            runnerOut = null;
-            runnerOutLines = null;
-            continue;
-        }
-
-        var idMatch = Regex.Match(queuedLine, @"\bid=(\d+)\b");
-        if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var queuedId))
-        {
-            lock (pendingLock)
-            {
-                var supersedesMatch = Regex.Match(queuedLine, @"\bsupersedes=(\d+)\b");
-                if (supersedesMatch.Success && ulong.TryParse(supersedesMatch.Groups[1].Value, out var supersedesId) && supersedesId != 0)
-                {
-                    _ = pendingSwaps.Remove(supersedesId);
-                }
-                pendingSwaps[queuedId] = (ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs);
-            }
-        }
-        else
-        {
-            Console.Error.WriteLine($"warning: jit swap queue response missing id: {queuedLine}");
+            sentButNotQueued.Enqueue((ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs));
         }
 
         lastGoodClif = clif;
