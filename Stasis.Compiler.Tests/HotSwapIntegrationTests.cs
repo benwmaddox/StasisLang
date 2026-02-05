@@ -550,6 +550,151 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickJitSwap_LoadsSvgSprite()
+    {
+        var repoRoot = FindRepoRoot();
+        var samplePath = Path.Combine(repoRoot, "samples", "gfx_cmd_smoke.stasis");
+        Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
+
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var moduleName = "gfx";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+
+        var runnerOutLog = Path.Combine(swapDir, $"gfx_cmd_smoke.{moduleName}.runner.out.log");
+        var runnerErrLog = Path.Combine(swapDir, $"gfx_cmd_smoke.{moduleName}.runner.err.log");
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerOutLog);
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll, "run", samplePath, "--watch", "--backend", "cranelift", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+
+            // Make the runner emit a positive "gfx_load_sprite: ... handle=.." line on success.
+            psi.EnvironmentVariables["STASIS_GFX_LOG_SPRITES"] = "1";
+
+            // CI / headless stability knobs (these are no-ops on platforms where they don't apply).
+            psi.EnvironmentVariables["STASIS_SKIP_RENDER_TEST"] = "1";
+            psi.EnvironmentVariables["STASIS_USE_SDL"] = "1";
+            if (OperatingSystem.IsLinux())
+            {
+                psi.EnvironmentVariables["SDL_VIDEODRIVER"] = "dummy";
+            }
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            // Wait for the sprite load log (stasis_graphics prints via SDL_Log -> stderr).
+            await WaitForAnyLineAsync(
+                proc,
+                () =>
+                {
+                    if (!File.Exists(runnerErrLog))
+                    {
+                        return false;
+                    }
+                    if (!TryReadTextShared(runnerErrLog, out var errText))
+                    {
+                        return false;
+                    }
+
+                    // Success path (requires STASIS_GFX_LOG_SPRITES=1).
+                    if (errText.Contains("gfx_load_sprite:", StringComparison.OrdinalIgnoreCase) &&
+                        errText.Contains("handle=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    // Failure signals: stop waiting so we can assert with the log content.
+                    if (errText.Contains("gfx_load_sprite: failed", StringComparison.OrdinalIgnoreCase) ||
+                        errText.Contains("gfx_load_sprite: could not resolve", StringComparison.OrdinalIgnoreCase) ||
+                        errText.Contains("failed to parse", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    return false;
+                },
+                timeout: TimeSpan.FromSeconds(60));
+
+            Assert.True(File.Exists(runnerErrLog), $"missing runner err log: {runnerErrLog}");
+            Assert.True(TryReadTextShared(runnerErrLog, out var finalErr), "failed to read runner err log");
+            Assert.DoesNotContain("gfx_load_sprite: failed", finalErr, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("gfx_load_sprite: could not resolve", finalErr, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("failed to parse", finalErr, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("gfx_load_sprite:", finalErr, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("handle=", finalErr, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            // Best-effort: cleanup fresh jit runner processes.
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickHotSwap_ReportsSemanticErrors_AndKeepsRunning()
     {
         var repoRoot = FindRepoRoot();
