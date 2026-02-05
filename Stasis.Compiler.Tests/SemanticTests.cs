@@ -149,6 +149,30 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Does_not_warn_on_struct_fields_used_via_array_access()
+    {
+        var source = """
+            struct S { used: i32; }
+            struct Outer { xs: S[2]; }
+            global state: Outer;
+            function f(): void {
+                state.xs[0].used = 1;
+                let y: i32 = state.xs[1].used;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+        Assert.DoesNotContain(sema.Diagnostics, d =>
+            d.Severity == DiagnosticSeverity.Warning &&
+            d.Message.Contains("S.used", StringComparison.Ordinal) &&
+            d.Message.Contains("never assigned or referenced", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_calling_non_function_symbol()
     {
         var source = """

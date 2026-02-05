@@ -6,6 +6,7 @@ global state: WatchState;
 
 function main(): i32 {
     print_string("init tick watch\n");
+    state.ticks = 0;
     return 0;
 }
 
