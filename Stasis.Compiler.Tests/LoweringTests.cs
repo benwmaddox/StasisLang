@@ -96,6 +96,31 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_function_form_receiver_dispatch_with_literal_first_arguments()
+    {
+        var ir = Lower("""
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function tick(): i32 {
+                let a: i32 = tag("hello");
+                let b: i32 = tag(5);
+                return a.+(b);
+            }
+            """);
+
+        Assert.Contains("define i32 @tag__recv__string(", ir);
+        Assert.Contains("define i32 @tag__recv__i32(", ir);
+        Assert.Contains("call i32 @tag__recv__string(", ir);
+        Assert.Contains("call i32 @tag__recv__i32(", ir);
+    }
+
+    [Fact]
     public void Emits_ret_void_when_missing()
     {
         var ir = Lower("""

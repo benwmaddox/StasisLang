@@ -219,6 +219,30 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Local_value_shadows_function_name_for_calls()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+
+            function damage(target: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function run(): i32 {
+                let enemy: Enemy = 0;
+                let damage: i32 = 0;
+                return damage(enemy, 5);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("'damage' is not callable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
     {
         var source = """
