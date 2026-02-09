@@ -121,6 +121,28 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_zero_arg_call_when_receiverless_and_receiver_scoped_share_name()
+    {
+        var ir = Lower("""
+            function ping(): i32 {
+                return 7;
+            }
+
+            function ping(value: i32): i32 {
+                return value;
+            }
+
+            function tick(): i32 {
+                return ping();
+            }
+            """);
+
+        Assert.Contains("define i32 @ping()", ir);
+        Assert.Contains("define i32 @ping__recv__i32(", ir);
+        Assert.Contains("call i32 @ping()", ir);
+    }
+
+    [Fact]
     public void Emits_ret_void_when_missing()
     {
         var ir = Lower("""

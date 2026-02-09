@@ -1,0 +1,15 @@
+function ping(): i32 {
+    return 7;
+}
+
+function ping(value: i32): i32 {
+    return value;
+}
+
+test `zero-arg call picks receiverless overload`(): bool {
+    return ping() == 7;
+}
+
+test `arg call still picks receiver-scoped overload`(): bool {
+    return ping(5) == 5;
+}
