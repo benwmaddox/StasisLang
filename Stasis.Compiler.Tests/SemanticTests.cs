@@ -155,6 +155,46 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_function_name_collision_with_test_when_test_declared_first()
+    {
+        var source = """
+            test clash(): bool {
+                return true;
+            }
+
+            function clash(): i32 {
+                return 0;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate symbol 'clash'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_duplicate_receiver_callable_when_array_size_text_differs_only_by_formatting()
+    {
+        var source = """
+            function hash(values: i32[04]): i32 {
+                return 0;
+            }
+
+            function hash(values: i32[4]): i32 {
+                return 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate callable 'hash' for receiver type 'i32[4]'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
     {
         var source = """

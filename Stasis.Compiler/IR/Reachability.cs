@@ -14,6 +14,12 @@ public static class Reachability
         var functionsByName = functionList
             .GroupBy(fn => fn.Name.Text, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.Ordinal);
+        var globalsByName = compilationUnit.Declarations
+            .OfType<GlobalDeclarationSyntax>()
+            .ToDictionary(g => g.Name.Text, g => g.Type, StringComparer.Ordinal);
+        var structsByName = compilationUnit.Declarations
+            .OfType<StructDeclarationSyntax>()
+            .ToDictionary(s => s.Name.Text, s => s, StringComparer.Ordinal);
 
         var callGraph = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var func in functionList)
@@ -25,11 +31,14 @@ public static class Reachability
                 continue;
             }
 
-            callGraph[key] = CollectCalledFunctions(func.Body, functionsByName);
+            var locals = func.Parameters.ToDictionary(p => p.Name.Text, p => p.Type, StringComparer.Ordinal);
+            callGraph[key] = CollectCalledFunctions(func.Body, functionsByName, globalsByName, structsByName, locals);
         }
+
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
         {
-            callGraph[test.Name.Text] = CollectCalledFunctions(test.Body, functionsByName);
+            var locals = test.Parameters.ToDictionary(p => p.Name.Text, p => p.Type, StringComparer.Ordinal);
+            callGraph[test.Name.Text] = CollectCalledFunctions(test.Body, functionsByName, globalsByName, structsByName, locals);
         }
 
         var reachable = new HashSet<string>(StringComparer.Ordinal);
@@ -87,10 +96,16 @@ public static class Reachability
         return reachable;
     }
 
-    private static HashSet<string> CollectCalledFunctions(BlockStatementSyntax block, IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions)
+    private static HashSet<string> CollectCalledFunctions(
+        BlockStatementSyntax block,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        IReadOnlyDictionary<string, TypeSyntax> initialLocals)
     {
         var results = new HashSet<string>(StringComparer.Ordinal);
-        CollectFromBlock(block, functions, results);
+        var locals = new Dictionary<string, TypeSyntax>(initialLocals, StringComparer.Ordinal);
+        CollectFromBlock(block, functions, globals, structs, locals, results);
         return results;
     }
 
@@ -118,17 +133,23 @@ public static class Reachability
     private static void CollectFromBlock(
         BlockStatementSyntax block,
         IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        Dictionary<string, TypeSyntax> locals,
         HashSet<string> results)
     {
         foreach (var stmt in block.Statements)
         {
-            CollectFromStatement(stmt, functions, results);
+            CollectFromStatement(stmt, functions, globals, structs, locals, results);
         }
     }
 
     private static void CollectFromStatement(
         StatementSyntax stmt,
         IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        Dictionary<string, TypeSyntax> locals,
         HashSet<string> results)
     {
         switch (stmt)
@@ -136,47 +157,63 @@ public static class Reachability
             case VariableDeclarationSyntax decl:
                 if (decl.Initializer != null)
                 {
-                    CollectFromExpression(decl.Initializer, functions, results);
+                    CollectFromExpression(decl.Initializer, functions, globals, structs, locals, results);
+                }
+
+                if (decl.Type is not null)
+                {
+                    locals[decl.Name.Text] = decl.Type;
                 }
                 break;
             case ExpressionStatementSyntax exprStmt:
-                CollectFromExpression(exprStmt.Expression, functions, results);
+                CollectFromExpression(exprStmt.Expression, functions, globals, structs, locals, results);
                 break;
             case ReturnStatementSyntax ret:
                 if (ret.Expression != null)
                 {
-                    CollectFromExpression(ret.Expression, functions, results);
+                    CollectFromExpression(ret.Expression, functions, globals, structs, locals, results);
                 }
                 break;
             case IfStatementSyntax ifStmt:
-                CollectFromExpression(ifStmt.Condition, functions, results);
-                CollectFromBlock(ifStmt.ThenBlock, functions, results);
+                CollectFromExpression(ifStmt.Condition, functions, globals, structs, locals, results);
+                CollectFromBlock(ifStmt.ThenBlock, functions, globals, structs, new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal), results);
                 if (ifStmt.ElseBlock != null)
                 {
-                    CollectFromBlock(ifStmt.ElseBlock, functions, results);
+                    CollectFromBlock(ifStmt.ElseBlock, functions, globals, structs, new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal), results);
                 }
                 break;
             case ForStatementSyntax forStmt:
+                var forLocals = new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal);
                 if (forStmt.Initializer != null)
                 {
-                    CollectFromExpression(forStmt.Initializer, functions, results);
+                    CollectFromExpression(forStmt.Initializer, functions, globals, structs, forLocals, results);
                 }
                 if (forStmt.Condition != null)
                 {
-                    CollectFromExpression(forStmt.Condition, functions, results);
+                    CollectFromExpression(forStmt.Condition, functions, globals, structs, forLocals, results);
                 }
                 if (forStmt.Step != null)
                 {
-                    CollectFromExpression(forStmt.Step, functions, results);
+                    CollectFromExpression(forStmt.Step, functions, globals, structs, forLocals, results);
                 }
-                CollectFromBlock(forStmt.Body, functions, results);
+                CollectFromBlock(forStmt.Body, functions, globals, structs, new Dictionary<string, TypeSyntax>(forLocals, StringComparer.Ordinal), results);
                 break;
             case ForeachStatementSyntax foreachStmt:
-                CollectFromExpression(foreachStmt.Iterable, functions, results);
-                CollectFromBlock(foreachStmt.Body, functions, results);
+                CollectFromExpression(foreachStmt.Iterable, functions, globals, structs, locals, results);
+                var foreachLocals = new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal);
+                if (TryResolveExpressionType(foreachStmt.Iterable, foreachLocals, globals, structs, out var iterableType) &&
+                    iterableType is ArrayTypeSyntax arrayType)
+                {
+                    foreachLocals[foreachStmt.Iterator.Text] = arrayType.ElementType;
+                    if (foreachStmt.IndexVariable is not null)
+                    {
+                        foreachLocals[foreachStmt.IndexVariable.Text] = CreateNamedType("i32");
+                    }
+                }
+                CollectFromBlock(foreachStmt.Body, functions, globals, structs, foreachLocals, results);
                 break;
             case BlockStatementSyntax inner:
-                CollectFromBlock(inner, functions, results);
+                CollectFromBlock(inner, functions, globals, structs, new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal), results);
                 break;
         }
     }
@@ -184,59 +221,226 @@ public static class Reachability
     private static void CollectFromExpression(
         ExpressionSyntax expr,
         IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        Dictionary<string, TypeSyntax> locals,
         HashSet<string> results)
     {
         switch (expr)
         {
             case ParenthesizedExpressionSyntax paren:
-                CollectFromExpression(paren.Expression, functions, results);
+                CollectFromExpression(paren.Expression, functions, globals, structs, locals, results);
                 break;
             case UnaryExpressionSyntax unary:
-                CollectFromExpression(unary.Operand, functions, results);
+                CollectFromExpression(unary.Operand, functions, globals, structs, locals, results);
                 break;
             case MemberAccessExpressionSyntax member:
-                CollectFromExpression(member.Receiver, functions, results);
+                CollectFromExpression(member.Receiver, functions, globals, structs, locals, results);
                 break;
             case ArrayAccessExpressionSyntax array:
-                CollectFromExpression(array.Receiver, functions, results);
-                CollectFromExpression(array.Index, functions, results);
+                CollectFromExpression(array.Receiver, functions, globals, structs, locals, results);
+                CollectFromExpression(array.Index, functions, globals, structs, locals, results);
                 break;
             case AssignmentExpressionSyntax assign:
-                CollectFromExpression(assign.Left, functions, results);
-                CollectFromExpression(assign.Right, functions, results);
+                CollectFromExpression(assign.Left, functions, globals, structs, locals, results);
+                CollectFromExpression(assign.Right, functions, globals, structs, locals, results);
                 break;
             case BinaryExpressionSyntax bin:
-                CollectFromExpression(bin.Left, functions, results);
-                CollectFromExpression(bin.Right, functions, results);
+                CollectFromExpression(bin.Left, functions, globals, structs, locals, results);
+                CollectFromExpression(bin.Right, functions, globals, structs, locals, results);
                 break;
             case CallExpressionSyntax call:
-                if (call.Callee is IdentifierExpressionSyntax id && functions.TryGetValue(id.Identifier.Text, out var candidates))
+                foreach (var candidate in ResolveCallCandidates(call, functions, globals, structs, locals))
                 {
-                    foreach (var candidate in candidates)
-                    {
-                        results.Add(CallableIdentity.GetCallableKey(candidate));
-                    }
+                    results.Add(CallableIdentity.GetCallableKey(candidate));
                 }
-                else if (call.Callee is MemberAccessExpressionSyntax member && functions.TryGetValue(member.Member.Text, out var memberCandidates))
-                {
-                    foreach (var candidate in memberCandidates)
-                    {
-                        results.Add(CallableIdentity.GetCallableKey(candidate));
-                    }
-                }
-                CollectFromExpression(call.Callee, functions, results);
+
+                CollectFromExpression(call.Callee, functions, globals, structs, locals, results);
                 foreach (var arg in call.Arguments)
                 {
-                    CollectFromExpression(arg, functions, results);
+                    CollectFromExpression(arg, functions, globals, structs, locals, results);
                 }
                 break;
             case OperatorCallExpressionSyntax opCall:
-                CollectFromExpression(opCall.Receiver, functions, results);
+                CollectFromExpression(opCall.Receiver, functions, globals, structs, locals, results);
                 foreach (var arg in opCall.Arguments)
                 {
-                    CollectFromExpression(arg, functions, results);
+                    CollectFromExpression(arg, functions, globals, structs, locals, results);
                 }
                 break;
         }
     }
+
+    private static FunctionDeclarationSyntax[] ResolveCallCandidates(
+        CallExpressionSyntax call,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        IReadOnlyDictionary<string, TypeSyntax> locals)
+    {
+        switch (call.Callee)
+        {
+            case IdentifierExpressionSyntax id when functions.TryGetValue(id.Identifier.Text, out var candidates):
+                return ResolveFunctionFormCandidates(candidates, call.Arguments, globals, structs, locals);
+            case MemberAccessExpressionSyntax member when string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                return Array.Empty<FunctionDeclarationSyntax>();
+            case MemberAccessExpressionSyntax member when functions.TryGetValue(member.Member.Text, out var memberCandidates):
+                return ResolveReceiverFormCandidates(member, call.Arguments.Count, memberCandidates, globals, structs, locals);
+            default:
+                return Array.Empty<FunctionDeclarationSyntax>();
+        }
+    }
+
+    private static FunctionDeclarationSyntax[] ResolveFunctionFormCandidates(
+        FunctionDeclarationSyntax[] candidates,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        IReadOnlyDictionary<string, TypeSyntax> locals)
+    {
+        var arityMatches = candidates.Where(fn => fn.Parameters.Count == arguments.Count).ToArray();
+        if (arityMatches.Length == 0)
+        {
+            return Array.Empty<FunctionDeclarationSyntax>();
+        }
+
+        if (arguments.Count > 0 &&
+            TryResolveExpressionType(arguments[0], locals, globals, structs, out var firstArgType))
+        {
+            var firstArgKey = CallableIdentity.TypeKey(firstArgType);
+            var receiverMatches = arityMatches
+                .Where(fn => fn.Parameters.Count > 0 &&
+                             string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), firstArgKey, StringComparison.Ordinal))
+                .ToArray();
+            if (receiverMatches.Length > 0)
+            {
+                return receiverMatches;
+            }
+        }
+
+        var receiverlessMatches = arityMatches.Where(fn => !CallableIdentity.HasReceiver(fn)).ToArray();
+        if (receiverlessMatches.Length > 0)
+        {
+            return receiverlessMatches;
+        }
+
+        return arityMatches;
+    }
+
+    private static FunctionDeclarationSyntax[] ResolveReceiverFormCandidates(
+        MemberAccessExpressionSyntax member,
+        int argumentCount,
+        FunctionDeclarationSyntax[] candidates,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        IReadOnlyDictionary<string, TypeSyntax> locals)
+    {
+        var arityMatches = candidates.Where(fn => fn.Parameters.Count == argumentCount + 1).ToArray();
+        if (arityMatches.Length == 0)
+        {
+            return Array.Empty<FunctionDeclarationSyntax>();
+        }
+
+        if (TryResolveExpressionType(member.Receiver, locals, globals, structs, out var receiverType))
+        {
+            var receiverKey = CallableIdentity.TypeKey(receiverType);
+            var receiverMatches = arityMatches
+                .Where(fn => fn.Parameters.Count > 0 &&
+                             string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+                .ToArray();
+            if (receiverMatches.Length > 0)
+            {
+                return receiverMatches;
+            }
+        }
+
+        return arityMatches;
+    }
+
+    private static bool TryResolveExpressionType(
+        ExpressionSyntax expr,
+        IReadOnlyDictionary<string, TypeSyntax> locals,
+        IReadOnlyDictionary<string, TypeSyntax> globals,
+        IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
+        out TypeSyntax type)
+    {
+        switch (expr)
+        {
+            case ParenthesizedExpressionSyntax paren:
+                return TryResolveExpressionType(paren.Expression, locals, globals, structs, out type);
+            case UnaryExpressionSyntax unary:
+                return TryResolveExpressionType(unary.Operand, locals, globals, structs, out type);
+            case IdentifierExpressionSyntax id:
+                if (locals.TryGetValue(id.Identifier.Text, out var localType))
+                {
+                    type = localType;
+                    return true;
+                }
+
+                if (globals.TryGetValue(id.Identifier.Text, out var globalType))
+                {
+                    type = globalType;
+                    return true;
+                }
+
+                break;
+            case LiteralExpressionSyntax lit:
+                switch (lit.Literal.Kind)
+                {
+                    case TokenKind.IntegerLiteral:
+                        type = CreateNamedType("i32");
+                        return true;
+                    case TokenKind.U8Literal:
+                        type = CreateNamedType("u8");
+                        return true;
+                    case TokenKind.FloatLiteral:
+                        type = CreateNamedType("f32");
+                        return true;
+                    case TokenKind.StringLiteral:
+                    case TokenKind.BacktickLiteral:
+                        type = CreateNamedType("string");
+                        return true;
+                    case TokenKind.TrueKeyword:
+                    case TokenKind.FalseKeyword:
+                        type = CreateNamedType("bool");
+                        return true;
+                }
+                break;
+            case ArrayAccessExpressionSyntax array:
+                if (TryResolveExpressionType(array.Receiver, locals, globals, structs, out var arrayType) &&
+                    arrayType is ArrayTypeSyntax arraySyntax)
+                {
+                    type = arraySyntax.ElementType;
+                    return true;
+                }
+                break;
+            case MemberAccessExpressionSyntax member:
+                if (TryResolveExpressionType(member.Receiver, locals, globals, structs, out var receiverType))
+                {
+                    if (receiverType is NamedTypeSyntax named &&
+                        structs.TryGetValue(named.Name, out var structDecl))
+                    {
+                        var field = structDecl.Fields.FirstOrDefault(f => string.Equals(f.Identifier.Text, member.Member.Text, StringComparison.Ordinal));
+                        if (field is not null)
+                        {
+                            type = field.Type;
+                            return true;
+                        }
+                    }
+
+                    if (receiverType is ArrayTypeSyntax && string.Equals(member.Member.Text, "length", StringComparison.Ordinal))
+                    {
+                        type = CreateNamedType("i32");
+                        return true;
+                    }
+                }
+                break;
+        }
+
+        type = null!;
+        return false;
+    }
+
+    private static NamedTypeSyntax CreateNamedType(string name) =>
+        new(new Token(TokenKind.Identifier, name, new SourceSpan(0, 0)));
 }
