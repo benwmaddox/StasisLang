@@ -175,6 +175,22 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_function_name_collision_with_builtin_function()
+    {
+        var source = """
+            function print(value: i32): i32 {
+                return value;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate symbol 'print'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_duplicate_receiver_callable_when_array_size_text_differs_only_by_formatting()
     {
         var source = """

@@ -452,11 +452,15 @@ public sealed class SemanticAnalyzer
                 case FunctionDeclarationSyntax fn:
                     {
                         var returnType = fn.ReturnType is null ? null : ResolveType(fn.ReturnType);
-                        if (!_functionsByName.TryGetValue(fn.Name.Text, out var overloads))
+                        var hadUserDeclaredName = _functionsByName.TryGetValue(fn.Name.Text, out var existingOverloads);
+                        var overloads = hadUserDeclaredName
+                            ? existingOverloads!
+                            : new List<FunctionDeclarationSyntax>();
+                        if (!hadUserDeclaredName)
                         {
-                            overloads = new List<FunctionDeclarationSyntax>();
                             _functionsByName[fn.Name.Text] = overloads;
                         }
+
                         overloads.Add(fn);
 
                         var callableKey = CallableIdentity.GetCallableKey(fn);
@@ -480,6 +484,12 @@ public sealed class SemanticAnalyzer
                             }
                             else if (existing.Kind != SymbolKind.Function)
                             {
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                            else if (!hadUserDeclaredName)
+                            {
+                                // Builtins are predeclared as function symbols. User declarations must not
+                                // silently shadow them because lowering routes builtin names directly.
                                 AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
                             }
                         }

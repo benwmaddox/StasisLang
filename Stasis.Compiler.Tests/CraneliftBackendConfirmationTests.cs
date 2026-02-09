@@ -360,6 +360,26 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void FunctionFormOverload_UsesBacktickLiteralAsString()
+    {
+        var ir = CompileCraneliftIr("""
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function main(): i32 {
+                return tag(`raw`);
+            }
+            """);
+
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
     public void PrintInt_UsesPrintf()
     {
         var ir = CompileCraneliftIr("""

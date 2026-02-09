@@ -1265,7 +1265,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         foreach (var constDecl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
         {
-            if (constDecl.Initializer is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+            if (constDecl.Initializer is LiteralExpressionSyntax lit &&
+                lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral)
             {
                 stringLiterals.Add(UnescapeString(lit.Literal.Text));
             }
@@ -1355,7 +1356,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     {
         switch (expr)
         {
-            case LiteralExpressionSyntax lit when lit.Literal.Kind == TokenKind.StringLiteral:
+            case LiteralExpressionSyntax lit when lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral:
                 stringLiterals.Add(UnescapeString(lit.Literal.Text));
                 break;
             case IdentifierExpressionSyntax:
