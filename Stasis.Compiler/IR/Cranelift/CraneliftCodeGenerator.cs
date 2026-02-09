@@ -50,7 +50,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             using var builder = new CraneliftModuleBuilder(_moduleName);
 
             var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, options.IncludeTests, options.AllowReachabilityFallback);
-            var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>());
+            var reachableFunctionDeclarations = compilationUnit.Declarations
+                .OfType<FunctionDeclarationSyntax>()
+                .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
+            var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
             var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
@@ -780,7 +783,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
-            var externName = GetExternLinkName(func) ?? CallableIdentity.GetEmittedFunctionName(func, namesWithCollisions);
+            var externName = GetExternLinkName(func) ?? func.Name.Text;
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);

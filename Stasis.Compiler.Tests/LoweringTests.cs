@@ -143,6 +143,53 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Reachable_collision_set_does_not_mangle_live_function_for_dead_overload()
+    {
+        var result = LowerWithDiagnostics("""
+            function ping(value: i32): i32 {
+                return value;
+            }
+
+            function ping(value: f32): i32 {
+                return 0;
+            }
+
+            function main(): i32 {
+                return ping(5);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @ping(i32", result.Ir);
+        Assert.Contains("call i32 @ping(", result.Ir);
+        Assert.DoesNotContain("@ping__recv__i32", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Extern_overload_uses_link_name_instead_of_receiver_mangle()
+    {
+        var result = LowerWithDiagnostics("""
+            function @extern("host_damage_enemy") damage(enemy: i32, amount: i32): i32;
+
+            function damage(enemy: f32, amount: i32): i32 {
+                return amount;
+            }
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("declare i32 @host_damage_enemy(i32, i32)", result.Ir);
+        Assert.Contains("call i32 @host_damage_enemy(", result.Ir);
+        Assert.Contains("define i32 @damage__recv__f32(", result.Ir);
+        Assert.DoesNotContain("@damage__recv__i32", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Emits_ret_void_when_missing()
     {
         var ir = Lower("""

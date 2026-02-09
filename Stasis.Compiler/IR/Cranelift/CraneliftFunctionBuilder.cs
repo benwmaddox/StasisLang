@@ -1810,7 +1810,7 @@ public sealed class CraneliftFunctionBuilder
             return UnquoteStringLiteral(linkName);
         }
 
-        return CallableIdentity.GetEmittedFunctionName(function, _namesWithCollisions);
+        return function.Name.Text;
     }
 
     private static string UnquoteStringLiteral(string text)
