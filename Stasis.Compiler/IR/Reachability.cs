@@ -201,7 +201,7 @@ public static class Reachability
             case ForeachStatementSyntax foreachStmt:
                 CollectFromExpression(foreachStmt.Iterable, functions, globals, structs, locals, results);
                 var foreachLocals = new Dictionary<string, TypeSyntax>(locals, StringComparer.Ordinal);
-                if (TryResolveExpressionType(foreachStmt.Iterable, foreachLocals, globals, structs, out var iterableType) &&
+                if (TryResolveExpressionType(foreachStmt.Iterable, functions, foreachLocals, globals, structs, out var iterableType) &&
                     iterableType is ArrayTypeSyntax arrayType)
                 {
                     foreachLocals[foreachStmt.Iterator.Text] = arrayType.ElementType;
@@ -283,11 +283,11 @@ public static class Reachability
             case IdentifierExpressionSyntax id when locals.ContainsKey(id.Identifier.Text):
                 return Array.Empty<FunctionDeclarationSyntax>();
             case IdentifierExpressionSyntax id when functions.TryGetValue(id.Identifier.Text, out var candidates):
-                return ResolveFunctionFormCandidates(candidates, call.Arguments, globals, structs, locals);
+                return ResolveFunctionFormCandidates(candidates, call.Arguments, functions, globals, structs, locals);
             case MemberAccessExpressionSyntax member when string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
                 return Array.Empty<FunctionDeclarationSyntax>();
             case MemberAccessExpressionSyntax member when functions.TryGetValue(member.Member.Text, out var memberCandidates):
-                return ResolveReceiverFormCandidates(member, call.Arguments.Count, memberCandidates, globals, structs, locals);
+                return ResolveReceiverFormCandidates(member, call.Arguments.Count, memberCandidates, functions, globals, structs, locals);
             default:
                 return Array.Empty<FunctionDeclarationSyntax>();
         }
@@ -296,6 +296,7 @@ public static class Reachability
     private static FunctionDeclarationSyntax[] ResolveFunctionFormCandidates(
         FunctionDeclarationSyntax[] candidates,
         IReadOnlyList<ExpressionSyntax> arguments,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         IReadOnlyDictionary<string, TypeSyntax> globals,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
         IReadOnlyDictionary<string, TypeSyntax> locals)
@@ -306,18 +307,24 @@ public static class Reachability
             return Array.Empty<FunctionDeclarationSyntax>();
         }
 
-        if (arguments.Count > 0 &&
-            TryResolveExpressionType(arguments[0], locals, globals, structs, out var firstArgType))
+        if (arguments.Count > 0)
         {
-            var firstArgKey = CallableIdentity.TypeKey(firstArgType);
-            var receiverMatches = arityMatches
-                .Where(fn => fn.Parameters.Count > 0 &&
-                             string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), firstArgKey, StringComparison.Ordinal))
-                .ToArray();
-            if (receiverMatches.Length > 0)
+            if (TryResolveExpressionType(arguments[0], functions, locals, globals, structs, out var firstArgType))
             {
-                return receiverMatches;
+                var firstArgKey = CallableIdentity.TypeKey(firstArgType);
+                var receiverMatches = arityMatches
+                    .Where(fn => fn.Parameters.Count > 0 &&
+                                 string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), firstArgKey, StringComparison.Ordinal))
+                    .ToArray();
+                if (receiverMatches.Length > 0)
+                {
+                    return receiverMatches;
+                }
             }
+
+            return arityMatches.Length == 1
+                ? arityMatches
+                : Array.Empty<FunctionDeclarationSyntax>();
         }
 
         var receiverlessMatches = arityMatches.Where(fn => !CallableIdentity.HasReceiver(fn)).ToArray();
@@ -333,6 +340,7 @@ public static class Reachability
         MemberAccessExpressionSyntax member,
         int argumentCount,
         FunctionDeclarationSyntax[] candidates,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         IReadOnlyDictionary<string, TypeSyntax> globals,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
         IReadOnlyDictionary<string, TypeSyntax> locals)
@@ -343,7 +351,7 @@ public static class Reachability
             return Array.Empty<FunctionDeclarationSyntax>();
         }
 
-        if (TryResolveExpressionType(member.Receiver, locals, globals, structs, out var receiverType))
+        if (TryResolveExpressionType(member.Receiver, functions, locals, globals, structs, out var receiverType))
         {
             var receiverKey = CallableIdentity.TypeKey(receiverType);
             var receiverMatches = arityMatches
@@ -361,6 +369,7 @@ public static class Reachability
 
     private static bool TryResolveExpressionType(
         ExpressionSyntax expr,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         IReadOnlyDictionary<string, TypeSyntax> locals,
         IReadOnlyDictionary<string, TypeSyntax> globals,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
@@ -369,9 +378,9 @@ public static class Reachability
         switch (expr)
         {
             case ParenthesizedExpressionSyntax paren:
-                return TryResolveExpressionType(paren.Expression, locals, globals, structs, out type);
+                return TryResolveExpressionType(paren.Expression, functions, locals, globals, structs, out type);
             case UnaryExpressionSyntax unary:
-                return TryResolveExpressionType(unary.Operand, locals, globals, structs, out type);
+                return TryResolveExpressionType(unary.Operand, functions, locals, globals, structs, out type);
             case IdentifierExpressionSyntax id:
                 if (locals.TryGetValue(id.Identifier.Text, out var localType))
                 {
@@ -409,7 +418,7 @@ public static class Reachability
                 }
                 break;
             case ArrayAccessExpressionSyntax array:
-                if (TryResolveExpressionType(array.Receiver, locals, globals, structs, out var arrayType) &&
+                if (TryResolveExpressionType(array.Receiver, functions, locals, globals, structs, out var arrayType) &&
                     arrayType is ArrayTypeSyntax arraySyntax)
                 {
                     type = arraySyntax.ElementType;
@@ -417,7 +426,7 @@ public static class Reachability
                 }
                 break;
             case MemberAccessExpressionSyntax member:
-                if (TryResolveExpressionType(member.Receiver, locals, globals, structs, out var receiverType))
+                if (TryResolveExpressionType(member.Receiver, functions, locals, globals, structs, out var receiverType))
                 {
                     if (receiverType is NamedTypeSyntax named &&
                         structs.TryGetValue(named.Name, out var structDecl))
@@ -437,6 +446,21 @@ public static class Reachability
                     }
                 }
                 break;
+            case CallExpressionSyntax call:
+                {
+                    var callCandidates = ResolveCallCandidates(call, functions, globals, structs, locals);
+                    if (callCandidates.Length == 1)
+                    {
+                        var returnType = callCandidates[0].ReturnType;
+                        if (returnType is not null)
+                        {
+                            type = returnType;
+                            return true;
+                        }
+                    }
+
+                    break;
+                }
         }
 
         type = null!;

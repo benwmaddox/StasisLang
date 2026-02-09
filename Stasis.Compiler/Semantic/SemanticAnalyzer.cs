@@ -1725,6 +1725,7 @@ public sealed class SemanticAnalyzer
                     TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                     TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                     TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
+                    TokenKind.BacktickLiteral => new PrimitiveTypeSymbol("string_literal"),
                     TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                     _ => null
                 };
@@ -2104,24 +2105,40 @@ public sealed class SemanticAnalyzer
             return false;
         }
 
+        var arityMatches = candidates
+            .Where(fn => fn.Parameters.Count == arguments.Count)
+            .ToArray();
+        if (arityMatches.Length == 0)
+        {
+            return false;
+        }
+
         // Prefer receiver-scoped callables when the first argument has a known type and a matching receiver exists.
         if (arguments.Count > 0)
         {
             var firstType = ResolveExpressionType(arguments[0], scope);
-            if (firstType is not null &&
-                TryResolveReceiverScopedCallable(name, firstType, out var receiverResolved, out ambiguousMessage))
+            if (firstType is not null)
             {
-                function = receiverResolved;
-                return true;
-            }
+                var receiverKey = CallableIdentity.TypeKey(firstType);
+                var receiverMatches = arityMatches
+                    .Where(fn => fn.Parameters.Count > 0 &&
+                                 string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+                    .ToArray();
+                if (receiverMatches.Length == 1)
+                {
+                    function = receiverMatches[0];
+                    return true;
+                }
 
-            if (ambiguousMessage is not null)
-            {
-                return false;
+                if (receiverMatches.Length > 1)
+                {
+                    ambiguousMessage = $"Call to '{name}' is ambiguous for receiver type '{receiverKey}'.";
+                    return false;
+                }
             }
         }
 
-        var receiverless = candidates.Where(fn => fn.Parameters.Count == 0).ToArray();
+        var receiverless = arityMatches.Where(fn => fn.Parameters.Count == 0).ToArray();
         if (receiverless.Length == 1)
         {
             function = receiverless[0];
@@ -2131,8 +2148,16 @@ public sealed class SemanticAnalyzer
         if (receiverless.Length > 1)
         {
             ambiguousMessage = $"Call to '{name}' is ambiguous (multiple receiverless declarations).";
+            return false;
         }
 
+        if (arityMatches.Length == 1)
+        {
+            function = arityMatches[0];
+            return true;
+        }
+
+        ambiguousMessage = $"Call to '{name}' is ambiguous.";
         return false;
     }
 

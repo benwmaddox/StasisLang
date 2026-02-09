@@ -219,6 +219,30 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Resolves_function_form_overload_for_backtick_literal_without_zero_arg_fallback()
+    {
+        var source = """
+            function ping(): i32 {
+                return 0;
+            }
+
+            function ping(value: string): i32 {
+                return 1;
+            }
+
+            function run(): i32 {
+                return ping(`raw`);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
     public void Local_value_shadows_function_name_for_calls()
     {
         var source = """
