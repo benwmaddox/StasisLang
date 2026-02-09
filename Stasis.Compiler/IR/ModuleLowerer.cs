@@ -23,7 +23,10 @@ public sealed class ModuleLowerer
         var opts = options ?? LowerOptions.Default;
         using var builder = new LlvmModuleBuilder(moduleName, opts.TargetTriple);
         var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, opts.IncludeTests, opts.AllowReachabilityFallback);
-        var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>());
+        var reachableFunctionDeclarations = compilationUnit.Declarations
+            .OfType<FunctionDeclarationSyntax>()
+            .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
+        var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions);
@@ -2165,9 +2168,9 @@ public sealed class ModuleLowerer
                 return inlined;
             }
 
-            var emittedName = CallableIdentity.GetEmittedFunctionName(resolvedFunction, _namesWithCollisions);
+            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions);
             var fn = _moduleBuilder.Module.GetNamedFunction(emittedName);
-            if (fn.Handle == IntPtr.Zero && resolvedFunction.IsExtern)
+            if (fn.Handle == IntPtr.Zero && IsExternFunction(resolvedFunction))
             {
                 var externSignature = ResolveFunctionSignature(resolvedFunction);
                 var externType = LLVMTypeRef.CreateFunction(externSignature.ReturnType, externSignature.Parameters, false);
@@ -7157,7 +7160,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            var emittedName = CallableIdentity.GetEmittedFunctionName(fn, namesWithCollisions);
+            var emittedName = GetCallableSymbolName(fn, namesWithCollisions);
             EmitFunction(builder, symbols, structs, emittedName, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
@@ -7193,6 +7196,41 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             .ToArray();
 
         builder.DefineFunction(name, ret, paramTypes);
+    }
+
+    private static string GetCallableSymbolName(FunctionDeclarationSyntax function, IReadOnlySet<string> namesWithCollisions)
+    {
+        if (IsExternFunction(function))
+        {
+            return GetExternLinkName(function) ?? function.Name.Text;
+        }
+
+        return CallableIdentity.GetEmittedFunctionName(function, namesWithCollisions);
+    }
+
+    private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
+        function.IsExtern || HasExternAttribute(function);
+
+    private static bool HasExternAttribute(FunctionDeclarationSyntax function) =>
+        function.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
+
+    private static string? GetExternLinkName(FunctionDeclarationSyntax function)
+    {
+        var raw = function.Attributes
+            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
+            .StringValue;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            return raw.Substring(1, raw.Length - 2);
+        }
+
+        return raw;
     }
 
     private static TypeSymbol ResolveType(TypeSyntax syntax, IReadOnlyDictionary<string, Symbol> symbols)
