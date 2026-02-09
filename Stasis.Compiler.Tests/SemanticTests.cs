@@ -191,7 +191,7 @@ public class SemanticTests
         Assert.Empty(parse.Diagnostics);
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
-        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate callable 'hash' for receiver type 'i32[4]'.", StringComparison.Ordinal));
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate callable 'hash' for receiver type 'i32[]'.", StringComparison.Ordinal));
     }
 
     [Fact]
