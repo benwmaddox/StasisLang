@@ -322,9 +322,9 @@ public static class Reachability
                 }
             }
 
-            return arityMatches.Length == 1
-                ? arityMatches
-                : Array.Empty<FunctionDeclarationSyntax>();
+            // Keep same-arity candidates when first-arg typing is unavailable or inconclusive.
+            // Reachability must stay conservative to avoid dropping required overloads.
+            return arityMatches;
         }
 
         var receiverlessMatches = arityMatches.Where(fn => !CallableIdentity.HasReceiver(fn)).ToArray();
@@ -381,6 +381,8 @@ public static class Reachability
                 return TryResolveExpressionType(paren.Expression, functions, locals, globals, structs, out type);
             case UnaryExpressionSyntax unary:
                 return TryResolveExpressionType(unary.Operand, functions, locals, globals, structs, out type);
+            case AssignmentExpressionSyntax assign:
+                return TryResolveExpressionType(assign.Right, functions, locals, globals, structs, out type);
             case IdentifierExpressionSyntax id:
                 if (locals.TryGetValue(id.Identifier.Text, out var localType))
                 {
@@ -417,6 +419,44 @@ public static class Reachability
                         return true;
                 }
                 break;
+            case BinaryExpressionSyntax bin:
+                {
+                    if (bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual or
+                        TokenKind.Less or TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual or
+                        TokenKind.AmpAmp or TokenKind.PipePipe)
+                    {
+                        type = CreateNamedType("bool");
+                        return true;
+                    }
+
+                    if (TryResolveExpressionType(bin.Left, functions, locals, globals, structs, out var leftType) &&
+                        TryResolveExpressionType(bin.Right, functions, locals, globals, structs, out var rightType))
+                    {
+                        var leftKey = CallableIdentity.TypeKey(leftType);
+                        var rightKey = CallableIdentity.TypeKey(rightType);
+                        if (leftKey == "f32" || rightKey == "f32")
+                        {
+                            type = CreateNamedType("f32");
+                            return true;
+                        }
+
+                        type = leftType;
+                        return true;
+                    }
+
+                    break;
+                }
+            case OperatorCallExpressionSyntax op:
+                {
+                    var opText = op.OperatorToken.Text;
+                    if (opText is "==" or "!=" or "<" or "<=" or ">" or ">=" or "&&" or "||")
+                    {
+                        type = CreateNamedType("bool");
+                        return true;
+                    }
+
+                    return TryResolveExpressionType(op.Receiver, functions, locals, globals, structs, out type);
+                }
             case ArrayAccessExpressionSyntax array:
                 if (TryResolveExpressionType(array.Receiver, functions, locals, globals, structs, out var arrayType) &&
                     arrayType is ArrayTypeSyntax arraySyntax)

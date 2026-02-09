@@ -117,6 +117,30 @@ public class ReachabilityTests
         Assert.DoesNotContain("damage|Hero", reachable);
     }
 
+    [Fact]
+    public void Selects_matching_receiver_overload_for_binary_first_argument()
+    {
+        var compilationUnit = Parse("""
+            function tag(value: i32): i32 {
+                return 1;
+            }
+
+            function tag(value: f32): i32 {
+                return 2;
+            }
+
+            function main(): i32 {
+                return tag(1.+(2));
+            }
+            """);
+
+        var reachable = Reachability.CollectReachableFunctions(compilationUnit, includeTests: false, allowFallback: false);
+
+        Assert.Contains("main|<none>", reachable);
+        Assert.Contains("tag|i32", reachable);
+        Assert.DoesNotContain("tag|f32", reachable);
+    }
+
     private static CompilationUnitSyntax Parse(string source)
     {
         var parse = Parser.Parse(source);

@@ -6792,9 +6792,64 @@ public sealed class ModuleLowerer
                     return null;
                 case ParenthesizedExpressionSyntax paren:
                     return ResolveExpressionType(paren.Expression, locals);
+                case UnaryExpressionSyntax unary when unary.OperatorToken.Kind == TokenKind.Bang:
+                    return new PrimitiveTypeSymbol("bool");
+                case UnaryExpressionSyntax unary:
+                    return ResolveExpressionType(unary.Operand, locals);
+                case AssignmentExpressionSyntax assign:
+                    return ResolveExpressionType(assign.Right, locals);
+                case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                                   TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, locals ?? new Dictionary<string, LocalBinding>(StringComparer.Ordinal), out var resolvedFunction, out _):
+                    return resolvedFunction.ReturnType is null
+                        ? new VoidTypeSymbol()
+                        : ResolveType(resolvedFunction.ReturnType, _symbols);
+                case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                                   string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                    return new VoidTypeSymbol();
+                case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                                   TryResolveReceiverScopedCallable(member, locals ?? new Dictionary<string, LocalBinding>(StringComparer.Ordinal), out var resolvedReceiverFunction, out _):
+                    return resolvedReceiverFunction.ReturnType is null
+                        ? new VoidTypeSymbol()
+                        : ResolveType(resolvedReceiverFunction.ReturnType, _symbols);
                 default:
-                    return null;
+                    break;
             }
+
+            if (expr is BinaryExpressionSyntax bin)
+            {
+                if (bin.OperatorToken.Kind is TokenKind.EqualEqual or TokenKind.BangEqual or TokenKind.Less or
+                    TokenKind.LessEqual or TokenKind.Greater or TokenKind.GreaterEqual or TokenKind.AmpAmp or TokenKind.PipePipe)
+                {
+                    return new PrimitiveTypeSymbol("bool");
+                }
+
+                var leftType = ResolveExpressionType(bin.Left, locals);
+                var rightType = ResolveExpressionType(bin.Right, locals);
+                if (leftType is PrimitiveTypeSymbol leftPrim && leftPrim.PrimitiveName == "f32")
+                {
+                    return leftType;
+                }
+
+                if (rightType is PrimitiveTypeSymbol rightPrim && rightPrim.PrimitiveName == "f32")
+                {
+                    return rightType;
+                }
+
+                return leftType ?? rightType;
+            }
+
+            if (expr is OperatorCallExpressionSyntax op)
+            {
+                var opText = op.OperatorToken.Text;
+                if (opText is "==" or "!=" or "<" or "<=" or ">" or ">=" or "&&" or "||")
+                {
+                    return new PrimitiveTypeSymbol("bool");
+                }
+
+                return ResolveExpressionType(op.Receiver, locals);
+            }
+
+            return null;
         }
 
         private string TryResolveGlobalName(string name) =>
