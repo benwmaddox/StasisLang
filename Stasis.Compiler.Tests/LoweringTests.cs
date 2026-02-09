@@ -60,6 +60,42 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_receiver_scoped_callables_with_collision_only_name_mangling()
+    {
+        var ir = Lower("""
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function damage(hero: Hero, amount: i32): i32 {
+                return amount.+(1);
+            }
+
+            function add(a: i32, b: i32): i32 {
+                return a.+(b);
+            }
+
+            function tick(): void {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let x: i32 = enemy.damage(5);
+                let y: i32 = damage(hero, 6);
+                let z: i32 = add(1, 2);
+            }
+            """);
+
+        Assert.Contains("define i32 @damage__recv__Enemy(", ir);
+        Assert.Contains("define i32 @damage__recv__Hero(", ir);
+        Assert.Contains("call i32 @damage__recv__Enemy(", ir);
+        Assert.Contains("call i32 @damage__recv__Hero(", ir);
+        Assert.Contains("define i32 @add(", ir);
+        Assert.DoesNotContain("@add__recv__", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Emits_ret_void_when_missing()
     {
         var ir = Lower("""

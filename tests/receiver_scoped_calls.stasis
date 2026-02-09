@@ -1,0 +1,29 @@
+struct Enemy {
+    hp: i32;
+}
+
+struct Hero {
+    hp: i32;
+}
+
+function damage(enemy: Enemy, amount: i32): i32 {
+    return amount;
+}
+
+function damage(hero: Hero, amount: i32): i32 {
+    return amount.+(100);
+}
+
+test `receiver form resolves by first parameter type`() {
+    let enemy: Enemy = 0;
+    let hero: Hero = 0;
+    return enemy.damage(5) == 5
+        && hero.damage(5) == 105;
+}
+
+test `function form uses same receiver-scoped resolution`() {
+    let enemy: Enemy = 0;
+    let hero: Hero = 0;
+    return damage(enemy, 7) == 7
+        && damage(hero, 7) == 107;
+}

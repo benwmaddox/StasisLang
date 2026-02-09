@@ -50,6 +50,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             using var builder = new CraneliftModuleBuilder(_moduleName);
 
             var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, options.IncludeTests, options.AllowReachabilityFallback);
+            var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>());
             var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
@@ -58,7 +59,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
-            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, namesWithCollisions);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -70,7 +71,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, _moduleName);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, _moduleName);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -754,7 +755,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         CraneliftModuleBuilder builder,
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
-        IReadOnlySet<string> reachableFunctions)
+        IReadOnlySet<string> reachableFunctions,
+        IReadOnlySet<string> namesWithCollisions)
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
@@ -765,7 +767,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Avoid emitting extern declarations that are never referenced (Windows COFF AOT can
             // treat declared-but-unused externs as link-time requirements).
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
@@ -778,7 +780,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
-            var externName = GetExternLinkName(func) ?? func.Name.Text;
+            var externName = GetExternLinkName(func) ?? CallableIdentity.GetEmittedFunctionName(func, namesWithCollisions);
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);
@@ -897,6 +899,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         bool includeTests,
         bool emitTestHarness,
         HashSet<string> reachableFunctions,
+        IReadOnlySet<string> namesWithCollisions,
         string moduleName)
     {
         var typeMapper = builder.TypeMapper;
@@ -907,15 +910,16 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<EnumDeclarationSyntax>()
             .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
         var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
-        var functions = compilationUnit.Declarations
+        var functionsByName = compilationUnit.Declarations
             .OfType<FunctionDeclarationSyntax>()
-            .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functions, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+            .GroupBy(f => f.Name.Text, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<FunctionDeclarationSyntax>)g.ToList(), StringComparer.Ordinal);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
@@ -943,7 +947,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             {
                 body = $"; attrs: {string.Join(" ", attributes)}{Environment.NewLine}{body}";
             }
-            var mangledName = MangleFunctionName(moduleName, func.Name.Text);
+            var emittedName = CallableIdentity.GetEmittedFunctionName(func, namesWithCollisions);
+            var mangledName = MangleFunctionName(moduleName, emittedName);
             builder.DefineFunctionWithBody(mangledName, returnType, paramTypes, body);
         }
 
@@ -1244,7 +1249,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
