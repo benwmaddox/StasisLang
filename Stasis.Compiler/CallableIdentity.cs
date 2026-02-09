@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
 using Stasis.Compiler.Semantic;
@@ -58,7 +57,7 @@ internal static class CallableIdentity
         type switch
         {
             NamedTypeSyntax named => named.Name,
-            ArrayTypeSyntax arr => $"{TypeKey(arr.ElementType)}[{NormalizeArraySizeText(arr.SizeText)}]",
+            ArrayTypeSyntax arr => $"{TypeKey(arr.ElementType)}[]",
             _ => "unknown"
         };
 
@@ -67,7 +66,7 @@ internal static class CallableIdentity
         {
             PrimitiveTypeSymbol prim => prim.PrimitiveName,
             NamedTypeSymbol named => named.TypeName,
-            ArrayTypeSymbol arr => $"{TypeKey(arr.ElementType)}[{arr.Size}]",
+            ArrayTypeSymbol arr => $"{TypeKey(arr.ElementType)}[]",
             VoidTypeSymbol => "void",
             _ => "unknown"
         };
@@ -88,15 +87,5 @@ internal static class CallableIdentity
         }
 
         return sb.ToString();
-    }
-
-    private static string NormalizeArraySizeText(string sizeText)
-    {
-        if (int.TryParse(sizeText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
-        {
-            return parsed.ToString(CultureInfo.InvariantCulture);
-        }
-
-        return sizeText;
     }
 }
