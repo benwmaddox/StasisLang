@@ -484,7 +484,7 @@ public sealed class CraneliftFunctionBuilder
         {
             _instructions.AppendLine($"    {val} = iconst.i32 0");
         }
-        else if (lit.Literal.Kind == TokenKind.StringLiteral)
+        else if (lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral)
         {
             var text = UnescapeString(lit.Literal.Text);
             if (_stringLiterals.TryGetValue(text, out var globalName))
@@ -3509,7 +3509,7 @@ public sealed class CraneliftFunctionBuilder
             return true;
         }
 
-        if (argument is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+        if (argument is LiteralExpressionSyntax lit && lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral)
         {
             ptr = LowerExpression(argument);
             return true;
@@ -4853,7 +4853,7 @@ public sealed class CraneliftFunctionBuilder
             switch (prim.PrimitiveName)
             {
                 case "string":
-                    if (value.LiteralKind == TokenKind.StringLiteral)
+                    if (value.LiteralKind is TokenKind.StringLiteral or TokenKind.BacktickLiteral)
                     {
                         var text = UnescapeString(value.LiteralText);
                         if (_stringLiterals.TryGetValue(text, out var globalName))
@@ -4989,6 +4989,7 @@ public sealed class CraneliftFunctionBuilder
                 TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                 TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                 TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
+                TokenKind.BacktickLiteral => new PrimitiveTypeSymbol("string_literal"),
                 _ => null
             },
             IdentifierExpressionSyntax id when _localTypes.TryGetValue(id.Identifier.Text, out var localType) => localType,
