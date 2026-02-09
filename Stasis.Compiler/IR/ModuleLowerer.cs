@@ -2138,6 +2138,12 @@ public sealed class ModuleLowerer
             else if (call.Callee is IdentifierExpressionSyntax idCallee)
             {
                 callableName = idCallee.Identifier.Text;
+                if (locals.ContainsKey(callableName))
+                {
+                    AddDiagnostic($"'{callableName}' is not callable (local value).", call.Span);
+                    return ConstI32(0);
+                }
+
                 if (!TryResolveFunctionFormCallable(callableName, call.Arguments, locals, out resolvedFunction, out var diag))
                 {
                     AddDiagnostic(diag ?? $"Unknown function '{callableName}'.", call.Span);
@@ -6709,6 +6715,18 @@ public sealed class ModuleLowerer
         {
             switch (expr)
             {
+                case LiteralExpressionSyntax lit:
+                    return lit.Literal.Kind switch
+                    {
+                        TokenKind.IntegerLiteral => new PrimitiveTypeSymbol("i32"),
+                        TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
+                        TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
+                        TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
+                        TokenKind.BacktickLiteral => new PrimitiveTypeSymbol("string_literal"),
+                        TokenKind.TrueKeyword => new PrimitiveTypeSymbol("bool"),
+                        TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
+                        _ => null
+                    };
                 case IdentifierExpressionSyntax id:
                     if (locals is not null &&
                         locals.TryGetValue(id.Identifier.Text, out var local) &&

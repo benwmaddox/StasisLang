@@ -280,6 +280,8 @@ public static class Reachability
     {
         switch (call.Callee)
         {
+            case IdentifierExpressionSyntax id when locals.ContainsKey(id.Identifier.Text):
+                return Array.Empty<FunctionDeclarationSyntax>();
             case IdentifierExpressionSyntax id when functions.TryGetValue(id.Identifier.Text, out var candidates):
                 return ResolveFunctionFormCandidates(candidates, call.Arguments, globals, structs, locals);
             case MemberAccessExpressionSyntax member when string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):

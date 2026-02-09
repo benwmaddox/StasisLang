@@ -1125,6 +1125,16 @@ public sealed class SemanticAnalyzer
                     // Avoid double-reporting: treat `foo()` as a call-site check instead of
                     // first resolving `foo` as a standalone identifier expression.
                     var name = idCallee.Identifier.Text;
+                    if (scope.TryGetValue(name, out var localCallee))
+                    {
+                        var kind = localCallee.Kind.ToString().ToLowerInvariant();
+                        var ty = localCallee.Type is null ? "unknown" : FormatType(localCallee.Type);
+                        AddDiagnostic(
+                            $"'{name}' is not callable ({kind} {ty}). Hint: remove '()' to use the value, or call a declared function.",
+                            idCallee.Identifier.Span);
+                        break;
+                    }
+
                     if (TryResolveFunctionFormCallable(name, c.Arguments, scope, out var resolved, out var ambiguous))
                     {
                         ValidateCallArity(c, resolved);
@@ -1137,15 +1147,7 @@ public sealed class SemanticAnalyzer
                         break;
                     }
 
-                    if (scope.TryGetValue(name, out var localCallee))
-                    {
-                        var kind = localCallee.Kind.ToString().ToLowerInvariant();
-                        var ty = localCallee.Type is null ? "unknown" : FormatType(localCallee.Type);
-                        AddDiagnostic(
-                            $"'{name}' is not callable ({kind} {ty}). Hint: remove '()' to use the value, or call a declared function.",
-                            idCallee.Identifier.Span);
-                    }
-                    else if (_symbols.TryGetValue(name, out var calleeSym))
+                    if (_symbols.TryGetValue(name, out var calleeSym))
                     {
                         if (calleeSym.Kind is not (SymbolKind.Function or SymbolKind.Test))
                         {
@@ -1812,6 +1814,9 @@ public sealed class SemanticAnalyzer
                     // Default to left operand type, or i32 if unknown
                     return leftType ?? new PrimitiveTypeSymbol("i32");
                 }
+            case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                               scope.ContainsKey(id.Identifier.Text):
+                return null;
             case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                                TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, scope, out var resolved, out _):
                 return resolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(resolved.ReturnType);

@@ -701,6 +701,12 @@ public sealed class CraneliftFunctionBuilder
         else if (call.Callee is IdentifierExpressionSyntax idCallee)
         {
             callableName = idCallee.Identifier.Text;
+            if (_locals.ContainsKey(callableName))
+            {
+                _diagnostics.Add(new Diagnostic($"'{callableName}' is not callable (local value).", call.Span));
+                return ZeroI32();
+            }
+
             if (!TryResolveFunctionFormCallable(callableName, call.Arguments, out resolvedFunction, out var diag))
             {
                 _diagnostics.Add(new Diagnostic(diag ?? $"Unknown function '{callableName}'.", call.Span));
