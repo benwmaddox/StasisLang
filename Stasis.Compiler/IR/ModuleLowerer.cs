@@ -2264,13 +2264,22 @@ public sealed class ModuleLowerer
                 return false;
             }
 
+            var arityMatches = candidates
+                .Where(fn => fn.Parameters.Count == arguments.Count)
+                .ToArray();
+            if (arityMatches.Length == 0)
+            {
+                diagnostic = $"No callable '{name}' matches arity {arguments.Count}.";
+                return false;
+            }
+
             if (arguments.Count > 0)
             {
                 var firstType = ResolveExpressionType(arguments[0], locals);
                 if (firstType is not null)
                 {
                     var receiverKey = CallableIdentity.TypeKey(firstType);
-                    var receiverMatches = candidates
+                    var receiverMatches = arityMatches
                         .Where(fn => fn.Parameters.Count > 0 &&
                                      string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
                         .ToArray();
@@ -2288,9 +2297,22 @@ public sealed class ModuleLowerer
                 }
             }
 
-            if (candidates.Count == 1)
+            var receiverless = arityMatches.Where(fn => fn.Parameters.Count == 0).ToArray();
+            if (receiverless.Length == 1)
             {
-                function = candidates[0];
+                function = receiverless[0];
+                return true;
+            }
+
+            if (receiverless.Length > 1)
+            {
+                diagnostic = $"Call to '{name}' is ambiguous (multiple receiverless declarations).";
+                return false;
+            }
+
+            if (arityMatches.Length == 1)
+            {
+                function = arityMatches[0];
                 return true;
             }
 
