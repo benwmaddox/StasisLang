@@ -195,6 +195,30 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Resolves_function_form_overload_for_string_literal_as_string_receiver()
+    {
+        var source = """
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function run(): i32 {
+                return tag("hello");
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
     public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
     {
         var source = """

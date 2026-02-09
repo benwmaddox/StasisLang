@@ -64,7 +64,7 @@ internal static class CallableIdentity
     public static string TypeKey(TypeSymbol type) =>
         type switch
         {
-            PrimitiveTypeSymbol prim => prim.PrimitiveName,
+            PrimitiveTypeSymbol prim => NormalizeDispatchPrimitiveName(prim.PrimitiveName),
             NamedTypeSymbol named => named.TypeName,
             ArrayTypeSymbol arr => $"{TypeKey(arr.ElementType)}[]",
             VoidTypeSymbol => "void",
@@ -88,4 +88,11 @@ internal static class CallableIdentity
 
         return sb.ToString();
     }
+
+    private static string NormalizeDispatchPrimitiveName(string primitiveName) =>
+        primitiveName switch
+        {
+            "string_literal" => "string",
+            _ => primitiveName
+        };
 }
