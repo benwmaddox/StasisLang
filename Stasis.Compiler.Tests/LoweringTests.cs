@@ -143,6 +143,28 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Lowers_function_form_overload_for_binary_first_argument()
+    {
+        var ir = Lower("""
+            function tag(value: i32): i32 {
+                return 1;
+            }
+
+            function tag(value: f32): i32 {
+                return 2;
+            }
+
+            function tick(): i32 {
+                return tag(1.+(2));
+            }
+            """);
+
+        Assert.Contains("define i32 @tag__recv__i32(", ir);
+        Assert.Contains("define i32 @tag__recv__f32(", ir);
+        Assert.Contains("call i32 @tag__recv__i32(", ir);
+    }
+
+    [Fact]
     public void Reachable_collision_set_does_not_mangle_live_function_for_dead_overload()
     {
         var result = LowerWithDiagnostics("""
