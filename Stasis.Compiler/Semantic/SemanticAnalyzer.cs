@@ -474,7 +474,11 @@ public sealed class SemanticAnalyzer
 
                         if (_symbols.TryGetValue(fn.Name.Text, out var existing))
                         {
-                            if (existing.Kind is not (SymbolKind.Function or SymbolKind.Test))
+                            if (existing.Kind == SymbolKind.Test)
+                            {
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                            else if (existing.Kind != SymbolKind.Function)
                             {
                                 AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
                             }
