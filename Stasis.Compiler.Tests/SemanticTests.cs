@@ -100,6 +100,61 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Allows_receiver_scoped_callables_in_receiver_and_function_form()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function damage(hero: Hero, amount: i32): i32 {
+                return amount.+(1);
+            }
+
+            function run(): void {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let a: i32 = enemy.damage(5);
+                let b: i32 = hero.damage(5);
+                let c: i32 = damage(enemy, 5);
+                let d: i32 = damage(hero, 5);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_receiver_form_arity_mismatch_for_receiver_scoped_callable()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function run(): void {
+                let enemy: Enemy = 0;
+                enemy.damage();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("expects 1 argument(s) in receiver form", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
     {
         var source = """

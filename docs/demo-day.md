@@ -74,7 +74,7 @@ Features:
 
 Run:
 ```bat
-.\stasis.bat run .\samples\underwater_automation.stasis --backend llvm --graphics
+.\stasis.bat run .\samples\sudoku.stasis --backend llvm --graphics
 ```
 
 ### 4) Flappy Birds (sprites + asset hot reload + keyboard input)

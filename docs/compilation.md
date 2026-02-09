@@ -50,6 +50,7 @@ Parsing note:
   - local declarations first
   - then imported module members (in scope by default)
   - and `ModuleName.symbol` for disambiguation
+  - receiver-scoped callable candidates are resolved semantically by `(name, parameter-0 type)` at each call site
   - imports are transitive for compilation (the build graph includes imported files and their imports)
 
 ## 2.1 Struct Declarations
@@ -167,6 +168,21 @@ Param            -> Identifier ":" Type
 ReturnTypeOpt    -> ":" Type
                   | <empty>
 ```
+
+Semantic notes for receiver-scoped callables:
+
+- The parser grammar for functions is unchanged.
+- A callable key is `(name, parameter-0 type)`.
+- General overloading by non-receiver parameter lists remains unsupported.
+- Distinct parameter-0 types may reuse the same function name.
+- Both call forms are valid:
+  - receiver form: `recv.name(args...)`
+  - function form: `name(recv, args...)`
+- Resolution is deterministic:
+  1. Determine receiver type from `recv` (receiver form) or argument 0 (function form).
+  2. Match by callable key.
+  3. Validate arity and remaining argument types.
+  4. Require exactly one match; never tie-break by import order.
 
 ---
 
@@ -337,6 +353,12 @@ ArrayAccess          -> "[" Expression "]"
 FunctionCall         -> "(" ArgumentListOpt ")"
 OperatorMethodCall   -> "." OperatorToken "(" ArgumentListOpt ")"
 ```
+
+Semantic note:
+
+- `recv.name(args...)` is parsed as member access plus call, then bound as a receiver-scoped callable using receiver type + name.
+- `name(recv, args...)` is bound through the same receiver-scoped callable key.
+- After binding, both forms lower through the same function call path.
 
 ### Operator tokens (method-style)
 

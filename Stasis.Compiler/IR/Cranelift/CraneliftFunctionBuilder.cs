@@ -17,7 +17,8 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, Symbol> _symbols;
     private readonly IReadOnlyDictionary<string, StructDeclarationSyntax> _structs;
     private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
-    private readonly IReadOnlyDictionary<string, FunctionDeclarationSyntax> _functions;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> _functionsByName;
+    private readonly IReadOnlySet<string> _namesWithCollisions;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly IReadOnlyDictionary<string, string> _cStringLiterals;
@@ -37,7 +38,8 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, Symbol> symbols,
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
         IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
-        IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions,
+        IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> functionsByName,
+        IReadOnlySet<string> namesWithCollisions,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
         IReadOnlyDictionary<string, string> stringLiterals,
         IReadOnlyDictionary<string, string> cStringLiterals,
@@ -50,7 +52,8 @@ public sealed class CraneliftFunctionBuilder
         _symbols = symbols;
         _structs = structs;
         _enums = enums;
-        _functions = functions;
+        _functionsByName = functionsByName;
+        _namesWithCollisions = namesWithCollisions;
         _globalTypes = globalTypes;
         _stringLiterals = stringLiterals;
         _cStringLiterals = cStringLiterals;
@@ -674,31 +677,53 @@ public sealed class CraneliftFunctionBuilder
             return LowerClearCall(member.Receiver, call.Arguments);
         }
 
-        // Get function name
-        string funcName;
-        if (call.Callee is IdentifierExpressionSyntax id)
+        if (call.Callee is IdentifierExpressionSyntax builtinId && IsBuiltinFunction(builtinId.Identifier.Text))
         {
-            funcName = id.Identifier.Text;
+            return LowerBuiltinCall(builtinId.Identifier.Text, call.Arguments);
+        }
+
+        FunctionDeclarationSyntax? resolvedFunction;
+        string callableName;
+        var effectiveArguments = new List<ExpressionSyntax>();
+
+        if (call.Callee is MemberAccessExpressionSyntax memberCallee)
+        {
+            callableName = memberCallee.Member.Text;
+            if (!TryResolveReceiverScopedCallable(memberCallee, out resolvedFunction, out var diag))
+            {
+                _diagnostics.Add(new Diagnostic(diag ?? $"Unknown callable '{callableName}'.", call.Span));
+                return ZeroI32();
+            }
+
+            effectiveArguments.Add(memberCallee.Receiver);
+            effectiveArguments.AddRange(call.Arguments);
+        }
+        else if (call.Callee is IdentifierExpressionSyntax idCallee)
+        {
+            callableName = idCallee.Identifier.Text;
+            if (!TryResolveFunctionFormCallable(callableName, call.Arguments, out resolvedFunction, out var diag))
+            {
+                _diagnostics.Add(new Diagnostic(diag ?? $"Unknown function '{callableName}'.", call.Span));
+                return ZeroI32();
+            }
+
+            effectiveArguments.AddRange(call.Arguments);
         }
         else
         {
-            funcName = "unknown";
+            _diagnostics.Add(new Diagnostic("Only identifier calls or receiver-form calls are supported.", call.Span));
+            return ZeroI32();
         }
 
-        // Check if this is a built-in function
-        if (IsBuiltinFunction(funcName))
-        {
-            return LowerBuiltinCall(funcName, call.Arguments);
-        }
-
-        if (TryInlineCall(call, funcName, out var inlined))
+        var callableKey = CallableIdentity.GetCallableKey(resolvedFunction);
+        if (TryInlineCall(call, callableKey, resolvedFunction, effectiveArguments, out var inlined))
         {
             return inlined;
         }
 
         // Lower arguments first
         var args = new List<string>();
-        foreach (var arg in call.Arguments)
+        foreach (var arg in effectiveArguments)
         {
             if (GetExpressionType(arg) is ArrayTypeSymbol)
             {
@@ -712,12 +737,12 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
-        var isExtern = IsExternFunction(funcName);
-        var callName = IsBuiltinFunction(funcName)
-            ? funcName
-            : (isExtern ? GetExternCallName(funcName) : MangleFunctionName(funcName));
+        var isExtern = IsExternFunction(resolvedFunction);
+        var callName = isExtern
+            ? GetExternCallName(resolvedFunction)
+            : MangleFunctionName(CallableIdentity.GetEmittedFunctionName(resolvedFunction, _namesWithCollisions));
         var argList = string.Join(", ", args);
-        if (IsVoidFunction(funcName))
+        if (IsVoidFunction(resolvedFunction))
         {
             _instructions.AppendLine($"    call %{callName}({argList})");
             return ZeroI32();
@@ -728,6 +753,90 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {result} = call %{callName}({argList})");
 
         return result;
+    }
+
+    private bool TryResolveReceiverScopedCallable(
+        MemberAccessExpressionSyntax memberCallee,
+        out FunctionDeclarationSyntax function,
+        out string? diagnostic)
+    {
+        function = null!;
+        diagnostic = null;
+        var receiverType = GetExpressionType(memberCallee.Receiver);
+        if (receiverType is null)
+        {
+            diagnostic = $"Unable to resolve receiver type for call '{memberCallee.Member.Text}()'.";
+            return false;
+        }
+
+        if (!_functionsByName.TryGetValue(memberCallee.Member.Text, out var candidates))
+        {
+            diagnostic = $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{CallableIdentity.TypeKey(receiverType)}'.";
+            return false;
+        }
+
+        var receiverKey = CallableIdentity.TypeKey(receiverType);
+        var matches = candidates
+            .Where(fn => fn.Parameters.Count > 0 &&
+                         string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length == 1)
+        {
+            function = matches[0];
+            return true;
+        }
+
+        diagnostic = matches.Length > 1
+            ? $"Call to '{memberCallee.Member.Text}' is ambiguous for receiver type '{receiverKey}'."
+            : $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{receiverKey}'.";
+        return false;
+    }
+
+    private bool TryResolveFunctionFormCallable(
+        string name,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        out FunctionDeclarationSyntax function,
+        out string? diagnostic)
+    {
+        function = null!;
+        diagnostic = null;
+        if (!_functionsByName.TryGetValue(name, out var candidates))
+        {
+            return false;
+        }
+
+        if (arguments.Count > 0)
+        {
+            var firstType = GetExpressionType(arguments[0]);
+            if (firstType is not null)
+            {
+                var receiverKey = CallableIdentity.TypeKey(firstType);
+                var receiverMatches = candidates
+                    .Where(fn => fn.Parameters.Count > 0 &&
+                                 string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+                    .ToArray();
+                if (receiverMatches.Length == 1)
+                {
+                    function = receiverMatches[0];
+                    return true;
+                }
+
+                if (receiverMatches.Length > 1)
+                {
+                    diagnostic = $"Call to '{name}' is ambiguous for receiver type '{receiverKey}'.";
+                    return false;
+                }
+            }
+        }
+
+        if (candidates.Count == 1)
+        {
+            function = candidates[0];
+            return true;
+        }
+
+        diagnostic = $"Call to '{name}' is ambiguous. Use receiver form to disambiguate.";
+        return false;
     }
 
     private string LowerClearCall(ExpressionSyntax receiver, IReadOnlyList<ExpressionSyntax> arguments)
@@ -1021,14 +1130,14 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"{endBlock}:");
     }
 
-    private bool TryInlineCall(CallExpressionSyntax call, string funcName, out string result)
+    private bool TryInlineCall(
+        CallExpressionSyntax call,
+        string callableKey,
+        FunctionDeclarationSyntax func,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        out string result)
     {
         result = string.Empty;
-        if (!_functions.TryGetValue(funcName, out var func))
-        {
-            return false;
-        }
-
         if (func.IsExtern || func.Body is null)
         {
             return false;
@@ -1039,12 +1148,12 @@ public sealed class CraneliftFunctionBuilder
             return false;
         }
 
-        if (_inlineStack.Contains(funcName))
+        if (_inlineStack.Contains(callableKey))
         {
             return false;
         }
 
-        if (func.Parameters.Count != call.Arguments.Count)
+        if (func.Parameters.Count != arguments.Count)
         {
             return false;
         }
@@ -1075,7 +1184,7 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var savedLocals = new List<(string Name, LocalSlot? Slot, TypeSymbol? Type)>();
-        _inlineStack.Add(funcName);
+        _inlineStack.Add(callableKey);
 
         void SaveLocal(string name)
         {
@@ -1090,7 +1199,7 @@ public sealed class CraneliftFunctionBuilder
         for (int i = 0; i < func.Parameters.Count; i++)
         {
             var param = func.Parameters[i];
-            var argExpr = call.Arguments[i];
+            var argExpr = arguments[i];
             var argType = GetExpressionType(argExpr);
             var paramType = ResolveType(param.Type);
             var clifType = NormalizeLocalStorageType(_typeMapper.Map(paramType));
@@ -1126,7 +1235,7 @@ public sealed class CraneliftFunctionBuilder
                     {
                         if (ret.Expression is null)
                         {
-                            _inlineStack.Remove(funcName);
+                            _inlineStack.Remove(callableKey);
                             RestoreSavedLocals(savedLocals);
                             return false;
                         }
@@ -1140,7 +1249,7 @@ public sealed class CraneliftFunctionBuilder
     done:
 
         RestoreSavedLocals(savedLocals);
-        _inlineStack.Remove(funcName);
+        _inlineStack.Remove(callableKey);
 
         if (!isVoid && !hasResult)
         {
@@ -1317,14 +1426,9 @@ public sealed class CraneliftFunctionBuilder
         return nonCmp;
     }
 
-    private bool IsVoidFunction(string name)
+    private bool IsVoidFunction(FunctionDeclarationSyntax function)
     {
-        if (_functions.TryGetValue(name, out var func))
-        {
-            return func.ReturnType is null || ResolveType(func.ReturnType) is VoidTypeSymbol;
-        }
-
-        return _symbols.TryGetValue(name, out var sym) && sym.Type is VoidTypeSymbol;
+        return function.ReturnType is null || ResolveType(function.ReturnType) is VoidTypeSymbol;
     }
 
     private bool IsBuiltinFunction(string name)
@@ -1664,17 +1768,12 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {call} = call %stasis_sys_flush()");
         return call;
     }
-    private bool IsExternFunction(string name) =>
-        _functions.TryGetValue(name, out var func) && (func.IsExtern || HasExternAttribute(func));
+    private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
+        function.IsExtern || HasExternAttribute(function);
 
-    private string GetExternCallName(string name)
+    private string GetExternCallName(FunctionDeclarationSyntax function)
     {
-        if (!_functions.TryGetValue(name, out var func))
-        {
-            return name;
-        }
-
-        var linkName = func.Attributes
+        var linkName = function.Attributes
             .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
             .StringValue;
 
@@ -1683,7 +1782,7 @@ public sealed class CraneliftFunctionBuilder
             return UnquoteStringLiteral(linkName);
         }
 
-        return name;
+        return CallableIdentity.GetEmittedFunctionName(function, _namesWithCollisions);
     }
 
     private static string UnquoteStringLiteral(string text)
@@ -4871,7 +4970,17 @@ public sealed class CraneliftFunctionBuilder
             UnaryExpressionSyntax unary => GetExpressionType(unary.Operand),
             AssignmentExpressionSyntax assign => GetExpressionType(assign.Right),
             CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                            TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, out var resolvedFunction, out _) =>
+                resolvedFunction.ReturnType is null ? new VoidTypeSymbol() : ResolveType(resolvedFunction.ReturnType),
+            CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                             _symbols.TryGetValue(id.Identifier.Text, out var funcSym) => funcSym.Type,
+            CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                            !string.Equals(member.Member.Text, "clear", StringComparison.Ordinal) &&
+                                            TryResolveReceiverScopedCallable(member, out var receiverResolved, out _) =>
+                receiverResolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(receiverResolved.ReturnType),
+            CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                            string.Equals(member.Member.Text, "clear", StringComparison.Ordinal) =>
+                new VoidTypeSymbol(),
             MemberAccessExpressionSyntax member when TryGetMemberType(member, out var memberType) => memberType,
             ArrayAccessExpressionSyntax array when GetExpressionType(array.Receiver) is ArrayTypeSymbol arr =>
                 arr.ElementType is PrimitiveTypeSymbol prim && (prim.PrimitiveName == "ascii" || prim.PrimitiveName == "utf8")

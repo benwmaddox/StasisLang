@@ -28,6 +28,8 @@ public sealed class SemanticAnalyzer
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
     private readonly List<Diagnostic> _diagnostics = new();
     private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<FunctionDeclarationSyntax>> _functionsByName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FunctionDeclarationSyntax> _functionsByKey = new(StringComparer.Ordinal);
 
     private int _errorCount;
     private bool AtDiagnosticLimit => _errorCount >= DiagnosticPolicy.MaxErrors;
@@ -450,7 +452,37 @@ public sealed class SemanticAnalyzer
                 case FunctionDeclarationSyntax fn:
                     {
                         var returnType = fn.ReturnType is null ? null : ResolveType(fn.ReturnType);
-                        AddSymbol(fn.Name.Text, SymbolKind.Function, returnType, fn.Name.Span);
+                        if (!_functionsByName.TryGetValue(fn.Name.Text, out var overloads))
+                        {
+                            overloads = new List<FunctionDeclarationSyntax>();
+                            _functionsByName[fn.Name.Text] = overloads;
+                        }
+                        overloads.Add(fn);
+
+                        var callableKey = CallableIdentity.GetCallableKey(fn);
+                        if (_functionsByKey.ContainsKey(callableKey))
+                        {
+                            var receiverType = fn.Parameters.Count > 0
+                                ? CallableIdentity.TypeKey(fn.Parameters[0].Type)
+                                : "<none>";
+                            AddDiagnostic($"Duplicate callable '{fn.Name.Text}' for receiver type '{receiverType}'.", fn.Name.Span);
+                        }
+                        else
+                        {
+                            _functionsByKey[callableKey] = fn;
+                        }
+
+                        if (_symbols.TryGetValue(fn.Name.Text, out var existing))
+                        {
+                            if (existing.Kind is not (SymbolKind.Function or SymbolKind.Test))
+                            {
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                        }
+                        else
+                        {
+                            _symbols[fn.Name.Text] = new Symbol(fn.Name.Text, SymbolKind.Function, returnType);
+                        }
                         break;
                     }
                 case TestDeclarationSyntax test:
@@ -1051,11 +1083,56 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(arg, scope);
                 }
 
+                if (c.Callee is MemberAccessExpressionSyntax memberCallee)
+                {
+                    AnalyzeExpression(memberCallee.Receiver, scope);
+
+                    var memberReceiverType = ResolveExpressionType(memberCallee.Receiver, scope);
+                    if (memberReceiverType is not null)
+                    {
+                        if (TryResolveReceiverScopedCallable(memberCallee.Member.Text, memberReceiverType, out var resolved, out var ambiguous))
+                        {
+                            ValidateCallArity(c, resolved);
+                            break;
+                        }
+
+                        if (ambiguous is not null)
+                        {
+                            AddDiagnostic(ambiguous, memberCallee.Member.Span);
+                            break;
+                        }
+
+                        var memberType = ResolveExpressionType(memberCallee, scope);
+                        if (memberType is not null)
+                        {
+                            AddDiagnostic($"'{memberCallee.Member.Text}' is not callable on type '{FormatType(memberReceiverType)}'. Hint: remove '()' to access the field value.", memberCallee.Member.Span);
+                            break;
+                        }
+
+                        AddDiagnostic($"Type '{FormatType(memberReceiverType)}' has no callable '{memberCallee.Member.Text}'.", memberCallee.Member.Span);
+                        break;
+                    }
+
+                    break;
+                }
+
                 if (c.Callee is IdentifierExpressionSyntax idCallee)
                 {
                     // Avoid double-reporting: treat `foo()` as a call-site check instead of
                     // first resolving `foo` as a standalone identifier expression.
                     var name = idCallee.Identifier.Text;
+                    if (TryResolveFunctionFormCallable(name, c.Arguments, scope, out var resolved, out var ambiguous))
+                    {
+                        ValidateCallArity(c, resolved);
+                        break;
+                    }
+
+                    if (ambiguous is not null)
+                    {
+                        AddDiagnostic(ambiguous, idCallee.Identifier.Span);
+                        break;
+                    }
+
                     if (scope.TryGetValue(name, out var localCallee))
                     {
                         var kind = localCallee.Kind.ToString().ToLowerInvariant();
@@ -1085,7 +1162,7 @@ public sealed class SemanticAnalyzer
                         var matches = GetClosestMatches(name, candidates).ToArray();
                         var hint = matches.Length switch
                         {
-                            0 => "Hint: declare it with `function name(...): type { ... }` (or check imports/spelling).",
+                            0 => "Hint: declare it with `function name(...): type { ... }`, or use receiver form `value.name(...)`.",
                             1 => $"Hint: did you mean '{matches[0]}'?",
                             _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(m => $"'{m}'"))}?"
                         };
@@ -1732,8 +1809,26 @@ public sealed class SemanticAnalyzer
                     return leftType ?? new PrimitiveTypeSymbol("i32");
                 }
             case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                               TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, scope, out var resolved, out _):
+                return resolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(resolved.ReturnType);
+            case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                                _symbols.TryGetValue(id.Identifier.Text, out var sym):
                 return sym.Type;
+            case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                               !string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                {
+                    var receiverType = ResolveExpressionType(member.Receiver, scope);
+                    if (receiverType is not null &&
+                        TryResolveReceiverScopedCallable(member.Member.Text, receiverType, out var receiverResolved, out _))
+                    {
+                        return receiverResolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(receiverResolved.ReturnType);
+                    }
+
+                    return null;
+                }
+            case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                               string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                return new VoidTypeSymbol();
             case OperatorCallExpressionSyntax op:
                 {
                     // Operator calls are expressions; the result is either the receiver type or bool for comparisons.
@@ -1952,6 +2047,102 @@ public sealed class SemanticAnalyzer
             VoidTypeSymbol => "void",
             _ => "unknown"
         };
+    }
+
+    private bool TryResolveReceiverScopedCallable(
+        string name,
+        TypeSymbol receiverType,
+        out FunctionDeclarationSyntax function,
+        out string? ambiguousMessage)
+    {
+        ambiguousMessage = null;
+        function = null!;
+        if (!_functionsByName.TryGetValue(name, out var candidates))
+        {
+            return false;
+        }
+
+        var receiverKey = CallableIdentity.TypeKey(receiverType);
+        var matches = candidates
+            .Where(fn => fn.Parameters.Count > 0 &&
+                         string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length == 1)
+        {
+            function = matches[0];
+            return true;
+        }
+
+        if (matches.Length > 1)
+        {
+            ambiguousMessage = $"Call to '{name}' is ambiguous for receiver type '{receiverKey}'.";
+        }
+
+        return false;
+    }
+
+    private bool TryResolveFunctionFormCallable(
+        string name,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        IReadOnlyDictionary<string, Symbol> scope,
+        out FunctionDeclarationSyntax function,
+        out string? ambiguousMessage)
+    {
+        ambiguousMessage = null;
+        function = null!;
+        if (!_functionsByName.TryGetValue(name, out var candidates))
+        {
+            return false;
+        }
+
+        // Prefer receiver-scoped callables when the first argument has a known type and a matching receiver exists.
+        if (arguments.Count > 0)
+        {
+            var firstType = ResolveExpressionType(arguments[0], scope);
+            if (firstType is not null &&
+                TryResolveReceiverScopedCallable(name, firstType, out var receiverResolved, out ambiguousMessage))
+            {
+                function = receiverResolved;
+                return true;
+            }
+
+            if (ambiguousMessage is not null)
+            {
+                return false;
+            }
+        }
+
+        var receiverless = candidates.Where(fn => fn.Parameters.Count == 0).ToArray();
+        if (receiverless.Length == 1)
+        {
+            function = receiverless[0];
+            return true;
+        }
+
+        if (receiverless.Length > 1)
+        {
+            ambiguousMessage = $"Call to '{name}' is ambiguous (multiple receiverless declarations).";
+        }
+
+        return false;
+    }
+
+    private void ValidateCallArity(CallExpressionSyntax call, FunctionDeclarationSyntax function)
+    {
+        var expected = function.Parameters.Count;
+        var actual = call.Arguments.Count;
+        var receiverForm = call.Callee is MemberAccessExpressionSyntax;
+        if (receiverForm)
+        {
+            expected -= 1;
+        }
+
+        if (expected != actual)
+        {
+            AddDiagnostic(
+                $"Callable '{function.Name.Text}' expects {expected} argument(s) in {(receiverForm ? "receiver" : "function")} form, got {actual}.",
+                call.Span);
+        }
     }
 
     private static bool TryGetIntegerLiteralValue(ExpressionSyntax expr, out long value)

@@ -6,24 +6,30 @@ public static class Reachability
 {
     public static HashSet<string> CollectReachableFunctions(CompilationUnitSyntax compilationUnit, bool includeTests, bool allowFallback)
     {
-        var functions = compilationUnit.Declarations
+        var functionList = compilationUnit.Declarations
             .OfType<FunctionDeclarationSyntax>()
-            .ToDictionary(fn => fn.Name.Text, fn => fn, StringComparer.Ordinal);
+            .ToList();
+        var functionsByKey = functionList
+            .ToDictionary(CallableIdentity.GetCallableKey, fn => fn, StringComparer.Ordinal);
+        var functionsByName = functionList
+            .GroupBy(fn => fn.Name.Text, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.ToArray(), StringComparer.Ordinal);
 
         var callGraph = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        foreach (var (name, func) in functions)
+        foreach (var func in functionList)
         {
+            var key = CallableIdentity.GetCallableKey(func);
             if (func.Body is null)
             {
-                callGraph[name] = new HashSet<string>(StringComparer.Ordinal);
+                callGraph[key] = new HashSet<string>(StringComparer.Ordinal);
                 continue;
             }
 
-            callGraph[name] = CollectCalledFunctions(func.Body, functions);
+            callGraph[key] = CollectCalledFunctions(func.Body, functionsByName);
         }
         foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
         {
-            callGraph[test.Name.Text] = CollectCalledFunctions(test.Body, functions);
+            callGraph[test.Name.Text] = CollectCalledFunctions(test.Body, functionsByName);
         }
 
         var reachable = new HashSet<string>(StringComparer.Ordinal);
@@ -31,20 +37,20 @@ public static class Reachability
 
         if (!includeTests)
         {
-            if (functions.ContainsKey("main"))
+            if (TryGetReceiverlessCallable(functionsByName, "main", out var mainKey))
             {
-                queue.Enqueue("main");
+                queue.Enqueue(mainKey);
             }
 
             // Tick hosting: if a program defines `tick`, treat it as an entrypoint alongside `main`.
-            if (functions.ContainsKey("tick"))
+            if (TryGetReceiverlessCallable(functionsByName, "tick", out var tickKey))
             {
-                queue.Enqueue("tick");
+                queue.Enqueue(tickKey);
             }
 
-            foreach (var export in functions.Values.Where(fn => fn.IsExported))
+            foreach (var export in functionList.Where(fn => fn.IsExported))
             {
-                queue.Enqueue(export.Name.Text);
+                queue.Enqueue(CallableIdentity.GetCallableKey(export));
             }
         }
 
@@ -58,7 +64,7 @@ public static class Reachability
 
         if (queue.Count == 0 && allowFallback)
         {
-            return new HashSet<string>(functions.Keys, StringComparer.Ordinal);
+            return new HashSet<string>(functionsByKey.Keys, StringComparer.Ordinal);
         }
 
         while (queue.Count > 0)
@@ -81,16 +87,37 @@ public static class Reachability
         return reachable;
     }
 
-    private static HashSet<string> CollectCalledFunctions(BlockStatementSyntax block, IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions)
+    private static HashSet<string> CollectCalledFunctions(BlockStatementSyntax block, IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions)
     {
         var results = new HashSet<string>(StringComparer.Ordinal);
         CollectFromBlock(block, functions, results);
         return results;
     }
 
+    private static bool TryGetReceiverlessCallable(
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functionsByName,
+        string name,
+        out string callableKey)
+    {
+        callableKey = string.Empty;
+        if (!functionsByName.TryGetValue(name, out var funcs))
+        {
+            return false;
+        }
+
+        var receiverless = funcs.FirstOrDefault(f => !CallableIdentity.HasReceiver(f));
+        if (receiverless is null)
+        {
+            return false;
+        }
+
+        callableKey = CallableIdentity.GetCallableKey(receiverless);
+        return true;
+    }
+
     private static void CollectFromBlock(
         BlockStatementSyntax block,
-        IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         HashSet<string> results)
     {
         foreach (var stmt in block.Statements)
@@ -101,7 +128,7 @@ public static class Reachability
 
     private static void CollectFromStatement(
         StatementSyntax stmt,
-        IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         HashSet<string> results)
     {
         switch (stmt)
@@ -156,7 +183,7 @@ public static class Reachability
 
     private static void CollectFromExpression(
         ExpressionSyntax expr,
-        IReadOnlyDictionary<string, FunctionDeclarationSyntax> functions,
+        IReadOnlyDictionary<string, FunctionDeclarationSyntax[]> functions,
         HashSet<string> results)
     {
         switch (expr)
@@ -183,9 +210,19 @@ public static class Reachability
                 CollectFromExpression(bin.Right, functions, results);
                 break;
             case CallExpressionSyntax call:
-                if (call.Callee is IdentifierExpressionSyntax id && functions.ContainsKey(id.Identifier.Text))
+                if (call.Callee is IdentifierExpressionSyntax id && functions.TryGetValue(id.Identifier.Text, out var candidates))
                 {
-                    results.Add(id.Identifier.Text);
+                    foreach (var candidate in candidates)
+                    {
+                        results.Add(CallableIdentity.GetCallableKey(candidate));
+                    }
+                }
+                else if (call.Callee is MemberAccessExpressionSyntax member && functions.TryGetValue(member.Member.Text, out var memberCandidates))
+                {
+                    foreach (var candidate in memberCandidates)
+                    {
+                        results.Add(CallableIdentity.GetCallableKey(candidate));
+                    }
                 }
                 CollectFromExpression(call.Callee, functions, results);
                 foreach (var arg in call.Arguments)

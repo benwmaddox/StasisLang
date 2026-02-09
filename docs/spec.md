@@ -482,10 +482,53 @@ function @inline name(param: Type): ReturnType { ... }
 
 ### Function properties:
 
-- No overloading.
+- No general overloading by parameter list alone.
+- Receiver-scoped callable names are allowed: the same function name may be declared for different parameter-0 types.
 - No closures.
 - Parameters are primitive or references (struct indices, slices, etc.).
 - All struct/array data resides in global memory.
+
+### Receiver-scoped callables (parameter 0 dispatch)
+
+Stasis supports receiver-scoped callable resolution without requiring a separate `method` declaration keyword.
+
+Given declarations:
+
+```stasis
+function damage(self: Enemy, amt: i32): void { ... }
+function damage(self: Hero, amt: i32): void { ... }
+```
+
+Both declarations are valid and distinct.
+
+Callable identity is:
+
+- function name
+- parameter 0 type
+
+Call forms:
+
+- Receiver form (recommended): `enemy.damage(5)`
+- Function form (supported): `damage(enemy, 5)`
+
+Resolution rules:
+
+1. Resolve receiver type:
+   - Receiver form uses the expression before `.`.
+   - Function form uses argument 0.
+2. Find candidates with matching function name and parameter-0 type.
+3. Require exactly one declaration for that `(name, parameter-0 type)` in scope.
+4. Validate arity and remaining argument types for that declaration.
+5. Ties are compile errors; import order is never used as a tie-breaker.
+
+Invalid duplicate declarations:
+
+- Defining the same `(name, parameter-0 type)` more than once in the same effective scope is a compile error.
+- For a fixed `(name, parameter-0 type)`, additional overloads by arity or non-receiver parameter types are not supported.
+
+Lowering model:
+
+- Receiver-form and function-form calls are equivalent after binding and lower through the same function ABI path.
 
 ### Extern declarations
 
@@ -507,6 +550,8 @@ To call a different underlying symbol name, provide a link name:
 function @extern("stasis_sleep_ms") sleep_ms(ms: i32): void;
 ```
 
+Extern functions also participate in receiver-scoped resolution when declared with a typed parameter 0 and called in receiver form.
+
 ---
 
 # **10. Globals**
@@ -527,7 +572,8 @@ Global arrays of struct references become SoA automatically.
   - No import aliasing.
   - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
   - Module identity is the canonical (normalized) file path; module names are not required to be unique.
-  - If multiple imports introduce the same member name, unqualified references are ambiguous and should produce a diagnostic.
+  - If multiple imports introduce the same non-callable member name (or a callable reference without receiver/argument-0 typing context), unqualified references are ambiguous and should produce a diagnostic.
+  - For receiver-scoped callables, ambiguity is checked on `(name, parameter-0 type)` at the call site. If multiple imports provide the same key, the call is ambiguous and must fail with a diagnostic.
 - Imports are transitive for compilation: the build graph includes the imported file and recursively includes its imports.
 - Compiled via signature-first pass.
 - Platform variants: if an import resolves to `name.stasis` and that file does not exist, the importer will fall back to `name.{platform}.stasis` (e.g. `name.windows.stasis`).
@@ -685,6 +731,7 @@ function damage(e: Enemy, amt: u8): void {
 | No dynamic allocation              | required |
 | Infix arith/compare + method calls | available |
 | Assignment via `=`, `+=`, `-=`, `*=`, `/=`, `%=` | available |
+| Receiver-scoped callables (param-0 typed) | available |
 | Infix ops beyond these             | none in v1 |
 | Function signatures first pass     | yes |
 | Tree shaking                       | yes |
