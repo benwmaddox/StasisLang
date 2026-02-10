@@ -69,8 +69,14 @@ This is the first implementation slice toward the in-process architecture target
 
 ## Next concrete step
 
-Implement a `PendingSwapPlan` model in CLI/runtime boundary:
-- build patch in background
-- validate layout/signature compatibility
-- commit only at safe point
-- emit explicit commit telemetry (`compiled`, `queued`, `applied`, `rejected`).
+Implement issue #156: per-function semantic hash gating.
+- Add per-function `fnSigHash` + `fnBodyHash` computation in `Stasis.Compiler`.
+- Track prior function hashes for watch mode and classify edits as:
+  - no-op (reuse all functions)
+  - partial (recompile changed functions only)
+  - conservative full recompile (layout/signature-affecting changes)
+- Extend hot-reload telemetry to report reused vs recompiled function counts.
+- Add integration tests for:
+  - whitespace/comment-only edits (no compile enqueue)
+  - single-function body edits (targeted recompile)
+  - signature/layout edits (conservative full recompile).
