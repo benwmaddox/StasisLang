@@ -19,7 +19,7 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> _functionsByName;
     private readonly IReadOnlySet<string> _namesWithCollisions;
-    private readonly IReadOnlySet<string> _externFunctionsWithCollidingLinkSymbols;
+    private readonly IReadOnlyDictionary<string, string> _externFallbackSymbolNames;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
     private readonly IReadOnlyDictionary<string, string> _stringLiterals;
     private readonly IReadOnlyDictionary<string, string> _cStringLiterals;
@@ -41,7 +41,7 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
         IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> functionsByName,
         IReadOnlySet<string> namesWithCollisions,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols,
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
         IReadOnlyDictionary<string, string> stringLiterals,
         IReadOnlyDictionary<string, string> cStringLiterals,
@@ -56,7 +56,7 @@ public sealed class CraneliftFunctionBuilder
         _enums = enums;
         _functionsByName = functionsByName;
         _namesWithCollisions = namesWithCollisions;
-        _externFunctionsWithCollidingLinkSymbols = externFunctionsWithCollidingLinkSymbols;
+        _externFallbackSymbolNames = externFallbackSymbolNames;
         _globalTypes = globalTypes;
         _stringLiterals = stringLiterals;
         _cStringLiterals = cStringLiterals;
@@ -1826,9 +1826,9 @@ public sealed class CraneliftFunctionBuilder
     private string GetExternCallName(FunctionDeclarationSyntax function)
     {
         var callableKey = CallableIdentity.GetCallableKey(function);
-        if (_externFunctionsWithCollidingLinkSymbols.Contains(callableKey))
+        if (_externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
         {
-            return CallableIdentity.GetEmittedFunctionName(function);
+            return fallbackSymbol;
         }
 
         var linkName = function.Attributes

@@ -232,6 +232,30 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Extern_receiver_callable_falls_back_when_link_name_collides_with_receiverless_callable()
+    {
+        var result = LowerWithDiagnostics("""
+            function foo(): i32 {
+                return 7;
+            }
+
+            extern function foo(value: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = foo();
+                let b: i32 = foo(1);
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @foo()", result.Ir);
+        Assert.Contains("declare i32 @foo__recv__i32(i32)", result.Ir);
+        Assert.Contains("call i32 @foo()", result.Ir);
+        Assert.Contains("call i32 @foo__recv__i32(", result.Ir);
+    }
+
+    [Fact]
     public void Emits_lowering_diagnostic_for_receiver_form_arity_mismatch()
     {
         var result = LowerWithDiagnostics("""

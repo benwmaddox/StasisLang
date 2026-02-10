@@ -54,7 +54,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 .OfType<FunctionDeclarationSyntax>()
                 .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
             var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
-            var externFunctionsWithCollidingLinkSymbols = CollectExternFunctionsWithCollidingLinkSymbols(reachableFunctionDeclarations);
+            var externFallbackSymbolNames = CollectExternFallbackSymbolNames(reachableFunctionDeclarations, namesWithCollisions);
             var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
@@ -63,7 +63,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
-            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, externFunctionsWithCollidingLinkSymbols);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, externFallbackSymbolNames);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -75,7 +75,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols, _moduleName);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, externFallbackSymbolNames, _moduleName);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -760,7 +760,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
         IReadOnlySet<string> reachableFunctions,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
@@ -784,7 +784,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
-            var externName = GetExternSymbolName(func, externFunctionsWithCollidingLinkSymbols);
+            var externName = GetExternSymbolName(func, externFallbackSymbolNames);
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);
@@ -802,12 +802,12 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     private static string GetExternSymbolName(
         FunctionDeclarationSyntax func,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         var callableKey = CallableIdentity.GetCallableKey(func);
-        if (externFunctionsWithCollidingLinkSymbols.Contains(callableKey))
+        if (externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
         {
-            return CallableIdentity.GetEmittedFunctionName(func);
+            return fallbackSymbol;
         }
 
         return GetExternLinkName(func) ?? func.Name.Text;
@@ -835,23 +835,52 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         return raw;
     }
 
-    private static IReadOnlySet<string> CollectExternFunctionsWithCollidingLinkSymbols(IEnumerable<FunctionDeclarationSyntax> functions)
+    private static IReadOnlyDictionary<string, string> CollectExternFallbackSymbolNames(
+        IEnumerable<FunctionDeclarationSyntax> functions,
+        IReadOnlySet<string> namesWithCollisions)
     {
-        var collisions = new HashSet<string>(StringComparer.Ordinal);
-        var byLinkName = functions
-            .Where(IsExternFunction)
-            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal)
-            .Where(group => group.Count() > 1);
+        var functionList = functions.ToList();
+        var reservedSymbolNames = functionList
+            .Where(fn => !IsExternFunction(fn))
+            .Select(fn => CallableIdentity.GetEmittedFunctionName(fn, namesWithCollisions))
+            .ToHashSet(StringComparer.Ordinal);
+        var fallbackByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        foreach (var group in byLinkName)
+        var externGroups = functionList
+            .Where(IsExternFunction)
+            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal);
+        foreach (var group in externGroups)
         {
+            var hasCollision = group.Count() > 1 || reservedSymbolNames.Contains(group.Key);
+            if (!hasCollision)
+            {
+                reservedSymbolNames.Add(group.Key);
+                continue;
+            }
+
             foreach (var fn in group)
             {
-                collisions.Add(CallableIdentity.GetCallableKey(fn));
+                var fallbackBase = CallableIdentity.GetEmittedFunctionName(fn);
+                if (!CallableIdentity.HasReceiver(fn))
+                {
+                    fallbackBase = $"{fn.Name.Text}__extern";
+                }
+
+                var fallback = fallbackBase;
+                var suffix = 2;
+                while (reservedSymbolNames.Contains(fallback))
+                {
+                    fallback = $"{fallbackBase}_{suffix}";
+                    suffix++;
+                }
+
+                var callableKey = CallableIdentity.GetCallableKey(fn);
+                fallbackByCallableKey[callableKey] = fallback;
+                reservedSymbolNames.Add(fallback);
             }
         }
 
-        return collisions;
+        return fallbackByCallableKey;
     }
 
     private static void EmitGlobals(
@@ -939,7 +968,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         bool emitTestHarness,
         HashSet<string> reachableFunctions,
         IReadOnlySet<string> namesWithCollisions,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols,
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames,
         string moduleName)
     {
         var typeMapper = builder.TypeMapper;
@@ -954,7 +983,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<FunctionDeclarationSyntax>()
             .GroupBy(f => f.Name.Text, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<FunctionDeclarationSyntax>)g.ToList(), StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, externFunctionsWithCollidingLinkSymbols, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, externFallbackSymbolNames, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
