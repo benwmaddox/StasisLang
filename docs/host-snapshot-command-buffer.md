@@ -245,7 +245,7 @@ For Stasis v1, prefer (2). Reasons:
 - No variable-length parsing logic required in the host.
 - Fixed layouts remain easy to version.
 - Fast to validate (counts + bounds checks).
-- Matches existing "batched" APIs (`draw_lines_f32`, `gfx_draw_sprites_i32`).
+- Matches existing "batched" APIs (`draw_lines`, `gfx_draw_sprites`).
 
 #### Graphics command buffer v1 (SoA)
 
@@ -264,7 +264,7 @@ Example layout (one possible split):
   - reserved
 - `gfx_f32[]` payload for `lines`:
   - `line_count * 8` floats: `x1,y1,x2,y2,r,g,b,a`
-- `gfx_i32[]` payload for `sprites` (if keeping `gfx_draw_sprites_i32`-style packing)
+- `gfx_i32[]` payload for `sprites` (if keeping `gfx_draw_sprites`-style packing)
   - `sprite_count * SPRITE_STRIDE_I32`
 
 Alternatively, make sprites a `gfx_f32[]` stream (handle as i32 + six f32, or all f32 with handle converted) if you want a single float stream.

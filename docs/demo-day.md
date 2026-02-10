@@ -121,7 +121,7 @@ Run:
 ### Render submission benchmark (per-call vs batched vs command buffer)
 
 Features:
-- Compares many host calls (`draw_line`) vs one batched call (`draw_lines_f32`) vs one command-buffer submit (`gfx_submit_*`)
+- Compares many host calls (`draw_line`) vs one batched call (`draw_lines`) vs one command-buffer submit (`gfx_submit_*`)
 - Uses debug hash to validate all paths submit identical draw streams
 - See `docs/graphics-command-buffer-v1.md` for the command buffer layout
 

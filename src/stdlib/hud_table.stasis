@@ -12,7 +12,7 @@ const HUD_RECT_W: i32 = 2;
 const HUD_RECT_H: i32 = 3;
 
 // Clamp utility (avoid extra imports).
-function hud_clamp_i32(v: i32, min: i32, max: i32): i32 {
+function hud_clamp(v: i32, min: i32, max: i32): i32 {
     if (v < min) { return min; }
     if (v > max) { return max; }
     return v;
@@ -80,7 +80,7 @@ function hud_table_place(out_table: f32[], parent: f32[], table_w: f32, table_h:
 }
 
 function hud_table_cell_x(table: f32[], col_w: f32[], col_count: i32, col_gap: f32, col: i32): f32 {
-    let c: i32 = hud_clamp_i32(col, 0, col_count - 1);
+    let c: i32 = hud_clamp(col, 0, col_count - 1);
     let x: f32 = table[HUD_RECT_X];
     let i: i32 = 0;
     for (i = 0; i < c; i = i + 1) {
@@ -90,7 +90,7 @@ function hud_table_cell_x(table: f32[], col_w: f32[], col_count: i32, col_gap: f
 }
 
 function hud_table_cell_w(col_w: f32[], col_count: i32, col: i32): f32 {
-    let c: i32 = hud_clamp_i32(col, 0, col_count - 1);
+    let c: i32 = hud_clamp(col, 0, col_count - 1);
     return col_w[c];
 }
 
