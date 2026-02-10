@@ -934,8 +934,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             {
                 continue;
             }
-            if (!symbols.TryGetValue(func.Name.Text, out var symbol))
+            if (!symbols.TryGetValue(func.Name.Text, out var symbol) &&
+                !symbols.TryGetValue(CallableIdentity.GetCallableKey(func), out symbol))
+            {
                 continue;
+            }
 
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
