@@ -109,8 +109,9 @@ public sealed class HotSwapIntegrationTests
                 throw new XunitException($"watch process exited unexpectedly after killing jit runner (code={proc.ExitCode}).");
             }
 
-            // Trigger a real rebuild + swap.
-            await File.AppendAllTextAsync(samplePath, "\n// test edit " + DateTime.UtcNow.Ticks + "\n", System.Text.Encoding.ASCII);
+            // Trigger a real semantic rebuild + swap.
+            var semanticEdit = ApplyTickSemanticEdit(original, 7);
+            await File.WriteAllTextAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
 
             var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
             await WaitForAnyLineAsync(
@@ -220,7 +221,8 @@ public sealed class HotSwapIntegrationTests
                 timeout: TimeSpan.FromMinutes(5));
             var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
 
-            await File.AppendAllTextAsync(samplePath, "\n// jit swap test edit " + DateTime.UtcNow.Ticks + "\n", System.Text.Encoding.ASCII);
+            var semanticEdit = ApplyTickSemanticEdit(original, 11);
+            await File.WriteAllTextAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -342,7 +344,8 @@ public sealed class HotSwapIntegrationTests
             }
 
             // Fix the file; next rebuild should hot-swap again.
-            await File.WriteAllTextAsync(samplePath, original + "\n// jit swap recovery " + DateTime.UtcNow.Ticks + "\n", System.Text.Encoding.ASCII);
+            var semanticRecovery = ApplyTickSemanticEdit(original, 13);
+            await File.WriteAllTextAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -695,6 +698,208 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickJitSwap_UsesSwapHook_AndRejectsLayoutChanges()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_swap_hook");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_swap_hook_watch.stasis");
+
+        var initialSource = """
+            struct GameState {
+                value: i32;
+                swaps: i32;
+            }
+
+            global state: GameState;
+
+            function main(): i32 {
+                state.value = 1;
+                state.swaps = 0;
+                return 0;
+            }
+
+            function on_code_swap(): i32 {
+                state.swaps = state.swaps + 1;
+                print_string("SWAP_HOOK_OK\n");
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """;
+
+        var layoutChangedSource = """
+            struct GameState {
+                value: i32;
+                swaps: i32;
+                extra: i32;
+            }
+
+            global state: GameState;
+
+            function main(): i32 {
+                state.value = 1;
+                state.swaps = 0;
+                state.extra = 0;
+                return 0;
+            }
+
+            function on_code_swap(): i32 {
+                state.swaps = state.swaps + 1;
+                print_string("SWAP_HOOK_OK\n");
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """;
+
+        File.WriteAllText(stasisPath, initialSource, System.Text.Encoding.ASCII);
+
+        var moduleName = "hook";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+        var baseName = Path.GetFileNameWithoutExtension(stasisPath);
+        var runnerOutLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.out.log");
+        var runnerErrLog = Path.Combine(swapDir, $"{baseName}.{moduleName}.runner.err.log");
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerOutLog);
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe!;
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            Assert.True(initialSwapCount > 0, "watch did not report initial HOTSWAP(ms).");
+
+            var semanticEdit = ApplyTickSemanticEdit(initialSource, 19);
+            await File.WriteAllTextAsync(stasisPath, semanticEdit, System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                timeout: TimeSpan.FromMinutes(5));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () =>
+                {
+                    if (!File.Exists(runnerErrLog))
+                    {
+                        return false;
+                    }
+
+                    return TryReadTextShared(runnerErrLog, out var errLog) &&
+                        errLog.Contains("HOTSWAP hook: on_code_swap rc=0", StringComparison.Ordinal);
+                },
+                timeout: TimeSpan.FromSeconds(60));
+
+            var swapCountAfterHook = outLines.CountContains("HOTSWAP(ms):");
+
+            await File.WriteAllTextAsync(stasisPath, layoutChangedSource, System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () =>
+                {
+                    if (!File.Exists(runnerOutLog))
+                    {
+                        return false;
+                    }
+
+                    return TryReadTextShared(runnerOutLog, out var outLog) &&
+                        outLog.Contains("swap layout changed", StringComparison.OrdinalIgnoreCase);
+                },
+                timeout: TimeSpan.FromMinutes(2));
+
+            await Task.Delay(500);
+
+            Assert.Equal(swapCountAfterHook, outLines.CountContains("HOTSWAP(ms):"));
+            Assert.False(proc.HasExited, "watch process exited after layout rejection.");
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickHotSwap_ReportsSemanticErrors_AndKeepsRunning()
     {
         var repoRoot = FindRepoRoot();
@@ -782,8 +987,9 @@ public sealed class HotSwapIntegrationTests
                 throw new XunitException($"watch process exited unexpectedly after semantic error (code={proc.ExitCode}).");
             }
 
-            // Fix the file; watch should recover on the next build.
-            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+            // Fix the file with a semantic edit; watch should recover on the next build.
+            var semanticRecovery = ApplyTickSemanticEdit(original, 17);
+            await File.WriteAllTextAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
@@ -1088,6 +1294,20 @@ public sealed class HotSwapIntegrationTests
 
     private static string QuoteArgs(params string[] args) =>
         string.Join(" ", args.Select(QuoteArg));
+
+    private static string AppendSemanticEditFunction(string source, string functionName)
+    {
+        var nl = source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        return source + nl + $"function {functionName}(): i32 {{ return 0; }}" + nl;
+    }
+
+    private static string ApplyTickSemanticEdit(string source, int seed)
+    {
+        var nl = source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var tick = "function tick(): i32 {" + nl + "    return 0;" + nl + "}";
+        var replacement = "function tick(): i32 {" + nl + $"    return {seed} - {seed};" + nl + "}";
+        return source.Replace(tick, replacement, StringComparison.Ordinal);
+    }
 
     private static string QuoteArg(string arg)
     {

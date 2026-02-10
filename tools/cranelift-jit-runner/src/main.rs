@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use cranelift_codegen::ir::types;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_module::{default_libcall_names, DataDescription, Linkage, Module};
@@ -664,6 +665,29 @@ struct SwapResult
     outcome: SwapOutcome,
 }
 
+#[derive(Clone, Copy)]
+enum SwapHookFn
+{
+    Void(extern "C" fn()),
+    I32(extern "C" fn() -> i32),
+}
+
+impl SwapHookFn
+{
+    fn call(self) -> i32
+    {
+        match self
+        {
+            SwapHookFn::Void(f) =>
+            {
+                f();
+                0
+            }
+            SwapHookFn::I32(f) => f(),
+        }
+    }
+}
+
 fn run_server(fps: u32) -> Result<()>
 {
     let mut stdout = io::stdout();
@@ -914,6 +938,47 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
             {
                 SwapOutcome::Ok { instance: mut new_instance, compile_us } =>
                 {
+                    let (layout_missing_save, layout_missing_restore) = state_layout_diff(instance, &new_instance);
+                    if layout_missing_save > 0 || layout_missing_restore > 0
+                    {
+                        eprintln!(
+                            "HOTSWAP reject: state layout changed (missing save={} restore={}); keeping old code.",
+                            layout_missing_save, layout_missing_restore
+                        );
+                        let _ = drop_tx.send(new_instance);
+                        writeln!(
+                            stdout,
+                            "ERR id={} swap layout changed: missing_save={} missing_restore={}",
+                            result.id, layout_missing_save, layout_missing_restore
+                        )?;
+                        stdout.flush()?;
+                        pending_swap_id = None;
+                        last_progress_ms.store(now_ms(), Ordering::Relaxed);
+                        continue;
+                    }
+
+                    if let Some(hook) = instance.on_code_swap_fn
+                    {
+                        let (rollback_missing_save, rollback_snapshot) = instance.save_state();
+                        let hook_rc = hook.call();
+                        if hook_rc != 0
+                        {
+                            let rollback_missing_restore = instance.restore_state(rollback_snapshot);
+                            eprintln!(
+                                "HOTSWAP reject: on_code_swap returned {}; swap aborted (rollback save-missing={} restore-missing={}).",
+                                hook_rc, rollback_missing_save, rollback_missing_restore
+                            );
+                            let _ = drop_tx.send(new_instance);
+                            writeln!(stdout, "ERR id={} swap hook failed: rc={}", result.id, hook_rc)?;
+                            stdout.flush()?;
+                            pending_swap_id = None;
+                            last_progress_ms.store(now_ms(), Ordering::Relaxed);
+                            continue;
+                        }
+
+                        eprintln!("HOTSWAP hook: on_code_swap rc=0");
+                    }
+
                     let t0 = Instant::now();
                     let (missing_save, save_bytes) = instance.save_state();
                     let save_us = t0.elapsed().as_micros() as u64;
@@ -921,6 +986,24 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     let t2 = Instant::now();
                     let missing_restore = new_instance.restore_state(save_bytes);
                     let restore_us = t2.elapsed().as_micros() as u64;
+
+                    if missing_save > 0 || missing_restore > 0
+                    {
+                        eprintln!(
+                            "HOTSWAP reject: state transfer failed (missing save={} restore={}); keeping old code.",
+                            missing_save, missing_restore
+                        );
+                        let _ = drop_tx.send(new_instance);
+                        writeln!(
+                            stdout,
+                            "ERR id={} swap state transfer failed: missing_save={} missing_restore={}",
+                            result.id, missing_save, missing_restore
+                        )?;
+                        stdout.flush()?;
+                        pending_swap_id = None;
+                        last_progress_ms.store(now_ms(), Ordering::Relaxed);
+                        continue;
+                    }
 
                     if let Some(b) = data_binding.as_ref()
                     {
@@ -936,13 +1019,6 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                         "HOTSWAP ok: save={}us load={}us tick=0us restore={}us bytes={} symbols={}",
                         save_us, compile_us, restore_us, bytes, symbols
                     );
-                    if missing_save > 0 || missing_restore > 0
-                    {
-                        eprintln!(
-                            "HOTSWAP warning: state layout changed (missing save={} restore={}); consider restarting to resync state.",
-                            missing_save, missing_restore
-                        );
-                    }
 
                     let old = std::mem::replace(instance, new_instance);
                     let _ = drop_tx.send(old);
@@ -958,7 +1034,7 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                 SwapOutcome::Err { message } =>
                 {
                     eprintln!("HOTSWAP error: {}", message);
-                    writeln!(stdout, "ERR swap compile failed: {}", message.replace('\n', " "))?;
+                    writeln!(stdout, "ERR id={} swap compile failed: {}", result.id, message.replace('\n', " "))?;
                     stdout.flush()?;
                 }
             }
@@ -1338,6 +1414,7 @@ struct JitInstance
     _module: JITModule,
     entry_fn: extern "C" fn() -> i32,
     tick_fn: extern "C" fn() -> i32,
+    on_code_swap_fn: Option<SwapHookFn>,
     state_globals: Vec<(String, usize)>,
     data_ptrs: HashMap<String, *mut u8>,
 
@@ -1419,12 +1496,33 @@ impl JitInstance
             function_ids.insert(ext.name.clone(), id);
         }
 
+        let on_code_swap_name = format!("{module_name}__on_code_swap");
+        let mut on_code_swap_kind: Option<SwapHookFnKind> = None;
         for f in &parsed.functions
         {
             let id = module
                 .declare_function(&f.name, Linkage::Export, &f.signature)
                 .with_context(|| format!("declare_function failed for {}", f.name))?;
             function_ids.insert(f.name.clone(), id);
+
+            if f.name == on_code_swap_name
+            {
+                let kind = if f.signature.params.is_empty() && f.signature.returns.is_empty()
+                {
+                    SwapHookFnKind::Void
+                }
+                else if f.signature.params.is_empty()
+                    && f.signature.returns.len() == 1
+                    && f.signature.returns[0].value_type == types::I32
+                {
+                    SwapHookFnKind::I32
+                }
+                else
+                {
+                    bail!("on_code_swap must have signature `function on_code_swap(): i32` or `function on_code_swap()`");
+                };
+                on_code_swap_kind = Some(kind);
+            }
         }
 
         for f in parsed.functions
@@ -1473,6 +1571,22 @@ impl JitInstance
 
         let entry_ptr = module.get_finalized_function(entry_id);
         let tick_ptr = module.get_finalized_function(tick_id);
+        let on_code_swap_fn = if let Some(kind) = on_code_swap_kind
+        {
+            let hook_id = *function_ids
+                .get(&on_code_swap_name)
+                .with_context(|| format!("missing on_code_swap function {on_code_swap_name}"))?;
+            let hook_ptr = module.get_finalized_function(hook_id);
+            Some(match kind
+            {
+                SwapHookFnKind::Void => unsafe { SwapHookFn::Void(std::mem::transmute(hook_ptr)) },
+                SwapHookFnKind::I32 => unsafe { SwapHookFn::I32(std::mem::transmute(hook_ptr)) },
+            })
+        }
+        else
+        {
+            None
+        };
 
         Ok(JitInstance {
             module_name: module_name.to_string(),
@@ -1482,6 +1596,7 @@ impl JitInstance
             _module: module,
             entry_fn: unsafe { std::mem::transmute(entry_ptr) },
             tick_fn: unsafe { std::mem::transmute(tick_ptr) },
+            on_code_swap_fn,
             state_globals,
             data_ptrs,
             bulk_active,
@@ -1539,6 +1654,50 @@ impl JitInstance
         }
         missing
     }
+}
+
+#[derive(Clone, Copy)]
+enum SwapHookFnKind
+{
+    Void,
+    I32,
+}
+
+fn state_layout_diff(current: &JitInstance, next: &JitInstance) -> (u32, u32)
+{
+    let mut next_layout = HashMap::with_capacity(next.state_globals.len());
+    for (name, size) in &next.state_globals
+    {
+        next_layout.insert(name.as_str(), *size);
+    }
+
+    let mut current_layout = HashMap::with_capacity(current.state_globals.len());
+    for (name, size) in &current.state_globals
+    {
+        current_layout.insert(name.as_str(), *size);
+    }
+
+    let mut missing_save = 0u32;
+    for (name, size) in &current.state_globals
+    {
+        match next_layout.get(name.as_str())
+        {
+            Some(next_size) if *next_size == *size => {}
+            _ => missing_save = missing_save.saturating_add(1),
+        }
+    }
+
+    let mut missing_restore = 0u32;
+    for (name, size) in &next.state_globals
+    {
+        match current_layout.get(name.as_str())
+        {
+            Some(current_size) if *current_size == *size => {}
+            _ => missing_restore = missing_restore.saturating_add(1),
+        }
+    }
+
+    (missing_save, missing_restore)
 }
 
 fn build_flags(opt_level: &str, target: &Triple) -> Result<settings::Flags>
