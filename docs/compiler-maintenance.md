@@ -15,6 +15,7 @@ Non-scope (but adjacent): native runtime (`runtime/`), VSCode extension (`vscode
 - Parsing/grammar notes (LL(1) declarations + Pratt expressions): `docs/compilation.md`
 - Diagnostic tone and patterns: `docs/error-messages.md`
 - Cranelift backend notes/plan: `docs/cranelift-backend-plan.md`
+- Callable review checklist + parity matrix: `docs/callable-review-checklist.md`
 
 ## Repo Map (Compiler-Relevant)
 
@@ -46,6 +47,10 @@ Dotnet-only (useful when iterating on compiler code):
 - Build solution: `dotnet build Stasis.sln -c Release`
 - Run compiler unit tests: `dotnet test Stasis.Compiler.Tests/Stasis.Compiler.Tests.csproj -c Release`
 - Run CLI unit tests: `dotnet test Stasis.Cli.Tests/Stasis.Cli.Tests.csproj -c Release`
+
+Recommended pre-push gate (callable + backend parity focused):
+
+- `.\scripts\pre-push-gate.ps1`
 
 Notes:
 - Some tests require an LLVM toolchain (specifically `clang`) on PATH or in `.tools/llvm-*/bin`.

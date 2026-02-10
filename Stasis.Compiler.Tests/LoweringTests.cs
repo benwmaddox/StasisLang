@@ -54,9 +54,248 @@ public class LoweringTests
             }
             """);
 
-        Assert.Contains("define i32 @add(", ir);
+        Assert.Contains("define i32 @add__i32(", ir);
         Assert.Contains("addtmp", ir);
         Assert.Contains("ret i32", ir);
+    }
+
+    [Fact]
+    public void Lowers_receiver_scoped_callables_with_receiver_type_mangling()
+    {
+        var ir = Lower("""
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function damage(hero: Hero, amount: i32): i32 {
+                return amount.+(1);
+            }
+
+            function add(a: i32, b: i32): i32 {
+                return a.+(b);
+            }
+
+            function tick(): void {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let x: i32 = enemy.damage(5);
+                let y: i32 = damage(hero, 6);
+                let z: i32 = add(1, 2);
+            }
+            """);
+
+        Assert.Contains("define i32 @damage__Enemy(", ir);
+        Assert.Contains("define i32 @damage__Hero(", ir);
+        Assert.Contains("call i32 @damage__Enemy(", ir);
+        Assert.Contains("call i32 @damage__Hero(", ir);
+        Assert.Contains("define i32 @add__i32(", ir);
+        Assert.Contains("call i32 @add__i32(", ir);
+    }
+
+    [Fact]
+    public void Lowers_function_form_receiver_dispatch_with_literal_first_arguments()
+    {
+        var ir = Lower("""
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function tick(): i32 {
+                let a: i32 = tag("hello");
+                let b: i32 = tag(5);
+                return a.+(b);
+            }
+            """);
+
+        Assert.Contains("define i32 @tag__string(", ir);
+        Assert.Contains("define i32 @tag__i32(", ir);
+        Assert.Contains("call i32 @tag__string(", ir);
+        Assert.Contains("call i32 @tag__i32(", ir);
+    }
+
+    [Fact]
+    public void Lowers_receiverless_call_without_receiver_suffix()
+    {
+        var ir = Lower("""
+            function ping(): i32 {
+                return 7;
+            }
+
+            function tick(): i32 {
+                return ping();
+            }
+            """);
+
+        Assert.Contains("define i32 @ping()", ir);
+        Assert.Contains("call i32 @ping()", ir);
+    }
+
+    [Fact]
+    public void Lowers_function_form_overload_for_binary_first_argument()
+    {
+        var ir = Lower("""
+            function tag(value: i32): i32 {
+                return 1;
+            }
+
+            function tag(value: f32): i32 {
+                return 2;
+            }
+
+            function tick(): i32 {
+                return tag(1.+(2));
+            }
+            """);
+
+        Assert.Contains("define i32 @tag__i32(", ir);
+        Assert.Contains("define i32 @tag__f32(", ir);
+        Assert.Contains("call i32 @tag__i32(", ir);
+    }
+
+    [Fact]
+    public void Receiver_callable_uses_receiver_type_suffix_even_without_live_collisions()
+    {
+        var result = LowerWithDiagnostics("""
+            function ping(value: i32): i32 {
+                return value;
+            }
+
+            function ping(value: f32): i32 {
+                return 0;
+            }
+
+            function main(): i32 {
+                return ping(5);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @ping__i32(i32", result.Ir);
+        Assert.Contains("call i32 @ping__i32(", result.Ir);
+        Assert.DoesNotContain("call i32 @ping(", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Extern_overload_uses_link_name_instead_of_receiver_mangle()
+    {
+        var result = LowerWithDiagnostics("""
+            function @extern("host_damage_enemy") damage(enemy: i32, amount: i32): i32;
+
+            function damage(enemy: f32, amount: i32): i32 {
+                return amount;
+            }
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("declare i32 @host_damage_enemy(i32, i32)", result.Ir);
+        Assert.Contains("call i32 @host_damage_enemy(", result.Ir);
+        Assert.Contains("define i32 @damage__f32(", result.Ir);
+        Assert.DoesNotContain("@damage__i32", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Extern_overloads_require_distinct_link_names_and_emit_link_symbols()
+    {
+        var result = LowerWithDiagnostics("""
+            function @extern("host_damage_enemy_i32") damage(enemy: i32, amount: i32): i32;
+            function @extern("host_damage_enemy_f32") damage(hero: f32, amount: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("declare i32 @host_damage_enemy_i32(i32, i32)", result.Ir);
+        Assert.Contains("declare i32 @host_damage_enemy_f32(float, i32)", result.Ir);
+        Assert.Contains("call i32 @host_damage_enemy_i32(", result.Ir);
+        Assert.Contains("call i32 @host_damage_enemy_f32(", result.Ir);
+    }
+
+    [Fact]
+    public void Receiver_form_zero_arg_dispatch_uses_receiver_type_symbol()
+    {
+        var result = LowerWithDiagnostics("""
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function score(enemy: Enemy): i32 {
+                return 7;
+            }
+
+            function score(hero: Hero): i32 {
+                return 11;
+            }
+
+            function main(): i32 {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let a: i32 = enemy.score();
+                let b: i32 = hero.score();
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: false, options: LowerOptions.Production);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @score__Enemy(", result.Ir);
+        Assert.Contains("define i32 @score__Hero(", result.Ir);
+        Assert.Contains("call i32 @score__Enemy(", result.Ir);
+        Assert.Contains("call i32 @score__Hero(", result.Ir);
+    }
+
+    [Fact]
+    public void Test_to_test_function_form_call_resolves_in_lowering()
+    {
+        var result = LowerWithDiagnostics("""
+            test helper(): i32 {
+                return 7;
+            }
+
+            test caller(): i32 {
+                return helper();
+            }
+            """, allowSemanticDiagnostics: false, options: new LowerOptions(IncludeTests: true, EmitTestHarness: false));
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @helper()", result.Ir);
+        Assert.Contains("define i32 @caller()", result.Ir);
+        Assert.Contains("call i32 @helper()", result.Ir);
+    }
+
+    [Fact]
+    public void Emits_lowering_diagnostic_for_receiver_form_arity_mismatch()
+    {
+        var result = LowerWithDiagnostics("""
+            struct Enemy { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function main(): i32 {
+                let enemy: Enemy = 0;
+                return enemy.damage();
+            }
+            """, allowSemanticDiagnostics: true, options: LowerOptions.Production);
+
+        Assert.Contains(
+            result.Diagnostics,
+            d => d.Message.Contains("expects 1 argument(s) in receiver form, but got 0", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -560,7 +799,7 @@ public class LoweringTests
             }
             """);
 
-        Assert.Contains("call void @sink({ ptr, i32 } { ptr @values, i32 4 })", ir);
-        Assert.Contains("call void @sink", ir);
+        Assert.Contains("call void @sink__i32__({ ptr, i32 } { ptr @values, i32 4 })", ir);
+        Assert.Contains("call void @sink__i32__", ir);
     }
 }

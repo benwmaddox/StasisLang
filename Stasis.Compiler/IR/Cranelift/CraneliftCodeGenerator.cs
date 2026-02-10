@@ -50,6 +50,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             using var builder = new CraneliftModuleBuilder(_moduleName);
 
             var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, options.IncludeTests, options.AllowReachabilityFallback);
+            var reachableFunctionDeclarations = compilationUnit.Declarations
+                .OfType<FunctionDeclarationSyntax>()
+                .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
+            var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
+            var externFallbackSymbolNames = CallableSymbolNameResolver.CollectExternFallbackSymbolNames(reachableFunctionDeclarations, namesWithCollisions);
             var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
@@ -58,7 +63,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
-            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, externFallbackSymbolNames);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -70,7 +75,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, _moduleName);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, externFallbackSymbolNames, _moduleName);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -754,18 +759,19 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         CraneliftModuleBuilder builder,
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
-        IReadOnlySet<string> reachableFunctions)
+        IReadOnlySet<string> reachableFunctions,
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!func.IsExtern && !HasExternAttribute(func))
+            if (!CallableSymbolNameResolver.IsExternFunction(func))
             {
                 continue;
             }
 
             // Avoid emitting extern declarations that are never referenced (Windows COFF AOT can
             // treat declared-but-unused externs as link-time requirements).
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
@@ -778,7 +784,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
-            var externName = GetExternLinkName(func) ?? func.Name.Text;
+            var externName = CallableSymbolNameResolver.GetExternSymbolName(func, externFallbackSymbolNames);
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);
@@ -789,28 +795,6 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             builder.DeclareExternal(externName, returnType, paramTypes);
         }
-    }
-
-    private static bool HasExternAttribute(FunctionDeclarationSyntax func) =>
-        func.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
-
-    private static string? GetExternLinkName(FunctionDeclarationSyntax func)
-    {
-        var raw = func.Attributes
-            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
-            .StringValue;
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return null;
-        }
-
-        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
-        {
-            return raw.Substring(1, raw.Length - 2);
-        }
-
-        return raw;
     }
 
     private static void EmitGlobals(
@@ -897,6 +881,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         bool includeTests,
         bool emitTestHarness,
         HashSet<string> reachableFunctions,
+        IReadOnlySet<string> namesWithCollisions,
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames,
         string moduleName)
     {
         var typeMapper = builder.TypeMapper;
@@ -907,15 +893,40 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<EnumDeclarationSyntax>()
             .ToDictionary(e => e.Name.Text, e => e, StringComparer.Ordinal);
         var consts = CollectConstValues(compilationUnit, symbols, diagnostics);
-        var functions = compilationUnit.Declarations
+        var functionsByName = compilationUnit.Declarations
             .OfType<FunctionDeclarationSyntax>()
-            .ToDictionary(f => f.Name.Text, f => f, StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functions, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+            .GroupBy(f => f.Name.Text, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<FunctionDeclarationSyntax>)g.ToList(), StringComparer.Ordinal);
+        var testsByName = compilationUnit.Declarations
+            .OfType<TestDeclarationSyntax>()
+            .ToDictionary(t => t.Name.Text, t => t, StringComparer.Ordinal);
+        var testSymbolsByName = testsByName
+            .ToDictionary(
+                kvp => kvp.Key,
+                kvp => MangleFunctionName(moduleName, $"test_{SanitizeTestName(kvp.Key)}"),
+                StringComparer.Ordinal);
+        var functionBuilder = new CraneliftFunctionBuilder(
+            typeMapper,
+            symbols,
+            structs,
+            enums,
+            functionsByName,
+            testsByName,
+            testSymbolsByName,
+            namesWithCollisions,
+            externFallbackSymbolNames,
+            builder.GlobalTypes,
+            builder.StringLiterals,
+            builder.CStringLiterals,
+            layout,
+            consts,
+            diagnostics,
+            moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
@@ -943,7 +954,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             {
                 body = $"; attrs: {string.Join(" ", attributes)}{Environment.NewLine}{body}";
             }
-            var mangledName = MangleFunctionName(moduleName, func.Name.Text);
+            var emittedName = CallableIdentity.GetEmittedFunctionName(func, namesWithCollisions);
+            var mangledName = MangleFunctionName(moduleName, emittedName);
             builder.DefineFunctionWithBody(mangledName, returnType, paramTypes, body);
         }
 
@@ -952,10 +964,21 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         {
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
             {
-                var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
-                var mangledTestName = MangleFunctionName(moduleName, testFuncName);
+                if (!testSymbolsByName.TryGetValue(test.Name.Text, out var mangledTestName))
+                {
+                    var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
+                    mangledTestName = MangleFunctionName(moduleName, testFuncName);
+                }
+
+                var returnTypeSymbol = test.ReturnType is null
+                    ? new PrimitiveTypeSymbol("i32")
+                    : ResolveType(test.ReturnType, symbols);
+                var returnType = NormalizeFunctionType(typeMapper.Map(returnTypeSymbol));
+                var paramTypes = test.Parameters
+                    .Select(p => NormalizeFunctionType(typeMapper.Map(ResolveType(p.Type, symbols))))
+                    .ToArray();
                 var body = functionBuilder.BuildTestBody(test);
-                builder.DefineFunctionWithBody(mangledTestName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body);
+                builder.DefineFunctionWithBody(mangledTestName, returnType, paramTypes, body);
             }
 
             if (emitTestHarness)
@@ -1244,7 +1267,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!reachableFunctions.Contains(func.Name.Text))
+            if (!reachableFunctions.Contains(CallableIdentity.GetCallableKey(func)))
             {
                 continue;
             }
@@ -1257,7 +1280,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         foreach (var constDecl in compilationUnit.Declarations.OfType<ConstDeclarationSyntax>())
         {
-            if (constDecl.Initializer is LiteralExpressionSyntax lit && lit.Literal.Kind == TokenKind.StringLiteral)
+            if (constDecl.Initializer is LiteralExpressionSyntax lit &&
+                lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral)
             {
                 stringLiterals.Add(UnescapeString(lit.Literal.Text));
             }
@@ -1347,7 +1371,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
     {
         switch (expr)
         {
-            case LiteralExpressionSyntax lit when lit.Literal.Kind == TokenKind.StringLiteral:
+            case LiteralExpressionSyntax lit when lit.Literal.Kind is TokenKind.StringLiteral or TokenKind.BacktickLiteral:
                 stringLiterals.Add(UnescapeString(lit.Literal.Text));
                 break;
             case IdentifierExpressionSyntax:

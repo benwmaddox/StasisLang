@@ -1,0 +1,21 @@
+function tag(value: i32): i32 {
+    return 1;
+}
+
+function tag(value: u8): i32 {
+    return 2;
+}
+
+test `receiver form supports zero-arg call when only receiver parameter exists`() {
+    let i: i32 = 0;
+    let b: u8 = 0;
+    return i.tag() == 1
+        && b.tag() == 2;
+}
+
+test `function form selects overload from first argument type`() {
+    let i: i32 = 0;
+    let b: u8 = 0;
+    return tag(i) == 1
+        && tag(b) == 2;
+}
