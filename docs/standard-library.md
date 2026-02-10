@@ -110,7 +110,8 @@ ascii_recount(s: ascii[]): i32           // Recompute length from sentinel, fix 
 ascii_clear(s: ascii[])                  // Reset length to 0 and write sentinel
 ascii_copy(dst: ascii[], src: ascii[]): i32
 ascii_append(dst: ascii[], src: ascii[]): i32
-ascii_append_byte(dst: ascii[], b: u8): i32
+ascii_push(dst: ascii[], b: u8): i32
+ascii_push_i32(dst: ascii[], value: i32): void
 ascii_cmp(a: ascii[], b: ascii[]): i32
 ascii_eq(a: ascii[], b: ascii[]): bool
 ascii_find_byte(s: ascii[], b: u8): i32
