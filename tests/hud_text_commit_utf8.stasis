@@ -7,11 +7,11 @@ global out: utf8[32];
 test `hud_text_commit_utf8 updates utf8 lengths`(): bool {
     hud_text_clear_ascii(tmp);
     ascii_append(tmp, "HP=");
-    ascii_append_i32(tmp, 42);
+    ascii_push_i32(tmp, 42);
     let n: i32 = hud_text_commit_utf8(out, tmp, 32);
     return n == 5
-        && utf8_byte_len(out) == 5
-        && utf8_char_len(out) == 5
+        && length_bytes(out) == 5
+        && length_chars(out) == 5
         && out[0] == 72
         && out[1] == 80
         && out[2] == 61

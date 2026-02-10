@@ -122,7 +122,7 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
         return;
     }
 
-    let byte_len: i32 = utf8_byte_len(text);
+    let byte_len: i32 = length_bytes(text);
     if (byte_len < 0) { byte_len = 0; }
     if (byte_len > 1024) { byte_len = 1024; } // hard cap per command to keep worst-case bounded
 

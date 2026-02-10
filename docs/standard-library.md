@@ -17,6 +17,7 @@ import "src/stdlib/stdlib.stasis";
 5. **No app-specific functions**: Generic primitives only
 6. **Explicit about bytes vs codepoints**: Function names and docs clearly indicate which unit they operate on
 7. **No globals in stdlib**: standard library files may declare consts, structs, enums, and functions only
+8. **Prefer receiver-form calls**: write `receiver.doAction(action)` over `doAction(receiver, action)` for receiver-centric operations
 
 ---
 
@@ -101,7 +102,7 @@ ascii_from_hex(d: i32): u8       // 0->'0', 10->'a', else '?'
 ### ASCII String Buffers
 
 ```stasis
-ascii_len(s: ascii[]): i32               // Length from header
+length(s: ascii[]): i32                  // Length from header
 ascii_is_empty(s: ascii[]): bool         // True if length == 0
 ascii_get(s: ascii[], index: i32): u8    // Get byte at index
 ascii_set(s: ascii[], index: i32, b: u8) // Set byte, update header if needed
@@ -241,7 +242,7 @@ str_sanitize_utf8(s: utf8[]): i32               // Replace invalid sequences wit
 ### Conversion (Explicit Only)
 
 ```stasis
-from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32  // Copy ASCII bytes into UTF-8 buffer, return byte length
+utf8_from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32  // Copy ASCII bytes into UTF-8 buffer, return byte length
 ```
 
 ---
