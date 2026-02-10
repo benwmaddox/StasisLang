@@ -212,6 +212,47 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Extern_overloads_without_distinct_link_names_use_collision_safe_fallback_symbols()
+    {
+        var result = LowerWithDiagnostics("""
+            extern function damage(enemy: i32, amount: i32): i32;
+            extern function damage(hero: f32, amount: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a.+(b);
+            }
+            """, allowSemanticDiagnostics: true, options: LowerOptions.Production);
+
+        Assert.Contains("declare i32 @damage__recv__i32(i32, i32)", result.Ir);
+        Assert.Contains("declare i32 @damage__recv__f32(float, i32)", result.Ir);
+        Assert.Contains("call i32 @damage__recv__i32(", result.Ir);
+        Assert.Contains("call i32 @damage__recv__f32(", result.Ir);
+    }
+
+    [Fact]
+    public void Emits_lowering_diagnostic_for_receiver_form_arity_mismatch()
+    {
+        var result = LowerWithDiagnostics("""
+            struct Enemy { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function main(): i32 {
+                let enemy: Enemy = 0;
+                return enemy.damage();
+            }
+            """, allowSemanticDiagnostics: true, options: LowerOptions.Production);
+
+        Assert.Contains(
+            result.Diagnostics,
+            d => d.Message.Contains("expects 1 argument(s) in receiver form, but got 0", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Emits_ret_void_when_missing()
     {
         var ir = Lower("""

@@ -689,7 +689,7 @@ public sealed class CraneliftFunctionBuilder
         if (call.Callee is MemberAccessExpressionSyntax memberCallee)
         {
             callableName = memberCallee.Member.Text;
-            if (!TryResolveReceiverScopedCallable(memberCallee, out resolvedFunction, out var diag))
+            if (!TryResolveReceiverScopedCallable(memberCallee, call.Arguments.Count, out resolvedFunction, out var diag))
             {
                 _diagnostics.Add(new Diagnostic(diag ?? $"Unknown callable '{callableName}'.", call.Span));
                 return ZeroI32();
@@ -763,6 +763,7 @@ public sealed class CraneliftFunctionBuilder
 
     private bool TryResolveReceiverScopedCallable(
         MemberAccessExpressionSyntax memberCallee,
+        int receiverArgumentCount,
         out FunctionDeclarationSyntax function,
         out string? diagnostic)
     {
@@ -782,19 +783,39 @@ public sealed class CraneliftFunctionBuilder
         }
 
         var receiverKey = CallableIdentity.TypeKey(receiverType);
-        var matches = candidates
+        var receiverMatches = candidates
             .Where(fn => fn.Parameters.Count > 0 &&
                          string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
             .ToArray();
-        if (matches.Length == 1)
+        if (receiverMatches.Length == 0)
         {
-            function = matches[0];
+            diagnostic = $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{receiverKey}'.";
+            return false;
+        }
+
+        var arityMatches = receiverMatches
+            .Where(fn => fn.Parameters.Count == receiverArgumentCount + 1)
+            .ToArray();
+        if (arityMatches.Length == 1)
+        {
+            function = arityMatches[0];
             return true;
         }
 
-        diagnostic = matches.Length > 1
-            ? $"Call to '{memberCallee.Member.Text}' is ambiguous for receiver type '{receiverKey}'."
-            : $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{receiverKey}'.";
+        if (arityMatches.Length > 1)
+        {
+            diagnostic = $"Call to '{memberCallee.Member.Text}' is ambiguous for receiver type '{receiverKey}' and arity {receiverArgumentCount}.";
+            return false;
+        }
+
+        if (receiverMatches.Length == 1)
+        {
+            var expectedArgs = Math.Max(0, receiverMatches[0].Parameters.Count - 1);
+            diagnostic = $"Callable '{memberCallee.Member.Text}' expects {expectedArgs} argument(s) in receiver form, but got {receiverArgumentCount}.";
+            return false;
+        }
+
+        diagnostic = $"No callable '{memberCallee.Member.Text}' matches receiver-form arity {receiverArgumentCount} for receiver type '{receiverKey}'.";
         return false;
     }
 
@@ -5005,7 +5026,7 @@ public sealed class CraneliftFunctionBuilder
                                             _symbols.TryGetValue(id.Identifier.Text, out var funcSym) => funcSym.Type,
             CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
                                             !string.Equals(member.Member.Text, "clear", StringComparison.Ordinal) &&
-                                            TryResolveReceiverScopedCallable(member, out var receiverResolved, out _) =>
+                                            TryResolveReceiverScopedCallable(member, call.Arguments.Count, out var receiverResolved, out _) =>
                 receiverResolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(receiverResolved.ReturnType),
             CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
                                             string.Equals(member.Member.Text, "clear", StringComparison.Ordinal) =>

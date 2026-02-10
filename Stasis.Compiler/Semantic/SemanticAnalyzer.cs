@@ -212,13 +212,16 @@ public sealed class SemanticAnalyzer
 
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
     {
+        var externByLinkName = new Dictionary<string, FunctionDeclarationSyntax>(StringComparer.Ordinal);
+
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             var hasExternAttr = fn.Attributes.Any(a => string.Equals(a.Text, "extern", StringComparison.Ordinal));
+            var isExternFunction = fn.IsExtern || hasExternAttr;
 
             if (fn.Body is null)
             {
-                if (!fn.IsExtern && !hasExternAttr)
+                if (!isExternFunction)
                 {
                     AddDiagnostic($"Function '{fn.Name.Text}' is missing a body. Add a body or mark it as extern.", fn.Name.Span);
                 }
@@ -230,7 +233,42 @@ public sealed class SemanticAnalyzer
                     AddDiagnostic($"Function '{fn.Name.Text}' has a body and cannot be marked @extern.", fn.Name.Span);
                 }
             }
+
+            if (!isExternFunction)
+            {
+                continue;
+            }
+
+            var linkName = GetExternLinkName(fn) ?? fn.Name.Text;
+            if (externByLinkName.TryGetValue(linkName, out var existing))
+            {
+                AddDiagnostic(
+                    $"Extern link symbol '{linkName}' is used by multiple callables ('{existing.Name.Text}' and '{fn.Name.Text}'). Give each extern callable a distinct @extern(\"...\") link name.",
+                    fn.Name.Span);
+                continue;
+            }
+
+            externByLinkName[linkName] = fn;
         }
+    }
+
+    private static string? GetExternLinkName(FunctionDeclarationSyntax function)
+    {
+        var raw = function.Attributes
+            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
+            .StringValue;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            return raw.Substring(1, raw.Length - 2);
+        }
+
+        return raw;
     }
 
     private void DeclareBuiltIns()

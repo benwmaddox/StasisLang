@@ -191,6 +191,23 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_extern_overloads_that_share_link_symbol()
+    {
+        var source = """
+            extern function damage(enemy: i32, amount: i32): i32;
+            extern function damage(hero: f32, amount: i32): i32;
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("Extern link symbol 'damage' is used by multiple callables", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_duplicate_receiver_callable_when_array_size_text_differs_only_by_formatting()
     {
         var source = """
