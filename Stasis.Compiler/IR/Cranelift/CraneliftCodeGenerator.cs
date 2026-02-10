@@ -54,6 +54,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 .OfType<FunctionDeclarationSyntax>()
                 .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
             var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
+            var externFunctionsWithCollidingLinkSymbols = CollectExternFunctionsWithCollidingLinkSymbols(reachableFunctionDeclarations);
             var (builtins, stringLiterals) = CollectLoweringNeeds(compilationUnit, options.IncludeTests, reachableFunctions);
             if (options.IncludeTests && options.EmitTestHarness)
             {
@@ -62,7 +63,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             // Declare external functions (C runtime) only when needed
             DeclareExternalFunctions(builder, builtins);
-            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, namesWithCollisions);
+            DeclareExternFunctionsFromSource(builder, compilationUnit, semanticResult.Symbols, reachableFunctions, externFunctionsWithCollidingLinkSymbols);
 
             // Define string literals referenced by the program
             foreach (var literal in stringLiterals)
@@ -74,7 +75,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, _moduleName);
+            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols, _moduleName);
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -759,11 +760,11 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         CompilationUnitSyntax compilationUnit,
         IReadOnlyDictionary<string, Symbol> symbols,
         IReadOnlySet<string> reachableFunctions,
-        IReadOnlySet<string> namesWithCollisions)
+        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
     {
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
-            if (!func.IsExtern && !HasExternAttribute(func))
+            if (!IsExternFunction(func))
             {
                 continue;
             }
@@ -783,7 +784,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 continue;
             }
 
-            var externName = GetExternLinkName(func) ?? func.Name.Text;
+            var externName = GetExternSymbolName(func, externFunctionsWithCollidingLinkSymbols);
             var returnTypeSymbol = func.ReturnType is null
                 ? new VoidTypeSymbol()
                 : ResolveType(func.ReturnType, symbols);
@@ -794,6 +795,22 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             builder.DeclareExternal(externName, returnType, paramTypes);
         }
+    }
+
+    private static bool IsExternFunction(FunctionDeclarationSyntax func) =>
+        func.IsExtern || HasExternAttribute(func);
+
+    private static string GetExternSymbolName(
+        FunctionDeclarationSyntax func,
+        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+    {
+        var callableKey = CallableIdentity.GetCallableKey(func);
+        if (externFunctionsWithCollidingLinkSymbols.Contains(callableKey))
+        {
+            return CallableIdentity.GetEmittedFunctionName(func);
+        }
+
+        return GetExternLinkName(func) ?? func.Name.Text;
     }
 
     private static bool HasExternAttribute(FunctionDeclarationSyntax func) =>
@@ -816,6 +833,25 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         }
 
         return raw;
+    }
+
+    private static IReadOnlySet<string> CollectExternFunctionsWithCollidingLinkSymbols(IEnumerable<FunctionDeclarationSyntax> functions)
+    {
+        var collisions = new HashSet<string>(StringComparer.Ordinal);
+        var byLinkName = functions
+            .Where(IsExternFunction)
+            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1);
+
+        foreach (var group in byLinkName)
+        {
+            foreach (var fn in group)
+            {
+                collisions.Add(CallableIdentity.GetCallableKey(fn));
+            }
+        }
+
+        return collisions;
     }
 
     private static void EmitGlobals(
@@ -903,6 +939,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         bool emitTestHarness,
         HashSet<string> reachableFunctions,
         IReadOnlySet<string> namesWithCollisions,
+        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols,
         string moduleName)
     {
         var typeMapper = builder.TypeMapper;
@@ -917,7 +954,7 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<FunctionDeclarationSyntax>()
             .GroupBy(f => f.Name.Text, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<FunctionDeclarationSyntax>)g.ToList(), StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, externFunctionsWithCollidingLinkSymbols, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
