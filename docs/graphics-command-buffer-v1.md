@@ -106,7 +106,7 @@ The current prototype uses fixed maxima (see `runtime/stasis_graphics.c`):
 
 1. Calls `stasis_begin_frame()`
 2. If `(flags & 1) != 0`: calls `stasis_clear(r,g,b,a)`
-3. If `line_count > 0`: calls `stasis_draw_lines_f32(...)`
+3. If `line_count > 0`: calls `draw_lines(...)`
 4. If `sprite_count > 0`: loops and calls `stasis_gfx_draw_sprite(...)`
 5. If `cmd_u8 != NULL` and text present: loops and calls `stasis_draw_text(...)`
 6. If `(flags & 2) != 0`: calls `stasis_end_frame()` (present)
@@ -124,7 +124,7 @@ This "present bit" exists so benchmarks can exclude swap/vsync while still exerc
 
 - `samples/render_command_buffer_bench_submit.stasis` compares:
   - per-call `draw_line` (many host calls)
-  - batched `draw_lines_f32` (1 host call)
+  - batched `draw_lines` (1 host call)
   - `gfx_cmd_submit_*` (1 host call; can measure build vs prebuilt)
 - `samples/render_heavy_submit_bench.stasis` compares the same submission styles with both lines and sprites, so the signal is large enough to see on native.
 

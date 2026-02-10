@@ -111,12 +111,12 @@ function brickout_shop_anim_step(anim: f32, open: i32, dt: f32, speed: f32): f32
 function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
     let v: i32 = value;
     if (v == 0) {
-        ascii_append_byte(dst, 48);
+        ascii_push(dst, 48);
         return;
     }
 
     if (v < 0) {
-        ascii_append_byte(dst, 45); // '-'
+        ascii_push(dst, 45); // '-'
         v = 0 - v;
     }
 
@@ -130,7 +130,7 @@ function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
 
     let i: i32 = count - 1;
     for (; i >= 0; i = i - 1) {
-        ascii_append_byte(dst, brickout_digits_tmp[i]);
+        ascii_push(dst, brickout_digits_tmp[i]);
     }
 }
 
@@ -147,7 +147,7 @@ function brickout_ascii_write_scraps_power_line(
     brickout_ascii_append_i32(tmp_ascii, scraps);
     ascii_append(tmp_ascii, "   Power: ");
     brickout_ascii_append_i32(tmp_ascii, power_used);
-    ascii_append_byte(tmp_ascii, 47); // '/'
+    ascii_push(tmp_ascii, 47); // '/'
     brickout_ascii_append_i32(tmp_ascii, power_cap);
-    from_ascii(out, tmp_ascii, out_max);
+    utf8_from_ascii(out, tmp_ascii, out_max);
 }

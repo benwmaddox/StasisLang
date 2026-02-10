@@ -16,6 +16,6 @@ function hud_draw_text_from_ascii(
     b: f32,
     a: f32
 ): void {
-    hud_text_commit_utf8(out, tmp, out_max);
+    hud_text_commit(out, tmp, out_max);
     draw_text(font, out, x, y, r, g, b, a);
 }

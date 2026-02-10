@@ -4,7 +4,7 @@ import "../src/gfx_cmd.stasis";
 
 // Render submission microbench:
 // - Per-call: many draw_line() calls from Stasis (many host boundary calls).
-// - Batched: one draw_lines_f32() call that loops in the runtime.
+// - Batched: one draw_lines() call that loops in the runtime.
 // - Submit: one gfx_cmd_submit_no_present() call (command buffer) that loops in the runtime.
 //
 // Notes:
@@ -61,18 +61,18 @@ function submit_lines_per_call(): void {
 }
 
 function submit_lines_batched(): void {
-    draw_lines_f32(state.lines, LINE_COUNT);
+    draw_lines(state.lines, LINE_COUNT);
 }
 
 function submit_lines_cmd(): void {
     gfx_cmd_begin();
-    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
+    gfx_cmd_lines_from(state.lines, LINE_COUNT);
     gfx_cmd_submit_no_present();
 }
 
 function build_lines_cmd_once(): void {
     gfx_cmd_begin();
-    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
+    gfx_cmd_lines_from(state.lines, LINE_COUNT);
 }
 
 function bench_per_call(iterations: i32): i32 {

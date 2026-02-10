@@ -132,7 +132,7 @@ ascii[N]   // ASCII-only string buffers with a single length header
 
 - `print_string(utf8[N])` prints a UTF-8 buffer; the compiler lowers string literals to static storage with UTF-8 headers and a null sentinel, and the runtime passes the payload pointer to the host I/O layer.
 - `string` and `string[N]` are `utf8` aliases, so any string passed to built-ins uses the UTF-8 header layout by default.
-- `ascii[N]` and `utf8[N]` are distinct; there is no implicit widening between them. Use explicit conversion helpers (for example, a stdlib `from_ascii` function) when crossing the boundary.
+- `ascii[N]` and `utf8[N]` are distinct; there is no implicit widening between them. Use explicit conversion helpers (for example, a stdlib `utf8_from_ascii` function) when crossing the boundary.
 - Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
 - Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
 - `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
@@ -511,6 +511,11 @@ Call forms:
 
 - Receiver form (recommended): `enemy.damage(5)`
 - Function form (supported): `damage(enemy, 5)`
+
+Style guidance:
+
+- Prefer receiver form for receiver-centric operations.
+- Write `receiver.doAction(action)` instead of `doAction(receiver, action)` unless function form is clearer for a specific context.
 
 Resolution rules:
 

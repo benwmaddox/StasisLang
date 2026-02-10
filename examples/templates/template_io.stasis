@@ -5,11 +5,11 @@ import "../../src/stdlib/stdlib.stasis";
 function t_append_i32(dst: ascii[], value: i32): void {
     let v: i32 = value;
     if (v == 0) {
-        ascii_append_byte(dst, 48);
+        ascii_push(dst, 48);
         return;
     }
     if (v < 0) {
-        ascii_append_byte(dst, 45);
+        ascii_push(dst, 45);
         v = 0 - v;
     }
     let pow10: i32 = 1;
@@ -17,7 +17,7 @@ function t_append_i32(dst: ascii[], value: i32): void {
     }
     for (; pow10 > 0; pow10 = pow10 / 10) {
         let digit: i32 = (v / pow10) % 10;
-        ascii_append_byte(dst, i32_to_u8_trunc(48 + digit));
+        ascii_push(dst, i32_to_u8_trunc(48 + digit));
     }
 }
 
@@ -35,5 +35,5 @@ function t_path_set_csv(out_path: ascii[], base: ascii[]): void {
 }
 
 function t_write_ascii_file(path: ascii[], text: ascii[]): bool {
-    return sys_write_file(path, text, ascii_len(text)) == 1;
+    return sys_write_file(path, text, length(text)) == 1;
 }
