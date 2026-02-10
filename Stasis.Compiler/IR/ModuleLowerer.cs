@@ -27,12 +27,13 @@ public sealed class ModuleLowerer
             .OfType<FunctionDeclarationSyntax>()
             .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
         var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
+        var externFunctionsWithCollidingLinkSymbols = CollectExternFunctionsWithCollidingLinkSymbols(reachableFunctionDeclarations);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
-        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions);
+        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
 
         var diagnostics = new List<Diagnostic>();
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics, reachableFunctions, namesWithCollisions);
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
         lowerer.Lower(compilationUnit, opts.IncludeTests);
 
         if (opts.IncludeTests && opts.EmitTestHarness)
@@ -1367,6 +1368,7 @@ public sealed class ModuleLowerer
         private readonly bool _headlessGraphics;
         private readonly HashSet<string> _reachableFunctions;
         private readonly IReadOnlySet<string> _namesWithCollisions;
+        private readonly IReadOnlySet<string> _externFunctionsWithCollidingLinkSymbols;
 
         public FunctionLowerer(
             LlvmModuleBuilder moduleBuilder,
@@ -1376,7 +1378,8 @@ public sealed class ModuleLowerer
             bool includeTests,
             bool headlessGraphics,
             HashSet<string> reachableFunctions,
-            IReadOnlySet<string> namesWithCollisions)
+            IReadOnlySet<string> namesWithCollisions,
+            IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
@@ -1385,6 +1388,7 @@ public sealed class ModuleLowerer
             _headlessGraphics = headlessGraphics;
             _reachableFunctions = reachableFunctions;
             _namesWithCollisions = namesWithCollisions;
+            _externFunctionsWithCollidingLinkSymbols = externFunctionsWithCollidingLinkSymbols;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit, bool includeTests)
@@ -2129,7 +2133,7 @@ public sealed class ModuleLowerer
             if (call.Callee is MemberAccessExpressionSyntax memberCallee)
             {
                 callableName = memberCallee.Member.Text;
-                if (!TryResolveReceiverScopedCallable(memberCallee, locals, out resolvedFunction, out var diag))
+                if (!TryResolveReceiverScopedCallable(memberCallee, locals, call.Arguments.Count, out resolvedFunction, out var diag))
                 {
                     AddDiagnostic(diag ?? $"Unknown callable '{callableName}'.", call.Span);
                     return ConstI32(0);
@@ -2168,7 +2172,7 @@ public sealed class ModuleLowerer
                 return inlined;
             }
 
-            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions);
+            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFunctionsWithCollidingLinkSymbols);
             var fn = _moduleBuilder.Module.GetNamedFunction(emittedName);
             if (fn.Handle == IntPtr.Zero && IsExternFunction(resolvedFunction))
             {
@@ -2214,6 +2218,7 @@ public sealed class ModuleLowerer
         private bool TryResolveReceiverScopedCallable(
             MemberAccessExpressionSyntax memberCallee,
             IReadOnlyDictionary<string, LocalBinding> locals,
+            int receiverArgumentCount,
             out FunctionDeclarationSyntax function,
             out string? diagnostic)
         {
@@ -2233,23 +2238,39 @@ public sealed class ModuleLowerer
             }
 
             var receiverKey = CallableIdentity.TypeKey(receiverType);
-            var matches = candidates
+            var receiverMatches = candidates
                 .Where(fn => fn.Parameters.Count > 0 &&
                              string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
                 .ToArray();
-            if (matches.Length == 1)
+            if (receiverMatches.Length == 0)
             {
-                function = matches[0];
-                return true;
-            }
-
-            if (matches.Length > 1)
-            {
-                diagnostic = $"Call to '{memberCallee.Member.Text}' is ambiguous for receiver type '{receiverKey}'.";
+                diagnostic = $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{receiverKey}'.";
                 return false;
             }
 
-            diagnostic = $"Unknown callable '{memberCallee.Member.Text}' for receiver type '{receiverKey}'.";
+            var arityMatches = receiverMatches
+                .Where(fn => fn.Parameters.Count == receiverArgumentCount + 1)
+                .ToArray();
+            if (arityMatches.Length == 1)
+            {
+                function = arityMatches[0];
+                return true;
+            }
+
+            if (arityMatches.Length > 1)
+            {
+                diagnostic = $"Call to '{memberCallee.Member.Text}' is ambiguous for receiver type '{receiverKey}' and arity {receiverArgumentCount}.";
+                return false;
+            }
+
+            if (receiverMatches.Length == 1)
+            {
+                var expectedArgs = Math.Max(0, receiverMatches[0].Parameters.Count - 1);
+                diagnostic = $"Callable '{memberCallee.Member.Text}' expects {expectedArgs} argument(s) in receiver form, but got {receiverArgumentCount}.";
+                return false;
+            }
+
+            diagnostic = $"No callable '{memberCallee.Member.Text}' matches receiver-form arity {receiverArgumentCount} for receiver type '{receiverKey}'.";
             return false;
         }
 
@@ -6807,7 +6828,7 @@ public sealed class ModuleLowerer
                                                    string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
                     return new VoidTypeSymbol();
                 case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
-                                                   TryResolveReceiverScopedCallable(member, locals ?? new Dictionary<string, LocalBinding>(StringComparer.Ordinal), out var resolvedReceiverFunction, out _):
+                                                   TryResolveReceiverScopedCallable(member, locals ?? new Dictionary<string, LocalBinding>(StringComparer.Ordinal), call.Arguments.Count, out var resolvedReceiverFunction, out _):
                     return resolvedReceiverFunction.ReturnType is null
                         ? new VoidTypeSymbol()
                         : ResolveType(resolvedReceiverFunction.ReturnType, _symbols);
@@ -7203,7 +7224,8 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         LlvmModuleBuilder builder,
         bool includeTests,
         HashSet<string> reachableFunctions,
-        IReadOnlySet<string> namesWithCollisions)
+        IReadOnlySet<string> namesWithCollisions,
+        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
     {
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
@@ -7215,7 +7237,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            var emittedName = GetCallableSymbolName(fn, namesWithCollisions);
+            var emittedName = GetCallableSymbolName(fn, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
             EmitFunction(builder, symbols, structs, emittedName, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
@@ -7253,14 +7275,44 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         builder.DefineFunction(name, ret, paramTypes);
     }
 
-    private static string GetCallableSymbolName(FunctionDeclarationSyntax function, IReadOnlySet<string> namesWithCollisions)
+    private static string GetCallableSymbolName(
+        FunctionDeclarationSyntax function,
+        IReadOnlySet<string> namesWithCollisions,
+        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
     {
         if (IsExternFunction(function))
         {
+            var callableKey = CallableIdentity.GetCallableKey(function);
+            if (externFunctionsWithCollidingLinkSymbols.Contains(callableKey))
+            {
+                // Keep symbol names unique in diagnostic-tolerant lowering even when semantic
+                // diagnostics already reported extern link collisions.
+                return CallableIdentity.GetEmittedFunctionName(function);
+            }
+
             return GetExternLinkName(function) ?? function.Name.Text;
         }
 
         return CallableIdentity.GetEmittedFunctionName(function, namesWithCollisions);
+    }
+
+    private static IReadOnlySet<string> CollectExternFunctionsWithCollidingLinkSymbols(IEnumerable<FunctionDeclarationSyntax> functions)
+    {
+        var collisions = new HashSet<string>(StringComparer.Ordinal);
+        var byLinkName = functions
+            .Where(IsExternFunction)
+            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1);
+
+        foreach (var group in byLinkName)
+        {
+            foreach (var fn in group)
+            {
+                collisions.Add(CallableIdentity.GetCallableKey(fn));
+            }
+        }
+
+        return collisions;
     }
 
     private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
