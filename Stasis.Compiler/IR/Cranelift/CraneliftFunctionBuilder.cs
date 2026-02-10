@@ -746,7 +746,7 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
-        var isExtern = IsExternFunction(resolvedFunction);
+        var isExtern = CallableSymbolNameResolver.IsExternFunction(resolvedFunction);
         var callName = isExtern
             ? GetExternCallName(resolvedFunction)
             : MangleFunctionName(CallableIdentity.GetEmittedFunctionName(resolvedFunction, _namesWithCollisions));
@@ -1820,41 +1820,10 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {call} = call %stasis_sys_flush()");
         return call;
     }
-    private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
-        function.IsExtern || HasExternAttribute(function);
-
     private string GetExternCallName(FunctionDeclarationSyntax function)
     {
-        var callableKey = CallableIdentity.GetCallableKey(function);
-        if (_externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
-        {
-            return fallbackSymbol;
-        }
-
-        var linkName = function.Attributes
-            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
-            .StringValue;
-
-        if (!string.IsNullOrWhiteSpace(linkName))
-        {
-            return UnquoteStringLiteral(linkName);
-        }
-
-        return function.Name.Text;
+        return CallableSymbolNameResolver.GetExternSymbolName(function, _externFallbackSymbolNames);
     }
-
-    private static string UnquoteStringLiteral(string text)
-    {
-        if (text.Length >= 2 && text[0] == '"' && text[^1] == '"')
-        {
-            return text.Substring(1, text.Length - 2);
-        }
-
-        return text;
-    }
-
-    private static bool HasExternAttribute(FunctionDeclarationSyntax func) =>
-        func.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
 
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
 

@@ -217,7 +217,7 @@ public sealed class SemanticAnalyzer
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             var hasExternAttr = fn.Attributes.Any(a => string.Equals(a.Text, "extern", StringComparison.Ordinal));
-            var isExternFunction = fn.IsExtern || hasExternAttr;
+            var isExternFunction = CallableSymbolNameResolver.IsExternFunction(fn);
 
             if (fn.Body is null)
             {
@@ -239,7 +239,7 @@ public sealed class SemanticAnalyzer
                 continue;
             }
 
-            var linkName = GetExternLinkName(fn) ?? fn.Name.Text;
+            var linkName = CallableSymbolNameResolver.GetExternLinkName(fn) ?? fn.Name.Text;
             if (externByLinkName.TryGetValue(linkName, out var existing))
             {
                 AddDiagnostic(
@@ -250,25 +250,6 @@ public sealed class SemanticAnalyzer
 
             externByLinkName[linkName] = fn;
         }
-    }
-
-    private static string? GetExternLinkName(FunctionDeclarationSyntax function)
-    {
-        var raw = function.Attributes
-            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
-            .StringValue;
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return null;
-        }
-
-        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
-        {
-            return raw.Substring(1, raw.Length - 2);
-        }
-
-        return raw;
     }
 
     private void DeclareBuiltIns()

@@ -27,6 +27,12 @@ Run a sample:
 .\stasis.bat run .\samples\interactive_showcase.stasis --backend llvm --graphics
 ```
 
+Quality gate before pushing callable/lowering changes:
+
+```powershell
+.\scripts\pre-push-gate.ps1
+```
+
 ## Quickstart (WSL/Linux)
 
 See `docs/wsl-dev.md` for a WSL-first Brickout Revenge dev loop (recommended if you're comparing hot-swap latency).

@@ -27,7 +27,7 @@ public sealed class ModuleLowerer
             .OfType<FunctionDeclarationSyntax>()
             .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
         var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
-        var externFallbackSymbolNames = CollectExternFallbackSymbolNames(reachableFunctionDeclarations, namesWithCollisions);
+        var externFallbackSymbolNames = CallableSymbolNameResolver.CollectExternFallbackSymbolNames(reachableFunctionDeclarations, namesWithCollisions);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
         EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions, externFallbackSymbolNames);
@@ -2172,9 +2172,9 @@ public sealed class ModuleLowerer
                 return inlined;
             }
 
-            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFallbackSymbolNames);
+            var emittedName = CallableSymbolNameResolver.GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFallbackSymbolNames);
             var fn = _moduleBuilder.Module.GetNamedFunction(emittedName);
-            if (fn.Handle == IntPtr.Zero && IsExternFunction(resolvedFunction))
+            if (fn.Handle == IntPtr.Zero && CallableSymbolNameResolver.IsExternFunction(resolvedFunction))
             {
                 var externSignature = ResolveFunctionSignature(resolvedFunction);
                 var externType = LLVMTypeRef.CreateFunction(externSignature.ReturnType, externSignature.Parameters, false);
@@ -7237,7 +7237,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            var emittedName = GetCallableSymbolName(fn, namesWithCollisions, externFallbackSymbolNames);
+            var emittedName = CallableSymbolNameResolver.GetCallableSymbolName(fn, namesWithCollisions, externFallbackSymbolNames);
             EmitFunction(builder, symbols, structs, emittedName, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
@@ -7273,98 +7273,6 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             .ToArray();
 
         builder.DefineFunction(name, ret, paramTypes);
-    }
-
-    private static string GetCallableSymbolName(
-        FunctionDeclarationSyntax function,
-        IReadOnlySet<string> namesWithCollisions,
-        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
-    {
-        if (IsExternFunction(function))
-        {
-            var callableKey = CallableIdentity.GetCallableKey(function);
-            if (externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
-            {
-                return fallbackSymbol;
-            }
-
-            return GetExternLinkName(function) ?? function.Name.Text;
-        }
-
-        return CallableIdentity.GetEmittedFunctionName(function, namesWithCollisions);
-    }
-
-    private static IReadOnlyDictionary<string, string> CollectExternFallbackSymbolNames(
-        IEnumerable<FunctionDeclarationSyntax> functions,
-        IReadOnlySet<string> namesWithCollisions)
-    {
-        var functionList = functions.ToList();
-        var reservedSymbolNames = functionList
-            .Where(fn => !IsExternFunction(fn))
-            .Select(fn => CallableIdentity.GetEmittedFunctionName(fn, namesWithCollisions))
-            .ToHashSet(StringComparer.Ordinal);
-        var fallbackByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        var externGroups = functionList
-            .Where(IsExternFunction)
-            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal);
-        foreach (var group in externGroups)
-        {
-            var hasCollision = group.Count() > 1 || reservedSymbolNames.Contains(group.Key);
-            if (!hasCollision)
-            {
-                reservedSymbolNames.Add(group.Key);
-                continue;
-            }
-
-            foreach (var fn in group)
-            {
-                var fallbackBase = CallableIdentity.GetEmittedFunctionName(fn);
-                if (!CallableIdentity.HasReceiver(fn))
-                {
-                    fallbackBase = $"{fn.Name.Text}__extern";
-                }
-
-                var fallback = fallbackBase;
-                var suffix = 2;
-                while (reservedSymbolNames.Contains(fallback))
-                {
-                    fallback = $"{fallbackBase}_{suffix}";
-                    suffix++;
-                }
-
-                var callableKey = CallableIdentity.GetCallableKey(fn);
-                fallbackByCallableKey[callableKey] = fallback;
-                reservedSymbolNames.Add(fallback);
-            }
-        }
-
-        return fallbackByCallableKey;
-    }
-
-    private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
-        function.IsExtern || HasExternAttribute(function);
-
-    private static bool HasExternAttribute(FunctionDeclarationSyntax function) =>
-        function.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));
-
-    private static string? GetExternLinkName(FunctionDeclarationSyntax function)
-    {
-        var raw = function.Attributes
-            .FirstOrDefault(a => string.Equals(a.Text, "extern", StringComparison.Ordinal))?
-            .StringValue;
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return null;
-        }
-
-        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
-        {
-            return raw.Substring(1, raw.Length - 2);
-        }
-
-        return raw;
     }
 
     private static TypeSymbol ResolveType(TypeSyntax syntax, IReadOnlyDictionary<string, Symbol> symbols)
