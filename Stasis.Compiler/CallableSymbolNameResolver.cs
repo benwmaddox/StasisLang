@@ -23,20 +23,14 @@ internal static class CallableSymbolNameResolver
 
     public static string GetExternSymbolName(
         FunctionDeclarationSyntax function,
-        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
+        IReadOnlyDictionary<string, string> _externFallbackSymbolNames)
     {
-        var callableKey = CallableIdentity.GetCallableKey(function);
-        if (externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
-        {
-            return fallbackSymbol;
-        }
-
         return GetExternLinkName(function) ?? function.Name.Text;
     }
 
     public static string GetCallableSymbolName(
         FunctionDeclarationSyntax function,
-        IReadOnlySet<string> namesWithCollisions,
+        IReadOnlySet<string> _namesWithCollisions,
         IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         if (IsExternFunction(function))
@@ -44,56 +38,13 @@ internal static class CallableSymbolNameResolver
             return GetExternSymbolName(function, externFallbackSymbolNames);
         }
 
-        return CallableIdentity.GetEmittedFunctionName(function, namesWithCollisions);
+        return CallableIdentity.GetEmittedFunctionName(function);
     }
 
     public static IReadOnlyDictionary<string, string> CollectExternFallbackSymbolNames(
-        IEnumerable<FunctionDeclarationSyntax> functions,
-        IReadOnlySet<string> namesWithCollisions)
-    {
-        var functionList = functions.ToList();
-        var reservedSymbolNames = functionList
-            .Where(fn => !IsExternFunction(fn))
-            .Select(fn => CallableIdentity.GetEmittedFunctionName(fn, namesWithCollisions))
-            .ToHashSet(StringComparer.Ordinal);
-        var fallbackByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        var externGroups = functionList
-            .Where(IsExternFunction)
-            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal);
-        foreach (var group in externGroups)
-        {
-            var hasCollision = group.Count() > 1 || reservedSymbolNames.Contains(group.Key);
-            if (!hasCollision)
-            {
-                reservedSymbolNames.Add(group.Key);
-                continue;
-            }
-
-            foreach (var fn in group)
-            {
-                var fallbackBase = CallableIdentity.GetEmittedFunctionName(fn);
-                if (!CallableIdentity.HasReceiver(fn))
-                {
-                    fallbackBase = $"{fn.Name.Text}__extern";
-                }
-
-                var fallback = fallbackBase;
-                var suffix = 2;
-                while (reservedSymbolNames.Contains(fallback))
-                {
-                    fallback = $"{fallbackBase}_{suffix}";
-                    suffix++;
-                }
-
-                var callableKey = CallableIdentity.GetCallableKey(fn);
-                fallbackByCallableKey[callableKey] = fallback;
-                reservedSymbolNames.Add(fallback);
-            }
-        }
-
-        return fallbackByCallableKey;
-    }
+        IEnumerable<FunctionDeclarationSyntax> _functions,
+        IReadOnlySet<string> _namesWithCollisions) =>
+        new Dictionary<string, string>(StringComparer.Ordinal);
 
     private static bool HasExternAttribute(FunctionDeclarationSyntax function) =>
         function.Attributes.Any(attr => string.Equals(attr.Text, "extern", StringComparison.Ordinal));

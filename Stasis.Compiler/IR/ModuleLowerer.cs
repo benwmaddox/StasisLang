@@ -6898,6 +6898,11 @@ public sealed class ModuleLowerer
                     return resolvedFunction.ReturnType is null
                         ? new VoidTypeSymbol()
                         : ResolveType(resolvedFunction.ReturnType, _symbols);
+                case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                                   TryResolveTestCallable(id.Identifier.Text, call.Arguments, out var resolvedTest, out _):
+                    return resolvedTest.ReturnType is null
+                        ? new PrimitiveTypeSymbol("i32")
+                        : ResolveType(resolvedTest.ReturnType, _symbols);
                 case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
                                                    string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
                     return new VoidTypeSymbol();

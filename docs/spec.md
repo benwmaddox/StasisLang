@@ -484,6 +484,7 @@ function @inline name(param: Type): ReturnType { ... }
 
 - No general overloading by parameter list alone.
 - Receiver-scoped callable names are allowed: the same function name may be declared for different parameter-0 types.
+- All declarations that share a function name must use the same parameter count (arity overloading is not supported).
 - No closures.
 - Parameters are primitive or references (struct indices, slices, etc.).
 - All struct/array data resides in global memory.
@@ -524,11 +525,14 @@ Resolution rules:
 Invalid duplicate declarations:
 
 - Defining the same `(name, parameter-0 type)` more than once in the same effective scope is a compile error.
-- For a fixed `(name, parameter-0 type)`, additional overloads by arity or non-receiver parameter types are not supported.
+- Any declarations that share a name but differ in parameter count are compile errors.
+- For a fixed `(name, parameter-0 type)`, additional overloads by non-receiver parameter types are not supported.
 
 Lowering model:
 
 - Receiver-form and function-form calls are equivalent after binding and lower through the same function ABI path.
+- Non-receiver callables lower to symbol `name`.
+- Receiver callables lower to symbol `name__ReceiverTypeKey` (for example `damage__Enemy`, `tag__i32`).
 
 ### Extern declarations
 
@@ -551,6 +555,7 @@ function @extern("stasis_sleep_ms") sleep_ms(ms: i32): void;
 ```
 
 Extern functions also participate in receiver-scoped resolution when declared with a typed parameter 0 and called in receiver form.
+Extern link names must be unique across extern declarations and must not collide with emitted non-extern callable symbols.
 
 ---
 

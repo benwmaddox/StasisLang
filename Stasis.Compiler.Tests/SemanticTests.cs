@@ -208,6 +208,26 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Flags_extern_link_symbol_collision_with_non_extern_callable_symbol()
+    {
+        var source = """
+            function puts(): i32 {
+                return 0;
+            }
+
+            function @extern("puts") host_puts(value: i32): i32;
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("Extern link symbol 'puts' collides with emitted callable symbol", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_duplicate_receiver_callable_when_array_size_text_differs_only_by_formatting()
     {
         var source = """
@@ -252,10 +272,10 @@ public class SemanticTests
     }
 
     [Fact]
-    public void Resolves_function_form_overload_for_backtick_literal_without_zero_arg_fallback()
+    public void Resolves_function_form_overload_for_backtick_literal_without_receiverless_arity_fallback()
     {
         var source = """
-            function ping(): i32 {
+            function ping(value: i32): i32 {
                 return 0;
             }
 
@@ -273,6 +293,28 @@ public class SemanticTests
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
         DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_arity_overloading_for_same_callable_name()
+    {
+        var source = """
+            function ping(): i32 {
+                return 0;
+            }
+
+            function ping(value: i32): i32 {
+                return value;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("cannot overload by arity", StringComparison.Ordinal));
     }
 
     [Fact]

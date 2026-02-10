@@ -33,18 +33,11 @@ internal static class CallableIdentity
         }
 
         var receiver = TypeKey(function.Parameters[0].Type);
-        return $"{function.Name.Text}__recv__{SanitizeForSymbol(receiver)}";
+        return $"{function.Name.Text}__{SanitizeForSymbol(receiver)}";
     }
 
     public static string GetEmittedFunctionName(FunctionDeclarationSyntax function, IReadOnlySet<string> namesWithCollisions)
-    {
-        if (!namesWithCollisions.Contains(function.Name.Text))
-        {
-            return function.Name.Text;
-        }
-
-        return GetEmittedFunctionName(function);
-    }
+        => GetEmittedFunctionName(function);
 
     public static HashSet<string> CollectNamesWithCollisions(IEnumerable<FunctionDeclarationSyntax> functions) =>
         functions

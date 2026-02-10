@@ -5097,6 +5097,9 @@ public sealed class CraneliftFunctionBuilder
                                             TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, out var resolvedFunction, out _) =>
                 resolvedFunction.ReturnType is null ? new VoidTypeSymbol() : ResolveType(resolvedFunction.ReturnType),
             CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                            TryResolveTestCallable(id.Identifier.Text, call.Arguments, out var resolvedTest, out _) =>
+                resolvedTest.ReturnType is null ? new PrimitiveTypeSymbol("i32") : ResolveType(resolvedTest.ReturnType),
+            CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                             _symbols.TryGetValue(id.Identifier.Text, out var funcSym) => funcSym.Type,
             CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
                                             !string.Equals(member.Member.Text, "clear", StringComparison.Ordinal) &&

@@ -24,13 +24,13 @@ Use this checklist when changing any of:
 - Ambiguous overloads should emit focused diagnostics.
 
 3. **Extern naming invariants**
-- Extern overloads with shared default link names must not collapse to one symbol.
-- Extern names must also avoid collisions with non-extern emitted symbols (for example, receiverless `foo`).
+- Extern overloads with shared default link names must produce semantic errors.
+- Extern link names must avoid collisions with emitted non-extern symbols (for example, receiverless `foo`).
 - Explicit `@extern("name")` should still be honored when unique.
 
 4. **Backend parity**
 - LLVM and Cranelift must choose the same callable targets for the same source.
-- Symbol fallback rules must be shared, not duplicated ad-hoc in each backend.
+- Callable symbol naming rules must be shared, not duplicated ad-hoc in each backend.
 
 5. **Reachability and declaration safety**
 - Reachability should not force unrelated overload extern declarations.
@@ -48,10 +48,10 @@ The canonical matrix is implemented in:
 Current matrix scenarios:
 
 1. Receiver overload dispatch by first parameter type.
-2. Receiverless + receiver overload coexistence.
-3. Extern overload collision fallback (`damage(i32)` + `damage(f32)`).
-4. Extern vs receiverless symbol collision fallback (`foo()` + `extern foo(i32)`).
-5. Explicit extern link name mixed with receiver overload.
+2. Primitive receiver overload dispatch (`ping(i32)` + `ping(u8)`).
+3. Extern overloads with explicit distinct link names.
+4. Receiverless + extern receiver callable coexistence via explicit link name.
+5. Explicit extern link name mixed with non-extern receiver overload.
 
 ## Commands
 
