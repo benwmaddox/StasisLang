@@ -380,6 +380,38 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void ExternOverloadCollision_UsesFallbackSymbolsInCranelift()
+    {
+        var parse = Parser.Parse("""
+            extern function damage(enemy: i32, amount: i32): i32;
+            extern function damage(hero: f32, amount: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a + b;
+            }
+            """);
+        Assert.Empty(parse.Diagnostics);
+
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        Assert.Contains(
+            semantic.Diagnostics,
+            d => d.Message.Contains("Extern link symbol 'damage' is used by multiple callables", StringComparison.Ordinal));
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, semantic.Symbols).Plan();
+        var options = new CodeGenerationOptions(ModuleName: "cranelift_confirm", IncludeTests: false, EmitTestHarness: false);
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, "cranelift_confirm");
+        var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("external damage__recv__i32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("external damage__recv__f32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("call %damage__recv__i32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("call %damage__recv__f32(", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PrintInt_UsesPrintf()
     {
         var ir = CompileCraneliftIr("""
