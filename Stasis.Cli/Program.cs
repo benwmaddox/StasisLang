@@ -3046,11 +3046,25 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
 static SwapHookKind DetermineSwapHookKind(CompilationUnitSyntax compilationUnit, out bool invalid)
 {
     invalid = false;
-    var hook = compilationUnit.Declarations
+    var hooks = compilationUnit.Declarations
         .OfType<FunctionDeclarationSyntax>()
-        .FirstOrDefault(fn => string.Equals(fn.Name.Text, "on_code_swap", StringComparison.Ordinal));
-    if (hook is null)
+        .Where(fn => string.Equals(fn.Name.Text, "on_code_swap", StringComparison.Ordinal))
+        .ToArray();
+    if (hooks.Length == 0)
     {
+        return SwapHookKind.None;
+    }
+
+    if (hooks.Length > 1)
+    {
+        invalid = true;
+        return SwapHookKind.None;
+    }
+
+    var hook = hooks[0];
+    if (hook.Parameters.Count != 0)
+    {
+        invalid = true;
         return SwapHookKind.None;
     }
 
@@ -3165,7 +3179,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         var hookKind = DetermineSwapHookKind(parse.CompilationUnit, out var invalidHook);
         if (invalidHook)
         {
-            Console.Error.WriteLine("error: on_code_swap must return i32 or have no return type.");
+            Console.Error.WriteLine("error: on_code_swap must have zero parameters and return i32 or have no return type.");
             return 1;
         }
 
@@ -3252,7 +3266,17 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             }
             phase.Restart();
 
-            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
+            var exports = new List<string>
+            {
+                $"{moduleName}__main",
+                $"{moduleName}__tick"
+            };
+            if (hookKind != SwapHookKind.None)
+            {
+                exports.Add($"{moduleName}__on_code_swap");
+            }
+
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, exports, excludeSpriteFields: false, out var plan))
             {
                 return 1;
             }
@@ -3411,14 +3435,22 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         }
         changeSignal.Reset();
 
-        var exit = BuildAndApply(startHost: false, out var timingLine, out var loadMs);
+        var startHost = host is null;
+        var exit = BuildAndApply(startHost: startHost, out var timingLine, out var loadMs);
         if (exit == 0)
         {
             var totalMs = TryParseHotReloadTotalMs(timingLine);
-            var loadText = loadMs < 0
-                ? "-1"
-                : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-            Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=0 load={loadText}");
+            if (startHost)
+            {
+                Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
+            }
+            else
+            {
+                var loadText = loadMs < 0
+                    ? "-1"
+                    : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=0 load={loadText}");
+            }
         }
         else if (host is not null && host.IsRunning)
         {
@@ -6643,15 +6675,16 @@ sealed class InProcessTickHost : IDisposable
                         loadMs);
                 }
 
-                var snapshot = CaptureState(current.StateSymbols);
+                var preHookSnapshot = CaptureState(current.StateSymbols);
                 if (current.InvokeSwapHook() != 0)
                 {
-                    RestoreState(current.StateSymbols, snapshot, out _);
+                    RestoreState(current.StateSymbols, preHookSnapshot, out _);
                     incoming.Dispose();
                     return new InProcessSwapResult(false, "on_code_swap returned non-zero", loadMs);
                 }
 
-                RestoreState(incoming.StateSymbols, snapshot, out var missingRestoreAfterCopy);
+                var transferSnapshot = CaptureState(current.StateSymbols);
+                RestoreState(incoming.StateSymbols, transferSnapshot, out var missingRestoreAfterCopy);
                 if (missingRestoreAfterCopy > 0)
                 {
                     incoming.Dispose();
