@@ -412,6 +412,29 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void ExternReceiverCallable_FallsBackWhenNameCollidesWithReceiverlessCallable()
+    {
+        var ir = CompileCraneliftIr("""
+            function foo(): i32 {
+                return 7;
+            }
+
+            extern function foo(value: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = foo();
+                let b: i32 = foo(1);
+                return a + b;
+            }
+            """);
+
+        Assert.Contains("function %cranelift_confirm__foo()", ir, StringComparison.Ordinal);
+        Assert.Contains("external foo__recv__i32(i32) -> i32", ir, StringComparison.Ordinal);
+        Assert.Contains("call %cranelift_confirm__foo()", ir, StringComparison.Ordinal);
+        Assert.Contains("call %foo__recv__i32(", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PrintInt_UsesPrintf()
     {
         var ir = CompileCraneliftIr("""

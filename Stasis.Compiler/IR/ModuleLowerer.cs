@@ -27,13 +27,13 @@ public sealed class ModuleLowerer
             .OfType<FunctionDeclarationSyntax>()
             .Where(fn => reachableFunctions.Contains(CallableIdentity.GetCallableKey(fn)));
         var namesWithCollisions = CallableIdentity.CollectNamesWithCollisions(reachableFunctionDeclarations);
-        var externFunctionsWithCollidingLinkSymbols = CollectExternFunctionsWithCollidingLinkSymbols(reachableFunctionDeclarations);
+        var externFallbackSymbolNames = CollectExternFallbackSymbolNames(reachableFunctionDeclarations, namesWithCollisions);
         EmitGlobals(compilationUnit, semantic.Symbols, layout, builder);
         EmitConstants(compilationUnit, semantic.Symbols, builder);
-        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
+        EmitFunctionSignatures(compilationUnit, semantic.Symbols, builder, opts.IncludeTests, reachableFunctions, namesWithCollisions, externFallbackSymbolNames);
 
         var diagnostics = new List<Diagnostic>();
-        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics, reachableFunctions, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
+        var lowerer = new FunctionLowerer(builder, semantic.Symbols, layout, diagnostics, opts.IncludeTests, opts.HeadlessGraphics, reachableFunctions, namesWithCollisions, externFallbackSymbolNames);
         lowerer.Lower(compilationUnit, opts.IncludeTests);
 
         if (opts.IncludeTests && opts.EmitTestHarness)
@@ -1368,7 +1368,7 @@ public sealed class ModuleLowerer
         private readonly bool _headlessGraphics;
         private readonly HashSet<string> _reachableFunctions;
         private readonly IReadOnlySet<string> _namesWithCollisions;
-        private readonly IReadOnlySet<string> _externFunctionsWithCollidingLinkSymbols;
+        private readonly IReadOnlyDictionary<string, string> _externFallbackSymbolNames;
 
         public FunctionLowerer(
             LlvmModuleBuilder moduleBuilder,
@@ -1379,7 +1379,7 @@ public sealed class ModuleLowerer
             bool headlessGraphics,
             HashSet<string> reachableFunctions,
             IReadOnlySet<string> namesWithCollisions,
-            IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+            IReadOnlyDictionary<string, string> externFallbackSymbolNames)
         {
             _moduleBuilder = moduleBuilder;
             _symbols = symbols;
@@ -1388,7 +1388,7 @@ public sealed class ModuleLowerer
             _headlessGraphics = headlessGraphics;
             _reachableFunctions = reachableFunctions;
             _namesWithCollisions = namesWithCollisions;
-            _externFunctionsWithCollidingLinkSymbols = externFunctionsWithCollidingLinkSymbols;
+            _externFallbackSymbolNames = externFallbackSymbolNames;
         }
 
         public void Lower(CompilationUnitSyntax compilationUnit, bool includeTests)
@@ -2172,7 +2172,7 @@ public sealed class ModuleLowerer
                 return inlined;
             }
 
-            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFunctionsWithCollidingLinkSymbols);
+            var emittedName = GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFallbackSymbolNames);
             var fn = _moduleBuilder.Module.GetNamedFunction(emittedName);
             if (fn.Handle == IntPtr.Zero && IsExternFunction(resolvedFunction))
             {
@@ -7225,7 +7225,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         bool includeTests,
         HashSet<string> reachableFunctions,
         IReadOnlySet<string> namesWithCollisions,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
@@ -7237,7 +7237,7 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             {
                 continue;
             }
-            var emittedName = GetCallableSymbolName(fn, namesWithCollisions, externFunctionsWithCollidingLinkSymbols);
+            var emittedName = GetCallableSymbolName(fn, namesWithCollisions, externFallbackSymbolNames);
             EmitFunction(builder, symbols, structs, emittedName, fn.ReturnType, fn.Parameters, isTest: false);
         }
 
@@ -7278,16 +7278,14 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
     private static string GetCallableSymbolName(
         FunctionDeclarationSyntax function,
         IReadOnlySet<string> namesWithCollisions,
-        IReadOnlySet<string> externFunctionsWithCollidingLinkSymbols)
+        IReadOnlyDictionary<string, string> externFallbackSymbolNames)
     {
         if (IsExternFunction(function))
         {
             var callableKey = CallableIdentity.GetCallableKey(function);
-            if (externFunctionsWithCollidingLinkSymbols.Contains(callableKey))
+            if (externFallbackSymbolNames.TryGetValue(callableKey, out var fallbackSymbol))
             {
-                // Keep symbol names unique in diagnostic-tolerant lowering even when semantic
-                // diagnostics already reported extern link collisions.
-                return CallableIdentity.GetEmittedFunctionName(function);
+                return fallbackSymbol;
             }
 
             return GetExternLinkName(function) ?? function.Name.Text;
@@ -7296,23 +7294,52 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
         return CallableIdentity.GetEmittedFunctionName(function, namesWithCollisions);
     }
 
-    private static IReadOnlySet<string> CollectExternFunctionsWithCollidingLinkSymbols(IEnumerable<FunctionDeclarationSyntax> functions)
+    private static IReadOnlyDictionary<string, string> CollectExternFallbackSymbolNames(
+        IEnumerable<FunctionDeclarationSyntax> functions,
+        IReadOnlySet<string> namesWithCollisions)
     {
-        var collisions = new HashSet<string>(StringComparer.Ordinal);
-        var byLinkName = functions
-            .Where(IsExternFunction)
-            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal)
-            .Where(group => group.Count() > 1);
+        var functionList = functions.ToList();
+        var reservedSymbolNames = functionList
+            .Where(fn => !IsExternFunction(fn))
+            .Select(fn => CallableIdentity.GetEmittedFunctionName(fn, namesWithCollisions))
+            .ToHashSet(StringComparer.Ordinal);
+        var fallbackByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        foreach (var group in byLinkName)
+        var externGroups = functionList
+            .Where(IsExternFunction)
+            .GroupBy(fn => GetExternLinkName(fn) ?? fn.Name.Text, StringComparer.Ordinal);
+        foreach (var group in externGroups)
         {
+            var hasCollision = group.Count() > 1 || reservedSymbolNames.Contains(group.Key);
+            if (!hasCollision)
+            {
+                reservedSymbolNames.Add(group.Key);
+                continue;
+            }
+
             foreach (var fn in group)
             {
-                collisions.Add(CallableIdentity.GetCallableKey(fn));
+                var fallbackBase = CallableIdentity.GetEmittedFunctionName(fn);
+                if (!CallableIdentity.HasReceiver(fn))
+                {
+                    fallbackBase = $"{fn.Name.Text}__extern";
+                }
+
+                var fallback = fallbackBase;
+                var suffix = 2;
+                while (reservedSymbolNames.Contains(fallback))
+                {
+                    fallback = $"{fallbackBase}_{suffix}";
+                    suffix++;
+                }
+
+                var callableKey = CallableIdentity.GetCallableKey(fn);
+                fallbackByCallableKey[callableKey] = fallback;
+                reservedSymbolNames.Add(fallback);
             }
         }
 
-        return collisions;
+        return fallbackByCallableKey;
     }
 
     private static bool IsExternFunction(FunctionDeclarationSyntax function) =>
