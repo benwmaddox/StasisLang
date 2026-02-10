@@ -213,6 +213,16 @@ public sealed class SemanticAnalyzer
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
     {
         var externByLinkName = new Dictionary<string, FunctionDeclarationSyntax>(StringComparer.Ordinal);
+        var nonExternSymbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
+        {
+            if (CallableSymbolNameResolver.IsExternFunction(fn))
+            {
+                continue;
+            }
+
+            nonExternSymbols.Add(CallableIdentity.GetEmittedFunctionName(fn));
+        }
 
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
@@ -240,6 +250,14 @@ public sealed class SemanticAnalyzer
             }
 
             var linkName = CallableSymbolNameResolver.GetExternLinkName(fn) ?? fn.Name.Text;
+            if (nonExternSymbols.Contains(linkName))
+            {
+                AddDiagnostic(
+                    $"Extern link symbol '{linkName}' collides with emitted callable symbol. Use a distinct @extern(\"...\") link name.",
+                    fn.Name.Span);
+                continue;
+            }
+
             if (externByLinkName.TryGetValue(linkName, out var existing))
             {
                 AddDiagnostic(
@@ -479,6 +497,12 @@ public sealed class SemanticAnalyzer
                         {
                             _functionsByName[fn.Name.Text] = overloads;
                         }
+                        else if (overloads.Count > 0 && overloads[0].Parameters.Count != fn.Parameters.Count)
+                        {
+                            AddDiagnostic(
+                                $"Callable '{fn.Name.Text}' cannot overload by arity. All declarations with this name must declare {overloads[0].Parameters.Count} parameter(s).",
+                                fn.Name.Span);
+                        }
 
                         overloads.Add(fn);
 
@@ -520,7 +544,9 @@ public sealed class SemanticAnalyzer
                     }
                 case TestDeclarationSyntax test:
                     {
-                        var returnType = test.ReturnType is null ? null : ResolveType(test.ReturnType);
+                        var returnType = test.ReturnType is null
+                            ? new PrimitiveTypeSymbol("i32")
+                            : ResolveType(test.ReturnType);
                         AddSymbol(test.Name.Text, SymbolKind.Test, returnType, test.Name.Span);
                         break;
                     }

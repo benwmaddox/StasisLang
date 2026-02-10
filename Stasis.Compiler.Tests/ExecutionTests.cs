@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Stasis.Compiler.IR;
 using Stasis.Compiler.Layout;
+using Xunit.Sdk;
 
 namespace Stasis.Compiler.Tests;
 
@@ -95,10 +96,34 @@ public class ExecutionTests
             CreateNoWindow = true
         };
 
-        using var proc = Process.Start(psi)!;
-        proc.WaitForExit();
-        var stderr = proc.StandardError.ReadToEnd();
-        return (proc.ExitCode, stderr);
+        Process? proc;
+        try
+        {
+            proc = Process.Start(psi);
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (IsExecutionBlockedByPolicy(ex))
+        {
+            throw SkipException.ForSkip("Execution blocked by Windows Application Control policy.");
+        }
+
+        Assert.NotNull(proc);
+        using (proc)
+        {
+            proc.WaitForExit();
+            var stderr = proc.StandardError.ReadToEnd();
+            return (proc.ExitCode, stderr);
+        }
+    }
+
+    private static bool IsExecutionBlockedByPolicy(System.ComponentModel.Win32Exception ex)
+    {
+        // ERROR_ACCESS_DISABLED_BY_POLICY: 1260
+        if (ex.NativeErrorCode == 1260)
+        {
+            return true;
+        }
+
+        return ex.Message.Contains("Application Control policy has blocked this file", StringComparison.OrdinalIgnoreCase);
     }
 
     private static (int ExitCode, string Stderr) CompileAndRunIr(string clangPath, string irPath, string? entryFunction = null)

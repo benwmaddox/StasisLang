@@ -36,32 +36,32 @@ public class CallableResolutionParityTests
             }
             """,
             false,
-            new[] { "damage__recv__Enemy", "damage__recv__Hero" }
+            new[] { "damage__Enemy", "damage__Hero" }
         };
 
         yield return new object[]
         {
-            "receiverless-and-receiver-overload",
+            "receiver-overloads-on-primitives",
             """
-            function ping(): i32 { return 7; }
             function ping(value: i32): i32 { return value; }
+            function ping(value: u8): i32 { return 7; }
 
             function main(): i32 {
-                let a: i32 = ping();
-                let b: i32 = ping(1);
+                let a: i32 = ping(1);
+                let b: i32 = ping(2u8);
                 return a + b;
             }
             """,
             false,
-            new[] { "ping", "ping__recv__i32" }
+            new[] { "ping__i32", "ping__u8" }
         };
 
         yield return new object[]
         {
-            "extern-overload-collision-fallback",
+            "extern-overloads-with-distinct-link-names",
             """
-            extern function damage(enemy: i32, amount: i32): i32;
-            extern function damage(hero: f32, amount: i32): i32;
+            function @extern("host_damage_enemy_i32") damage(enemy: i32, amount: i32): i32;
+            function @extern("host_damage_enemy_f32") damage(hero: f32, amount: i32): i32;
 
             function main(): i32 {
                 let a: i32 = damage(1, 2);
@@ -69,25 +69,23 @@ public class CallableResolutionParityTests
                 return a + b;
             }
             """,
-            true,
-            new[] { "damage__recv__i32", "damage__recv__f32" }
+            false,
+            new[] { "host_damage_enemy_i32", "host_damage_enemy_f32" }
         };
 
         yield return new object[]
         {
-            "extern-vs-receiverless-collision-fallback",
+            "function-form-binary-first-argument-dispatch",
             """
-            function foo(): i32 { return 7; }
-            extern function foo(value: i32): i32;
+            function tag(value: i32): i32 { return 1; }
+            function tag(value: f32): i32 { return 2; }
 
             function main(): i32 {
-                let a: i32 = foo();
-                let b: i32 = foo(1);
-                return a + b;
+                return tag(1.+(2));
             }
             """,
             false,
-            new[] { "foo", "foo__recv__i32" }
+            new[] { "tag__i32" }
         };
 
         yield return new object[]
@@ -104,7 +102,7 @@ public class CallableResolutionParityTests
             }
             """,
             false,
-            new[] { "host_damage_enemy", "damage__recv__f32" }
+            new[] { "host_damage_enemy", "damage__f32" }
         };
     }
 

@@ -1,15 +1,27 @@
-function ping(): i32 {
+struct Enemy {
+    hp: i32;
+}
+
+struct Hero {
+    hp: i32;
+}
+
+function score(entity: Enemy): i32 {
     return 7;
 }
 
-function ping(value: i32): i32 {
-    return value;
+function score(entity: Hero): i32 {
+    return 11;
 }
 
-test `zero-arg call picks receiverless overload`(): bool {
-    return ping() == 7;
+test `receiver form zero-arg call dispatches by receiver type`(): bool {
+    let enemy: Enemy = 0;
+    let hero: Hero = 0;
+    return enemy.score() == 7 && hero.score() == 11;
 }
 
-test `arg call still picks receiver-scoped overload`(): bool {
-    return ping(5) == 5;
+test `function form zero-arg receiver call uses argument zero type`(): bool {
+    let enemy: Enemy = 0;
+    let hero: Hero = 0;
+    return score(enemy) == 7 && score(hero) == 11;
 }

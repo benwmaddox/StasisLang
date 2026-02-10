@@ -12,8 +12,9 @@ try {
     $filter = @(
         "FullyQualifiedName~CallableResolutionParityTests",
         "FullyQualifiedName~SemanticTests.Flags_extern_overloads_that_share_link_symbol",
-        "FullyQualifiedName~LoweringTests.Extern_receiver_callable_falls_back_when_link_name_collides_with_receiverless_callable",
-        "FullyQualifiedName~CraneliftBackendConfirmationTests.ExternReceiverCallable_FallsBackWhenNameCollidesWithReceiverlessCallable",
+        "FullyQualifiedName~SemanticTests.Flags_arity_overloading_for_same_callable_name",
+        "FullyQualifiedName~LoweringTests.Receiver_form_zero_arg_dispatch_uses_receiver_type_symbol",
+        "FullyQualifiedName~CraneliftBackendConfirmationTests.ReceiverFormZeroArgDispatch_UsesReceiverTypeSymbolsInCranelift",
         "FullyQualifiedName~LoweringTests.Test_to_test_function_form_call_resolves_in_lowering",
         "FullyQualifiedName~CraneliftBackendConfirmationTests.Test_to_test_function_form_call_resolves_in_cranelift"
     ) -join "|"
