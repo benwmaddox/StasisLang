@@ -897,7 +897,31 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             .OfType<FunctionDeclarationSyntax>()
             .GroupBy(f => f.Name.Text, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => (IReadOnlyList<FunctionDeclarationSyntax>)g.ToList(), StringComparer.Ordinal);
-        var functionBuilder = new CraneliftFunctionBuilder(typeMapper, symbols, structs, enums, functionsByName, namesWithCollisions, externFallbackSymbolNames, builder.GlobalTypes, builder.StringLiterals, builder.CStringLiterals, layout, consts, diagnostics, moduleName);
+        var testsByName = compilationUnit.Declarations
+            .OfType<TestDeclarationSyntax>()
+            .ToDictionary(t => t.Name.Text, t => t, StringComparer.Ordinal);
+        var testSymbolsByName = testsByName
+            .ToDictionary(
+                kvp => kvp.Key,
+                kvp => MangleFunctionName(moduleName, $"test_{SanitizeTestName(kvp.Key)}"),
+                StringComparer.Ordinal);
+        var functionBuilder = new CraneliftFunctionBuilder(
+            typeMapper,
+            symbols,
+            structs,
+            enums,
+            functionsByName,
+            testsByName,
+            testSymbolsByName,
+            namesWithCollisions,
+            externFallbackSymbolNames,
+            builder.GlobalTypes,
+            builder.StringLiterals,
+            builder.CStringLiterals,
+            layout,
+            consts,
+            diagnostics,
+            moduleName);
 
         // Emit regular functions with bodies
         foreach (var func in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
@@ -940,10 +964,21 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         {
             foreach (var test in compilationUnit.Declarations.OfType<TestDeclarationSyntax>())
             {
-                var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
-                var mangledTestName = MangleFunctionName(moduleName, testFuncName);
+                if (!testSymbolsByName.TryGetValue(test.Name.Text, out var mangledTestName))
+                {
+                    var testFuncName = $"test_{SanitizeTestName(test.Name.Text)}";
+                    mangledTestName = MangleFunctionName(moduleName, testFuncName);
+                }
+
+                var returnTypeSymbol = test.ReturnType is null
+                    ? new PrimitiveTypeSymbol("i32")
+                    : ResolveType(test.ReturnType, symbols);
+                var returnType = NormalizeFunctionType(typeMapper.Map(returnTypeSymbol));
+                var paramTypes = test.Parameters
+                    .Select(p => NormalizeFunctionType(typeMapper.Map(ResolveType(p.Type, symbols))))
+                    .ToArray();
                 var body = functionBuilder.BuildTestBody(test);
-                builder.DefineFunctionWithBody(mangledTestName, CraneliftTypeMapper.ClifType.I32, Array.Empty<CraneliftTypeMapper.ClifType>(), body);
+                builder.DefineFunctionWithBody(mangledTestName, returnType, paramTypes, body);
             }
 
             if (emitTestHarness)

@@ -256,6 +256,25 @@ public class LoweringTests
     }
 
     [Fact]
+    public void Test_to_test_function_form_call_resolves_in_lowering()
+    {
+        var result = LowerWithDiagnostics("""
+            test helper(): i32 {
+                return 7;
+            }
+
+            test caller(): i32 {
+                return helper();
+            }
+            """, allowSemanticDiagnostics: false, options: new LowerOptions(IncludeTests: true, EmitTestHarness: false));
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("define i32 @helper()", result.Ir);
+        Assert.Contains("define i32 @caller()", result.Ir);
+        Assert.Contains("call i32 @helper()", result.Ir);
+    }
+
+    [Fact]
     public void Emits_lowering_diagnostic_for_receiver_form_arity_mismatch()
     {
         var result = LowerWithDiagnostics("""

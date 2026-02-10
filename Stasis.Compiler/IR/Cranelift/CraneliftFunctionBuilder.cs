@@ -18,6 +18,8 @@ public sealed class CraneliftFunctionBuilder
     private readonly IReadOnlyDictionary<string, StructDeclarationSyntax> _structs;
     private readonly IReadOnlyDictionary<string, EnumDeclarationSyntax> _enums;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> _functionsByName;
+    private readonly IReadOnlyDictionary<string, TestDeclarationSyntax> _testsByName;
+    private readonly IReadOnlyDictionary<string, string> _testSymbolsByName;
     private readonly IReadOnlySet<string> _namesWithCollisions;
     private readonly IReadOnlyDictionary<string, string> _externFallbackSymbolNames;
     private readonly IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> _globalTypes;
@@ -40,6 +42,8 @@ public sealed class CraneliftFunctionBuilder
         IReadOnlyDictionary<string, StructDeclarationSyntax> structs,
         IReadOnlyDictionary<string, EnumDeclarationSyntax> enums,
         IReadOnlyDictionary<string, IReadOnlyList<FunctionDeclarationSyntax>> functionsByName,
+        IReadOnlyDictionary<string, TestDeclarationSyntax> testsByName,
+        IReadOnlyDictionary<string, string> testSymbolsByName,
         IReadOnlySet<string> namesWithCollisions,
         IReadOnlyDictionary<string, string> externFallbackSymbolNames,
         IReadOnlyDictionary<string, CraneliftTypeMapper.ClifType> globalTypes,
@@ -55,6 +59,8 @@ public sealed class CraneliftFunctionBuilder
         _structs = structs;
         _enums = enums;
         _functionsByName = functionsByName;
+        _testsByName = testsByName;
+        _testSymbolsByName = testSymbolsByName;
         _namesWithCollisions = namesWithCollisions;
         _externFallbackSymbolNames = externFallbackSymbolNames;
         _globalTypes = globalTypes;
@@ -140,11 +146,23 @@ public sealed class CraneliftFunctionBuilder
         _localTypes.Clear();
         _elementBindings.Clear();
         _inlineStack.Clear();
-        _valueCounter = 0;
+        _valueCounter = test.Parameters.Count;
         _blockCounter = 0;
 
         var entryBlock = NewBlock();
-        _instructions.AppendLine($"{entryBlock}:");
+        _instructions.AppendLine($"{entryBlock}({FormatBlockParams(test.Parameters)}):");
+
+        for (int i = 0; i < test.Parameters.Count; i++)
+        {
+            var param = test.Parameters[i];
+            var paramType = ResolveType(param.Type);
+            var clifType = NormalizeLocalStorageType(_typeMapper.Map(paramType));
+            var addr = NewValue();
+            _instructions.AppendLine($"    {addr} = stack_slot.{FormatType(clifType)}");
+            _instructions.AppendLine($"    store v{i}, {addr}");
+            _locals[param.Name.Text] = new LocalSlot(addr, clifType);
+            _localTypes[param.Name.Text] = paramType;
+        }
 
         LowerBlock(test.Body);
 
@@ -685,7 +703,8 @@ public sealed class CraneliftFunctionBuilder
             return LowerBuiltinCall(builtinId.Identifier.Text, call.Arguments);
         }
 
-        FunctionDeclarationSyntax? resolvedFunction;
+        FunctionDeclarationSyntax? resolvedFunction = null;
+        TestDeclarationSyntax? resolvedTest = null;
         string callableName;
         var effectiveArguments = new List<ExpressionSyntax>();
 
@@ -712,8 +731,11 @@ public sealed class CraneliftFunctionBuilder
 
             if (!TryResolveFunctionFormCallable(callableName, call.Arguments, out resolvedFunction, out var diag))
             {
-                _diagnostics.Add(new Diagnostic(diag ?? $"Unknown function '{callableName}'.", call.Span));
-                return ZeroI32();
+                if (!TryResolveTestCallable(callableName, call.Arguments, out resolvedTest, out var testDiag))
+                {
+                    _diagnostics.Add(new Diagnostic(testDiag ?? diag ?? $"Unknown function '{callableName}'.", call.Span));
+                    return ZeroI32();
+                }
             }
 
             effectiveArguments.AddRange(call.Arguments);
@@ -724,10 +746,13 @@ public sealed class CraneliftFunctionBuilder
             return ZeroI32();
         }
 
-        var callableKey = CallableIdentity.GetCallableKey(resolvedFunction);
-        if (TryInlineCall(call, callableKey, resolvedFunction, effectiveArguments, out var inlined))
+        if (resolvedTest is null)
         {
-            return inlined;
+            var callableKey = CallableIdentity.GetCallableKey(resolvedFunction!);
+            if (TryInlineCall(call, callableKey, resolvedFunction!, effectiveArguments, out var inlined))
+            {
+                return inlined;
+            }
         }
 
         // Lower arguments first
@@ -746,12 +771,9 @@ public sealed class CraneliftFunctionBuilder
             args.Add(LowerExpression(arg));
         }
 
-        var isExtern = CallableSymbolNameResolver.IsExternFunction(resolvedFunction);
-        var callName = isExtern
-            ? GetExternCallName(resolvedFunction)
-            : MangleFunctionName(CallableIdentity.GetEmittedFunctionName(resolvedFunction, _namesWithCollisions));
+        var callName = ResolveCallName(resolvedFunction, resolvedTest);
         var argList = string.Join(", ", args);
-        if (IsVoidFunction(resolvedFunction))
+        if (IsVoidCallable(resolvedFunction, resolvedTest))
         {
             _instructions.AppendLine($"    call %{callName}({argList})");
             return ZeroI32();
@@ -762,6 +784,24 @@ public sealed class CraneliftFunctionBuilder
         _instructions.AppendLine($"    {result} = call %{callName}({argList})");
 
         return result;
+    }
+
+    private string ResolveCallName(FunctionDeclarationSyntax? resolvedFunction, TestDeclarationSyntax? resolvedTest)
+    {
+        if (resolvedFunction is not null)
+        {
+            var isExtern = CallableSymbolNameResolver.IsExternFunction(resolvedFunction);
+            return isExtern
+                ? GetExternCallName(resolvedFunction)
+                : MangleFunctionName(CallableIdentity.GetEmittedFunctionName(resolvedFunction, _namesWithCollisions));
+        }
+
+        if (resolvedTest is not null && _testSymbolsByName.TryGetValue(resolvedTest.Name.Text, out var testSymbol))
+        {
+            return testSymbol;
+        }
+
+        return MangleFunctionName($"test_{SanitizeName(resolvedTest?.Name.Text ?? string.Empty)}");
     }
 
     private bool TryResolveReceiverScopedCallable(
@@ -889,6 +929,29 @@ public sealed class CraneliftFunctionBuilder
 
         diagnostic = $"Call to '{name}' is ambiguous. Use receiver form to disambiguate.";
         return false;
+    }
+
+    private bool TryResolveTestCallable(
+        string name,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        out TestDeclarationSyntax test,
+        out string? diagnostic)
+    {
+        test = null!;
+        diagnostic = null;
+        if (!_testsByName.TryGetValue(name, out var candidate))
+        {
+            return false;
+        }
+
+        if (candidate.Parameters.Count != arguments.Count)
+        {
+            diagnostic = $"No callable '{name}' matches arity {arguments.Count}.";
+            return false;
+        }
+
+        test = candidate;
+        return true;
     }
 
     private string LowerClearCall(ExpressionSyntax receiver, IReadOnlyList<ExpressionSyntax> arguments)
@@ -1483,6 +1546,21 @@ public sealed class CraneliftFunctionBuilder
         return function.ReturnType is null || ResolveType(function.ReturnType) is VoidTypeSymbol;
     }
 
+    private bool IsVoidTest(TestDeclarationSyntax test)
+    {
+        return test.ReturnType is not null && ResolveType(test.ReturnType) is VoidTypeSymbol;
+    }
+
+    private bool IsVoidCallable(FunctionDeclarationSyntax? function, TestDeclarationSyntax? test)
+    {
+        if (function is not null)
+        {
+            return IsVoidFunction(function);
+        }
+
+        return test is null || IsVoidTest(test);
+    }
+
     private bool IsBuiltinFunction(string name)
     {
         return name switch
@@ -1826,6 +1904,24 @@ public sealed class CraneliftFunctionBuilder
     }
 
     private string MangleFunctionName(string name) => $"{_moduleName}__{name}";
+
+    private static string SanitizeName(string name)
+    {
+        var sb = new StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            if (char.IsLetterOrDigit(c))
+            {
+                sb.Append(c);
+            }
+            else if (c == ' ')
+            {
+                sb.Append('_');
+            }
+        }
+
+        return sb.ToString();
+    }
 
     private string LowerBuiltinCall(string funcName, IReadOnlyList<ExpressionSyntax> arguments)
     {

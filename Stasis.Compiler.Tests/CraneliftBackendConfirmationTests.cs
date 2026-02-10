@@ -602,6 +602,25 @@ public class CraneliftBackendConfirmationTests
         Assert.DoesNotContain("TODO:", ir);
     }
 
+    [Fact]
+    public void Test_to_test_function_form_call_resolves_in_cranelift()
+    {
+        var ir = CompileCraneliftIr("""
+            test helper(): i32 {
+                return 7;
+            }
+
+            test caller(): i32 {
+                return helper();
+            }
+            """, includeTests: true);
+
+        Assert.Contains("function %cranelift_confirm__test_helper", ir);
+        Assert.Contains("function %cranelift_confirm__test_caller", ir);
+        Assert.Contains("call %cranelift_confirm__test_helper()", ir);
+        Assert.DoesNotContain("Unknown function 'helper'", ir, StringComparison.Ordinal);
+    }
+
     private static string CompileCraneliftIr(string source, bool includeTests = false)
     {
         var parse = Parser.Parse(source);
