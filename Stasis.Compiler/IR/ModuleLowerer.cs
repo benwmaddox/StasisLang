@@ -2127,6 +2127,7 @@ public sealed class ModuleLowerer
             }
 
             FunctionDeclarationSyntax? resolvedFunction = null;
+            TestDeclarationSyntax? resolvedTest = null;
             List<ExpressionSyntax> effectiveArguments = new();
             string callableName;
 
@@ -2153,8 +2154,11 @@ public sealed class ModuleLowerer
 
                 if (!TryResolveFunctionFormCallable(callableName, call.Arguments, locals, out resolvedFunction, out var diag))
                 {
-                    AddDiagnostic(diag ?? $"Unknown function '{callableName}'.", call.Span);
-                    return ConstI32(0);
+                    if (!TryResolveTestCallable(callableName, call.Arguments, out resolvedTest, out var testDiag))
+                    {
+                        AddDiagnostic(testDiag ?? diag ?? $"Unknown function '{callableName}'.", call.Span);
+                        return ConstI32(0);
+                    }
                 }
 
                 effectiveArguments.AddRange(call.Arguments);
@@ -2165,18 +2169,23 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
-            var callableKey = CallableIdentity.GetCallableKey(resolvedFunction);
+            if (resolvedTest is not null)
+            {
+                return LowerTestCall(builder, call, callableName, resolvedTest, effectiveArguments, locals);
+            }
 
-            if (TryInlineCall(builder, call, callableKey, resolvedFunction, effectiveArguments, locals, out var inlined))
+            var callableKey = CallableIdentity.GetCallableKey(resolvedFunction!);
+
+            if (TryInlineCall(builder, call, callableKey, resolvedFunction!, effectiveArguments, locals, out var inlined))
             {
                 return inlined;
             }
 
-            var emittedName = CallableSymbolNameResolver.GetCallableSymbolName(resolvedFunction, _namesWithCollisions, _externFallbackSymbolNames);
+            var emittedName = CallableSymbolNameResolver.GetCallableSymbolName(resolvedFunction!, _namesWithCollisions, _externFallbackSymbolNames);
             var fn = _moduleBuilder.Module.GetNamedFunction(emittedName);
-            if (fn.Handle == IntPtr.Zero && CallableSymbolNameResolver.IsExternFunction(resolvedFunction))
+            if (fn.Handle == IntPtr.Zero && CallableSymbolNameResolver.IsExternFunction(resolvedFunction!))
             {
-                var externSignature = ResolveFunctionSignature(resolvedFunction);
+                var externSignature = ResolveFunctionSignature(resolvedFunction!);
                 var externType = LLVMTypeRef.CreateFunction(externSignature.ReturnType, externSignature.Parameters, false);
                 fn = _moduleBuilder.Module.AddFunction(emittedName, externType);
             }
@@ -2187,7 +2196,7 @@ public sealed class ModuleLowerer
                 return ConstI32(0);
             }
 
-            var paramSymbols = ResolveParameterTypes(resolvedFunction);
+            var paramSymbols = ResolveParameterTypes(resolvedFunction!);
             var argValues = new LLVMValueRef[effectiveArguments.Count];
             for (int i = 0; i < effectiveArguments.Count; i++)
             {
@@ -2201,7 +2210,7 @@ public sealed class ModuleLowerer
                     argValues[i] = LowerExpression(builder, effectiveArguments[i], locals);
                 }
             }
-            var signature = ResolveFunctionSignature(resolvedFunction);
+            var signature = ResolveFunctionSignature(resolvedFunction!);
             var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
 
             var callRetType = fnType.ReturnType;
@@ -2213,6 +2222,48 @@ public sealed class ModuleLowerer
 
             var callValue = builder.BuildCall2(fnType, fn, argValues, $"{callableName}.call");
             return callValue;
+        }
+
+        private LLVMValueRef LowerTestCall(
+            LLVMBuilderRef builder,
+            CallExpressionSyntax call,
+            string callableName,
+            TestDeclarationSyntax resolvedTest,
+            IReadOnlyList<ExpressionSyntax> effectiveArguments,
+            Dictionary<string, LocalBinding> locals)
+        {
+            var fn = _moduleBuilder.Module.GetNamedFunction(resolvedTest.Name.Text);
+            if (fn.Handle == IntPtr.Zero)
+            {
+                AddDiagnostic($"Test '{callableName}' missing from module.", call.Span);
+                return ConstI32(0);
+            }
+
+            var paramSymbols = ResolveParameterTypes(resolvedTest);
+            var argValues = new LLVMValueRef[effectiveArguments.Count];
+            for (int i = 0; i < effectiveArguments.Count; i++)
+            {
+                if (i < paramSymbols.Length && paramSymbols[i] is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    argValues[i] = BuildArrayDescriptorValue(builder, effectiveArguments[i], arr, layout, locals);
+                }
+                else
+                {
+                    argValues[i] = LowerExpression(builder, effectiveArguments[i], locals);
+                }
+            }
+
+            var signature = ResolveFunctionSignature(resolvedTest);
+            var fnType = LLVMTypeRef.CreateFunction(signature.ReturnType, signature.Parameters, false);
+            var callRetType = fnType.ReturnType;
+            if (callRetType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
+            {
+                builder.BuildCall2(fnType, fn, argValues, string.Empty);
+                return ConstI32(0);
+            }
+
+            return builder.BuildCall2(fnType, fn, argValues, $"{callableName}.call");
         }
 
         private bool TryResolveReceiverScopedCallable(
@@ -2342,6 +2393,29 @@ public sealed class ModuleLowerer
 
             diagnostic = $"Call to '{name}' is ambiguous. Use receiver form to disambiguate.";
             return false;
+        }
+
+        private bool TryResolveTestCallable(
+            string name,
+            IReadOnlyList<ExpressionSyntax> arguments,
+            out TestDeclarationSyntax test,
+            out string? diagnostic)
+        {
+            test = null!;
+            diagnostic = null;
+            if (!_tests.TryGetValue(name, out var candidate))
+            {
+                return false;
+            }
+
+            if (candidate.Parameters.Count != arguments.Count)
+            {
+                diagnostic = $"No callable '{name}' matches arity {arguments.Count}.";
+                return false;
+            }
+
+            test = candidate;
+            return true;
         }
 
         private void LowerClear(LLVMBuilderRef builder, ExpressionSyntax receiver, Dictionary<string, LocalBinding> locals, SourceSpan span)
@@ -7134,8 +7208,30 @@ private string ResolveStructArrayBaseName(StructDeclarationSyntax structDecl, st
             return (retType, paramTypes);
         }
 
+        private (LLVMTypeRef ReturnType, LLVMTypeRef[] Parameters) ResolveFunctionSignature(TestDeclarationSyntax test)
+        {
+            var retType = test.ReturnType is null
+                ? LLVMTypeRef.Int32
+                : _moduleBuilder.TypeMapper.Map(ResolveType(test.ReturnType, _symbols));
+            var paramTypes = test.Parameters.Select(p =>
+            {
+                var pType = ResolveType(p.Type, _symbols);
+                if (pType is ArrayTypeSymbol arr)
+                {
+                    var layout = CreateArrayDescriptorLayout(arr, _moduleBuilder.TypeMapper, _structs, _symbols);
+                    return layout.DescriptorType;
+                }
+
+                return _moduleBuilder.TypeMapper.Map(pType);
+            }).ToArray();
+            return (retType, paramTypes);
+        }
+
         private TypeSymbol[] ResolveParameterTypes(FunctionDeclarationSyntax fn) =>
             fn.Parameters.Select(p => ResolveType(p.Type, _symbols)).ToArray();
+
+        private TypeSymbol[] ResolveParameterTypes(TestDeclarationSyntax test) =>
+            test.Parameters.Select(p => ResolveType(p.Type, _symbols)).ToArray();
 
         private LLVMValueRef ConstI32(int value) =>
             LLVMValueRef.CreateConstInt(_moduleBuilder.TypeMapper.Map(new PrimitiveTypeSymbol("i32")), (ulong)value, true);
