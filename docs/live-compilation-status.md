@@ -39,6 +39,18 @@ This aligns with PRD layout stability and "abort cleanly, never partial" goals.
 
 This provides explicit developer-controlled state adjustment while preserving safe failure semantics.
 
+### Experimental in-process tick host (no external JIT runner process)
+
+- Added an experimental watch-mode path enabled by `STASIS_CRANELIFT_INPROC_TICK=1`.
+- Path uses the existing Cranelift lowering/AOT pipeline, then runs `main`/`tick` from the compiled module in-process (no `stasis-cranelift-jit-runner` process).
+- Supports state-preserving swaps by loading a new module, verifying state-map compatibility, copying persisted state, and atomically switching active tick target under a lock.
+- Includes optional `on_code_swap` invocation (`void` or `i32`) before state handoff.
+- Current constraints:
+  - headless programs only (graphics/runtime host APIs are rejected)
+  - no data-binding reload in this path yet
+
+This is the first implementation slice toward the in-process architecture target.
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.

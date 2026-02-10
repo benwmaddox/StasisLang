@@ -2549,6 +2549,9 @@ static bool UseCraneliftAotServer() =>
 static bool UseCraneliftRunnerServer() =>
     Environment.GetEnvironmentVariable("STASIS_CRANELIFT_RUNNER_SERVER") == "1";
 
+static bool UseCraneliftInProcessTickHost() =>
+    Environment.GetEnvironmentVariable("STASIS_CRANELIFT_INPROC_TICK") == "1";
+
 static CraneliftAotServer GetCraneliftAotServer(string aotTool, out long? spawnMs)
 {
     lock (CraneliftAotState.Lock)
@@ -3038,6 +3041,393 @@ static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, G
     foreach (var f in otherStateFields) Add(f);
 
     return results;
+}
+
+static SwapHookKind DetermineSwapHookKind(CompilationUnitSyntax compilationUnit, out bool invalid)
+{
+    invalid = false;
+    var hook = compilationUnit.Declarations
+        .OfType<FunctionDeclarationSyntax>()
+        .FirstOrDefault(fn => string.Equals(fn.Name.Text, "on_code_swap", StringComparison.Ordinal));
+    if (hook is null)
+    {
+        return SwapHookKind.None;
+    }
+
+    if (hook.ReturnType is null)
+    {
+        return SwapHookKind.Void;
+    }
+
+    if (hook.ReturnType is NamedTypeSyntax named &&
+        string.Equals(named.Name, "i32", StringComparison.Ordinal))
+    {
+        return SwapHookKind.I32;
+    }
+
+    invalid = true;
+    return SwapHookKind.None;
+}
+
+static IReadOnlyList<StateMapEntry> ParseStateMapEntries(string mapPath)
+{
+    var lines = File.ReadAllLines(mapPath);
+    var entries = new List<StateMapEntry>();
+    for (var i = 2; i < lines.Length; i++)
+    {
+        var line = lines[i].Trim();
+        if (line.Length == 0)
+        {
+            continue;
+        }
+
+        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[1], out var size) || size < 0)
+        {
+            throw new InvalidOperationException($"invalid state-map entry in {mapPath}: '{line}'");
+        }
+
+        entries.Add(new StateMapEntry(parts[0], size));
+    }
+
+    return entries;
+}
+
+static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
+{
+    if (!TryFindCraneliftAot(out var aotTool))
+    {
+        Console.Error.WriteLine("error: stasis-cranelift-aot not found. Build it with `cargo build -p stasis-cranelift-aot` (in tools/cranelift-aot) or set STASIS_CRANELIFT_AOT.");
+        return 1;
+    }
+    if (!TryFindTool("clang", out var clang))
+    {
+        Console.Error.WriteLine("error: run requires clang in PATH.");
+        return 1;
+    }
+
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var hotDir = GetHotStateDir(repoRoot);
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
+    var pid = Environment.ProcessId;
+    var hotClifPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc.clif");
+    var hotObjPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc{GetObjectFileExtension()}");
+    Directory.CreateDirectory(hotDir);
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    InProcessTickHost? host = null;
+    var swapDllSerial = 0;
+
+    int BuildAndApply(bool startHost, out string timingLine, out double loadMs)
+    {
+        timingLine = string.Empty;
+        loadMs = -1;
+
+        var swTotal = Stopwatch.StartNew();
+        var readMs = 0L;
+        var parseMs = 0L;
+        var semaMs = 0L;
+        var layoutMs = 0L;
+        var lowerMs = 0L;
+        var clifWriteMs = 0L;
+        var aotSpawnMs = 0L;
+        var aotCompileMs = 0L;
+        var linkMs = 0L;
+        var planMs = 0L;
+        var hostMs = 0L;
+
+        var phase = Stopwatch.StartNew();
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        readMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+        if (importDiagnostics.Count > 0)
+        {
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            return 1;
+        }
+
+        var parse = Parser.Parse(source);
+        parseMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+        if (HasErrors(parse.Diagnostics))
+        {
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            return 1;
+        }
+
+        var hookKind = DetermineSwapHookKind(parse.CompilationUnit, out var invalidHook);
+        if (invalidHook)
+        {
+            Console.Error.WriteLine("error: on_code_swap must return i32 or have no return type.");
+            return 1;
+        }
+
+        var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
+        var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
+        if (HasErrors(linkDiagnostics))
+        {
+            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            return 1;
+        }
+
+        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
+        if (usesGraphics)
+        {
+            Console.Error.WriteLine("error: in-process tick host currently supports headless programs only. Disable STASIS_CRANELIFT_INPROC_TICK or remove graphics/runtime host usage.");
+            return 1;
+        }
+
+        if (FindDataBindingJson(sourcePath, repoRoot) is not null)
+        {
+            Console.Error.WriteLine("error: in-process tick host does not support data binding yet. Disable STASIS_CRANELIFT_INPROC_TICK for this program.");
+            return 1;
+        }
+
+        var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
+        semaMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+        if (sema.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            if (HasErrors(sema.Diagnostics))
+            {
+                return 1;
+            }
+        }
+
+        if (!ContainsTopLevelFunction(parse.CompilationUnit, "tick"))
+        {
+            Console.Error.WriteLine("error: tick hot-swap mode requires a top-level `function tick()`.");
+            return 1;
+        }
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
+        MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
+        layoutMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+
+        var options = new CodeGenerationOptions(
+            ModuleName: moduleName,
+            IncludeTests: false,
+            EmitTestHarness: false,
+            HeadlessGraphics: true,
+            AllowReachabilityFallback: true);
+
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
+        var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        lowerMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+        if (result.Diagnostics.Count > 0)
+        {
+            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            if (HasErrors(result.Diagnostics))
+            {
+                return 1;
+            }
+        }
+
+        var hotDll = Path.Combine(
+            hotDir,
+            $"{baseName}.{moduleName}.inproc.{pid}.{swapDllSerial++}{swapExt}");
+        File.WriteAllText(hotClifPath, result.Ir);
+        clifWriteMs = phase.ElapsedMilliseconds;
+        phase.Restart();
+
+        try
+        {
+            var aotExit = RunCraneliftAot(aotTool, hotClifPath, hotObjPath, moduleName, optLevel, out var spawnFallback, out var compileFallback);
+            aotSpawnMs = spawnFallback ?? 0;
+            aotCompileMs = compileFallback;
+            if (aotExit != 0)
+            {
+                return aotExit;
+            }
+            phase.Restart();
+
+            if (!TryCreateHotStatePlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, excludeSpriteFields: false, out var plan))
+            {
+                return 1;
+            }
+            planMs = phase.ElapsedMilliseconds;
+            phase.Restart();
+
+            var linkArgs = BuildClangArgsForObject(hotObjPath, hotDll, isTest: false, optLevel, enableLto, enableGraphics: false, graphicsLibPath, linkLibraries, entryName: $"{moduleName}__main", isDll: true, windowsDefFilePath: plan.DefPath);
+            if (OperatingSystem.IsWindows())
+            {
+                linkArgs += " -Wl,/OPT:NOREF -Wl,/OPT:NOICF -Wl,/DEBUG:NONE";
+            }
+            var linkExit = RunProcess(clang, linkArgs, suppressOutput: true);
+            linkMs = phase.ElapsedMilliseconds;
+            phase.Restart();
+            if (linkExit != 0)
+            {
+                return linkExit;
+            }
+
+            if (startHost)
+            {
+                var hostSw = Stopwatch.StartNew();
+                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps);
+                hostSw.Stop();
+                hostMs = hostSw.ElapsedMilliseconds;
+                if (host is null)
+                {
+                    Console.Error.WriteLine("error: failed to start in-process tick host.");
+                    return 1;
+                }
+            }
+            else
+            {
+                if (host is null)
+                {
+                    Console.Error.WriteLine("error: in-process tick host is not initialized.");
+                    return 1;
+                }
+
+                var swapSw = Stopwatch.StartNew();
+                var swap = host.Swap(hotDll, ParseStateMapEntries(plan.MapPath), hookKind);
+                swapSw.Stop();
+                hostMs = swapSw.ElapsedMilliseconds;
+                loadMs = swap.LoadMs;
+                if (!swap.Success)
+                {
+                    Console.Error.WriteLine($"warning: in-process swap rejected: {swap.Message}");
+                    return 1;
+                }
+            }
+
+            swTotal.Stop();
+            timingLine =
+                $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} host={hostMs} total={swTotal.ElapsedMilliseconds}";
+            return 0;
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(hotClifPath))
+                {
+                    File.Delete(hotClifPath);
+                }
+                if (File.Exists(hotObjPath))
+                {
+                    File.Delete(hotObjPath);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
+    }
+
+    static long TryParseHotReloadTotalMs(string timingLine)
+    {
+        const string needle = "total=";
+        var idx = timingLine.LastIndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return -1;
+        }
+        idx += needle.Length;
+
+        var end = idx;
+        while (end < timingLine.Length && char.IsDigit(timingLine[end]))
+        {
+            end++;
+        }
+        if (end <= idx)
+        {
+            return -1;
+        }
+
+        return long.TryParse(timingLine.AsSpan(idx, end - idx), out var value) ? value : -1;
+    }
+
+    var initial = BuildAndApply(startHost: true, out var initialTimingLine, out _);
+    if (initial == 0)
+    {
+        var totalMs = TryParseHotReloadTotalMs(initialTimingLine);
+        Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=-1 load=-1");
+    }
+    else
+    {
+        Console.Error.WriteLine("warning: initial build failed; waiting for changes.");
+    }
+
+    var dir = Path.GetDirectoryName(sourcePath) ?? Directory.GetCurrentDirectory();
+    var fileName = Path.GetFileName(sourcePath);
+    using var watcher = new FileSystemWatcher(dir, fileName)
+    {
+        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+    };
+
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void OnChange(object? _, FileSystemEventArgs __)
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    watcher.Changed += OnChange;
+    watcher.Created += OnChange;
+    watcher.Renamed += OnChange;
+    watcher.EnableRaisingEvents = true;
+
+    while (!cts.IsCancellationRequested)
+    {
+        if (host is not null && !host.IsRunning)
+        {
+            return host.ExitCode;
+        }
+
+        try
+        {
+            changeSignal.Wait(TimeSpan.FromMilliseconds(50), cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+
+        if (!changeSignal.IsSet)
+        {
+            continue;
+        }
+
+        while (DateTime.UtcNow - lastChange < debounce)
+        {
+            Thread.Sleep(10);
+        }
+        changeSignal.Reset();
+
+        var exit = BuildAndApply(startHost: false, out var timingLine, out var loadMs);
+        if (exit == 0)
+        {
+            var totalMs = TryParseHotReloadTotalMs(timingLine);
+            var loadText = loadMs < 0
+                ? "-1"
+                : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=0 load={loadText}");
+        }
+        else if (host is not null && host.IsRunning)
+        {
+            Console.Error.WriteLine("warning: rebuild/swap failed; keeping previous code; waiting for changes.");
+        }
+    }
+
+    host?.Dispose();
+    return 0;
 }
 
 static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int fps, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath)
@@ -4547,6 +4937,10 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
         DetectsTickUsage(File.ReadAllText(fullPath)))
     {
+        if (UseCraneliftInProcessTickHost())
+        {
+            return WatchCraneliftTickInProcessSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);
+        }
         if (Environment.GetEnvironmentVariable("STASIS_CRANELIFT_JIT_RUNNER") == "1" && TryFindCraneliftJitRunner(out _))
         {
             return WatchCraneliftTickJitSwap(fullPath, moduleName, tickHostFps, optLevel, enableGraphics, graphicsLibPath);
@@ -4813,6 +5207,7 @@ static void PrintUsage()
     Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
     Console.WriteLine("LLVM: pass --llvm-target <triple> to set the LLVM module target triple (useful for cross-compiling emitted IR).");
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
+    Console.WriteLine("Tick watch (experimental): set STASIS_CRANELIFT_INPROC_TICK=1 to run headless tick hot-swap in-process (no stasis-cranelift-jit-runner process).");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
 }
 
@@ -6147,6 +6542,400 @@ sealed class CraneliftRunnerServer : IDisposable
             // Ignore disposal errors.
         }
     }
+}
+
+sealed record StateMapEntry(string Name, int Size);
+
+readonly record struct InProcessSwapResult(bool Success, string Message, double LoadMs);
+
+enum SwapHookKind
+{
+    None,
+    Void,
+    I32
+}
+
+sealed class InProcessTickHost : IDisposable
+{
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int TickDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int MainDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int HookI32Delegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void HookVoidDelegate();
+
+    private readonly object gate = new();
+    private readonly CancellationTokenSource cts = new();
+    private readonly int fps;
+    private Thread? tickThread;
+    private LoadedModule? current;
+    private volatile bool running;
+    private volatile int exitCode;
+    private bool disposed;
+
+    public bool IsRunning => running;
+    public int ExitCode => exitCode;
+
+    private InProcessTickHost(LoadedModule initial, int fps)
+    {
+        current = initial;
+        this.fps = fps;
+        running = true;
+        tickThread = new Thread(TickLoop)
+        {
+            IsBackground = true,
+            Name = "stasis-inproc-tick-host"
+        };
+        tickThread.Start();
+    }
+
+    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps)
+    {
+        var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, out var error);
+        if (loaded is null)
+        {
+            Console.Error.WriteLine($"error: failed to load in-process module: {error}");
+            return null;
+        }
+
+        return new InProcessTickHost(loaded, fps);
+    }
+
+    public InProcessSwapResult Swap(string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
+    {
+        if (!running || disposed)
+        {
+            return new InProcessSwapResult(false, "host is not running", -1);
+        }
+
+        var loadSw = Stopwatch.StartNew();
+        var incoming = LoadedModule.TryLoad(dllPath, current?.ModuleName ?? "module", newStateMap, newHookKind, out var loadError);
+        loadSw.Stop();
+        var loadMs = loadSw.Elapsed.TotalMilliseconds;
+        if (incoming is null)
+        {
+            return new InProcessSwapResult(false, loadError ?? "failed to load new module", loadMs);
+        }
+
+        LoadedModule? old = null;
+        try
+        {
+            lock (gate)
+            {
+                if (!running || disposed || current is null)
+                {
+                    incoming.Dispose();
+                    return new InProcessSwapResult(false, "host is not running", loadMs);
+                }
+
+                var (missingSave, missingRestore) = CompareLayouts(current.StateSymbols, incoming.StateSymbols);
+                if (missingSave > 0 || missingRestore > 0)
+                {
+                    incoming.Dispose();
+                    return new InProcessSwapResult(
+                        false,
+                        $"state layout changed (missing_save={missingSave} missing_restore={missingRestore})",
+                        loadMs);
+                }
+
+                var snapshot = CaptureState(current.StateSymbols);
+                if (current.InvokeSwapHook() != 0)
+                {
+                    RestoreState(current.StateSymbols, snapshot, out _);
+                    incoming.Dispose();
+                    return new InProcessSwapResult(false, "on_code_swap returned non-zero", loadMs);
+                }
+
+                RestoreState(incoming.StateSymbols, snapshot, out var missingRestoreAfterCopy);
+                if (missingRestoreAfterCopy > 0)
+                {
+                    incoming.Dispose();
+                    return new InProcessSwapResult(false, $"state restore failed (missing={missingRestoreAfterCopy})", loadMs);
+                }
+
+                old = current;
+                current = incoming;
+            }
+
+            old?.Dispose();
+            return new InProcessSwapResult(true, string.Empty, loadMs);
+        }
+        catch (Exception ex)
+        {
+            try { incoming.Dispose(); } catch { }
+            return new InProcessSwapResult(false, ex.Message, loadMs);
+        }
+    }
+
+    private void TickLoop()
+    {
+        try
+        {
+            LoadedModule? module;
+            lock (gate)
+            {
+                module = current;
+            }
+
+            if (module is null)
+            {
+                exitCode = 1;
+                running = false;
+                return;
+            }
+
+            var mainRc = module.Main();
+            if (mainRc != 0)
+            {
+                exitCode = mainRc == 1 ? 0 : mainRc;
+                running = false;
+                return;
+            }
+
+            var frameMs = fps <= 0 ? 16.0 : 1000.0 / fps;
+            var sw = Stopwatch.StartNew();
+            long nextDue = 0;
+
+            while (!cts.Token.IsCancellationRequested)
+            {
+                int tickRc;
+                lock (gate)
+                {
+                    module = current;
+                    if (module is null)
+                    {
+                        exitCode = 1;
+                        running = false;
+                        return;
+                    }
+                    tickRc = module.Tick();
+                }
+
+                if (tickRc != 0)
+                {
+                    exitCode = tickRc == 1 ? 0 : tickRc;
+                    running = false;
+                    return;
+                }
+
+                nextDue += (long)Math.Round(frameMs);
+                var delay = nextDue - sw.ElapsedMilliseconds;
+                if (delay > 0)
+                {
+                    Thread.Sleep((int)delay);
+                }
+            }
+
+            exitCode = 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"error: in-process tick host crashed: {ex.Message}");
+            exitCode = 1;
+        }
+        finally
+        {
+            running = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        cts.Cancel();
+        try
+        {
+            tickThread?.Join(2000);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        lock (gate)
+        {
+            current?.Dispose();
+            current = null;
+        }
+        cts.Dispose();
+    }
+
+    private static Dictionary<string, byte[]> CaptureState(IReadOnlyDictionary<string, StateSymbol> symbols)
+    {
+        var snapshot = new Dictionary<string, byte[]>(symbols.Count, StringComparer.Ordinal);
+        foreach (var kv in symbols)
+        {
+            var bytes = new byte[kv.Value.Size];
+            Marshal.Copy(kv.Value.Pointer, bytes, 0, kv.Value.Size);
+            snapshot[kv.Key] = bytes;
+        }
+        return snapshot;
+    }
+
+    private static void RestoreState(IReadOnlyDictionary<string, StateSymbol> symbols, IReadOnlyDictionary<string, byte[]> snapshot, out int missing)
+    {
+        missing = 0;
+        foreach (var kv in symbols)
+        {
+            if (!snapshot.TryGetValue(kv.Key, out var bytes) || bytes.Length != kv.Value.Size)
+            {
+                missing++;
+                continue;
+            }
+            Marshal.Copy(bytes, 0, kv.Value.Pointer, kv.Value.Size);
+        }
+    }
+
+    private static (int MissingSave, int MissingRestore) CompareLayouts(
+        IReadOnlyDictionary<string, StateSymbol> currentSymbols,
+        IReadOnlyDictionary<string, StateSymbol> newSymbols)
+    {
+        var missingSave = 0;
+        foreach (var kv in currentSymbols)
+        {
+            if (!newSymbols.TryGetValue(kv.Key, out var next) || next.Size != kv.Value.Size)
+            {
+                missingSave++;
+            }
+        }
+
+        var missingRestore = 0;
+        foreach (var kv in newSymbols)
+        {
+            if (!currentSymbols.TryGetValue(kv.Key, out var existing) || existing.Size != kv.Value.Size)
+            {
+                missingRestore++;
+            }
+        }
+
+        return (missingSave, missingRestore);
+    }
+
+    private sealed class LoadedModule : IDisposable
+    {
+        public string ModuleName { get; }
+        public MainDelegate Main { get; }
+        public TickDelegate Tick { get; }
+        public IReadOnlyDictionary<string, StateSymbol> StateSymbols => stateSymbols;
+
+        private readonly IntPtr handle;
+        private readonly HookI32Delegate? hookI32;
+        private readonly HookVoidDelegate? hookVoid;
+        private readonly SwapHookKind hookKind;
+        private readonly Dictionary<string, StateSymbol> stateSymbols;
+
+        private LoadedModule(
+            string moduleName,
+            IntPtr handle,
+            MainDelegate main,
+            TickDelegate tick,
+            HookI32Delegate? hookI32,
+            HookVoidDelegate? hookVoid,
+            SwapHookKind hookKind,
+            Dictionary<string, StateSymbol> stateSymbols)
+        {
+            ModuleName = moduleName;
+            this.handle = handle;
+            Main = main;
+            Tick = tick;
+            this.hookI32 = hookI32;
+            this.hookVoid = hookVoid;
+            this.hookKind = hookKind;
+            this.stateSymbols = stateSymbols;
+        }
+
+        public static LoadedModule? TryLoad(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, out string? error)
+        {
+            error = null;
+            IntPtr handle = IntPtr.Zero;
+            try
+            {
+                handle = NativeLibrary.Load(dllPath);
+                var mainPtr = NativeLibrary.GetExport(handle, $"{moduleName}__main");
+                var tickPtr = NativeLibrary.GetExport(handle, $"{moduleName}__tick");
+                var main = Marshal.GetDelegateForFunctionPointer<MainDelegate>(mainPtr);
+                var tick = Marshal.GetDelegateForFunctionPointer<TickDelegate>(tickPtr);
+
+                HookI32Delegate? hookI32 = null;
+                HookVoidDelegate? hookVoid = null;
+                if (hookKind != SwapHookKind.None)
+                {
+                    var hookPtr = NativeLibrary.GetExport(handle, $"{moduleName}__on_code_swap");
+                    if (hookKind == SwapHookKind.I32)
+                    {
+                        hookI32 = Marshal.GetDelegateForFunctionPointer<HookI32Delegate>(hookPtr);
+                    }
+                    else
+                    {
+                        hookVoid = Marshal.GetDelegateForFunctionPointer<HookVoidDelegate>(hookPtr);
+                    }
+                }
+
+                var symbols = new Dictionary<string, StateSymbol>(stateMap.Count, StringComparer.Ordinal);
+                foreach (var entry in stateMap)
+                {
+                    var ptr = NativeLibrary.GetExport(handle, entry.Name);
+                    symbols[entry.Name] = new StateSymbol(entry.Name, entry.Size, ptr);
+                }
+
+                return new LoadedModule(moduleName, handle, main, tick, hookI32, hookVoid, hookKind, symbols);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                if (handle != IntPtr.Zero)
+                {
+                    try { NativeLibrary.Free(handle); } catch { }
+                }
+                return null;
+            }
+        }
+
+        public int InvokeSwapHook()
+        {
+            return hookKind switch
+            {
+                SwapHookKind.None => 0,
+                SwapHookKind.I32 when hookI32 is not null => hookI32(),
+                SwapHookKind.Void when hookVoid is not null =>
+                    InvokeVoidHook(),
+                _ => 1
+            };
+        }
+
+        private int InvokeVoidHook()
+        {
+            hookVoid!();
+            return 0;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (handle != IntPtr.Zero)
+                {
+                    NativeLibrary.Free(handle);
+                }
+            }
+            catch
+            {
+                // Best effort.
+            }
+        }
+    }
+
+    readonly record struct StateSymbol(string Name, int Size, IntPtr Pointer);
 }
 
 sealed record CompileResult(
