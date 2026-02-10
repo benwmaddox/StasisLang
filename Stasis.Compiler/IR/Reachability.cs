@@ -57,6 +57,12 @@ public static class Reachability
                 queue.Enqueue(tickKey);
             }
 
+            // Hot-swap hook: keep optional on_code_swap reachable so JIT watch can invoke it.
+            if (TryGetReceiverlessCallable(functionsByName, "on_code_swap", out var swapHookKey))
+            {
+                queue.Enqueue(swapHookKey);
+            }
+
             foreach (var export in functionList.Where(fn => fn.IsExported))
             {
                 queue.Enqueue(CallableIdentity.GetCallableKey(export));

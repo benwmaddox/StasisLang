@@ -3835,6 +3835,17 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                             }
                         }
                     }
+                    else if (line.StartsWith("ERR ", StringComparison.Ordinal))
+                    {
+                        var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
+                        if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var failedId))
+                        {
+                            lock (pendingLock)
+                            {
+                                _ = pendingSwaps.Remove(failedId);
+                            }
+                        }
+                    }
 
                     await runnerOutLines.Writer.WriteAsync(line, cts.Token);
                 }
@@ -3924,8 +3935,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         return true;
     }
 
-    int BuildClif(out string clif, out long lowerMs)
+    int BuildClif(string? previousSemanticFingerprint, out string clif, out long lowerMs, out string semanticFingerprint, out bool semanticChanged)
     {
+        semanticFingerprint = string.Empty;
+        semanticChanged = false;
         var sw = Stopwatch.StartNew();
         var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
         if (importDiagnostics.Count > 0)
@@ -3980,6 +3993,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
 
+        semanticFingerprint = SemanticFingerprint.ComputeFileFingerprint(source, layout);
+        semanticChanged = !string.Equals(previousSemanticFingerprint, semanticFingerprint, StringComparison.Ordinal);
+
         if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
         {
             clif = string.Empty;
@@ -3990,6 +4006,14 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         if (dataBindingPlan is not null)
         {
             Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
+        }
+
+        if (!semanticChanged && previousSemanticFingerprint is not null)
+        {
+            sw.Stop();
+            lowerMs = sw.ElapsedMilliseconds;
+            clif = string.Empty;
+            return 0;
         }
 
         var options = new CodeGenerationOptions(
@@ -4019,10 +4043,11 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     }
 
     string? lastGoodClif = null;
+    string? lastAppliedSemanticFingerprint = null;
     var lastRunnerRestartAttemptUtc = DateTime.MinValue;
     var consecutiveRunnerExits = 0;
 
-    var initialRc = BuildClif(out var initialClif, out var initialLowerMs);
+    var initialRc = BuildClif(lastAppliedSemanticFingerprint, out var initialClif, out var initialLowerMs, out var initialSemanticFingerprint, out var initialSemanticChanged);
     if (initialRc != 0)
     {
         Console.Error.WriteLine("warning: initial build failed; waiting for changes.");
@@ -4034,6 +4059,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         lastGoodClif = initialClif;
+        if (initialSemanticChanged)
+        {
+            lastAppliedSemanticFingerprint = initialSemanticFingerprint;
+        }
         _ = initialLowerMs;
         Console.WriteLine($"HOTSWAP(ms): total={initialLowerMs} latency=-1");
     }
@@ -4105,12 +4134,22 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         var changeUtc = DateTime.UtcNow;
         var swTotal = Stopwatch.StartNew();
-        var rc = BuildClif(out var clif, out var lowerMs);
+        var rc = BuildClif(lastAppliedSemanticFingerprint, out var clif, out var lowerMs, out var semanticFingerprint, out var semanticChanged);
         if (rc != 0)
         {
             if (runner is not null && !runner.HasExited)
             {
                 Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
+            }
+            continue;
+        }
+
+        if (!semanticChanged)
+        {
+            Console.WriteLine("HOTSWAP(skip): semantic fingerprint unchanged; no swap queued.");
+            if ((runner is null || runner.HasExited) && lastGoodClif is not null)
+            {
+                _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
             }
             continue;
         }
@@ -4122,6 +4161,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 return 1;
             }
             lastGoodClif = clif;
+            lastAppliedSemanticFingerprint = semanticFingerprint;
             Console.WriteLine($"HOTSWAP(ms): total={lowerMs} latency=-1");
             continue;
         }
@@ -4156,6 +4196,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         }
 
         lastGoodClif = clif;
+        lastAppliedSemanticFingerprint = semanticFingerprint;
         swTotal.Stop();
         _ = lowerMs;
     }
