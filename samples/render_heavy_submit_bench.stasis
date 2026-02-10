@@ -4,7 +4,7 @@ import "../src/gfx_cmd.stasis";
 
 // Heavy render submission benchmark:
 // - Per-call: draw_line() + gfx_draw_sprite() in loops (many host boundary calls).
-// - Batched: draw_lines_f32() + gfx_draw_sprites_i32() (2 host calls).
+// - Batched: draw_lines() + gfx_draw_sprites() (2 host calls).
 // - Cmd (build): build gfx_cmd streams per-iter + gfx_cmd_submit_no_present().
 // - Cmd (prebuilt): build gfx_cmd once + submit only.
 //
@@ -104,16 +104,16 @@ function submit_per_call(): void {
 
 function submit_batched(): void {
     clear(0.08, 0.09, 0.11, 1.0);
-    draw_lines_f32(state.lines, LINE_COUNT);
-    gfx_draw_sprites_i32(state.sprites, SPRITE_COUNT);
+    draw_lines(state.lines, LINE_COUNT);
+    gfx_draw_sprites(state.sprites, SPRITE_COUNT);
 }
 
 function submit_cmd_build(): void {
     gfx_cmd_begin();
     gfx_cmd_clear(0.08, 0.09, 0.11, 1.0);
 
-    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
-    gfx_cmd_sprites_from_i32(state.sprites, SPRITE_COUNT);
+    gfx_cmd_lines_from(state.lines, LINE_COUNT);
+    gfx_cmd_sprites_from(state.sprites, SPRITE_COUNT);
 
     gfx_cmd_submit_no_present();
 }
@@ -122,8 +122,8 @@ function build_cmd_once(): void {
     gfx_cmd_begin();
     gfx_cmd_clear(0.08, 0.09, 0.11, 1.0);
 
-    gfx_cmd_lines_from_f32(state.lines, LINE_COUNT);
-    gfx_cmd_sprites_from_i32(state.sprites, SPRITE_COUNT);
+    gfx_cmd_lines_from(state.lines, LINE_COUNT);
+    gfx_cmd_sprites_from(state.sprites, SPRITE_COUNT);
 }
 
 function bench_per_call(iters: i32): i32 {

@@ -168,8 +168,8 @@ function tick(): i32 {
     clear(0.05, 0.05, 0.15, 1.0);
     
     //update_game(dt, delta_ms);
-    gfx_draw_sprites_i32(state.gfx.sprites_i32, state.gfx.sprite_count);
-    draw_lines_f32(state.gfx.lines_f32, state.gfx.line_count);
+    gfx_draw_sprites(state.gfx.sprites_i32, state.gfx.sprite_count);
+    draw_lines(state.gfx.lines_f32, state.gfx.line_count);
     draw_frame();
 
     end_frame();

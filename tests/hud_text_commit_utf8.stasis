@@ -4,11 +4,11 @@ import "../src/stdlib/hud_text.stasis";
 global tmp: ascii[32];
 global out: utf8[32];
 
-test `hud_text_commit_utf8 updates utf8 lengths`(): bool {
-    hud_text_clear_ascii(tmp);
+test `hud_text_commit updates utf8 lengths`(): bool {
+    hud_text_clear(tmp);
     ascii_append(tmp, "HP=");
     ascii_push_i32(tmp, 42);
-    let n: i32 = hud_text_commit_utf8(out, tmp, 32);
+    let n: i32 = hud_text_commit(out, tmp, 32);
     return n == 5
         && length_bytes(out) == 5
         && length_chars(out) == 5

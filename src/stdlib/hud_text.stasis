@@ -3,11 +3,11 @@
 
 import "stdlib.stasis";
 
-function hud_text_clear_ascii(tmp: ascii[]): void {
+function hud_text_clear(tmp: ascii[]): void {
     ascii_clear(tmp);
 }
 
-function hud_text_commit_utf8(out: utf8[], tmp: ascii[], out_max: i32): i32 {
+function hud_text_commit(out: utf8[], tmp: ascii[], out_max: i32): i32 {
     return utf8_from_ascii(out, tmp, out_max);
 }
 
