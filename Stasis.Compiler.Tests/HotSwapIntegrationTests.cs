@@ -1016,6 +1016,267 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickInProcessSwap_RecoversAfterInitialBuildFailure()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        Assert.NotNull(cliDll);
+        var clangBinDir = FindClangBinDir(repoRoot);
+        if (string.IsNullOrWhiteSpace(clangBinDir))
+        {
+            throw SkipException.ForSkip("clang not found; skipping in-process tick swap recovery test.");
+        }
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_recover");
+        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_recover.stasis");
+        var brokenSource = """
+            struct WatchState {
+                ticks: i32;
+            }
+
+            global state: WatchState;
+
+            function main(): i32 {
+                state.ticks = 0;
+                return 0;
+            }
+
+            function tick(): i32 {
+                return missing_symbol;
+            }
+            """;
+        var fixedSource = """
+            struct WatchState {
+                ticks: i32;
+            }
+
+            global state: WatchState;
+
+            function main(): i32 {
+                state.ticks = 0;
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """;
+        File.WriteAllText(stasisPath, brokenSource, System.Text.Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
+            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => errLines.AnyContains("warning: initial build failed; waiting for changes.") ||
+                      outLines.AnyContains("HOTSWAP(ms):"),
+                timeout: TimeSpan.FromMinutes(3));
+
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            Assert.Equal(
+                0,
+                initialSwapCount);
+
+            var initialErrorCount = errLines.CountContains("error:");
+            await File.WriteAllTextAsync(stasisPath, fixedSource, System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount ||
+                      errLines.CountContains("error:") > initialErrorCount,
+                timeout: TimeSpan.FromMinutes(5));
+
+            Assert.True(
+                outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                $"watch did not recover after fixing startup source.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
+    public async Task WatchTickInProcessSwap_PreservesHookStateMigration()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        Assert.NotNull(cliDll);
+        var clangBinDir = FindClangBinDir(repoRoot);
+        if (string.IsNullOrWhiteSpace(clangBinDir))
+        {
+            throw SkipException.ForSkip("clang not found; skipping in-process hook migration test.");
+        }
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_hook_migration");
+        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_hook_migration.stasis");
+        var initialSource = """
+            struct WatchState {
+                migrated: i32;
+            }
+
+            global state: WatchState;
+
+            function main(): i32 {
+                state.migrated = 0;
+                return 0;
+            }
+
+            function on_code_swap(): i32 {
+                state.migrated = 42;
+                return 0;
+            }
+
+            function tick(): i32 {
+                return 0;
+            }
+            """;
+        var migratedSource = """
+            struct WatchState {
+                migrated: i32;
+            }
+
+            global state: WatchState;
+
+            function main(): i32 {
+                state.migrated = 0;
+                return 0;
+            }
+
+            function on_code_swap(): i32 {
+                state.migrated = 42;
+                return 0;
+            }
+
+            function tick(): i32 {
+                if (state.migrated == 42) {
+                    return 0;
+                }
+                return 99;
+            }
+            """;
+        File.WriteAllText(stasisPath, initialSource, System.Text.Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
+            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            Assert.True(
+                initialSwapCount > 0,
+                $"watch did not report initial HOTSWAP(ms).\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+
+            var errorCountBeforeSwap = errLines.CountContains("error:");
+            await File.WriteAllTextAsync(stasisPath, migratedSource, System.Text.Encoding.ASCII);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount ||
+                      errLines.CountContains("error:") > errorCountBeforeSwap,
+                timeout: TimeSpan.FromMinutes(5));
+
+            Assert.True(
+                outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                $"watch did not report swap after migrated hook edit.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            await Task.Delay(500);
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickHotSwap_ReportsSemanticErrors_AndKeepsRunning()
     {
         var repoRoot = FindRepoRoot();
