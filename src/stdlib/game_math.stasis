@@ -1,6 +1,9 @@
 // Game math helpers (not loaded by default).
+//
+// Preferred names use first-parameter overloading (`game_abs`, `game_min`, ...).
+// Legacy `*_i32` / `*_f32` names are kept as compatibility wrappers.
 
-function game_abs_i32(x: i32): i32 {
+function game_abs(x: i32): i32 {
     if (x < 0) {
         // i32 abs is undefined for INT_MIN; clamp so callers stay deterministic.
         if (x == -2147483648) {
@@ -11,46 +14,46 @@ function game_abs_i32(x: i32): i32 {
     return x;
 }
 
-function game_abs_f32(x: f32): f32 {
+function game_abs(x: f32): f32 {
     if (x < 0.0) {
         return 0.0 - x;
     }
     return x;
 }
 
-function game_min_i32(a: i32, b: i32): i32 {
+function game_min(a: i32, b: i32): i32 {
     if (a < b) { return a; }
     return b;
 }
 
-function game_max_i32(a: i32, b: i32): i32 {
-    if (a > b) { return a; }
-    return b;
-}
-
-function game_min_f32(a: f32, b: f32): f32 {
+function game_min(a: f32, b: f32): f32 {
     if (a < b) { return a; }
     return b;
 }
 
-function game_max_f32(a: f32, b: f32): f32 {
+function game_max(a: i32, b: i32): i32 {
     if (a > b) { return a; }
     return b;
 }
 
-function game_clamp_i32(x: i32, lo: i32, hi: i32): i32 {
+function game_max(a: f32, b: f32): f32 {
+    if (a > b) { return a; }
+    return b;
+}
+
+function game_clamp(x: i32, lo: i32, hi: i32): i32 {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
 }
 
-function game_clamp_f32(x: f32, lo: f32, hi: f32): f32 {
+function game_clamp(x: f32, lo: f32, hi: f32): f32 {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
 }
 
-function game_lerp_f32(a: f32, b: f32, t: f32): f32 {
+function game_lerp(a: f32, b: f32, t: f32): f32 {
     return a + (b - a) * t;
 }
 
