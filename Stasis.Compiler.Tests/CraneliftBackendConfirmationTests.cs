@@ -360,6 +360,86 @@ public class CraneliftBackendConfirmationTests
     }
 
     [Fact]
+    public void FunctionFormOverload_UsesBacktickLiteralAsString()
+    {
+        var ir = CompileCraneliftIr("""
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function main(): i32 {
+                return tag(`raw`);
+            }
+            """);
+
+        Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void ExternOverloads_WithDistinctLinkNames_EmitLinkSymbolsInCranelift()
+    {
+        var parse = Parser.Parse("""
+            function @extern("host_damage_enemy_i32") damage(enemy: i32, amount: i32): i32;
+            function @extern("host_damage_enemy_f32") damage(hero: f32, amount: i32): i32;
+
+            function main(): i32 {
+                let a: i32 = damage(1, 2);
+                let b: i32 = damage(1.0, 2);
+                return a + b;
+            }
+            """);
+        Assert.Empty(parse.Diagnostics);
+
+        var semantic = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+        DiagnosticAsserts.AssertNoErrors(semantic.Diagnostics);
+
+        var layout = new LayoutPlanner(parse.CompilationUnit, semantic.Symbols).Plan();
+        var options = new CodeGenerationOptions(ModuleName: "cranelift_confirm", IncludeTests: false, EmitTestHarness: false);
+        using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, "cranelift_confirm");
+        var result = generator.Generate(parse.CompilationUnit, semantic, layout, options);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains("external host_damage_enemy_i32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("external host_damage_enemy_f32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("call %host_damage_enemy_i32(", result.Ir, StringComparison.Ordinal);
+        Assert.Contains("call %host_damage_enemy_f32(", result.Ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReceiverFormZeroArgDispatch_UsesReceiverTypeSymbolsInCranelift()
+    {
+        var ir = CompileCraneliftIr("""
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function score(enemy: Enemy): i32 {
+                return 7;
+            }
+
+            function score(hero: Hero): i32 {
+                return 11;
+            }
+
+            function main(): i32 {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let a: i32 = enemy.score();
+                let b: i32 = hero.score();
+                return a + b;
+            }
+            """);
+
+        Assert.Contains("function %cranelift_confirm__score__Enemy(", ir, StringComparison.Ordinal);
+        Assert.Contains("function %cranelift_confirm__score__Hero(", ir, StringComparison.Ordinal);
+        Assert.Contains("call %cranelift_confirm__score__Enemy(", ir, StringComparison.Ordinal);
+        Assert.Contains("call %cranelift_confirm__score__Hero(", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PrintInt_UsesPrintf()
     {
         var ir = CompileCraneliftIr("""
@@ -525,6 +605,25 @@ public class CraneliftBackendConfirmationTests
         Assert.Contains("global str_", ir);
         Assert.Contains("bytes:", ir);
         Assert.DoesNotContain("TODO:", ir);
+    }
+
+    [Fact]
+    public void Test_to_test_function_form_call_resolves_in_cranelift()
+    {
+        var ir = CompileCraneliftIr("""
+            test helper(): i32 {
+                return 7;
+            }
+
+            test caller(): i32 {
+                return helper();
+            }
+            """, includeTests: true);
+
+        Assert.Contains("function %cranelift_confirm__test_helper", ir);
+        Assert.Contains("function %cranelift_confirm__test_caller", ir);
+        Assert.Contains("call %cranelift_confirm__test_helper()", ir);
+        Assert.DoesNotContain("Unknown function 'helper'", ir, StringComparison.Ordinal);
     }
 
     private static string CompileCraneliftIr(string source, bool includeTests = false)

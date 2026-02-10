@@ -100,6 +100,248 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Allows_receiver_scoped_callables_in_receiver_and_function_form()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+            struct Hero { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function damage(hero: Hero, amount: i32): i32 {
+                return amount.+(1);
+            }
+
+            function run(): void {
+                let enemy: Enemy = 0;
+                let hero: Hero = 0;
+                let a: i32 = enemy.damage(5);
+                let b: i32 = hero.damage(5);
+                let c: i32 = damage(enemy, 5);
+                let d: i32 = damage(hero, 5);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_receiver_form_arity_mismatch_for_receiver_scoped_callable()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+
+            function damage(enemy: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function run(): void {
+                let enemy: Enemy = 0;
+                enemy.damage();
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("expects 1 argument(s) in receiver form", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_function_name_collision_with_test_when_test_declared_first()
+    {
+        var source = """
+            test clash(): bool {
+                return true;
+            }
+
+            function clash(): i32 {
+                return 0;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate symbol 'clash'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_function_name_collision_with_builtin_function()
+    {
+        var source = """
+            function print(value: i32): i32 {
+                return value;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate symbol 'print'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_extern_overloads_that_share_link_symbol()
+    {
+        var source = """
+            extern function damage(enemy: i32, amount: i32): i32;
+            extern function damage(hero: f32, amount: i32): i32;
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("Extern link symbol 'damage' is used by multiple callables", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_extern_link_symbol_collision_with_non_extern_callable_symbol()
+    {
+        var source = """
+            function puts(): i32 {
+                return 0;
+            }
+
+            function @extern("puts") host_puts(value: i32): i32;
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("Extern link symbol 'puts' collides with emitted callable symbol", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Flags_duplicate_receiver_callable_when_array_size_text_differs_only_by_formatting()
+    {
+        var source = """
+            function hash(values: i32[04]): i32 {
+                return 0;
+            }
+
+            function hash(values: i32[4]): i32 {
+                return 1;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Duplicate callable 'hash' for receiver type 'i32[]'.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolves_function_form_overload_for_string_literal_as_string_receiver()
+    {
+        var source = """
+            function tag(value: string): i32 {
+                return 1;
+            }
+
+            function tag(value: i32): i32 {
+                return 2;
+            }
+
+            function run(): i32 {
+                return tag("hello");
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Resolves_function_form_overload_for_backtick_literal_without_receiverless_arity_fallback()
+    {
+        var source = """
+            function ping(value: i32): i32 {
+                return 0;
+            }
+
+            function ping(value: string): i32 {
+                return 1;
+            }
+
+            function run(): i32 {
+                return ping(`raw`);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Flags_arity_overloading_for_same_callable_name()
+    {
+        var source = """
+            function ping(): i32 {
+                return 0;
+            }
+
+            function ping(value: i32): i32 {
+                return value;
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(
+            sema.Diagnostics,
+            d => d.Message.Contains("cannot overload by arity", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Local_value_shadows_function_name_for_calls()
+    {
+        var source = """
+            struct Enemy { hp: i32; }
+
+            function damage(target: Enemy, amount: i32): i32 {
+                return amount;
+            }
+
+            function run(): i32 {
+                let enemy: Enemy = 0;
+                let damage: i32 = 0;
+                return damage(enemy, 5);
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("'damage' is not callable", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Stops_after_5_diagnostics_and_reports_invalid_calls_and_fields()
     {
         var source = """

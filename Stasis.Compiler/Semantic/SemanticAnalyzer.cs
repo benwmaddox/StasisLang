@@ -28,6 +28,8 @@ public sealed class SemanticAnalyzer
     private readonly Dictionary<string, Symbol> _symbols = new(StringComparer.Ordinal);
     private readonly List<Diagnostic> _diagnostics = new();
     private readonly Dictionary<string, StructDeclarationSyntax> _structs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<FunctionDeclarationSyntax>> _functionsByName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FunctionDeclarationSyntax> _functionsByKey = new(StringComparer.Ordinal);
 
     private int _errorCount;
     private bool AtDiagnosticLimit => _errorCount >= DiagnosticPolicy.MaxErrors;
@@ -210,13 +212,26 @@ public sealed class SemanticAnalyzer
 
     private void ValidateFunctionDeclarations(CompilationUnitSyntax compilationUnit)
     {
+        var externByLinkName = new Dictionary<string, FunctionDeclarationSyntax>(StringComparer.Ordinal);
+        var nonExternSymbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
+        {
+            if (CallableSymbolNameResolver.IsExternFunction(fn))
+            {
+                continue;
+            }
+
+            nonExternSymbols.Add(CallableIdentity.GetEmittedFunctionName(fn));
+        }
+
         foreach (var fn in compilationUnit.Declarations.OfType<FunctionDeclarationSyntax>())
         {
             var hasExternAttr = fn.Attributes.Any(a => string.Equals(a.Text, "extern", StringComparison.Ordinal));
+            var isExternFunction = CallableSymbolNameResolver.IsExternFunction(fn);
 
             if (fn.Body is null)
             {
-                if (!fn.IsExtern && !hasExternAttr)
+                if (!isExternFunction)
                 {
                     AddDiagnostic($"Function '{fn.Name.Text}' is missing a body. Add a body or mark it as extern.", fn.Name.Span);
                 }
@@ -228,6 +243,30 @@ public sealed class SemanticAnalyzer
                     AddDiagnostic($"Function '{fn.Name.Text}' has a body and cannot be marked @extern.", fn.Name.Span);
                 }
             }
+
+            if (!isExternFunction)
+            {
+                continue;
+            }
+
+            var linkName = CallableSymbolNameResolver.GetExternLinkName(fn) ?? fn.Name.Text;
+            if (nonExternSymbols.Contains(linkName))
+            {
+                AddDiagnostic(
+                    $"Extern link symbol '{linkName}' collides with emitted callable symbol. Use a distinct @extern(\"...\") link name.",
+                    fn.Name.Span);
+                continue;
+            }
+
+            if (externByLinkName.TryGetValue(linkName, out var existing))
+            {
+                AddDiagnostic(
+                    $"Extern link symbol '{linkName}' is used by multiple callables ('{existing.Name.Text}' and '{fn.Name.Text}'). Give each extern callable a distinct @extern(\"...\") link name.",
+                    fn.Name.Span);
+                continue;
+            }
+
+            externByLinkName[linkName] = fn;
         }
     }
 
@@ -450,12 +489,64 @@ public sealed class SemanticAnalyzer
                 case FunctionDeclarationSyntax fn:
                     {
                         var returnType = fn.ReturnType is null ? null : ResolveType(fn.ReturnType);
-                        AddSymbol(fn.Name.Text, SymbolKind.Function, returnType, fn.Name.Span);
+                        var hadUserDeclaredName = _functionsByName.TryGetValue(fn.Name.Text, out var existingOverloads);
+                        var overloads = hadUserDeclaredName
+                            ? existingOverloads!
+                            : new List<FunctionDeclarationSyntax>();
+                        if (!hadUserDeclaredName)
+                        {
+                            _functionsByName[fn.Name.Text] = overloads;
+                        }
+                        else if (overloads.Count > 0 && overloads[0].Parameters.Count != fn.Parameters.Count)
+                        {
+                            AddDiagnostic(
+                                $"Callable '{fn.Name.Text}' cannot overload by arity. All declarations with this name must declare {overloads[0].Parameters.Count} parameter(s).",
+                                fn.Name.Span);
+                        }
+
+                        overloads.Add(fn);
+
+                        var callableKey = CallableIdentity.GetCallableKey(fn);
+                        if (_functionsByKey.ContainsKey(callableKey))
+                        {
+                            var receiverType = fn.Parameters.Count > 0
+                                ? CallableIdentity.TypeKey(fn.Parameters[0].Type)
+                                : "<none>";
+                            AddDiagnostic($"Duplicate callable '{fn.Name.Text}' for receiver type '{receiverType}'.", fn.Name.Span);
+                        }
+                        else
+                        {
+                            _functionsByKey[callableKey] = fn;
+                        }
+
+                        if (_symbols.TryGetValue(fn.Name.Text, out var existing))
+                        {
+                            if (existing.Kind == SymbolKind.Test)
+                            {
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                            else if (existing.Kind != SymbolKind.Function)
+                            {
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                            else if (!hadUserDeclaredName)
+                            {
+                                // Builtins are predeclared as function symbols. User declarations must not
+                                // silently shadow them because lowering routes builtin names directly.
+                                AddDiagnostic($"Duplicate symbol '{fn.Name.Text}'.", fn.Name.Span);
+                            }
+                        }
+                        else
+                        {
+                            _symbols[fn.Name.Text] = new Symbol(fn.Name.Text, SymbolKind.Function, returnType);
+                        }
                         break;
                     }
                 case TestDeclarationSyntax test:
                     {
-                        var returnType = test.ReturnType is null ? null : ResolveType(test.ReturnType);
+                        var returnType = test.ReturnType is null
+                            ? new PrimitiveTypeSymbol("i32")
+                            : ResolveType(test.ReturnType);
                         AddSymbol(test.Name.Text, SymbolKind.Test, returnType, test.Name.Span);
                         break;
                     }
@@ -1051,6 +1142,39 @@ public sealed class SemanticAnalyzer
                     AnalyzeExpression(arg, scope);
                 }
 
+                if (c.Callee is MemberAccessExpressionSyntax memberCallee)
+                {
+                    AnalyzeExpression(memberCallee.Receiver, scope);
+
+                    var memberReceiverType = ResolveExpressionType(memberCallee.Receiver, scope);
+                    if (memberReceiverType is not null)
+                    {
+                        if (TryResolveReceiverScopedCallable(memberCallee.Member.Text, memberReceiverType, out var resolved, out var ambiguous))
+                        {
+                            ValidateCallArity(c, resolved);
+                            break;
+                        }
+
+                        if (ambiguous is not null)
+                        {
+                            AddDiagnostic(ambiguous, memberCallee.Member.Span);
+                            break;
+                        }
+
+                        var memberType = ResolveExpressionType(memberCallee, scope);
+                        if (memberType is not null)
+                        {
+                            AddDiagnostic($"'{memberCallee.Member.Text}' is not callable on type '{FormatType(memberReceiverType)}'. Hint: remove '()' to access the field value.", memberCallee.Member.Span);
+                            break;
+                        }
+
+                        AddDiagnostic($"Type '{FormatType(memberReceiverType)}' has no callable '{memberCallee.Member.Text}'.", memberCallee.Member.Span);
+                        break;
+                    }
+
+                    break;
+                }
+
                 if (c.Callee is IdentifierExpressionSyntax idCallee)
                 {
                     // Avoid double-reporting: treat `foo()` as a call-site check instead of
@@ -1063,8 +1187,22 @@ public sealed class SemanticAnalyzer
                         AddDiagnostic(
                             $"'{name}' is not callable ({kind} {ty}). Hint: remove '()' to use the value, or call a declared function.",
                             idCallee.Identifier.Span);
+                        break;
                     }
-                    else if (_symbols.TryGetValue(name, out var calleeSym))
+
+                    if (TryResolveFunctionFormCallable(name, c.Arguments, scope, out var resolved, out var ambiguous))
+                    {
+                        ValidateCallArity(c, resolved);
+                        break;
+                    }
+
+                    if (ambiguous is not null)
+                    {
+                        AddDiagnostic(ambiguous, idCallee.Identifier.Span);
+                        break;
+                    }
+
+                    if (_symbols.TryGetValue(name, out var calleeSym))
                     {
                         if (calleeSym.Kind is not (SymbolKind.Function or SymbolKind.Test))
                         {
@@ -1085,7 +1223,7 @@ public sealed class SemanticAnalyzer
                         var matches = GetClosestMatches(name, candidates).ToArray();
                         var hint = matches.Length switch
                         {
-                            0 => "Hint: declare it with `function name(...): type { ... }` (or check imports/spelling).",
+                            0 => "Hint: declare it with `function name(...): type { ... }`, or use receiver form `value.name(...)`.",
                             1 => $"Hint: did you mean '{matches[0]}'?",
                             _ => $"Hint: did you mean one of: {string.Join(", ", matches.Select(m => $"'{m}'"))}?"
                         };
@@ -1642,6 +1780,7 @@ public sealed class SemanticAnalyzer
                     TokenKind.U8Literal => new PrimitiveTypeSymbol("u8"),
                     TokenKind.FloatLiteral => new PrimitiveTypeSymbol("f32"),
                     TokenKind.StringLiteral => new PrimitiveTypeSymbol("string_literal"),
+                    TokenKind.BacktickLiteral => new PrimitiveTypeSymbol("string_literal"),
                     TokenKind.TrueKeyword or TokenKind.FalseKeyword => new PrimitiveTypeSymbol("bool"),
                     _ => null
                 };
@@ -1732,8 +1871,29 @@ public sealed class SemanticAnalyzer
                     return leftType ?? new PrimitiveTypeSymbol("i32");
                 }
             case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                               scope.ContainsKey(id.Identifier.Text):
+                return null;
+            case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
+                                               TryResolveFunctionFormCallable(id.Identifier.Text, call.Arguments, scope, out var resolved, out _):
+                return resolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(resolved.ReturnType);
+            case CallExpressionSyntax call when call.Callee is IdentifierExpressionSyntax id &&
                                                _symbols.TryGetValue(id.Identifier.Text, out var sym):
                 return sym.Type;
+            case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                               !string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                {
+                    var receiverType = ResolveExpressionType(member.Receiver, scope);
+                    if (receiverType is not null &&
+                        TryResolveReceiverScopedCallable(member.Member.Text, receiverType, out var receiverResolved, out _))
+                    {
+                        return receiverResolved.ReturnType is null ? new VoidTypeSymbol() : ResolveType(receiverResolved.ReturnType);
+                    }
+
+                    return null;
+                }
+            case CallExpressionSyntax call when call.Callee is MemberAccessExpressionSyntax member &&
+                                               string.Equals(member.Member.Text, "clear", StringComparison.Ordinal):
+                return new VoidTypeSymbol();
             case OperatorCallExpressionSyntax op:
                 {
                     // Operator calls are expressions; the result is either the receiver type or bool for comparisons.
@@ -1952,6 +2112,126 @@ public sealed class SemanticAnalyzer
             VoidTypeSymbol => "void",
             _ => "unknown"
         };
+    }
+
+    private bool TryResolveReceiverScopedCallable(
+        string name,
+        TypeSymbol receiverType,
+        out FunctionDeclarationSyntax function,
+        out string? ambiguousMessage)
+    {
+        ambiguousMessage = null;
+        function = null!;
+        if (!_functionsByName.TryGetValue(name, out var candidates))
+        {
+            return false;
+        }
+
+        var receiverKey = CallableIdentity.TypeKey(receiverType);
+        var matches = candidates
+            .Where(fn => fn.Parameters.Count > 0 &&
+                         string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length == 1)
+        {
+            function = matches[0];
+            return true;
+        }
+
+        if (matches.Length > 1)
+        {
+            ambiguousMessage = $"Call to '{name}' is ambiguous for receiver type '{receiverKey}'.";
+        }
+
+        return false;
+    }
+
+    private bool TryResolveFunctionFormCallable(
+        string name,
+        IReadOnlyList<ExpressionSyntax> arguments,
+        IReadOnlyDictionary<string, Symbol> scope,
+        out FunctionDeclarationSyntax function,
+        out string? ambiguousMessage)
+    {
+        ambiguousMessage = null;
+        function = null!;
+        if (!_functionsByName.TryGetValue(name, out var candidates))
+        {
+            return false;
+        }
+
+        var arityMatches = candidates
+            .Where(fn => fn.Parameters.Count == arguments.Count)
+            .ToArray();
+        if (arityMatches.Length == 0)
+        {
+            return false;
+        }
+
+        // Prefer receiver-scoped callables when the first argument has a known type and a matching receiver exists.
+        if (arguments.Count > 0)
+        {
+            var firstType = ResolveExpressionType(arguments[0], scope);
+            if (firstType is not null)
+            {
+                var receiverKey = CallableIdentity.TypeKey(firstType);
+                var receiverMatches = arityMatches
+                    .Where(fn => fn.Parameters.Count > 0 &&
+                                 string.Equals(CallableIdentity.TypeKey(fn.Parameters[0].Type), receiverKey, StringComparison.Ordinal))
+                    .ToArray();
+                if (receiverMatches.Length == 1)
+                {
+                    function = receiverMatches[0];
+                    return true;
+                }
+
+                if (receiverMatches.Length > 1)
+                {
+                    ambiguousMessage = $"Call to '{name}' is ambiguous for receiver type '{receiverKey}'.";
+                    return false;
+                }
+            }
+        }
+
+        var receiverless = arityMatches.Where(fn => fn.Parameters.Count == 0).ToArray();
+        if (receiverless.Length == 1)
+        {
+            function = receiverless[0];
+            return true;
+        }
+
+        if (receiverless.Length > 1)
+        {
+            ambiguousMessage = $"Call to '{name}' is ambiguous (multiple receiverless declarations).";
+            return false;
+        }
+
+        if (arityMatches.Length == 1)
+        {
+            function = arityMatches[0];
+            return true;
+        }
+
+        ambiguousMessage = $"Call to '{name}' is ambiguous.";
+        return false;
+    }
+
+    private void ValidateCallArity(CallExpressionSyntax call, FunctionDeclarationSyntax function)
+    {
+        var expected = function.Parameters.Count;
+        var actual = call.Arguments.Count;
+        var receiverForm = call.Callee is MemberAccessExpressionSyntax;
+        if (receiverForm)
+        {
+            expected -= 1;
+        }
+
+        if (expected != actual)
+        {
+            AddDiagnostic(
+                $"Callable '{function.Name.Text}' expects {expected} argument(s) in {(receiverForm ? "receiver" : "function")} form, got {actual}.",
+                call.Span);
+        }
     }
 
     private static bool TryGetIntegerLiteralValue(ExpressionSyntax expr, out long value)

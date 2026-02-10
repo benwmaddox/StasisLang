@@ -1,0 +1,15 @@
+function tag(value: string): i32 {
+    return 1;
+}
+
+function tag(value: i32): i32 {
+    return 2;
+}
+
+test `function form dispatch treats string literal as string`(): bool {
+    return tag("hello") == 1;
+}
+
+test `other overload still resolves by first parameter`(): bool {
+    return tag(5) == 2;
+}
