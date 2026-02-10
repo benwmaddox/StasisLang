@@ -183,7 +183,7 @@ function fill_audio_chunk(sample_rate: i32): void {
             click_env = 0.0;
         }
 
-        let s: f32 = game_clamp_f32((music + click) * 0.5 + 0.5, 0.0, 1.0) * 2.0 - 1.0;
+        let s: f32 = game_clamp((music + click) * 0.5 + 0.5, 0.0, 1.0) * 2.0 - 1.0;
 
         let idx: i32 = i * 2;
         audio_buf[idx] = s;

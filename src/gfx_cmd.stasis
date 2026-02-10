@@ -145,7 +145,7 @@ function gfx_cmd_set_sprite_at(index: i32, handle: i32, x: i32, y: i32, w: i32, 
     gfx_cmd_i32[base + 6] = a;
 }
 
-function gfx_cmd_lines_from_f32(lines: f32[], count: i32): void {
+function gfx_cmd_lines_from(lines: f32[], count: i32): void {
     if (count <= 0) {
         return;
     }
@@ -167,7 +167,7 @@ function gfx_cmd_lines_from_f32(lines: f32[], count: i32): void {
     gfx_cmd_i32[GFX_I_LINE_COUNT] = start + n;
 }
 
-function gfx_cmd_sprites_from_i32(cmds: i32[], count: i32): void {
+function gfx_cmd_sprites_from(cmds: i32[], count: i32): void {
     if (count <= 0) {
         return;
     }
@@ -212,7 +212,7 @@ function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b
         return;
     }
 
-    let byte_len: i32 = utf8_byte_len(text);
+    let byte_len: i32 = length_bytes(text);
     if (byte_len < 0) { byte_len = 0; }
     if (byte_len > 1024) { byte_len = 1024; } // hard cap per command to keep worst-case bounded
 

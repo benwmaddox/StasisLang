@@ -3,7 +3,7 @@ import "../src/stdlib/graphics.stasis";
 
 // Render command buffer microbench:
 // - Per-call: many draw_line() calls from Stasis.
-// - Batched: one draw_lines_f32() call that loops in the runtime.
+// - Batched: one draw_lines() call that loops in the runtime.
 //
 // Notes:
 // - This times submission only (no end_frame()), so it isolates host<->runtime call overhead.
@@ -59,7 +59,7 @@ function submit_lines_per_call(): void {
 }
 
 function submit_lines_batched(): void {
-    draw_lines_f32(state.lines, LINE_COUNT);
+    draw_lines(state.lines, LINE_COUNT);
 }
 
 function bench_per_call(iterations: i32): i32 {
