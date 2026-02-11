@@ -37,6 +37,7 @@ This tracks remaining work after the merged incremental hot-swap foundations.
 - [x] Deterministic tests for overlay command handling (`set`, `clear`, `clear_all`) in watch loop.
 - [x] JIT-runner watch integration test for overlay-triggered swap without disk edits.
 - [ ] Long-run swap soak test (100+ swaps) for stability and bounded retirement/memory metrics.
+  - Note: a short multi-swap stability test is now in place (`WatchTickJitSwap_PipeOverlay_MultiSwapStability`); full 100+ soak remains.
 - [ ] Performance regression harness for edit->applied latency (single-function and multi-function edits).
 
 ## 5) Reliability and Ops

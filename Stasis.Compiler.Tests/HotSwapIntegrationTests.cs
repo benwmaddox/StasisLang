@@ -517,6 +517,101 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickJitSwap_PipeOverlay_MultiSwapStability()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var pipeName = $"stasis-jit-overlay-soak-{Guid.NewGuid():N}";
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_overlay_soak");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_overlay_soak.stasis");
+        var onDiskSource = BuildInProcessTickSource(5);
+        await File.WriteAllTextAsync(stasisPath, onDiskSource, Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+            psi.EnvironmentVariables["STASIS_BUFFER_OVERLAY_PIPE"] = pipeName;
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var swapCount = outLines.CountContains("HOTSWAP(ms):");
+            Assert.True(swapCount > 0, $"watch did not report initial HOTSWAP(ms).\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+
+            foreach (var seed in new[] { 11, 13, 17, 19, 23, 29, 31, 37 })
+            {
+                await SendOverlayPipeCommandAsync(
+                    pipeName,
+                    new { kind = "set", path = stasisPath, text = BuildInProcessTickSource(seed) },
+                    timeout: TimeSpan.FromSeconds(30));
+
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.CountContains("HOTSWAP(ms):") > swapCount,
+                    timeout: TimeSpan.FromMinutes(5));
+
+                swapCount = outLines.CountContains("HOTSWAP(ms):");
+                Assert.False(proc.HasExited, $"watch process exited during soak cycle seed={seed}.");
+            }
+
+            var diskSource = await File.ReadAllTextAsync(stasisPath);
+            Assert.Equal(onDiskSource, diskSource);
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickJitSwap_SurvivesBuildError_AndSwapsAfterFix()
     {
         var repoRoot = FindRepoRoot();

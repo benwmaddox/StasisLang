@@ -124,6 +124,7 @@ This is the first implementation slice toward the in-process architecture target
   - `SourceImporterTests.ExpandImports_UsesOverlayPlatformSpecificFile`
   - `HotSwapIntegrationTests.WatchTickJitSwap_SwapsFromPipeOverlayWithoutDiskEdit`
   - `HotSwapIntegrationTests.WatchTickJitSwap_PipeOverlay_SetClearAndClearAll`
+  - `HotSwapIntegrationTests.WatchTickJitSwap_PipeOverlay_MultiSwapStability`
 - VS Code extension now supports pushing unsaved buffers to watch mode via configured pipe:
   - `stasis.watchOverlayPipe` setting writes `set`/`clear` overlay commands on open/change/close.
 - Added workflow guide: `docs/editor-buffer-overlay-workflow.md`.
