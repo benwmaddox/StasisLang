@@ -34,15 +34,17 @@ Assignment is infix:
 
 Method-style arithmetic/comparison forms are removed from the language surface.
 
-Numeric conversions should use receiver-form conversion helpers.
+Numeric conversions use receiver-form helpers in two categories.
 
-Example:
-- `f32Value.from_i32(i32Value)`
+`from_*` conversions (mutating target):
+- Assignment-like operations that write into the receiver target.
+- Statement-style side-effect operations.
+- Example: `f32Value.from_i32(i32Value);`
 
-Conversion semantics:
-- `from_*` operations write into the receiver target.
-- They are assignment-like operations with side effects.
-- They must not be treated as pure value-returning conversion calls.
+`to_*` conversions (pure value):
+- Pure operations on basic numeric types.
+- Expression-safe and may be used in declarations/initializers.
+- Example: `let alpha: f32 = ticks_i32.to_f32();`
 
 Example:
 
@@ -52,6 +54,14 @@ let alpha: f32;
 
 ticks_i32.from_u32(DebugUI.swapFlashTicks);
 alpha.from_i32(ticks_i32);
+alpha /= 180.0;
+```
+
+Equivalent declaration+initializer style with pure conversions:
+
+```stasis
+let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+let alpha: f32 = ticks_i32.to_f32();
 alpha /= 180.0;
 ```
 
@@ -111,10 +121,8 @@ global DebugUI {
 
 function draw_debug_ui(): void {
     if (DebugUI.swapFlashTicks > 0) {
-        let ticks_i32: i32;
-        let alpha: f32;
-        ticks_i32.from_u32(DebugUI.swapFlashTicks);
-        alpha.from_i32(ticks_i32);
+        let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+        let alpha: f32 = ticks_i32.to_f32();
         alpha /= 180.0;
         draw_swap_icon(alpha);
         DebugUI.swapFlashTicks -= 1;

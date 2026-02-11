@@ -262,10 +262,8 @@ During draw:
 ```stasis
 fn draw_debug_ui() {
     if DebugUI.swapFlashTicks > 0 {
-        let ticks_i32: i32;
-        let alpha: f32;
-        ticks_i32.from_u32(DebugUI.swapFlashTicks);
-        alpha.from_i32(ticks_i32);
+        let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+        let alpha: f32 = ticks_i32.to_f32();
         alpha /= 180.0;
         draw_swap_icon(alpha);
         DebugUI.swapFlashTicks -= 1;
@@ -292,7 +290,8 @@ Rules:
 - No `dt`-driven logic inside Stasis gameplay semantics
 - Rendering may interpolate visually
 - Simulation remains deterministic
-- Numeric conversion helpers such as `from_i32` and `from_u32` are target-mutating operations (assignment-like), not pure return-value casts.
+- `from_*` conversion helpers are target-mutating operations (assignment-like).
+- `to_*` conversion helpers are pure value conversions for basic numeric types.
 
 The engine defines `TICKS_PER_SECOND`.
 
@@ -360,13 +359,13 @@ Phase 4 (Optional):
 
 ## 16. Key Risks & Mitigations
 
-| Risk                   | Mitigation                               |
-| ---------------------- | ---------------------------------------- |
-| Stale code execution   | Atomic pointer swaps                     |
-| Partial state mutation | Swap hook transactional                  |
-| Developer confusion    | Swap indicator                           |
-| Complexity creep       | File-level only                          |
-| Inlining side effects  | Disable aggressive cross-boundary in dev |
+| Risk                   | Mitigation                                        |
+| ---------------------- | ----------------------------------------          |
+| Stale code execution   | Atomic pointer swaps                              |
+| Partial state mutation | Swap hook transactional                           |
+| Developer confusion    | Swap indicator                                    |
+| Complexity creep       | File-level only                                   |
+| Inlining side effects  | Inline supported but inline change forces rebuild |
 
 ## 17. Success Criteria
 
