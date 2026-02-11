@@ -3,8 +3,7 @@
 ## Project Structure & Module Organization
 - `docs/spec.md` is the canonical language spec for Rewrite V1.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
-- `docs/rewrite_v1_checklist.md` is the execution plan with S0-S12 feature slices and language ownership.
-- `compiler/incremental_compiler.stasis` is the compiler orchestration script entrypoint (Stasis-owned compile logic).
+- `docs/rewrite_v1_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
 - `crates/stasis_compiler` hosts compiler substrate and bindings used by orchestration.
 - `crates/stasis_jit` hosts Cranelift JIT integration, function pointer table, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
@@ -53,12 +52,7 @@
 ## Commit & Pull Request Guidelines
 - Use short imperative subjects; Conventional Commits are preferred (`feat:`, `fix:`, `docs:`, `test:`).
 - Reference affected spec/PRD/checklist sections when relevant.
-- Keep PRs scoped to one slice group where possible:
-- PR-A: S0-S2
-- PR-B: S3-S5
-- PR-C: S6-S8
-- PR-D: S9-S10
-- PR-E: S11-S12
+- Keep PRs scoped to one slice group where possible (exact grouping/sequencing lives in `docs/rewrite_v1_checklist.md`).
 - Each PR should include:
 - behavioral summary
 - tests added/updated
@@ -81,6 +75,5 @@
 
 ## Language Ownership Rules
 - Rust owns host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
-- `.stasis` owns compiler orchestration policies and language-level compile logic in `compiler/incremental_compiler.stasis`.
+- `.stasis` owns compiler orchestration policies and language-level compile logic.
 - Use C only when unavoidable for platform-level bindings.
-

@@ -8,6 +8,7 @@ Locked decisions:
 - Entrypoint is `function main(): i32`.
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
+- Planned compiler orchestration file path is `compiler/incremental_compiler.stasis`.
 
 ## Language Ownership Legend
 
@@ -23,6 +24,15 @@ Locked decisions:
 4. Update docs in the same PR when behavior changes.
 5. Preserve deterministic tick-based behavior.
 
+## Pre-S0 Bootstrap Reality (Temporary)
+
+Until S0 is complete, workspace crate manifests/sources may not all exist yet.
+Use bootstrap compiler tooling for Stasis compile smoke checks:
+- `bootstrap\\windows\\stasisc.bat run path\\to\\file.stasis --emit-ir`
+- `bootstrap\\windows\\stasisc.bat test --all`
+
+This section is temporary and should be removed once S0 establishes working Cargo workspace builds/tests.
+
 ## Slice Plan
 
 ### S0 - Workspace Bootstrap
@@ -30,6 +40,7 @@ Locked decisions:
 - `Rust`
 - Scope:
 - Create real crate/app sources for `apps/stasis`, `crates/stasis_compiler`, `crates/stasis_jit`, `crates/stasis_runner`.
+- Create/verify required `Cargo.toml` and `src/` roots for each workspace member referenced by root `Cargo.toml`.
 - Deliverable:
 - `cargo build` and `cargo test` pass with scaffold smoke tests.
 - Tests:
