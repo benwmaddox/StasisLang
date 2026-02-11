@@ -111,7 +111,7 @@ public sealed class HotSwapIntegrationTests
 
             // Trigger a real semantic rebuild + swap.
             var semanticEdit = ApplyTickSemanticEdit(original, 7);
-            await File.WriteAllTextAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
 
             var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
             await WaitForAnyLineAsync(
@@ -143,7 +143,7 @@ public sealed class HotSwapIntegrationTests
 
             try
             {
-                await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+                await WriteAllTextWithRetryAsync(samplePath, original, System.Text.Encoding.ASCII);
             }
             catch
             {
@@ -229,7 +229,7 @@ public sealed class HotSwapIntegrationTests
             var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
 
             var semanticEdit = ApplyTickSemanticEdit(original, 11);
-            await File.WriteAllTextAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, semanticEdit, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -260,7 +260,7 @@ public sealed class HotSwapIntegrationTests
 
             try
             {
-                await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+                await WriteAllTextWithRetryAsync(samplePath, original, System.Text.Encoding.ASCII);
             }
             catch
             {
@@ -345,7 +345,8 @@ public sealed class HotSwapIntegrationTests
             var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
 
             // Introduce a compiler error. The watch loop should stay alive and keep watching.
-            await File.AppendAllTextAsync(samplePath, "\nfunction __jit_build_error(): i32 { return x; }\n", System.Text.Encoding.ASCII);
+            var brokenSource = original + "\nfunction __jit_build_error(): i32 { return x; }\n";
+            await WriteAllTextWithRetryAsync(samplePath, brokenSource, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -359,7 +360,7 @@ public sealed class HotSwapIntegrationTests
 
             // Fix the file; next rebuild should hot-swap again.
             var semanticRecovery = ApplyTickSemanticEdit(original, 13);
-            await File.WriteAllTextAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -383,7 +384,7 @@ public sealed class HotSwapIntegrationTests
 
             try
             {
-                await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+                await WriteAllTextWithRetryAsync(samplePath, original, System.Text.Encoding.ASCII);
             }
             catch
             {
@@ -821,7 +822,7 @@ public sealed class HotSwapIntegrationTests
             Assert.True(initialSwapCount > 0, "watch did not report initial HOTSWAP(ms).");
 
             var semanticEdit = ApplyTickSemanticEdit(initialSource, 19);
-            await File.WriteAllTextAsync(stasisPath, semanticEdit, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(stasisPath, semanticEdit, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -844,7 +845,7 @@ public sealed class HotSwapIntegrationTests
 
             var swapCountAfterHook = outLines.CountContains("HOTSWAP(ms):");
 
-            await File.WriteAllTextAsync(stasisPath, layoutChangedSource, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(stasisPath, layoutChangedSource, System.Text.Encoding.ASCII);
 
             await WaitForAnyLineAsync(
                 proc,
@@ -915,20 +916,18 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
-    public async Task WatchTickInProcessSwap_SwapsOnEdit_WithoutJitRunnerProcess()
+    public async Task WatchTickHotSwap_DeprecatedInProcessFlag_FallsBackToRustRunner()
     {
         var repoRoot = FindRepoRoot();
-        var cliDll = FindCliDll(repoRoot);
-        Assert.NotNull(cliDll);
-        var clangBinDir = FindClangBinDir(repoRoot);
-        if (string.IsNullOrWhiteSpace(clangBinDir))
-        {
-            throw SkipException.ForSkip("clang not found; skipping in-process tick swap test.");
-        }
 
-        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_swap");
-        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_watch.stasis");
-        File.WriteAllText(stasisPath, """
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_tick_deprecated_inproc_env");
+        var stasisPath = Path.Combine(tempDir.FullName, "deprecated_inproc_env.stasis");
+        await WriteAllTextWithRetryAsync(stasisPath, """
             struct WatchState {
                 ticks: i32;
             }
@@ -941,6 +940,7 @@ public sealed class HotSwapIntegrationTests
             }
 
             function tick(): i32 {
+                state.ticks = state.ticks + 1;
                 return 0;
             }
             """, System.Text.Encoding.ASCII);
@@ -962,8 +962,8 @@ public sealed class HotSwapIntegrationTests
 
             psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
             psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
-            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
-            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe!;
 
             proc = Process.Start(psi);
             Assert.NotNull(proc);
@@ -971,29 +971,23 @@ public sealed class HotSwapIntegrationTests
             using var outLines = new AsyncLineCollector(proc!.StandardOutput);
             using var errLines = new AsyncLineCollector(proc.StandardError);
 
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
-                timeout: TimeSpan.FromMinutes(5));
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(5));
 
-            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
-            Assert.True(initialSwapCount > 0, "watch did not report initial HOTSWAP(ms).");
-
-            var original = await File.ReadAllTextAsync(stasisPath);
-            var edited = ApplyTickSemanticEdit(original, 23);
-            await File.WriteAllTextAsync(stasisPath, edited, System.Text.Encoding.ASCII);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                timeout: TimeSpan.FromMinutes(5));
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTSWAP(state): compiled") &&
-                      outLines.AnyContains("HOTSWAP(state): queued") &&
-                      outLines.AnyContains("HOTSWAP(state): applied"),
-                timeout: TimeSpan.FromMinutes(2));
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => errLines.AnyContains("STASIS_CRANELIFT_INPROC_TICK is deprecated"),
+                    timeout: TimeSpan.FromSeconds(30));
+            }
+            catch (Exception ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
 
             var jitRunnerCount = Process.GetProcessesByName("stasis-cranelift-jit-runner")
                 .Count(p =>
@@ -1008,7 +1002,7 @@ public sealed class HotSwapIntegrationTests
                     }
                 });
 
-            Assert.Equal(0, jitRunnerCount);
+            Assert.True(jitRunnerCount > 0, "expected Rust JIT runner process to be active.");
             Assert.False(proc.HasExited);
         }
         finally
@@ -1028,386 +1022,24 @@ public sealed class HotSwapIntegrationTests
 
             try
             {
-                tempDir.Delete(true);
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
             }
             catch
             {
                 // ignore
-            }
-        }
-    }
-
-    [HotSwapFact]
-    public async Task WatchTickInProcessSwap_ReportsGenerationRetirementTelemetry()
-    {
-        var repoRoot = FindRepoRoot();
-        var cliDll = FindCliDll(repoRoot);
-        Assert.NotNull(cliDll);
-        var clangBinDir = FindClangBinDir(repoRoot);
-        if (string.IsNullOrWhiteSpace(clangBinDir))
-        {
-            throw SkipException.ForSkip("clang not found; skipping in-process generation retirement test.");
-        }
-
-        const int retireWindow = 2;
-        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_generation_retire");
-        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_generation_retire.stasis");
-        await File.WriteAllTextAsync(stasisPath, BuildInProcessTickSource(1), System.Text.Encoding.ASCII);
-
-        Process? proc = null;
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "dotnet",
-                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
-                UseShellExecute = false,
-                WorkingDirectory = repoRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
-            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
-            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
-            psi.EnvironmentVariables["STASIS_INPROC_RETIRE_WINDOW_FRAMES"] = retireWindow.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
-
-            proc = Process.Start(psi);
-            Assert.NotNull(proc);
-
-            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
-            using var errLines = new AsyncLineCollector(proc.StandardError);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
-                timeout: TimeSpan.FromMinutes(5));
-
-            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
-            var appliedCount = outLines.CountContains("HOTSWAP(state): applied");
-            Assert.True(initialSwapCount > 0, "watch did not report initial HOTSWAP(ms).");
-
-            var observedGenerations = new List<long>();
-            var observedPending = new List<long>();
-            var observedRetired = new List<long>();
-
-            foreach (var seed in new[] { 31, 37, 43, 47 })
-            {
-                await File.WriteAllTextAsync(stasisPath, BuildInProcessTickSource(seed), System.Text.Encoding.ASCII);
-
-                await WaitForAnyLineAsync(
-                    proc,
-                    () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount &&
-                          outLines.CountContains("HOTSWAP(state): applied") > appliedCount,
-                    timeout: TimeSpan.FromMinutes(5));
-
-                initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
-                appliedCount = outLines.CountContains("HOTSWAP(state): applied");
-
-                var appliedLines = outLines.SnapshotLinesContaining("HOTSWAP(state): applied");
-                Assert.NotEmpty(appliedLines);
-                var latest = appliedLines[^1];
-
-                Assert.True(TryParseLongMetric(latest, "gen", out var generation), $"missing gen telemetry in line: {latest}");
-                Assert.True(TryParseLongMetric(latest, "retire_pending", out var pendingRetired), $"missing retire_pending telemetry in line: {latest}");
-                Assert.True(TryParseLongMetric(latest, "retired", out var retiredCount), $"missing retired telemetry in line: {latest}");
-
-                observedGenerations.Add(generation);
-                observedPending.Add(pendingRetired);
-                observedRetired.Add(retiredCount);
-            }
-
-            Assert.Equal(4, observedGenerations.Count);
-            Assert.True(observedGenerations[0] >= 2, "expected first applied generation >= 2.");
-            for (var i = 1; i < observedGenerations.Count; i++)
-            {
-                Assert.Equal(observedGenerations[i - 1] + 1, observedGenerations[i]);
-            }
-
-            var maxPending = observedPending.Count == 0 ? 0 : observedPending.Max();
-            Assert.True(
-                maxPending <= retireWindow + 1,
-                $"pending retired generations exceeded expected bound. max_pending={maxPending} retire_window={retireWindow}");
-
-            Assert.Contains(observedRetired, count => count > 0);
-            Assert.False(proc.HasExited);
-        }
-        finally
-        {
-            try
-            {
-                if (proc is not null && !proc.HasExited)
-                {
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(10_000);
-                }
-            }
-            catch
-            {
-                // Best-effort cleanup.
-            }
-
-            try
-            {
-                tempDir.Delete(true);
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-    }
-
-    [HotSwapFact]
-    public async Task WatchTickInProcessSwap_RecoversAfterInitialBuildFailure()
-    {
-        var repoRoot = FindRepoRoot();
-        var cliDll = FindCliDll(repoRoot);
-        Assert.NotNull(cliDll);
-        var clangBinDir = FindClangBinDir(repoRoot);
-        if (string.IsNullOrWhiteSpace(clangBinDir))
-        {
-            throw SkipException.ForSkip("clang not found; skipping in-process tick swap recovery test.");
-        }
-
-        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_recover");
-        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_recover.stasis");
-        var brokenSource = """
-            struct WatchState {
-                ticks: i32;
-            }
-
-            global state: WatchState;
-
-            function main(): i32 {
-                state.ticks = 0;
-                return 0;
-            }
-
-            function tick(): i32 {
-                return missing_symbol;
-            }
-            """;
-        var fixedSource = """
-            struct WatchState {
-                ticks: i32;
-            }
-
-            global state: WatchState;
-
-            function main(): i32 {
-                state.ticks = 0;
-                return 0;
-            }
-
-            function tick(): i32 {
-                return 0;
-            }
-            """;
-        File.WriteAllText(stasisPath, brokenSource, System.Text.Encoding.ASCII);
-
-        Process? proc = null;
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "dotnet",
-                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
-                UseShellExecute = false,
-                WorkingDirectory = repoRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
-            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
-            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
-            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
-
-            proc = Process.Start(psi);
-            Assert.NotNull(proc);
-
-            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
-            using var errLines = new AsyncLineCollector(proc.StandardError);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => errLines.AnyContains("warning: initial build failed; waiting for changes.") ||
-                      outLines.AnyContains("HOTSWAP(ms):"),
-                timeout: TimeSpan.FromMinutes(3));
-
-            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
-            Assert.Equal(
-                0,
-                initialSwapCount);
-
-            var initialErrorCount = errLines.CountContains("error:");
-            await File.WriteAllTextAsync(stasisPath, fixedSource, System.Text.Encoding.ASCII);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount ||
-                      errLines.CountContains("error:") > initialErrorCount,
-                timeout: TimeSpan.FromMinutes(5));
-
-            Assert.True(
-                outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                $"watch did not recover after fixing startup source.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
-            Assert.False(proc.HasExited);
-        }
-        finally
-        {
-            try
-            {
-                if (proc is not null && !proc.HasExited)
-                {
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(10_000);
-                }
-            }
-            catch
-            {
-                // Best-effort cleanup.
-            }
-
-            try
-            {
-                tempDir.Delete(true);
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-    }
-
-    [HotSwapFact]
-    public async Task WatchTickInProcessSwap_PreservesHookStateMigration()
-    {
-        var repoRoot = FindRepoRoot();
-        var cliDll = FindCliDll(repoRoot);
-        Assert.NotNull(cliDll);
-        var clangBinDir = FindClangBinDir(repoRoot);
-        if (string.IsNullOrWhiteSpace(clangBinDir))
-        {
-            throw SkipException.ForSkip("clang not found; skipping in-process hook migration test.");
-        }
-
-        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_hook_migration");
-        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_hook_migration.stasis");
-        var initialSource = """
-            struct WatchState {
-                migrated: i32;
-            }
-
-            global state: WatchState;
-
-            function main(): i32 {
-                state.migrated = 0;
-                return 0;
-            }
-
-            function on_code_swap(): i32 {
-                state.migrated = 42;
-                return 0;
-            }
-
-            function tick(): i32 {
-                return 0;
-            }
-            """;
-        var migratedSource = """
-            struct WatchState {
-                migrated: i32;
-            }
-
-            global state: WatchState;
-
-            function main(): i32 {
-                state.migrated = 0;
-                return 0;
-            }
-
-            function on_code_swap(): i32 {
-                state.migrated = 42;
-                return 0;
-            }
-
-            function tick(): i32 {
-                if (state.migrated == 42) {
-                    return 0;
-                }
-                return 99;
-            }
-            """;
-        File.WriteAllText(stasisPath, initialSource, System.Text.Encoding.ASCII);
-
-        Process? proc = null;
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "dotnet",
-                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
-                UseShellExecute = false,
-                WorkingDirectory = repoRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
-            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
-            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
-            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
-
-            proc = Process.Start(psi);
-            Assert.NotNull(proc);
-
-            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
-            using var errLines = new AsyncLineCollector(proc.StandardError);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
-                timeout: TimeSpan.FromMinutes(5));
-
-            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
-            Assert.True(
-                initialSwapCount > 0,
-                $"watch did not report initial HOTSWAP(ms).\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
-
-            var errorCountBeforeSwap = errLines.CountContains("error:");
-            await File.WriteAllTextAsync(stasisPath, migratedSource, System.Text.Encoding.ASCII);
-
-            await WaitForAnyLineAsync(
-                proc,
-                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount ||
-                      errLines.CountContains("error:") > errorCountBeforeSwap,
-                timeout: TimeSpan.FromMinutes(5));
-
-            Assert.True(
-                outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
-                $"watch did not report swap after migrated hook edit.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
-            await Task.Delay(500);
-            Assert.False(proc.HasExited);
-        }
-        finally
-        {
-            try
-            {
-                if (proc is not null && !proc.HasExited)
-                {
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(10_000);
-                }
-            }
-            catch
-            {
-                // Best-effort cleanup.
             }
 
             try
@@ -1489,7 +1121,7 @@ public sealed class HotSwapIntegrationTests
                 "function tick(): i32 {" + nl + "    state.missing = 1;" + nl + "    return 0;" + nl + "}" + nl,
                 StringComparison.Ordinal);
             Assert.NotEqual(original, bad);
-            await File.WriteAllTextAsync(samplePath, bad, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, bad, System.Text.Encoding.ASCII);
 
             try
             {
@@ -1511,7 +1143,7 @@ public sealed class HotSwapIntegrationTests
 
             // Fix the file with a semantic edit; watch should recover on the next build.
             var semanticRecovery = ApplyTickSemanticEdit(original, 17);
-            await File.WriteAllTextAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, semanticRecovery, System.Text.Encoding.ASCII);
             await WaitForAnyLineAsync(
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
@@ -1521,7 +1153,7 @@ public sealed class HotSwapIntegrationTests
         }
         finally
         {
-            await File.WriteAllTextAsync(samplePath, original, System.Text.Encoding.ASCII);
+            await WriteAllTextWithRetryAsync(samplePath, original, System.Text.Encoding.ASCII);
 
             try
             {
@@ -1667,107 +1299,6 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
-    private static string? FindClangBinDir(string repoRoot)
-    {
-        var clangExe = OperatingSystem.IsWindows() ? "clang.exe" : "clang";
-        var candidates = new List<string>();
-
-        // Prefer pinned LLVM under .tools/.
-        var toolsDir = Path.Combine(repoRoot, ".tools");
-        if (Directory.Exists(toolsDir))
-        {
-            var llvmDirs = Directory.GetDirectories(toolsDir, "llvm-*")
-                .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            foreach (var llvmDir in llvmDirs)
-            {
-                var bin = Path.Combine(llvmDir, "bin");
-                if (File.Exists(Path.Combine(bin, clangExe)))
-                {
-                    candidates.Add(bin);
-                }
-            }
-        }
-
-        // If clang is already on PATH, do nothing special.
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        foreach (var part in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (File.Exists(Path.Combine(part, clangExe)))
-            {
-                candidates.Add(part);
-            }
-        }
-
-        var best = PickBestClangBin(candidates);
-        return best ?? candidates.FirstOrDefault();
-    }
-
-    private static string? PickBestClangBin(IEnumerable<string> bins)
-    {
-        const int minOpaquePtrMajor = 15;
-        var best = (path: (string?)null, version: -1);
-
-        foreach (var bin in bins.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            var clangPath = Path.Combine(bin, OperatingSystem.IsWindows() ? "clang.exe" : "clang");
-            if (!File.Exists(clangPath))
-            {
-                continue;
-            }
-
-            if (TryGetClangMajorVersion(clangPath, out var major))
-            {
-                if (major >= minOpaquePtrMajor && major > best.version)
-                {
-                    best = (bin, major);
-                }
-            }
-        }
-
-        return best.path;
-    }
-
-    private static bool TryGetClangMajorVersion(string clangPath, out int major)
-    {
-        major = 0;
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = clangPath,
-                Arguments = "--version",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            using var proc = Process.Start(psi);
-            if (proc is null)
-            {
-                return false;
-            }
-            var line = proc.StandardOutput.ReadLine() ?? string.Empty;
-            proc.WaitForExit(2000);
-            var idx = line.IndexOf("version ", StringComparison.OrdinalIgnoreCase);
-            if (idx < 0)
-            {
-                return false;
-            }
-            var ver = line[(idx + "version ".Length)..];
-            var dot = ver.IndexOf('.');
-            if (dot < 0)
-            {
-                return false;
-            }
-            return int.TryParse(ver[..dot], out major);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static IEnumerable<string> GuessBuildConfigs()
     {
         // Prefer the current test configuration if it's visible in the output path.
@@ -1814,6 +1345,31 @@ public sealed class HotSwapIntegrationTests
         }
     }
 
+    private static async Task WriteAllTextWithRetryAsync(string path, string text, System.Text.Encoding encoding)
+    {
+        Exception? last = null;
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                await File.WriteAllTextAsync(path, text, encoding);
+                return;
+            }
+            catch (IOException ex)
+            {
+                last = ex;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                last = ex;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new IOException($"failed to write '{path}' after retries", last);
+    }
+
     private static string QuoteArgs(params string[] args) =>
         string.Join(" ", args.Select(QuoteArg));
 
@@ -1829,53 +1385,6 @@ public sealed class HotSwapIntegrationTests
         var tick = "function tick(): i32 {" + nl + "    return 0;" + nl + "}";
         var replacement = "function tick(): i32 {" + nl + $"    return {seed} - {seed};" + nl + "}";
         return source.Replace(tick, replacement, StringComparison.Ordinal);
-    }
-
-    private static string BuildInProcessTickSource(int seed) =>
-        $$"""
-        struct WatchState {
-            ticks: i32;
-        }
-
-        global state: WatchState;
-
-        function main(): i32 {
-            state.ticks = 0;
-            return 0;
-        }
-
-        function tick(): i32 {
-            state.ticks = state.ticks + 1;
-            return {{seed}} - {{seed}};
-        }
-        """;
-
-    private static bool TryParseLongMetric(string line, string key, out long value)
-    {
-        value = 0;
-        var needle = key + "=";
-        var idx = line.IndexOf(needle, StringComparison.Ordinal);
-        if (idx < 0)
-        {
-            return false;
-        }
-
-        idx += needle.Length;
-        var end = idx;
-        if (end < line.Length && line[end] == '-')
-        {
-            end++;
-        }
-        while (end < line.Length && char.IsDigit(line[end]))
-        {
-            end++;
-        }
-        if (end <= idx)
-        {
-            return false;
-        }
-
-        return long.TryParse(line.AsSpan(idx, end - idx), out value);
     }
 
     private static string QuoteArg(string arg)
