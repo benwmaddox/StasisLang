@@ -111,8 +111,8 @@ Local `let` declarations may omit explicit type annotations when type can be inf
 Examples:
 
 ```stasis
-let count = 0;      // inferred numeric type (typically i32 unless context requires otherwise)
-let alpha = 0.5;    // inferred numeric type (typically f32 unless context requires otherwise)
+let count = 0;      // inferred as i32
+let alpha = 0.5;    // inferred as f32
 let hp: u8 = 0;     // explicit narrow type remains supported/required when needed
 let enemy = state.enemies[0]; // inferred from indexed expression when unambiguous
 ```
@@ -125,6 +125,9 @@ Rules:
 - Example: `let enemy = state.enemies[0];` infers `Enemy` element view/reference type.
 - A binding inferred from an element expression aliases that element; it is not an implicit copy.
 - If inference has multiple valid candidate types, declaration is rejected with an ambiguity diagnostic and requires explicit annotation.
+- Numeric literal defaults are deterministic:
+- integer literals infer as `i32` by default
+- floating literals infer as `f32` by default
 
 ## 5. Operators and Expressions
 
@@ -136,13 +139,20 @@ Arithmetic and comparison are infix only:
 
 Method-style arithmetic/comparison forms are removed from Rewrite V1 language surface.
 
-### 5.2 Assignment Operators
+### 5.2 Logical Operators
+
+Logical operators are:
+- `&&`
+- `||`
+- `!`
+
+### 5.3 Assignment Operators
 
 Assignment is infix:
 - `=`
 - `+= -= *= /= %=`
 
-### 5.3 Precedence
+### 5.4 Precedence
 
 Infix expressions follow TypeScript-like precedence for:
 - multiplicative
@@ -193,6 +203,7 @@ state.enemies[1] = state.enemies[0]; // explicit struct value copy
 Rules:
 - Assignment is explicit and may perform explicit value copies.
 - `let enemy = state.enemies[0];` binds an element view/reference alias.
+- `enemy = state.enemies[1];` rebinds that alias to a different element reference (pass-through reference reassignment).
 - `state.enemies[1] = state.enemies[0];` copies source struct value into destination struct value.
 - For SoA-lowered struct arrays, struct copy assignment lowers to per-field writes at source and destination indices.
 
@@ -238,13 +249,11 @@ for (let i: u8 = 0; i < maxSlots; i += 1) {
 
 Rules:
 - `init` runs once before the first iteration.
-- `init` may be:
-- a declaration (`let i = 0` or `let i: i32 = 0`)
-- an assignment/expression (`i = 0`)
-- empty
-- `condition` is evaluated before each iteration and must be `bool`.
-- `step` runs after each body execution.
+- `init` may be a declaration (`let i = 0` or `let i: i32 = 0`) or an assignment/expression (`i = 0`).
+- `condition` is required, evaluated before each iteration, and must be `bool`.
+- `step` is required and runs after each body execution.
 - A variable declared in `init` is scoped to the loop (condition, step, and body).
+- Omitting any of `init`, `condition`, or `step` is a compile-time error.
 - `for` lowering is explicit control flow equivalent to:
 - run `init`
 - branch on `condition`
@@ -262,10 +271,19 @@ foreach (enemy in enemies) {
 }
 ```
 
+Primitive example:
+
+```stasis
+foreach (value in scores) {
+    value += 1;
+}
+```
+
 Rules:
 - Iterates left-to-right from index `0` to `N - 1` for fixed-size arrays `Type[N]`.
 - `enemy` is an element view for the current index (not a detached copy).
 - Writes through the element view mutate the underlying storage.
+- Primitive element variables in `foreach` are also writable views; writes are write-through to backing storage.
 
 #### 6.5.3 `foreach` loop (index + value form)
 
@@ -330,6 +348,8 @@ function name(param: Type): ReturnType {
     // ...
 }
 ```
+
+For struct/element arguments, Rewrite V1 uses reference/view passing semantics (pointer-like behavior), not implicit by-value copies.
 
 ### 7.2 Receiver-Scoped Resolution
 
