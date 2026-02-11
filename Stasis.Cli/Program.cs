@@ -596,7 +596,15 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var entryName = $"{moduleName}__{entryBase}";
                     if (useCraneliftRunner)
                     {
-                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
+                        return RunCachedRunnerDll(
+                            cachedOut,
+                            entryName,
+                            enableGraphics,
+                            graphicsLibPath,
+                            dataBindingPlan,
+                            entryAssetRoot,
+                            tickHostFps: hasTick ? tickHostFps : null,
+                            processTimeoutMs: mode == "test" ? GetTestExecutionTimeoutMs() : 0);
                     }
                     return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath, entryAssetRoot);
                 }
@@ -627,7 +635,15 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var runSw = Stopwatch.StartNew();
                     var entryBase = mode == "test" ? "run_tests" : "main";
                     var entryName = $"{moduleName}__{entryBase}";
-                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
+                    var exit = RunCachedRunnerDll(
+                        cachedOut,
+                        entryName,
+                        enableGraphics,
+                        graphicsLibPath,
+                        dataBindingPlan,
+                        entryAssetRoot,
+                        tickHostFps: hasTick ? tickHostFps : null,
+                        processTimeoutMs: mode == "test" ? GetTestExecutionTimeoutMs() : 0);
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -824,6 +840,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 
     var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.exe");
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
@@ -857,7 +874,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
                     }
                 }
             }
-        }, assetRoot: entryAssetRoot);
+        }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     }
     finally
     {
@@ -885,6 +902,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 
     var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
@@ -906,7 +924,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         }
 
         var entry = entryName;
-        if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null)
+        if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null && processTimeoutMs <= 0)
         {
             var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
             return runner.Run(dllPath, entry, out runMs);
@@ -939,7 +957,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         {
             runnerArgs += $" --fps {tickHostFps.Value}";
         }
-        var runExit = RunProcess(runnerPath, runnerArgs, assetRoot: entryAssetRoot);
+        var runExit = RunProcess(runnerPath, runnerArgs, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         runMs = runStopwatch.ElapsedMilliseconds;
         return runExit;
     }
@@ -1371,6 +1389,7 @@ static string? FindRepoRoot()
 
 static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, string? cachedExecutablePath = null, bool keepExecutable = false)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     var cachedExecutableUsed = false;
     if (!string.IsNullOrWhiteSpace(cachedExecutablePath))
     {
@@ -1412,7 +1431,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                     }
                 }
             }
-        }, assetRoot: entryAssetRoot);
+        }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     }
 
     // lli doesn't support external libraries easily, so use clang when graphics is enabled (or sys runtime is referenced).
@@ -1461,7 +1480,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                         }
                     }
                 }
-            }, assetRoot: entryAssetRoot);
+            }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         }
         finally
         {
@@ -1676,10 +1695,11 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
 
 static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     var interpreterArguments = mode == "test"
         ? $"-entry-function=run_tests \"{llvmIrPath}\""
         : $"\"{llvmIrPath}\"";
-    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, assetRoot: entryAssetRoot);
+    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     if (interpreterExitCode == 0)
     {
         return 0;
@@ -1696,6 +1716,7 @@ static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, strin
 
 static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, out int exitCode)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     if (!TryFindTool("clang", out var clangPath))
     {
         exitCode = 1;
@@ -1719,7 +1740,7 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
             return true;
         }
 
-        exitCode = RunProcess(executablePath, string.Empty, assetRoot: entryAssetRoot);
+        exitCode = RunProcess(executablePath, string.Empty, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         return true;
     }
     finally
@@ -2500,7 +2521,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, string? assetRoot = null)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, string? assetRoot = null, int timeoutMs = 0)
 {
     if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
     {
@@ -2524,17 +2545,94 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
     }
 
     using var proc = Process.Start(psi)!;
-    string? stdOut = null;
-    string? stdErr = null;
+    Task<string>? stdOutTask = null;
+    Task<string>? stdErrTask = null;
+    static string? TryReadTaskResult(Task<string>? task, int waitMs)
+    {
+        if (task is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!task.IsCompleted)
+            {
+                if (waitMs <= 0 || !task.Wait(waitMs))
+                {
+                    return null;
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return task.Status == TaskStatus.RanToCompletion
+            ? task.Result
+            : null;
+    }
+
     if (psi.RedirectStandardOutput)
     {
-        stdOut = proc.StandardOutput.ReadToEnd();
+        stdOutTask = proc.StandardOutput.ReadToEndAsync();
     }
     if (psi.RedirectStandardError)
     {
-        stdErr = proc.StandardError.ReadToEnd();
+        stdErrTask = proc.StandardError.ReadToEndAsync();
     }
-    proc.WaitForExit();
+
+    var exited = true;
+    if (timeoutMs > 0)
+    {
+        exited = proc.WaitForExit(timeoutMs);
+    }
+    else
+    {
+        proc.WaitForExit();
+    }
+
+    if (!exited)
+    {
+        try
+        {
+            proc.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        try
+        {
+            proc.WaitForExit(5000);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        // Bound output draining to avoid hanging if descendants keep inherited stdio handles open.
+        var timedOutStdOut = TryReadTaskResult(stdOutTask, waitMs: 250);
+        var timedOutStdErr = TryReadTaskResult(stdErrTask, waitMs: 250);
+
+        if (!string.IsNullOrWhiteSpace(timedOutStdOut))
+        {
+            Console.Write(timedOutStdOut);
+        }
+        if (!string.IsNullOrWhiteSpace(timedOutStdErr))
+        {
+            Console.Error.Write(timedOutStdErr);
+        }
+
+        Console.Error.WriteLine($"error: process timed out after {timeoutMs}ms: {fileName} {arguments}");
+        return 124;
+    }
+
+    var stdOut = TryReadTaskResult(stdOutTask, waitMs: 2000);
+    var stdErr = TryReadTaskResult(stdErrTask, waitMs: 2000);
+
     if (proc.ExitCode != 0)
     {
         if (!string.IsNullOrWhiteSpace(stdOut))
@@ -2902,6 +3000,56 @@ static int GetHotSwapDelayMs()
     return Math.Max(0, ms);
 }
 
+static int GetTestExecutionTimeoutMs()
+{
+    const int defaultMs = 120000;
+    var env = Environment.GetEnvironmentVariable("STASIS_TEST_TIMEOUT_MS");
+    if (string.IsNullOrWhiteSpace(env))
+    {
+        return defaultMs;
+    }
+
+    if (!int.TryParse(env, out var timeoutMs))
+    {
+        Console.Error.WriteLine($"warning: invalid STASIS_TEST_TIMEOUT_MS='{env}'. Using default {defaultMs}ms.");
+        return defaultMs;
+    }
+
+    if (timeoutMs < 0)
+    {
+        Console.Error.WriteLine($"warning: STASIS_TEST_TIMEOUT_MS must be >= 0, got {timeoutMs}. Using default {defaultMs}ms.");
+        return defaultMs;
+    }
+
+    return timeoutMs;
+}
+
+static int GetInProcessRetireWindowFrames()
+{
+    const int defaultFrames = 2;
+    var env = Environment.GetEnvironmentVariable("STASIS_INPROC_RETIRE_WINDOW_FRAMES");
+    if (string.IsNullOrWhiteSpace(env))
+    {
+        return defaultFrames;
+    }
+
+    if (!int.TryParse(env, out var frames))
+    {
+        Console.Error.WriteLine(
+            $"warning: invalid STASIS_INPROC_RETIRE_WINDOW_FRAMES='{env}'. Using default {defaultFrames}.");
+        return defaultFrames;
+    }
+
+    if (frames < 0)
+    {
+        Console.Error.WriteLine(
+            $"warning: STASIS_INPROC_RETIRE_WINDOW_FRAMES must be >= 0, got {frames}. Using default {defaultFrames}.");
+        return defaultFrames;
+    }
+
+    return frames;
+}
+
 static string? FindDataBindingJson(string sourcePath, string repoRoot)
 {
     static string? FirstJsonInDir(string dir)
@@ -3132,6 +3280,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
     var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
     var pid = Environment.ProcessId;
+    var retireWindowFrames = GetInProcessRetireWindowFrames();
     var hotClifPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc.clif");
     var hotObjPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc{GetObjectFileExtension()}");
     Directory.CreateDirectory(hotDir);
@@ -3157,6 +3306,31 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         message.Replace('\r', ' ')
             .Replace('\n', ' ')
             .Replace('"', '\'');
+
+    static string FormatGenerationTelemetry(InProcessGenerationTelemetry telemetry) =>
+        $"gen={telemetry.ActiveGeneration} retire_pending={telemetry.PendingRetiredGenerations} retire_pending_bytes={telemetry.PendingRetiredBytes} retired={telemetry.TotalRetiredGenerations} retired_bytes={telemetry.TotalRetiredBytes} retire_window={telemetry.RetireWindowFrames} tick={telemetry.TickCount}";
+
+    static string AppendDetails(string details, string more)
+    {
+        if (string.IsNullOrWhiteSpace(more))
+        {
+            return details;
+        }
+
+        return string.IsNullOrWhiteSpace(details)
+            ? more
+            : $"{details} {more}";
+    }
+
+    string CurrentGenerationDetails()
+    {
+        if (host is null)
+        {
+            return string.Empty;
+        }
+
+        return FormatGenerationTelemetry(host.GetGenerationTelemetry());
+    }
 
     void PrintSwapState(string state, string details)
     {
@@ -3359,7 +3533,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             if (startHost)
             {
                 var hostSw = Stopwatch.StartNew();
-                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps);
+                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps, retireWindowFrames);
                 hostSw.Stop();
                 hostMs = hostSw.ElapsedMilliseconds;
                 if (host is null)
@@ -3378,7 +3552,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
 
                 var swapId = nextSwapId++;
                 compiledCount++;
-                PrintSwapState("compiled", $"id={swapId}");
+                PrintSwapState("compiled", AppendDetails($"id={swapId}", CurrentGenerationDetails()));
 
                 var stateMap = ParseStateMapEntries(plan.MapPath);
                 var swapSw = Stopwatch.StartNew();
@@ -3388,16 +3562,16 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                     swapSw.Stop();
                     hostMs = swapSw.ElapsedMilliseconds;
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={swapId} reason=\"{SanitizeSwapMessage(queued.Message)}\"");
+                    PrintSwapState("rejected", AppendDetails($"id={swapId} reason=\"{SanitizeSwapMessage(queued.Message)}\"", CurrentGenerationDetails()));
                     return 1;
                 }
 
                 queuedCount++;
-                PrintSwapState("queued", $"id={queued.SwapId}");
+                PrintSwapState("queued", AppendDetails($"id={queued.SwapId}", CurrentGenerationDetails()));
                 if (queued.SupersededSwapId != 0)
                 {
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={queued.SupersededSwapId} reason=\"superseded\"");
+                    PrintSwapState("rejected", AppendDetails($"id={queued.SupersededSwapId} reason=\"superseded\"", CurrentGenerationDetails()));
                 }
 
                 var swap = queued.CompletionTask.GetAwaiter().GetResult();
@@ -3407,13 +3581,13 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                 if (!swap.Success)
                 {
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={queued.SwapId} reason=\"{SanitizeSwapMessage(swap.Message)}\"");
+                    PrintSwapState("rejected", AppendDetails($"id={queued.SwapId} reason=\"{SanitizeSwapMessage(swap.Message)}\"", CurrentGenerationDetails()));
                     Console.Error.WriteLine($"warning: in-process swap rejected: {swap.Message}");
                     return 1;
                 }
 
                 appliedCount++;
-                PrintSwapState("applied", $"id={queued.SwapId}");
+                PrintSwapState("applied", AppendDetails($"id={queued.SwapId}", CurrentGenerationDetails()));
             }
 
             lastAppliedFunctionProfile = functionProfile;
@@ -3512,7 +3686,9 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     {
         if (host is not null && !host.IsRunning)
         {
-            return host.ExitCode;
+            var exitCode = host.ExitCode;
+            host.Dispose();
+            return exitCode;
         }
 
         try
@@ -5929,6 +6105,7 @@ static string? TryGetCachedRunnerDllPath(CompileResult result)
 
 static int RunCachedExecutable(string mode, string executablePath, bool enableGraphics, string? graphicsLibPath, string entryAssetRoot)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     if (enableGraphics)
     {
         var exeDir = Path.GetDirectoryName(executablePath);
@@ -5951,10 +6128,10 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
                 }
             }
         }
-    }, assetRoot: entryAssetRoot);
+    }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, string entryAssetRoot, int? tickHostFps = null)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, string entryAssetRoot, int? tickHostFps = null, int processTimeoutMs = 0)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -5971,7 +6148,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
         }
     }
 
-    if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer())
+    if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer() && processTimeoutMs <= 0)
     {
         var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
         return runner.Run(dllPath, entryName, out _);
@@ -5987,7 +6164,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
     {
         args += $" --fps {tickHostFps.Value}";
     }
-    return RunProcess(runnerPath, args, assetRoot: entryAssetRoot);
+    return RunProcess(runnerPath, args, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
 }
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries)
@@ -6233,6 +6410,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, string moduleName, bool useCraneliftRunner)
 {
     var testStopwatch = Stopwatch.StartNew();
+    var testProcessTimeoutMs = GetTestExecutionTimeoutMs();
     var entryAssetRoot = GetEntryAssetRoot(result.FilePath);
 
     if (result.Diagnostics.Count > 0)
@@ -6287,12 +6465,12 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot, processTimeoutMs: testProcessTimeoutMs);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot, processTimeoutMs: testProcessTimeoutMs);
                 }
             }
             else
@@ -6814,6 +6992,14 @@ sealed record StateMapEntry(string Name, int Size);
 
 readonly record struct InProcessSwapResult(bool Success, string Message, double LoadMs);
 readonly record struct InProcessSwapQueueResult(bool Accepted, ulong SwapId, ulong SupersededSwapId, string Message, Task<InProcessSwapResult>? CompletionTask);
+readonly record struct InProcessGenerationTelemetry(
+    ulong ActiveGeneration,
+    int PendingRetiredGenerations,
+    long PendingRetiredBytes,
+    long TotalRetiredGenerations,
+    long TotalRetiredBytes,
+    int RetireWindowFrames,
+    long TickCount);
 
 enum SwapHookKind
 {
@@ -6839,9 +7025,16 @@ sealed class InProcessTickHost : IDisposable
     private readonly object gate = new();
     private readonly CancellationTokenSource cts = new();
     private readonly int fps;
+    private readonly int retireWindowFrames;
     private Thread? tickThread;
     private LoadedModule? current;
     private PendingSwapPlan? pendingSwap;
+    private readonly Queue<RetiredGeneration> retiredGenerations = new();
+    private ulong currentGeneration;
+    private long tickCount;
+    private long pendingRetiredBytes;
+    private long totalRetiredGenerations;
+    private long totalRetiredBytes;
     private volatile bool running;
     private volatile int exitCode;
     private bool disposed;
@@ -6849,10 +7042,12 @@ sealed class InProcessTickHost : IDisposable
     public bool IsRunning => running;
     public int ExitCode => exitCode;
 
-    private InProcessTickHost(LoadedModule initial, int fps)
+    private InProcessTickHost(LoadedModule initial, int fps, int retireWindowFrames)
     {
         current = initial;
         this.fps = fps;
+        this.retireWindowFrames = Math.Max(0, retireWindowFrames);
+        currentGeneration = initial.Generation;
         running = true;
         tickThread = new Thread(TickLoop)
         {
@@ -6862,16 +7057,32 @@ sealed class InProcessTickHost : IDisposable
         tickThread.Start();
     }
 
-    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps)
+    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps, int retireWindowFrames)
     {
-        var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, out var error);
+        var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, generation: 1, out var error);
         if (loaded is null)
         {
             Console.Error.WriteLine($"error: failed to load in-process module: {error}");
             return null;
         }
 
-        return new InProcessTickHost(loaded, fps);
+        return new InProcessTickHost(loaded, fps, retireWindowFrames);
+    }
+
+    public InProcessGenerationTelemetry GetGenerationTelemetry()
+    {
+        lock (gate)
+        {
+            var activeGeneration = current?.Generation ?? currentGeneration;
+            return new InProcessGenerationTelemetry(
+                activeGeneration,
+                retiredGenerations.Count,
+                pendingRetiredBytes,
+                totalRetiredGenerations,
+                totalRetiredBytes,
+                retireWindowFrames,
+                tickCount);
+        }
     }
 
     public InProcessSwapQueueResult QueueSwap(ulong swapId, string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
@@ -6963,6 +7174,9 @@ sealed class InProcessTickHost : IDisposable
                 int tickRc;
                 lock (gate)
                 {
+                    tickCount++;
+                    RetireReadyGenerationsLocked();
+
                     if (pendingSwap is not null)
                     {
                         swapPlan = pendingSwap;
@@ -6979,6 +7193,7 @@ sealed class InProcessTickHost : IDisposable
                         return;
                     }
                     tickRc = module.Tick();
+                    RetireReadyGenerationsLocked();
                 }
 
                 if (hasSwapResult && swapPlan is not null)
@@ -7046,6 +7261,19 @@ sealed class InProcessTickHost : IDisposable
             pendingSwap = null;
             current?.Dispose();
             current = null;
+            while (retiredGenerations.Count > 0)
+            {
+                var retired = retiredGenerations.Dequeue();
+                try
+                {
+                    retired.Module.Dispose();
+                }
+                catch
+                {
+                    // Best effort.
+                }
+            }
+            pendingRetiredBytes = 0;
         }
         pending?.Completion.TrySetResult(new InProcessSwapResult(false, "host disposed before swap commit", -1));
         cts.Dispose();
@@ -7059,7 +7287,7 @@ sealed class InProcessTickHost : IDisposable
         }
 
         var loadSw = Stopwatch.StartNew();
-        var incoming = LoadedModule.TryLoad(plan.DllPath, plan.ModuleName, plan.StateMap, plan.HookKind, out var loadError);
+        var incoming = LoadedModule.TryLoad(plan.DllPath, plan.ModuleName, plan.StateMap, plan.HookKind, currentGeneration + 1, out var loadError);
         loadSw.Stop();
         var loadMs = loadSw.Elapsed.TotalMilliseconds;
         if (incoming is null)
@@ -7098,6 +7326,9 @@ sealed class InProcessTickHost : IDisposable
 
             old = current;
             current = incoming;
+            currentGeneration = incoming.Generation;
+            EnqueueRetiredGenerationLocked(old);
+            old = null;
             return new InProcessSwapResult(true, string.Empty, loadMs);
         }
         catch (Exception ex)
@@ -7108,6 +7339,38 @@ sealed class InProcessTickHost : IDisposable
         finally
         {
             old?.Dispose();
+        }
+    }
+
+    private void EnqueueRetiredGenerationLocked(LoadedModule module)
+    {
+        var retireAtTick = tickCount + retireWindowFrames;
+        retiredGenerations.Enqueue(new RetiredGeneration(module, retireAtTick));
+        pendingRetiredBytes += module.CodeBytes;
+    }
+
+    private void RetireReadyGenerationsLocked()
+    {
+        while (retiredGenerations.Count > 0 && retiredGenerations.Peek().RetireAfterTick <= tickCount)
+        {
+            var retired = retiredGenerations.Dequeue();
+            pendingRetiredBytes -= retired.Module.CodeBytes;
+            if (pendingRetiredBytes < 0)
+            {
+                pendingRetiredBytes = 0;
+            }
+
+            totalRetiredGenerations++;
+            totalRetiredBytes += retired.Module.CodeBytes;
+
+            try
+            {
+                retired.Module.Dispose();
+            }
+            catch
+            {
+                // Best effort.
+            }
         }
     }
 
@@ -7188,9 +7451,23 @@ sealed class InProcessTickHost : IDisposable
         }
     }
 
+    private sealed class RetiredGeneration
+    {
+        public LoadedModule Module { get; }
+        public long RetireAfterTick { get; }
+
+        public RetiredGeneration(LoadedModule module, long retireAfterTick)
+        {
+            Module = module;
+            RetireAfterTick = retireAfterTick;
+        }
+    }
+
     private sealed class LoadedModule : IDisposable
     {
         public string ModuleName { get; }
+        public ulong Generation { get; }
+        public long CodeBytes { get; }
         public MainDelegate Main { get; }
         public TickDelegate Tick { get; }
         public IReadOnlyDictionary<string, StateSymbol> StateSymbols => stateSymbols;
@@ -7203,6 +7480,8 @@ sealed class InProcessTickHost : IDisposable
 
         private LoadedModule(
             string moduleName,
+            ulong generation,
+            long codeBytes,
             IntPtr handle,
             MainDelegate main,
             TickDelegate tick,
@@ -7212,6 +7491,8 @@ sealed class InProcessTickHost : IDisposable
             Dictionary<string, StateSymbol> stateSymbols)
         {
             ModuleName = moduleName;
+            Generation = generation;
+            CodeBytes = codeBytes;
             this.handle = handle;
             Main = main;
             Tick = tick;
@@ -7221,12 +7502,22 @@ sealed class InProcessTickHost : IDisposable
             this.stateSymbols = stateSymbols;
         }
 
-        public static LoadedModule? TryLoad(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, out string? error)
+        public static LoadedModule? TryLoad(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, ulong generation, out string? error)
         {
             error = null;
             IntPtr handle = IntPtr.Zero;
             try
             {
+                long codeBytes = 0;
+                try
+                {
+                    codeBytes = new FileInfo(dllPath).Length;
+                }
+                catch
+                {
+                    codeBytes = 0;
+                }
+
                 handle = NativeLibrary.Load(dllPath);
                 var mainPtr = NativeLibrary.GetExport(handle, $"{moduleName}__main");
                 var tickPtr = NativeLibrary.GetExport(handle, $"{moduleName}__tick");
@@ -7255,7 +7546,7 @@ sealed class InProcessTickHost : IDisposable
                     symbols[entry.Name] = new StateSymbol(entry.Name, entry.Size, ptr);
                 }
 
-                return new LoadedModule(moduleName, handle, main, tick, hookI32, hookVoid, hookKind, symbols);
+                return new LoadedModule(moduleName, generation, codeBytes, handle, main, tick, hookI32, hookVoid, hookKind, symbols);
             }
             catch (Exception ex)
             {
