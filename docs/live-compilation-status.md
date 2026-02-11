@@ -51,6 +51,27 @@ This provides explicit developer-controlled state adjustment while preserving sa
 
 This is the first implementation slice toward the in-process architecture target.
 
+### Per-function semantic hashes + gated function-body codegen (#156)
+
+- Added `FunctionSemanticFingerprint` in `Stasis.Compiler`:
+  - computes per-function `fnSigHash` and `fnBodyHash` for reachable functions
+  - tracks layout hash as part of diff classification
+  - classifies edits as no-op, partial body-only change, or conservative rebuild
+- Integrated diffing into both watch flows:
+  - `WatchCraneliftTickJitSwap`
+  - `WatchCraneliftTickInProcessSwap`
+- Watch behavior now:
+  - skips swap when function hashes are unchanged (`HOTSWAP(skip)`)
+  - uses partial rebuild set for body-only changes
+  - forces conservative rebuild on layout/signature/function-set changes
+- Added incremental Cranelift function-body reuse:
+  - unchanged functions reuse cached lowered bodies
+  - changed functions are rebuilt
+  - telemetry now includes `fnBuilt` / `fnReused` counts
+- Added test coverage:
+  - `FunctionSemanticFingerprintTests` for hash/diff behavior
+  - `CraneliftIncrementalCodegenTests` for body reuse parity and counters
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -61,7 +82,6 @@ This is the first implementation slice toward the in-process architecture target
 
 ## Not implemented yet (planned)
 
-- Per-function semantic hashes (`fnSigHash` / `fnBodyHash`) and function-level codegen gating.
 - In-process JIT service replacing external runner process.
 - Explicit two-phase commit object model (`pending patch` + atomic commit step).
 - Generation-based code memory retirement inside host process.
@@ -69,14 +89,8 @@ This is the first implementation slice toward the in-process architecture target
 
 ## Next concrete step
 
-Implement issue #156: per-function semantic hash gating.
-- Add per-function `fnSigHash` + `fnBodyHash` computation in `Stasis.Compiler`.
-- Track prior function hashes for watch mode and classify edits as:
-  - no-op (reuse all functions)
-  - partial (recompile changed functions only)
-  - conservative full recompile (layout/signature-affecting changes)
-- Extend hot-reload telemetry to report reused vs recompiled function counts.
-- Add integration tests for:
-  - whitespace/comment-only edits (no compile enqueue)
-  - single-function body edits (targeted recompile)
-  - signature/layout edits (conservative full recompile).
+Implement issue #157: explicit two-phase swap commit model.
+- Introduce a `PendingSwapPlan` that is produced off-thread.
+- Apply pending swaps only at safe points (between ticks on main loop boundary).
+- Keep strict all-or-nothing swap semantics with clear rejection diagnostics.
+- Extend telemetry with queued/applied/rejected counters and timings.
