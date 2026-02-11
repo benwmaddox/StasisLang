@@ -89,6 +89,23 @@ This is the first implementation slice toward the in-process architecture target
   - old code/data remain active on rejection
 - Runner watch path now tracks pending patches with build IDs and emits transition telemetry for queued/applied/rejected outcomes.
 
+### Generation-based code memory retirement (#158)
+
+- In-process tick host now assigns a monotonic generation ID to each loaded module.
+- On successful swap:
+  - active generation increments
+  - previous module is moved to a retired-generation queue (not freed immediately)
+- Retired generations are disposed in bulk after a bounded safe window (`STASIS_INPROC_RETIRE_WINDOW_FRAMES`, default `2`).
+- Added generation telemetry to in-process swap state output:
+  - `gen=...`
+  - `retire_pending=... retire_pending_bytes=...`
+  - `retired=... retired_bytes=...`
+  - `retire_window=... tick=...`
+- Added integration coverage (`WatchTickInProcessSwap_ReportsGenerationRetirementTelemetry`) to validate:
+  - generation increases monotonically across swaps
+  - pending retired generations remain bounded
+  - retired-generation counters advance over repeated swaps
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -100,13 +117,11 @@ This is the first implementation slice toward the in-process architecture target
 ## Not implemented yet (planned)
 
 - In-process JIT service replacing external runner process.
-- Explicit two-phase commit object model (`pending patch` + atomic commit step).
-- Generation-based code memory retirement inside host process.
 - VS Code buffer-native compilation input path (LSP push, no disk dependency).
 
 ## Next concrete step
 
-Implement issue #158: generation-based code memory retirement.
-- Add explicit code generation/version tracking per successful swap.
-- Keep old generations alive for a bounded safe window.
-- Retire/free old generations in bulk with deterministic policy and diagnostics.
+Implement issue #159: LSP buffer-native input path.
+- Add compile-from-buffer ingestion for unsaved editor content.
+- Keep module identity stable across buffer updates.
+- Surface diagnostics and swap outcomes back to the editor.
