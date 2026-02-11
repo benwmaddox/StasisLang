@@ -229,7 +229,7 @@ public static class SourceImporter
         return resolvedPath;
     }
 
-    private static string GetPlatformTag()
+    public static string GetActivePlatformTag()
     {
         var overrideTag = Environment.GetEnvironmentVariable("STASIS_PLATFORM");
         if (!string.IsNullOrWhiteSpace(overrideTag))
@@ -252,6 +252,8 @@ public static class SourceImporter
 
         return string.Empty;
     }
+
+    private static string GetPlatformTag() => GetActivePlatformTag();
 
     private static bool IsStdlibPath(string fullPath)
     {

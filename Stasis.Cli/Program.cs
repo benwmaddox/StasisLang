@@ -2232,8 +2232,12 @@ static string ResolveImportPathWithPlatformFallback(string baseDir, string impor
         return resolvedPath;
     }
 
-    var platform = GetPlatformMoniker();
-    if (platform is null || Path.GetExtension(resolvedPath).Length == 0)
+    if (Path.GetExtension(resolvedPath).Length == 0)
+    {
+        return resolvedPath;
+    }
+    var platform = SourceImporter.GetActivePlatformTag();
+    if (string.IsNullOrWhiteSpace(platform))
     {
         return resolvedPath;
     }
@@ -2244,26 +2248,6 @@ static string ResolveImportPathWithPlatformFallback(string baseDir, string impor
     return PathExistsWithSourceLoader(platformPath, sourceLoader)
         ? platformPath
         : resolvedPath;
-}
-
-static string? GetPlatformMoniker()
-{
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-    {
-        return "windows";
-    }
-
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-    {
-        return "linux";
-    }
-
-    if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-    {
-        return "macos";
-    }
-
-    return null;
 }
 
 static bool PathExistsWithSourceLoader(string path, Func<string, string?>? sourceLoader)
@@ -3358,8 +3342,11 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         lastChange = DateTime.UtcNow;
         changeSignal.Set();
     }
-    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
-    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
+
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN"), "1", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine("warning: STASIS_BUFFER_OVERLAY_STDIN is ignored in AOT runner watch mode to avoid consuming guest stdin; use JIT/in-process watch for buffer overlay swaps.");
+    }
 
     InProcessTickHost? host = null;
     var swapDllSerial = 0;
@@ -3428,12 +3415,12 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         var fnReused = 0;
 
         var phase = Stopwatch.StartNew();
-        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource, sourceLoader);
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
         readMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (importDiagnostics.Count > 0)
         {
-            PrintDiagnostics(importDiagnostics, importSource, sourcePath, sourceLoader);
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
             return 1;
         }
 
@@ -3442,7 +3429,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         phase.Restart();
         if (HasErrors(parse.Diagnostics))
         {
-            PrintDiagnostics(parse.Diagnostics, source, sourcePath, sourceLoader);
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
             return 1;
         }
 
@@ -3457,11 +3444,11 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
         if (HasErrors(linkDiagnostics))
         {
-            PrintDiagnostics(linkDiagnostics, source, sourcePath, sourceLoader);
+            PrintDiagnostics(linkDiagnostics, source, sourcePath);
             return 1;
         }
 
-        var runtimeImports = GetRuntimeImportFlags(sourcePath, sourceLoader);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
         if (usesGraphics)
         {
@@ -3480,7 +3467,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(sema.Diagnostics, source, sourcePath, sourceLoader);
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
             if (HasErrors(sema.Diagnostics))
             {
                 return 1;
@@ -3544,7 +3531,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         phase.Restart();
         if (result.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(result.Diagnostics, source, sourcePath, sourceLoader);
+            PrintDiagnostics(result.Diagnostics, source, sourcePath);
             if (HasErrors(result.Diagnostics))
             {
                 return 1;

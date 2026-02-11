@@ -112,16 +112,15 @@ This is the first implementation slice toward the in-process architecture target
   - enabled explicitly with `STASIS_BUFFER_OVERLAY_STDIN=1`
   - reads JSON line commands from stdin (`set` / `clear` / `clear_all`)
   - overlays source text by absolute path (supports `file://` URIs)
-- Wired overlay source loading through all watch swap paths:
-  - `WatchCraneliftTickHotSwap`
+- Wired overlay source loading through JIT and in-process watch swap paths:
   - `WatchCraneliftTickJitSwap`
   - `WatchCraneliftTickInProcessSwap`
+- AOT runner watch mode (`WatchCraneliftTickHotSwap`) intentionally ignores overlay stdin to avoid consuming guest program stdin.
 - Import expansion and runtime-import detection now honor overlay sources for imported files.
 - Diagnostic printing in watch mode now resolves line/column from the overlay text for imported files when available.
 - Added coverage:
   - `SourceImporterTests.ExpandImports_UsesSourceLoaderForImportedFiles`
   - `SourceImporterTests.ExpandImports_UsesOverlayPlatformSpecificFile`
-  - `HotSwapIntegrationTests.WatchTickInProcessSwap_AcceptsOverlaySourceOnSwap`
 
 ## Already present before this branch
 
