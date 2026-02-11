@@ -2798,6 +2798,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         return 0;
     }
 
+    /* Optional: start window minimized to keep automated/local test runs unobtrusive. */
+    {
+        const char* start_minimized = SDL_getenv("STASIS_WINDOW_START_MINIMIZED");
+        if (start_minimized && strcmp(start_minimized, "0") != 0) {
+            SDL_MinimizeWindow(g_window);
+        }
+    }
+
     /* Try GL first unless overridden */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {

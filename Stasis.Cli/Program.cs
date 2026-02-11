@@ -348,6 +348,12 @@ if (emitIrOnly && outputPath is not null && (watch || runAllInDirectory))
     Environment.Exit(1);
 }
 
+if (mode == "test" && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("STASIS_WINDOW_START_MINIMIZED")))
+{
+    // Keep test runs non-intrusive on developer machines while preserving an opt-out.
+    Environment.SetEnvironmentVariable("STASIS_WINDOW_START_MINIMIZED", "1");
+}
+
 if (runAllInDirectory && mode == "test")
 {
     var root = Directory.Exists(path) ? path : Path.GetDirectoryName(path)!;
