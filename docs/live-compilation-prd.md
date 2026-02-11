@@ -54,22 +54,22 @@ Single OS Process (Game Engine)
 
 ```text
 Game Process
- ├─ Runtime
- │   ├─ Game loop (tick-based)
- │   ├─ Global Data
- │   ├─ Debug UI
- │   └─ Function Pointer Table
- │
- ├─ Compiler Service
- │   ├─ In-memory file database
- │   ├─ File-level incremental pipeline
- │   ├─ Semantic hashing
- │   └─ Swap decision logic
- │
- └─ JIT Service (Cranelift)
-     ├─ Code generation
-     ├─ Executable memory management
-     └─ Code versioning
+ |- Runtime
+ |  |- Game loop (tick-based)
+ |  |- Global Data
+ |  |- Debug UI
+ |  \- Function Pointer Table
+ |
+ |- Compiler Service
+ |  |- In-memory file database
+ |  |- File-level incremental pipeline
+ |  |- Semantic hashing
+ |  \- Swap decision logic
+ |
+ \- JIT Service (Cranelift)
+    |- Code generation
+    |- Executable memory management
+    \- Code versioning
 ```
 
 Disk I/O is not part of the hot path.
@@ -89,25 +89,25 @@ Code generation is gated per function.
 
 ```text
 Raw Text
- → Lex
- → Parse
- → Index (imports / exports)
- → Semantic Analysis (whole file)
- → Per-function semantic hashing
- → Per-function codegen (gated)
+ -> Lex
+ -> Parse
+ -> Index (imports / exports)
+ -> Semantic Analysis (whole file)
+ -> Per-function semantic hashing
+ -> Per-function codegen (gated)
 ```
 
 ### 4.3 Semantic Hashing
 
 Each function produces:
 
-- `fnSigHash` — signature/ABI relevant
-- `fnBodyHash` — behavior
+- `fnSigHash` - signature/ABI relevant
+- `fnBodyHash` - behavior
 
 Rules:
 
-- If `fnBodyHash` unchanged → reuse machine code
-- If layout-affecting semantic fact changes → full file re-codegen
+- If `fnBodyHash` unchanged -> reuse machine code
+- If layout-affecting semantic fact changes -> full file re-codegen
 - Semantic hash comparison gates backend work only
 
 ### 4.4 Layout Stability Rule
@@ -130,7 +130,7 @@ If violated:
 All runtime calls use:
 
 ```text
-FnId → code_ptr
+FnId -> code_ptr
 ```
 
 Rules:
@@ -163,7 +163,7 @@ The runtime API:
 
 ### 6.1 Two-Phase Commit
 
-Phase 1 — Background Compilation
+Phase 1 - Background Compilation
 
 - File changes ingested
 - Semantics computed
@@ -171,7 +171,7 @@ Phase 1 — Background Compilation
 - Cranelift compiles changed functions
 - Results stored as a pending patch
 
-Phase 2 — Commit (Main Thread, Between Ticks)
+Phase 2 - Commit (Main Thread, Between Ticks)
 
 Occurs strictly between ticks.
 
@@ -199,7 +199,7 @@ Solves:
 ### 7.2 Definition
 
 ```stasis
-fn on_code_swap() {
+function on_code_swap(): void {
     // Optional
 }
 ```
@@ -215,8 +215,8 @@ Properties:
 
 ### 7.3 Enforcement Rules
 
-- Hook error → swap aborted
-- Layout change → swap rejected
+- Hook error -> swap aborted
+- Layout change -> swap rejected
 - Hook runs using old code pointers
 
 ## 8. Failure Handling
@@ -260,7 +260,7 @@ DebugUI.swapFlashTicks = 180; // Example: 3 seconds @ 60 ticks/sec
 During draw:
 
 ```stasis
-fn draw_debug_ui() {
+function draw_debug_ui(): void {
     if DebugUI.swapFlashTicks > 0 {
         let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
         let alpha: f32 = ticks_i32.to_f32();
@@ -297,14 +297,14 @@ The engine defines `TICKS_PER_SECOND`.
 
 ## 11. VS Code Workflow
 
-Phase 1 — File Watcher
+Phase 1 - File Watcher
 
 - VS Code edits files
 - Game watches directory
 - Compiler ingests file changes
 - Diagnostics shown in console
 
-Phase 2 — LSP Integration (Future)
+Phase 2 - LSP Integration (Future)
 
 - Text buffers sent directly
 - Disk removed from hot path
@@ -333,8 +333,8 @@ Rules:
 
 | Scenario               | Target   |
 | ---------------------- | -------- |
-| Single function edit   | 10–25 ms |
-| Multiple function edit | 15–40 ms |
+| Single function edit   | 10-25 ms |
+| Multiple function edit | 15-40 ms |
 | Comment-only change    | <15 ms   |
 | Swap commit            | <1 tick  |
 
@@ -360,7 +360,7 @@ Phase 4 (Optional):
 ## 16. Key Risks & Mitigations
 
 | Risk                   | Mitigation                                        |
-| ---------------------- | ----------------------------------------          |
+| ---------------------- | ------------------------------------------------- |
 | Stale code execution   | Atomic pointer swaps                              |
 | Partial state mutation | Swap hook transactional                           |
 | Developer confusion    | Swap indicator                                    |
@@ -371,7 +371,7 @@ Phase 4 (Optional):
 
 System is successful when:
 
-- Save → new logic runs next tick
+- Save -> new logic runs next tick
 - Game state persists
 - Swap confirmation is visible
 - Errors are safe and clear
