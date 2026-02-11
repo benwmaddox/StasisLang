@@ -11,7 +11,7 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Demonstrate keyboard + pointer input.
 // - Keep state in explicit globals (no hidden allocation).
 // - Keep most tuning data in JSON so learners can edit without recompiling.
-// - Use SVG sprites for the bucket/ball to show asset binding.
+// - Use PNG sprites for the bucket/ball to show asset binding.
 //
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
@@ -197,10 +197,12 @@ function spawn_ball(): void {
     let i: i32 = 0;
     for (i = 0; i < MAX_BALLS; i = i + 1) {
         if (!state.balls[i].active) {
-            state.balls[i].active = true;
-            state.balls[i].x = rand_range_i32(state.config.ball_radius, state.config.screen_width - state.config.ball_radius);
-            state.balls[i].y = -state.config.ball_radius;
-            state.balls[i].vy = state.config.ball_fall_speed;
+            state.balls[i] = {
+                active = true,
+                x = rand_range_i32(state.config.ball_radius, state.config.screen_width - state.config.ball_radius),
+                y = -state.config.ball_radius,
+                vy = state.config.ball_fall_speed,
+            };
             return;
         }
     }
