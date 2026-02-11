@@ -30,3 +30,15 @@ Notes:
    - `dotnet publish Stasis.LanguageServer/Stasis.LanguageServer.csproj -c Release -r win-x64 -o vscode-stasis/server/`
 3. Build the extension:
    - `cd vscode-stasis && npm install && npm run build`
+
+## Unsaved Buffer Push (Watch Mode)
+
+The extension can push unsaved `*.stasis` buffers to a running watch process through a named pipe.
+
+1. Start Stasis watch mode with pipe overlay enabled:
+   - Set `STASIS_BUFFER_OVERLAY_PIPE` to a pipe name/path.
+   - Example (Windows): `set STASIS_BUFFER_OVERLAY_PIPE=stasis-watch-overlay`
+2. Configure VS Code setting:
+   - `stasis.watchOverlayPipe`: `stasis-watch-overlay`
+3. Open/edit a Stasis file:
+   - On open/change/close, the extension sends `set`/`clear` overlay commands.

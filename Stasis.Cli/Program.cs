@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.IO.Pipes;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -3343,10 +3344,8 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         changeSignal.Set();
     }
 
-    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN"), "1", StringComparison.OrdinalIgnoreCase))
-    {
-        Console.Error.WriteLine("warning: STASIS_BUFFER_OVERLAY_STDIN is ignored in AOT runner watch mode to avoid consuming guest stdin; use JIT/in-process watch for buffer overlay swaps.");
-    }
+    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
+    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
 
     InProcessTickHost? host = null;
     var swapDllSerial = 0;
@@ -3392,6 +3391,19 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     {
         Console.WriteLine(
             $"HOTSWAP(state): {state} {details} counts=compiled:{compiledCount} queued:{queuedCount} applied:{appliedCount} rejected:{rejectedCount}");
+
+        EmitWatchEvent(
+            "swap_state",
+            new Dictionary<string, object?>(7, StringComparer.Ordinal)
+            {
+                ["backend"] = "inproc",
+                ["state"] = state,
+                ["details"] = details,
+                ["compiled"] = compiledCount,
+                ["queued"] = queuedCount,
+                ["applied"] = appliedCount,
+                ["rejected"] = rejectedCount
+            });
     }
 
     int BuildAndApply(bool startHost, out string timingLine, out double loadMs)
@@ -3893,8 +3905,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         lastChange = DateTime.UtcNow;
         changeSignal.Set();
     }
-    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
-    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN"), "1", StringComparison.OrdinalIgnoreCase) ||
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_PIPE")))
+    {
+        Console.Error.WriteLine("warning: buffer overlay input is ignored in AOT runner watch mode; use JIT/in-process watch for buffer overlay swaps.");
+    }
+    Func<string, string?>? sourceLoader = null;
 
     string? activeDll = null;
     Process? runner = null;
@@ -4392,6 +4408,19 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var rejected = Interlocked.Read(ref rejectedCount);
         Console.WriteLine(
             $"HOTSWAP(state): {state} {details} counts=compiled:{compiled} queued:{queued} applied:{applied} rejected:{rejected}");
+
+        EmitWatchEvent(
+            "swap_state",
+            new Dictionary<string, object?>(7, StringComparer.Ordinal)
+            {
+                ["backend"] = "jit_runner",
+                ["state"] = state,
+                ["details"] = details,
+                ["compiled"] = compiled,
+                ["queued"] = queued,
+                ["applied"] = applied,
+                ["rejected"] = rejected
+            });
     }
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
@@ -6672,6 +6701,19 @@ static void PrintDiagnostics(
         Console.Error.WriteLine($"{prefix}: {d.Message} ({location})");
         Console.Error.WriteLine(lineText);
         Console.Error.WriteLine(marker);
+
+        EmitWatchEvent(
+            "diagnostic",
+            new Dictionary<string, object?>(8, StringComparer.Ordinal)
+            {
+                ["severity"] = d.Severity == DiagnosticSeverity.Warning ? "warning" : "error",
+                ["message"] = d.Message,
+                ["file"] = diagnosticFilePath,
+                ["line"] = line,
+                ["column"] = column,
+                ["span_start"] = d.Span.Start,
+                ["span_length"] = d.Span.Length
+            });
     }
 }
 
@@ -6697,6 +6739,29 @@ static bool HasErrors(IEnumerable<Diagnostic> diagnostics)
         }
     }
     return false;
+}
+
+static bool IsWatchEventJsonEnabled() =>
+    string.Equals(Environment.GetEnvironmentVariable("STASIS_WATCH_EVENT_JSON"), "1", StringComparison.OrdinalIgnoreCase);
+
+static void EmitWatchEvent(string type, IReadOnlyDictionary<string, object?> fields)
+{
+    if (!IsWatchEventJsonEnabled())
+    {
+        return;
+    }
+
+    var payload = new Dictionary<string, object?>(fields.Count + 2, StringComparer.Ordinal)
+    {
+        ["type"] = type,
+        ["ts_utc"] = DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
+    };
+    foreach (var kv in fields)
+    {
+        payload[kv.Key] = kv.Value;
+    }
+
+    Console.WriteLine($"WATCH_EVENT {JsonSerializer.Serialize(payload)}");
 }
 
 static (int line, int column, string lineText) GetLineInfo(string source, int offset)
@@ -7697,23 +7762,38 @@ sealed class BufferOverlayBridge : IDisposable
     private readonly ConcurrentDictionary<string, string> sourcesByPath =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource cts = new();
-    private readonly Task readerTask;
+    private readonly Task? stdinReaderTask;
+    private readonly Task? pipeReaderTask;
     private readonly Action onOverlayChanged;
+    private readonly bool stdinEnabled;
+    private readonly string? pipeName;
 
-    private BufferOverlayBridge(Action onOverlayChanged)
+    private BufferOverlayBridge(Action onOverlayChanged, bool stdinEnabled, string? pipeName)
     {
         this.onOverlayChanged = onOverlayChanged;
-        readerTask = Task.Run(ReadCommandsLoop);
+        this.stdinEnabled = stdinEnabled;
+        this.pipeName = pipeName;
+        if (stdinEnabled)
+        {
+            stdinReaderTask = Task.Run(ReadStdinCommandsLoop);
+        }
+
+        if (!string.IsNullOrWhiteSpace(pipeName))
+        {
+            pipeReaderTask = Task.Run(ReadPipeCommandsLoop);
+        }
     }
 
     public static BufferOverlayBridge? StartIfEnabled(CancellationToken watchToken, Action onOverlayChanged)
     {
-        if (!IsEnabled())
+        var stdinEnabled = IsStdinEnabled();
+        var pipeName = GetPipeName();
+        if (!stdinEnabled && string.IsNullOrWhiteSpace(pipeName))
         {
             return null;
         }
 
-        var bridge = new BufferOverlayBridge(onOverlayChanged);
+        var bridge = new BufferOverlayBridge(onOverlayChanged, stdinEnabled, pipeName);
         watchToken.Register(bridge.Dispose);
         return bridge;
     }
@@ -7737,7 +7817,8 @@ sealed class BufferOverlayBridge : IDisposable
 
         try
         {
-            readerTask.Wait(250);
+            stdinReaderTask?.Wait(250);
+            pipeReaderTask?.Wait(250);
         }
         catch
         {
@@ -7745,8 +7826,13 @@ sealed class BufferOverlayBridge : IDisposable
         }
     }
 
-    private async Task ReadCommandsLoop()
+    private async Task ReadStdinCommandsLoop()
     {
+        if (!stdinEnabled)
+        {
+            return;
+        }
+
         StreamReader? reader = null;
         try
         {
@@ -7791,6 +7877,88 @@ sealed class BufferOverlayBridge : IDisposable
             catch
             {
                 // ignore
+            }
+        }
+    }
+
+    private async Task ReadPipeCommandsLoop()
+    {
+        if (string.IsNullOrWhiteSpace(pipeName))
+        {
+            return;
+        }
+
+        while (!cts.IsCancellationRequested)
+        {
+            NamedPipeServerStream? pipe = null;
+            StreamReader? reader = null;
+            try
+            {
+                pipe = new NamedPipeServerStream(
+                    pipeName,
+                    PipeDirection.In,
+                    1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous);
+                await pipe.WaitForConnectionAsync(cts.Token);
+                reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+
+                while (!cts.IsCancellationRequested && pipe.IsConnected)
+                {
+                    string? line;
+                    try
+                    {
+                        line = await reader.ReadLineAsync(cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                    catch
+                    {
+                        break;
+                    }
+
+                    if (line is null)
+                    {
+                        break;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    TryApplyCommand(line);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                // Keep listener alive on transient pipe errors.
+            }
+            finally
+            {
+                try
+                {
+                    reader?.Dispose();
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                try
+                {
+                    pipe?.Dispose();
+                }
+                catch
+                {
+                    // ignore
+                }
             }
         }
     }
@@ -7861,14 +8029,21 @@ sealed class BufferOverlayBridge : IDisposable
         return Path.GetFullPath(rawPath);
     }
 
-    private static bool IsEnabled()
+    private static bool IsStdinEnabled()
     {
         var env = Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN");
-        if (string.Equals(env, "1", StringComparison.OrdinalIgnoreCase))
+        return string.Equals(env, "1", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetPipeName()
+    {
+        var value = Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_PIPE");
+        if (string.IsNullOrWhiteSpace(value))
         {
-            return true;
+            return null;
         }
-        return false;
+
+        return value.Trim();
     }
 }
 

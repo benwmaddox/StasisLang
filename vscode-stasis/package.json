@@ -39,7 +39,17 @@
         "scopeName": "source.stasis",
         "path": "./syntaxes/stasis.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Stasis",
+      "properties": {
+        "stasis.watchOverlayPipe": {
+          "type": "string",
+          "default": "",
+          "description": "Optional named pipe/socket path used to push unsaved Stasis buffers to a running watch process (maps to STASIS_BUFFER_OVERLAY_PIPE)."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "npm run bundle",

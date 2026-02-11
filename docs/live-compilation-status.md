@@ -109,8 +109,9 @@ This is the first implementation slice toward the in-process architecture target
 ### Swap-time buffer overlay input for watch mode (#159, incremental)
 
 - Added a built-in source overlay bridge in `Stasis.Cli` watch mode (`BufferOverlayBridge`):
-  - enabled explicitly with `STASIS_BUFFER_OVERLAY_STDIN=1`
-  - reads JSON line commands from stdin (`set` / `clear` / `clear_all`)
+  - enabled by `STASIS_BUFFER_OVERLAY_STDIN=1` and/or `STASIS_BUFFER_OVERLAY_PIPE=<name>`
+  - reads JSON line commands (`set` / `clear` / `clear_all`)
+  - supports stdin and named-pipe ingestion for editor-driven updates
   - overlays source text by absolute path (supports `file://` URIs)
 - Wired overlay source loading through JIT and in-process watch swap paths:
   - `WatchCraneliftTickJitSwap`
@@ -121,6 +122,23 @@ This is the first implementation slice toward the in-process architecture target
 - Added coverage:
   - `SourceImporterTests.ExpandImports_UsesSourceLoaderForImportedFiles`
   - `SourceImporterTests.ExpandImports_UsesOverlayPlatformSpecificFile`
+  - `HotSwapIntegrationTests.WatchTickJitSwap_SwapsFromPipeOverlayWithoutDiskEdit`
+- VS Code extension now supports pushing unsaved buffers to watch mode via configured pipe:
+  - `stasis.watchOverlayPipe` setting writes `set`/`clear` overlay commands on open/change/close.
+- Added workflow guide: `docs/editor-buffer-overlay-workflow.md`.
+
+### Structured watch event channel (incremental #159 support)
+
+- Added optional machine-readable watch events in `Stasis.Cli`:
+  - enable with `STASIS_WATCH_EVENT_JSON=1`
+  - emitted as `WATCH_EVENT {json}` lines on stdout
+- Event types currently emitted:
+  - `swap_state` (in-process and JIT runner watch paths)
+  - `diagnostic` (includes severity/message/file/span metadata)
+- This provides a stable bridge for editor tooling to consume swap outcomes without parsing human-readable log lines.
+- Added coverage:
+  - `CliSnapshotTests.Error_ParseError_EmitsStructuredDiagnosticEvent_WhenEnabled`
+  - `HotSwapIntegrationTests.WatchTickInProcessSwap_SwapsOnEdit_WithoutJitRunnerProcess` (asserts `swap_state` events when enabled)
 
 ## Already present before this branch
 

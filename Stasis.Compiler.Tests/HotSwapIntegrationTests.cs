@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
 using Xunit.Sdk;
 
 namespace Stasis.Compiler.Tests;
@@ -283,6 +286,108 @@ public sealed class HotSwapIntegrationTests
                         // ignore
                     }
                 }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
+    public async Task WatchTickJitSwap_SwapsFromPipeOverlayWithoutDiskEdit()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var pipeName = $"stasis-jit-overlay-{Guid.NewGuid():N}";
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_overlay_swap");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_overlay_watch.stasis");
+        var onDiskSource = BuildInProcessTickSource(5);
+        var overlaySource = BuildInProcessTickSource(11);
+        await File.WriteAllTextAsync(stasisPath, onDiskSource, Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+            psi.EnvironmentVariables["STASIS_BUFFER_OVERLAY_PIPE"] = pipeName;
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            Assert.True(initialSwapCount > 0, $"watch did not report initial HOTSWAP(ms).\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+
+            await SendOverlayPipeCommandAsync(
+                pipeName,
+                new
+                {
+                    kind = "set",
+                    path = stasisPath,
+                    text = overlaySource
+                },
+                timeout: TimeSpan.FromSeconds(30));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
+                timeout: TimeSpan.FromMinutes(5));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(state): compiled") &&
+                      outLines.AnyContains("HOTSWAP(state): queued") &&
+                      outLines.AnyContains("HOTSWAP(state): applied"),
+                timeout: TimeSpan.FromMinutes(2));
+
+            var diskSource = await File.ReadAllTextAsync(stasisPath);
+            Assert.Equal(onDiskSource, diskSource);
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
             }
             catch
             {
@@ -963,6 +1068,7 @@ public sealed class HotSwapIntegrationTests
             psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
             psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
             psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
+            psi.EnvironmentVariables["STASIS_WATCH_EVENT_JSON"] = "1";
             psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
 
             proc = Process.Start(psi);
@@ -994,6 +1100,10 @@ public sealed class HotSwapIntegrationTests
                       outLines.AnyContains("HOTSWAP(state): queued") &&
                       outLines.AnyContains("HOTSWAP(state): applied"),
                 timeout: TimeSpan.FromMinutes(2));
+
+            Assert.True(
+                outLines.AnyContains("WATCH_EVENT {\"type\":\"swap_state\""),
+                $"structured swap_state events were not emitted.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
 
             var jitRunnerCount = Process.GetProcessesByName("stasis-cranelift-jit-runner")
                 .Count(p =>
@@ -1889,6 +1999,24 @@ public sealed class HotSwapIntegrationTests
             return "\"" + arg.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
         }
         return arg;
+    }
+
+    private static async Task SendOverlayPipeCommandAsync(string pipeName, object command, TimeSpan timeout)
+    {
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var client = new NamedPipeClientStream(
+            ".",
+            pipeName,
+            PipeDirection.Out,
+            PipeOptions.Asynchronous);
+
+        await client.ConnectAsync((int)timeout.TotalMilliseconds, timeoutCts.Token);
+        using var writer = new StreamWriter(client, new UTF8Encoding(false), bufferSize: 1024, leaveOpen: true)
+        {
+            AutoFlush = true
+        };
+        var payload = JsonSerializer.Serialize(command);
+        await writer.WriteLineAsync(payload);
     }
 
     private static async Task WaitForAnyLineAsync(Process proc, Func<bool> condition, TimeSpan timeout)

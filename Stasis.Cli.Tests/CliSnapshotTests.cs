@@ -557,6 +557,30 @@ public class CliSnapshotTests
     }
 
     [Fact]
+    public void Error_ParseError_EmitsStructuredDiagnosticEvent_WhenEnabled()
+    {
+        var temp = Path.GetTempFileName();
+        File.WriteAllText(temp, "function broken {");
+
+        try
+        {
+            var env = new Dictionary<string, string?>
+            {
+                ["STASIS_WATCH_EVENT_JSON"] = "1"
+            };
+            var (exitCode, stdout, stderr) = RunCliWithEnv(env, "run", temp, "--backend", "llvm");
+
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("WATCH_EVENT {\"type\":\"diagnostic\"", stdout, StringComparison.Ordinal);
+            Assert.Contains("error", stderr, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(temp);
+        }
+    }
+
+    [Fact]
     public void Import_LineNumbers_UseExpandedSource()
     {
         var tempDir = Directory.CreateTempSubdirectory("stasis_import_line");

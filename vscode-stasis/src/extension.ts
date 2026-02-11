@@ -1,4 +1,5 @@
 import * as path from "path";
+import * as net from "net";
 import * as vscode from "vscode";
 import {
   LanguageClient,
@@ -9,6 +10,84 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+
+function getOverlayPipePath(): string | undefined {
+  const configured = vscode.workspace.getConfiguration("stasis").get<string>("watchOverlayPipe");
+  if (!configured || configured.trim().length === 0) {
+    return undefined;
+  }
+
+  const raw = configured.trim();
+  if (process.platform === "win32") {
+    if (raw.startsWith("\\\\")) {
+      return raw;
+    }
+    return `\\\\.\\pipe\\${raw}`;
+  }
+
+  return raw;
+}
+
+async function sendOverlayPipeCommand(payload: object): Promise<void> {
+  const pipePath = getOverlayPipePath();
+  if (!pipePath) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      resolve();
+    };
+
+    const socket = net.createConnection(pipePath, () => {
+      try {
+        socket.write(`${JSON.stringify(payload)}\n`);
+        socket.end();
+      } catch {
+        // Ignore write errors; this is best-effort for dev watch mode.
+        finish();
+      }
+    });
+
+    socket.on("error", () => finish());
+    socket.on("close", () => finish());
+    socket.on("end", () => finish());
+  });
+}
+
+function queueOverlaySet(document: vscode.TextDocument): void {
+  if (document.languageId !== "stasis") {
+    return;
+  }
+  if (document.uri.scheme !== "file") {
+    return;
+  }
+
+  void sendOverlayPipeCommand({
+    kind: "set",
+    path: document.uri.fsPath,
+    text: document.getText(),
+  });
+}
+
+function queueOverlayClear(document: vscode.TextDocument): void {
+  if (document.languageId !== "stasis") {
+    return;
+  }
+  if (document.uri.scheme !== "file") {
+    return;
+  }
+
+  void sendOverlayPipeCommand({
+    kind: "clear",
+    path: document.uri.fsPath,
+  });
+}
 
 function tryServerCommand(extensionPath: string): { command: string; args: string[] } | undefined {
   const serverDir = path.join(extensionPath, "server");
@@ -87,6 +166,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ],
           reason: event.reason,
         };
+        queueOverlaySet(doc);
         return next(fullEvent);
       },
       provideCompletionItem: async (document, position, context, token, next) => {
@@ -111,6 +191,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   client = new LanguageClient("stasisLanguageServer", "Stasis Language Server", serverOptions, clientOptions);
   void client.setTrace(Trace.Verbose);
   void client.start();
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument((doc) => {
+      queueOverlaySet(doc);
+    })
+  );
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      queueOverlayClear(doc);
+    })
+  );
   context.subscriptions.push({
     dispose: () => {
       void client?.stop();
