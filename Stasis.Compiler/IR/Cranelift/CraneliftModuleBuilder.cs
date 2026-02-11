@@ -1,5 +1,6 @@
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace Stasis.Compiler.IR.Cranelift;
 
@@ -22,7 +23,6 @@ public sealed class CraneliftModuleBuilder : IDisposable
     private readonly Dictionary<string, string> _stringLiterals = new(); // maps literal value -> global name
     private readonly Dictionary<string, string> _cStringLiterals = new(); // maps C string value -> global name
     private readonly CraneliftTypeMapper _typeMapper = new();
-    private int _stringLiteralCounter;
 
     public CraneliftModuleBuilder(string moduleName)
     {
@@ -79,7 +79,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
             return existingName;
         }
 
-        var globalName = $"str_{_stringLiteralCounter++}";
+        var globalName = AllocateStableLiteralName("str", value);
         _stringLiterals[value] = globalName;
 
         var bytes = Encoding.UTF8.GetBytes(value);
@@ -109,7 +109,7 @@ public sealed class CraneliftModuleBuilder : IDisposable
             return existingName;
         }
 
-        var globalName = $"cstr_{_stringLiteralCounter++}";
+        var globalName = AllocateStableLiteralName("cstr", value);
         _cStringLiterals[value] = globalName;
 
         var bytes = Encoding.UTF8.GetBytes(value);
@@ -151,6 +151,20 @@ public sealed class CraneliftModuleBuilder : IDisposable
 
     private static string FormatBytes(IEnumerable<byte> bytes) =>
         string.Join(" ", bytes.Select(b => b.ToString("X2")));
+
+    private string AllocateStableLiteralName(string prefix, string value)
+    {
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        var baseName = $"{prefix}_{Convert.ToHexString(hashBytes.AsSpan(0, 6)).ToLowerInvariant()}";
+        var candidate = baseName;
+        var suffix = 1;
+        while (_globalTypes.ContainsKey(candidate))
+        {
+            candidate = $"{baseName}_{suffix++}";
+        }
+
+        return candidate;
+    }
 
     private static string EscapeString(string s)
     {

@@ -28,7 +28,9 @@ public sealed record CodeGenerationOptions(
     bool EmitTestHarness = true,
     bool HeadlessGraphics = true,
     OptimizationLevel Optimization = OptimizationLevel.None,
-    bool AllowReachabilityFallback = true)
+    bool AllowReachabilityFallback = true,
+    IReadOnlySet<string>? RebuildFunctionKeys = null,
+    IReadOnlyDictionary<string, string>? ReuseFunctionBodiesByCallableKey = null)
 {
     /// <summary>
     /// Default options for debug/development builds.
