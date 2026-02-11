@@ -1,39 +1,86 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `docs/spec.md` holds the Stasis language specification (semantics, memory rules, operators, examples).
-- `docs/compilation.md` captures the LL(1) grammar used by the compiler/parser design.
-- If you add code, prefer `src/` for the compiler/frontend, `tests/` for language fixtures, and `examples/` for minimal Stasis programs kept in sync with the spec.
-- Keep supporting assets (diagrams, datasets) in `docs/assets/` or `examples/` and reference them from the specs.
+- `docs/spec.md` is the canonical language spec for Rewrite V1.
+- `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
+- `docs/rewrite_v1_checklist.md` is the execution plan with S0-S12 feature slices and language ownership.
+- `compiler/incremental_compiler.stasis` is the compiler orchestration script entrypoint (Stasis-owned compile logic).
+- `crates/stasis_compiler` hosts compiler substrate and bindings used by orchestration.
+- `crates/stasis_jit` hosts Cranelift JIT integration, function pointer table, and code generation memory management.
+- `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
+- `apps/stasis` is the single in-process graphical runner app.
+- `src/stdlib/` contains Stasis standard library modules.
+- `samples/brickout_revenge/` is the primary end-to-end sample target.
+- `tests/rust/` contains host-side Rust tests. Add deterministic `.stasis` fixtures under `tests/` when needed.
 
 ## Build, Test, and Development Commands
-- Implementation target: C# with LLVMSharp for lowering to LLVM IR/WASM.
-- Prefer `dotnet` tooling (`dotnet build`, `dotnet test`) and keep a solution file at repo root when code lands.
-- When you add a toolchain, surface canonical commands in a `README` or `Makefile` (e.g., `make fmt`, `make test`, `make build`). Keep commands fast and deterministic.
-- Use `rg` for code/spec searches (faster than `grep`) and favor scriptable tasks over ad-hoc manual steps.
+- Primary toolchain is Rust/Cargo.
+- Use:
+- `cargo build`
+- `cargo test`
+- `cargo run -p stasis -- --entry samples/brickout_revenge/brickout_revenge_v1.stasis`
+- Use `rg` for search (`rg pattern path`, `rg --files`).
+- Keep commands deterministic and scriptable.
+- Bootstrap artifacts under `bootstrap/` are reference/bootstrap tools, not the primary Rewrite V1 implementation path.
 
 ## Coding Style & Naming Conventions
-- Preserve operator-method style for arithmetic/comparison (`.+()`, `.==()`, etc.); infix arithmetic/comparison is allowed with TypeScript-like precedence; assignment uses infix `=` (and compound forms).
-- Keep files ASCII; avoid introducing non-ASCII unless the surrounding file already uses it.
-- Name files and modules with short, lowercase, dash/underscore-separated tokens (`lexing.rs`, `parser.ts`, `memory_layout.md`).
-- Document memory layout and lowering decisions alongside code; add brief comments only where behavior is non-obvious.
+- Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
+- Prefer short, lowercase, snake_case file/module names.
+- Keep comments brief and only for non-obvious behavior.
+- Follow spec syntax and semantics:
+- Arithmetic/comparison are infix only (`+ - * / %`, `< <= > >= == !=`).
+- Assignment is infix (`=`, `+=`, `-=`, `*=`, `/=`, `%=`).
+- Method-style arithmetic/comparison forms are removed.
+- Receiver-form call style is preferred (`enemy.damage(5)`), function-form remains supported (`damage(enemy, 5)`).
+- Conversion helpers:
+- `from_*` are mutating target operations (statement-style side effects).
+- `to_*` are pure conversions (expression-safe).
 
 ## Testing Guidelines
-- Mirror the language’s `test` construct in fixtures; prefer deterministic, isolated cases. Example naming: ``test `enemy takes damage`()``.
-- Place host-side tests under `tests/` with filenames matching the feature under test (`tests/parser_assignment.stasis`, `tests/lowering_offsets.rs`).
-- Target high coverage of parsing, lowering, and static memory rules; include negative tests for invalid operator-method usage.
-- Keep tests fast; if slow paths are unavoidable, mark them and document expected runtime.
-- `stasis test` should discover every `.stasis` file in the working directory, print each file’s “Compiled in …”/`test-time` before test output, and avoid running IO-heavy suites on CI so the runs stay deterministic.
+- Ship work in feature slices from `docs/rewrite_v1_checklist.md` and include tests in the same PR.
+- Prefer deterministic, isolated tests with explicit expected output/state.
+- If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
+- Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
+- For incremental compilation:
+- Validate file-level invalidation correctness.
+- Validate per-function gating behavior.
+- Validate unchanged-function cache reuse.
+- For hot swap:
+- Validate all-or-nothing commit.
+- Validate rejection paths preserve old code/data.
+- Validate `on_code_swap` failure abort behavior.
 
 ## Commit & Pull Request Guidelines
-- Use short, imperative commit subjects; Conventional Commit prefixes (`feat:`, `fix:`, `docs:`) are encouraged for clarity.
-- Reference the spec section you touched when relevant (e.g., “align lowering with docs/spec.md §6.3”).
-- PRs should summarize intent, list user-visible changes, and call out spec updates or new commands; link issues and include reproduction or screenshots when UI/UX is involved.
+- Use short imperative subjects; Conventional Commits are preferred (`feat:`, `fix:`, `docs:`, `test:`).
+- Reference affected spec/PRD/checklist sections when relevant.
+- Keep PRs scoped to one slice group where possible:
+- PR-A: S0-S2
+- PR-B: S3-S5
+- PR-C: S6-S8
+- PR-D: S9-S10
+- PR-E: S11-S12
+- Each PR should include:
+- behavioral summary
+- tests added/updated
+- docs updates
+- explicit removal of obsolete paths introduced during the slice
 
-## Architecture & Design Notes
-- Core principles (per `docs/spec.md`): static global memory only; AoS syntax lowered to SoA storage; deterministic layouts; operator-method arithmetic/comparison (infix allowed) with infix assignment; compilation targets LLVM/WASM.
-- Implementation stack: C# front-end with recursive-descent parser (LL(1) per `docs/compilation.md`), lowering through LLVMSharp bindings to produce LLVM IR and WASM.
-- Keep the managed/native boundary explicit; encapsulate LLVMSharp interop in a thin layer to keep IR building testable.
-- Avoid hidden allocation or implicit copying; make side effects and memory writes explicit in both code and docs.
-- Favor Elm-inspired diagnostics that point to the offending span and offer actionable hints so developers fix parser or semantic issues quickly.
-- Keep string/seed-heavy samples such as `samples/sudoku.stasis` aligned with the built-in I/O helpers (`print_string`, `read_char`, `read_int`) and the deterministic random seed behavior exposed by the runtime so the CLI stays reproducible.
+## Architecture & Design Notes (Rewrite V1)
+- Single OS process runtime with in-process compiler and Cranelift JIT.
+- File-level correctness is primary; semantic analysis runs for full changed file.
+- Per-function semantic hashes gate backend work only.
+- Hot swap is a two-phase model:
+- background compilation to produce pending patch
+- commit between ticks on main thread
+- Dispatch boundary is stable indirection: `FnId -> code_ptr`.
+- Swap safety rules:
+- reject on layout/signature incompatibility
+- reject on `on_code_swap` failure
+- no partial commits
+- preserve deterministic tick-based semantics; avoid `dt`-driven gameplay progression in Stasis logic.
+
+## Language Ownership Rules
+- Rust owns host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
+- `.stasis` owns compiler orchestration policies and language-level compile logic in `compiler/incremental_compiler.stasis`.
+- Use C only when unavoidable for platform-level bindings.
+
