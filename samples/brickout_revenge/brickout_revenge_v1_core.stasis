@@ -151,3 +151,6 @@ function brickout_ascii_write_scraps_power_line(
     brickout_ascii_append_i32(tmp_ascii, power_cap);
     utf8_from_ascii(out, tmp_ascii, out_max);
 }
+
+
+

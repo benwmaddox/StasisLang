@@ -29,7 +29,9 @@ function menu_pick_level(play_x: f32, play_y: f32): i32 {
     let gap: f32 = 14.0;
     let i: i32 = 0;
     for (i = 0; i < BRICKOUT_LEVEL_COUNT; i = i + 1) {
-        let y: f32 = base_y + i32_to_f32(i) * (h + gap);
+        let i_f: f32;
+        i_f.from_i32(i);
+        let y: f32 = base_y + i_f * (h + gap);
         if (point_in_rect(play_x, play_y, base_x, y, w, h)) {
             return i;
         }
@@ -202,7 +204,9 @@ function draw_main_menu(): void {
     let gap: f32 = 14.0;
     let i: i32 = 0;
     for (i = 0; i < BRICKOUT_LEVEL_COUNT; i = i + 1) {
-        let y: f32 = base_y + i32_to_f32(i) * (h + gap);
+        let i_f: f32;
+        i_f.from_i32(i);
+        let y: f32 = base_y + i_f * (h + gap);
         let sx: f32 = play_to_screen_x(base_x);
         let sy: f32 = play_to_screen_y(y);
         let sw: f32 = play_to_screen_len(w);
@@ -223,4 +227,7 @@ function draw_main_menu(): void {
         if (i == 2) { draw_text(state.ui_font, brickout_level_name_2, sx + 12.0, sy + 14.0 * s, 0.95, 0.95, 0.95, 0.95); }
     }
 }
+
+
+
 

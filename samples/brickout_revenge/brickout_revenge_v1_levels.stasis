@@ -101,3 +101,6 @@ function tower_cost_power(t: BrickType): i32 {
     if (t == BrickType.Reflector) { return 2; }
     return 0;
 }
+
+
+
