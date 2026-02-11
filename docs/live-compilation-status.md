@@ -106,6 +106,22 @@ This is the first implementation slice toward the in-process architecture target
   - pending retired generations remain bounded
   - retired-generation counters advance over repeated swaps
 
+### Swap-time buffer overlay input for watch mode (#159, incremental)
+
+- Added a built-in source overlay bridge in `Stasis.Cli` watch mode (`BufferOverlayBridge`):
+  - enabled explicitly with `STASIS_BUFFER_OVERLAY_STDIN=1`
+  - reads JSON line commands from stdin (`set` / `clear` / `clear_all`)
+  - overlays source text by absolute path (supports `file://` URIs)
+- Wired overlay source loading through JIT and in-process watch swap paths:
+  - `WatchCraneliftTickJitSwap`
+  - `WatchCraneliftTickInProcessSwap`
+- AOT runner watch mode (`WatchCraneliftTickHotSwap`) intentionally ignores overlay stdin to avoid consuming guest program stdin.
+- Import expansion and runtime-import detection now honor overlay sources for imported files.
+- Diagnostic printing in watch mode now resolves line/column from the overlay text for imported files when available.
+- Added coverage:
+  - `SourceImporterTests.ExpandImports_UsesSourceLoaderForImportedFiles`
+  - `SourceImporterTests.ExpandImports_UsesOverlayPlatformSpecificFile`
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -117,11 +133,10 @@ This is the first implementation slice toward the in-process architecture target
 ## Not implemented yet (planned)
 
 - In-process JIT service replacing external runner process.
-- VS Code buffer-native compilation input path (LSP push, no disk dependency).
+- Direct VS Code LSP push transport for swap status/diagnostics (currently stdin overlay protocol is available as the ingestion path).
 
 ## Next concrete step
 
-Implement issue #159: LSP buffer-native input path.
-- Add compile-from-buffer ingestion for unsaved editor content.
-- Keep module identity stable across buffer updates.
-- Surface diagnostics and swap outcomes back to the editor.
+Complete issue #159 end-to-end editor integration.
+- Wire the VS Code extension/LSP host to emit stdin overlay commands automatically for unsaved buffers.
+- Add structured swap outcome events back to editor surfaces (status + diagnostics mapping).
