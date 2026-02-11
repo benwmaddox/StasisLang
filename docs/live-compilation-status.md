@@ -156,6 +156,14 @@ This is the first implementation slice toward the in-process architecture target
   - `HotSwapIntegrationTests.WatchTickJitSwap_BrickoutV1_StartsPortraitWindow`
   - verifies Brickout v1 starts with a portrait window (`height > width`) while running through watch + Cranelift JIT runner.
 
+### CI-default graphics suite gating
+
+- Graphics-heavy hot-swap integration tests are now CI-opt-in:
+  - `WatchTickJitSwap_LoadsSvgSprite`
+  - `WatchTickJitSwap_BrickoutV1_StartsPortraitWindow`
+- In CI (`CI=true`), they skip unless `STASIS_RUN_GRAPHICS_HOTSWAP=1` is set.
+- Local runs are unchanged by default.
+
 ### Incremental JIT backend scope locked (v1)
 
 - Locked v1 backend scope to full-module CLIF swap payloads with frontend function-level gating.

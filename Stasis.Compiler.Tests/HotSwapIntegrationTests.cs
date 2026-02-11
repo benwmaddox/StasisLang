@@ -1126,6 +1126,8 @@ public sealed class HotSwapIntegrationTests
     [HotSwapFact]
     public async Task WatchTickJitSwap_LoadsSvgSprite()
     {
+        RequireGraphicsHotSwapSupport();
+
         var repoRoot = FindRepoRoot();
         var samplePath = Path.Combine(repoRoot, "samples", "gfx_cmd_smoke.stasis");
         Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
@@ -1271,6 +1273,8 @@ public sealed class HotSwapIntegrationTests
     [HotSwapFact]
     public async Task WatchTickJitSwap_BrickoutV1_StartsPortraitWindow()
     {
+        RequireGraphicsHotSwapSupport();
+
         var repoRoot = FindRepoRoot();
         var samplePath = Path.Combine(repoRoot, "samples", "brickout_revenge", "brickout_revenge_v1.stasis");
         Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
@@ -2943,6 +2947,20 @@ public sealed class HotSwapIntegrationTests
         }
 
         throw new XunitException($"timeout after {timeout.TotalSeconds:0}s.");
+    }
+
+    private static void RequireGraphicsHotSwapSupport()
+    {
+        if (IsEnvFlagEnabled("STASIS_RUN_GRAPHICS_HOTSWAP"))
+        {
+            return;
+        }
+
+        if (string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            throw SkipException.ForSkip(
+                "graphics hot-swap integration tests are disabled in CI by default; set STASIS_RUN_GRAPHICS_HOTSWAP=1 to enable.");
+        }
     }
 
     private static async Task WaitForProcessExitAsync(Process proc, TimeSpan timeout)

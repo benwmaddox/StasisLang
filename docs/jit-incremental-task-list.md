@@ -48,7 +48,8 @@ This tracks remaining work after the merged incremental hot-swap foundations.
   - `WriteAllTextAtomic` now uses unique per-attempt temp files + retries to avoid watch-loop crashes on locked `.tmp` files.
 - [x] Add explicit stale-process cleanup guidance to docs/test scripts.
   - see `docs/editor-buffer-overlay-workflow.md` troubleshooting section.
-- [ ] Ensure CI excludes IO-heavy/graphics-heavy suites by default while preserving deterministic coverage.
+- [x] Ensure CI excludes IO-heavy/graphics-heavy suites by default while preserving deterministic coverage.
+  - graphics-heavy hot-swap integration tests now skip in CI unless `STASIS_RUN_GRAPHICS_HOTSWAP=1`.
 
 ## Immediate Execution Order
 
