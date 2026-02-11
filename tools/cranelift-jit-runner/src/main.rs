@@ -103,6 +103,46 @@ fn env_u64(name: &str, default: u64) -> u64
     std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default)
 }
 
+fn window_orientation(width: i32, height: i32) -> &'static str
+{
+    if height > width
+    {
+        "portrait"
+    }
+    else if width > height
+    {
+        "landscape"
+    }
+    else
+    {
+        "square"
+    }
+}
+
+fn try_get_window_size(instance: &JitInstance) -> Option<(i32, i32)>
+{
+    let graphics = instance.graphics.as_ref()?;
+    let get_w = graphics.gfx_window_width?;
+    let get_h = graphics.gfx_window_height?;
+    let (w, h) = unsafe { (get_w(), get_h()) };
+    if w > 0 && h > 0
+    {
+        Some((w, h))
+    }
+    else
+    {
+        None
+    }
+}
+
+fn log_window_size(tag: &str, instance: &JitInstance)
+{
+    if let Some((w, h)) = try_get_window_size(instance)
+    {
+        eprintln!("WINDOW {} size={}x{} orientation={}", tag, w, h, window_orientation(w, h));
+    }
+}
+
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub extern "win64" fn stasis_printf3(fmt: i64, a0: i64, _a1: i64) -> i32
@@ -285,6 +325,8 @@ struct GraphicsApi
     set_window_size: Option<unsafe extern "C" fn(i32, i32)>,
     set_fullscreen: Option<unsafe extern "C" fn(i32) -> i32>,
     init_window: Option<unsafe extern "C" fn(i32, i32, *const i8) -> i32>,
+    gfx_window_width: Option<unsafe extern "C" fn() -> i32>,
+    gfx_window_height: Option<unsafe extern "C" fn() -> i32>,
 }
 
 fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
@@ -313,6 +355,8 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
         "stasis_set_window_size",
         "stasis_set_fullscreen",
         "stasis_init_window",
+        "stasis_gfx_window_width",
+        "stasis_gfx_window_height",
         "stasis_gfx_load_sprite",
         "stasis_load_font",
         "stasis_get_time_ms",
@@ -360,6 +404,8 @@ fn try_load_stasis_graphics(jit_builder: &mut JITBuilder) -> Option<GraphicsApi>
         set_window_size: try_get_fn::<unsafe extern "C" fn(i32, i32)>(&lib, "stasis_set_window_size"),
         set_fullscreen: try_get_fn::<unsafe extern "C" fn(i32) -> i32>(&lib, "stasis_set_fullscreen"),
         init_window: try_get_fn::<unsafe extern "C" fn(i32, i32, *const i8) -> i32>(&lib, "stasis_init_window"),
+        gfx_window_width: try_get_fn::<unsafe extern "C" fn() -> i32>(&lib, "stasis_gfx_window_width"),
+        gfx_window_height: try_get_fn::<unsafe extern "C" fn() -> i32>(&lib, "stasis_gfx_window_height"),
         _lib: lib,
     };
 
@@ -743,6 +789,10 @@ fn run_server(fps: u32) -> Result<()>
                 // host window request globals and expect it to be applied immediately.
                 let mut last_req_seq = 0i32;
                 apply_window_requests(&mut new_instance, &mut last_req_seq);
+                if env_flag("STASIS_JIT_LOG_WINDOW_SIZE")
+                {
+                    log_window_size("init", &new_instance);
+                }
 
                 writeln!(stdout, "OK init")?;
                 stdout.flush()?;
@@ -1023,6 +1073,10 @@ fn run_tick_loop(fps: u32, instance: &mut JitInstance, rx: &mpsc::Receiver<Reque
                     let old = std::mem::replace(instance, new_instance);
                     let _ = drop_tx.send(old);
                     swap_counter.fetch_add(1, Ordering::Relaxed);
+                    if env_flag("STASIS_JIT_LOG_WINDOW_SIZE")
+                    {
+                        log_window_size("swap", instance);
+                    }
 
                     writeln!(
                         stdout,

@@ -612,6 +612,243 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickJitSwap_PipeOverlay_LongSoak_100PlusSwaps()
+    {
+        if (!IsEnvFlagEnabled("STASIS_RUN_LONG_HOTSWAP"))
+        {
+            Console.WriteLine("LONG_SOAK disabled (set STASIS_RUN_LONG_HOTSWAP=1 to enable).");
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var swapCycles = Math.Max(100, GetEnvInt("STASIS_LONG_HOTSWAP_CYCLES", 120));
+        var pipeName = $"stasis-jit-overlay-long-soak-{Guid.NewGuid():N}";
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_overlay_long_soak");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_overlay_long_soak.stasis");
+        var onDiskSource = BuildInProcessTickSource(7);
+        await File.WriteAllTextAsync(stasisPath, onDiskSource, Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+            psi.EnvironmentVariables["STASIS_BUFFER_OVERLAY_PIPE"] = pipeName;
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "30000";
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var latencyCount = CountHotSwapLatencyMetrics(outLines);
+            var collectedLatencyMs = new List<double>(swapCycles);
+
+            for (var i = 0; i < swapCycles; i++)
+            {
+                var seed = 1000 + i;
+                await SendOverlayPipeCommandAsync(
+                    pipeName,
+                    new { kind = "set", path = stasisPath, text = BuildInProcessTickSource(seed) },
+                    timeout: TimeSpan.FromSeconds(30));
+
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => CountHotSwapLatencyMetrics(outLines) > latencyCount || errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(2));
+
+                Assert.False(proc.HasExited, $"watch process exited during long soak cycle={i}.");
+                Assert.True(TryGetLatestHotSwapLatencyMetric(outLines, out _, out var latencyMs, out _), $"missing latency metric at cycle={i}.");
+                collectedLatencyMs.Add(latencyMs);
+                latencyCount = CountHotSwapLatencyMetrics(outLines);
+            }
+
+            Assert.True(collectedLatencyMs.Count >= swapCycles, $"expected at least {swapCycles} latency samples, got {collectedLatencyMs.Count}.");
+            var avgLatency = collectedLatencyMs.Average();
+            var p95Latency = Percentile(collectedLatencyMs, 0.95);
+            Console.WriteLine($"LONG_SOAK swaps={collectedLatencyMs.Count} avg_latency_ms={avgLatency:0.###} p95_latency_ms={p95Latency:0.###}");
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
+    public async Task WatchTickJitSwap_PipeOverlay_LatencyHarness_SingleVsMultiFunction()
+    {
+        if (!IsEnvFlagEnabled("STASIS_RUN_HOTSWAP_PERF"))
+        {
+            Console.WriteLine("PERF_HARNESS disabled (set STASIS_RUN_HOTSWAP_PERF=1 to enable).");
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var iterations = Math.Max(4, GetEnvInt("STASIS_HOTSWAP_PERF_ITERATIONS", 8));
+        var pipeName = $"stasis-jit-overlay-perf-{Guid.NewGuid():N}";
+        var tempDir = Directory.CreateTempSubdirectory("stasis_jit_overlay_perf");
+        var stasisPath = Path.Combine(tempDir.FullName, "jit_overlay_perf.stasis");
+        await File.WriteAllTextAsync(stasisPath, BuildPerfSingleEditSource(1), Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe;
+            psi.EnvironmentVariables["STASIS_BUFFER_OVERLAY_PIPE"] = pipeName;
+            psi.EnvironmentVariables["STASIS_JIT_WATCHDOG_MS"] = "30000";
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            async Task<List<double>> RunPhaseAsync(Func<int, string> builder, int seedBase)
+            {
+                var latencies = new List<double>(iterations);
+                var latencyCount = CountHotSwapLatencyMetrics(outLines);
+                for (var i = 0; i < iterations; i++)
+                {
+                    await SendOverlayPipeCommandAsync(
+                        pipeName,
+                        new { kind = "set", path = stasisPath, text = builder(seedBase + i) },
+                        timeout: TimeSpan.FromSeconds(30));
+
+                    await WaitForAnyLineAsync(
+                        proc!,
+                        () => CountHotSwapLatencyMetrics(outLines) > latencyCount || errLines.AnyContains("error:"),
+                        timeout: TimeSpan.FromMinutes(2));
+
+                    Assert.False(proc!.HasExited, $"watch process exited during latency phase edit={i}.");
+                    Assert.True(TryGetLatestHotSwapLatencyMetric(outLines, out _, out var latencyMs, out _), $"missing latency metric for edit={i}.");
+                    latencies.Add(latencyMs);
+                    latencyCount = CountHotSwapLatencyMetrics(outLines);
+                }
+
+                return latencies;
+            }
+
+            var singleLatencies = await RunPhaseAsync(BuildPerfSingleEditSource, 10);
+            var multiLatencies = await RunPhaseAsync(BuildPerfMultiEditSource, 200);
+
+            var singleAvg = singleLatencies.Average();
+            var singleP95 = Percentile(singleLatencies, 0.95);
+            var multiAvg = multiLatencies.Average();
+            var multiP95 = Percentile(multiLatencies, 0.95);
+
+            Console.WriteLine(
+                $"PERF_HARNESS iterations={iterations} single_avg_ms={singleAvg:0.###} single_p95_ms={singleP95:0.###} multi_avg_ms={multiAvg:0.###} multi_p95_ms={multiP95:0.###}");
+
+            var singleBudgetMs = GetEnvDouble("STASIS_PERF_MAX_SINGLE_LATENCY_MS", -1);
+            if (singleBudgetMs > 0)
+            {
+                Assert.True(singleAvg <= singleBudgetMs, $"single-function avg latency {singleAvg:0.###}ms exceeded budget {singleBudgetMs:0.###}ms");
+            }
+
+            var multiBudgetMs = GetEnvDouble("STASIS_PERF_MAX_MULTI_LATENCY_MS", -1);
+            if (multiBudgetMs > 0)
+            {
+                Assert.True(multiAvg <= multiBudgetMs, $"multi-function avg latency {multiAvg:0.###}ms exceeded budget {multiBudgetMs:0.###}ms");
+            }
+
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickJitSwap_SurvivesBuildError_AndSwapsAfterFix()
     {
         var repoRoot = FindRepoRoot();
@@ -1032,6 +1269,143 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickJitSwap_BrickoutV1_StartsPortraitWindow()
+    {
+        var repoRoot = FindRepoRoot();
+        var samplePath = Path.Combine(repoRoot, "samples", "brickout_revenge", "brickout_revenge_v1.stasis");
+        Assert.True(File.Exists(samplePath), $"missing sample: {samplePath}");
+
+        var cliDll = FindCliDll(repoRoot);
+        var jitRunnerExe = FindCraneliftJitRunnerExe(repoRoot);
+        Assert.NotNull(cliDll);
+        Assert.NotNull(jitRunnerExe);
+
+        var moduleName = "brickportrait";
+        var swapDir = Path.Combine(repoRoot, "build", "hotstate");
+        Directory.CreateDirectory(swapDir);
+
+        var runnerErrLog = Path.Combine(swapDir, $"brickout_revenge_v1.{moduleName}.runner.err.log");
+        var startTime = DateTime.UtcNow;
+
+        Process? proc = null;
+        try
+        {
+            TryDelete(runnerErrLog);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", samplePath, "--watch", "--backend", "cranelift", "--graphics", "--module", moduleName, "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER_EXE"] = jitRunnerExe!;
+            psi.EnvironmentVariables["STASIS_SKIP_RENDER_TEST"] = "1";
+            psi.EnvironmentVariables["STASIS_USE_SDL"] = "1";
+            psi.EnvironmentVariables["STASIS_DISABLE_AUDIO"] = "1";
+            psi.EnvironmentVariables["STASIS_WINDOW_START_MINIMIZED"] = "1";
+            psi.EnvironmentVariables["STASIS_JIT_LOG_WINDOW_SIZE"] = "1";
+            if (OperatingSystem.IsLinux())
+            {
+                psi.EnvironmentVariables["SDL_VIDEODRIVER"] = "dummy";
+            }
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            Assert.True(outLines.AnyContains("HOTSWAP(ms):"), $"watch did not report initial HOTSWAP(ms).\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+
+            await WaitForAnyLineAsync(
+                proc,
+                () =>
+                {
+                    if (!File.Exists(runnerErrLog))
+                    {
+                        return false;
+                    }
+                    if (!TryReadTextShared(runnerErrLog, out var errText))
+                    {
+                        return false;
+                    }
+                    return errText.Contains("WINDOW init size=", StringComparison.Ordinal);
+                },
+                timeout: TimeSpan.FromSeconds(60));
+
+            Assert.True(File.Exists(runnerErrLog), $"missing runner err log: {runnerErrLog}");
+            Assert.True(TryReadTextShared(runnerErrLog, out var finalErr), "failed to read runner err log");
+
+            var initLine = finalErr
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault(line => line.Contains("WINDOW init size=", StringComparison.Ordinal));
+
+            Assert.NotNull(initLine);
+            Assert.Contains("orientation=portrait", initLine!, StringComparison.Ordinal);
+
+            var sizeToken = initLine!
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault(token => token.StartsWith("size=", StringComparison.Ordinal));
+            Assert.NotNull(sizeToken);
+            var sizeValue = sizeToken!["size=".Length..];
+            var dims = sizeValue.Split('x');
+            Assert.Equal(2, dims.Length);
+            Assert.True(int.TryParse(dims[0], out var width), $"failed to parse width from: {sizeToken}");
+            Assert.True(int.TryParse(dims[1], out var height), $"failed to parse height from: {sizeToken}");
+            Assert.True(height > width, $"expected portrait window but got {width}x{height}");
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("stasis-cranelift-jit-runner"))
+                {
+                    try
+                    {
+                        if (p.StartTime.ToUniversalTime() >= startTime.AddSeconds(-5))
+                        {
+                            p.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickJitSwap_UsesSwapHook_AndRejectsLayoutChanges()
     {
         var repoRoot = FindRepoRoot();
@@ -1335,6 +1709,135 @@ public sealed class HotSwapIntegrationTests
 
             Assert.Equal(0, jitRunnerCount);
             Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
+    public async Task WatchTickInProcessSwap_AppliesAndReloadsDataBinding()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        Assert.NotNull(cliDll);
+        var clangBinDir = FindClangBinDir(repoRoot);
+        if (string.IsNullOrWhiteSpace(clangBinDir))
+        {
+            throw SkipException.ForSkip("clang not found; skipping in-process data binding test.");
+        }
+
+        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_databind");
+        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_databind.stasis");
+        var dataDir = Path.Combine(tempDir.FullName, "data");
+        Directory.CreateDirectory(dataDir);
+        var dataPath = Path.Combine(dataDir, "config.json");
+
+        File.WriteAllText(stasisPath, """
+            struct WatchState {
+                value: i32;
+                phase: i32;
+            }
+
+            global state: WatchState;
+
+            function main(): i32 {
+                state.value = 0;
+                state.phase = 0;
+                return 0;
+            }
+
+            function tick(): i32 {
+                if (state.value == 5 && state.phase == 0) {
+                    state.phase = 1;
+                }
+
+                if (state.value == 9 && state.phase == 1) {
+                    return 2;
+                }
+                return 0;
+            }
+            """, System.Text.Encoding.ASCII);
+
+        File.WriteAllText(dataPath, "{\"value\":5}\n", System.Text.Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
+            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            try
+            {
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                    timeout: TimeSpan.FromMinutes(5));
+
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => errLines.AnyContains("DATABIND: registered"),
+                    timeout: TimeSpan.FromSeconds(20));
+
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => errLines.AnyContains("DATABIND: reloaded"),
+                    timeout: TimeSpan.FromSeconds(30));
+
+                var initialReloadCount = errLines.CountContains("DATABIND: reloaded");
+                File.WriteAllText(dataPath, "{\"value\":9,\"_\":\"x\"}\n", System.Text.Encoding.ASCII);
+
+                await WaitForProcessExitAsync(proc, TimeSpan.FromSeconds(30));
+                Assert.Equal(2, proc.ExitCode);
+                Assert.True(
+                    errLines.CountContains("DATABIND: reloaded") > initialReloadCount,
+                    $"expected a data-binding reload after config update.\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
+            catch (Exception ex)
+            {
+                throw new XunitException(
+                    $"{ex.Message}\n\nwatch stdout tail:\n{outLines.GetTail()}\n\nwatch stderr tail:\n{errLines.GetTail()}");
+            }
         }
         finally
         {
@@ -2175,6 +2678,144 @@ public sealed class HotSwapIntegrationTests
         }
         """;
 
+    private static string BuildPerfSingleEditSource(int seed) =>
+        $$"""
+        struct PerfState {
+            ticks: i32;
+        }
+
+        global state: PerfState;
+
+        function main(): i32 {
+            state.ticks = 0;
+            return 0;
+        }
+
+        function hot_single(): i32 {
+            return {{seed}} - {{seed}};
+        }
+
+        function cold_identity(v: i32): i32 {
+            return v;
+        }
+
+        function tick(): i32 {
+            state.ticks = state.ticks + 1;
+            let v: i32 = hot_single();
+            return cold_identity(v);
+        }
+        """;
+
+    private static string BuildPerfMultiEditSource(int seed) =>
+        $$"""
+        struct PerfState {
+            ticks: i32;
+        }
+
+        global state: PerfState;
+
+        function main(): i32 {
+            state.ticks = 0;
+            return 0;
+        }
+
+        function hot_a(): i32 { return {{seed}} - {{seed}}; }
+        function hot_b(): i32 { return {{seed + 1}} - {{seed + 1}}; }
+        function hot_c(): i32 { return {{seed + 2}} - {{seed + 2}}; }
+        function hot_d(): i32 { return {{seed + 3}} - {{seed + 3}}; }
+        function hot_e(): i32 { return {{seed + 4}} - {{seed + 4}}; }
+
+        function cold_identity(v: i32): i32 {
+            return v;
+        }
+
+        function tick(): i32 {
+            state.ticks = state.ticks + 1;
+            let v: i32 = hot_a() + hot_b() + hot_c() + hot_d() + hot_e();
+            return cold_identity(v - v);
+        }
+        """;
+
+    private static bool IsEnvFlagEnabled(string name) =>
+        string.Equals(Environment.GetEnvironmentVariable(name), "1", StringComparison.OrdinalIgnoreCase);
+
+    private static int GetEnvInt(string name, int fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return int.TryParse(value, out var parsed) ? parsed : fallback;
+    }
+
+    private static double GetEnvDouble(string name, double fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return double.TryParse(
+            value,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed)
+            ? parsed
+            : fallback;
+    }
+
+    private static int CountHotSwapLatencyMetrics(AsyncLineCollector lines)
+    {
+        var count = 0;
+        foreach (var line in lines.SnapshotLinesContaining("HOTSWAP(ms):"))
+        {
+            if (TryParseDoubleMetric(line, "latency", out var latencyMs) && latencyMs >= 0)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static bool TryGetLatestHotSwapLatencyMetric(AsyncLineCollector lines, out string metricLine, out double latencyMs, out double totalMs)
+    {
+        metricLine = string.Empty;
+        latencyMs = 0;
+        totalMs = 0;
+
+        var metrics = lines.SnapshotLinesContaining("HOTSWAP(ms):");
+        for (var i = metrics.Count - 1; i >= 0; i--)
+        {
+            var line = metrics[i];
+            if (!TryParseDoubleMetric(line, "latency", out var latency) || latency < 0)
+            {
+                continue;
+            }
+
+            metricLine = line;
+            latencyMs = latency;
+            _ = TryParseDoubleMetric(line, "total", out totalMs);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static double Percentile(IReadOnlyList<double> values, double p)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        var sorted = values.OrderBy(v => v).ToArray();
+        var clamped = Math.Max(0.0, Math.Min(1.0, p));
+        var idx = (int)Math.Ceiling(sorted.Length * clamped) - 1;
+        if (idx < 0)
+        {
+            idx = 0;
+        }
+        if (idx >= sorted.Length)
+        {
+            idx = sorted.Length - 1;
+        }
+        return sorted[idx];
+    }
+
     private static bool TryParseLongMetric(string line, string key, out long value)
     {
         value = 0;
@@ -2201,6 +2842,55 @@ public sealed class HotSwapIntegrationTests
         }
 
         return long.TryParse(line.AsSpan(idx, end - idx), out value);
+    }
+
+    private static bool TryParseDoubleMetric(string line, string key, out double value)
+    {
+        value = 0;
+        var needle = key + "=";
+        var idx = line.IndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return false;
+        }
+
+        idx += needle.Length;
+        var end = idx;
+        if (end < line.Length && line[end] == '-')
+        {
+            end++;
+        }
+
+        var sawDigit = false;
+        while (end < line.Length)
+        {
+            var c = line[end];
+            if (char.IsDigit(c))
+            {
+                sawDigit = true;
+                end++;
+                continue;
+            }
+
+            if (c == '.')
+            {
+                end++;
+                continue;
+            }
+
+            break;
+        }
+
+        if (!sawDigit || end <= idx)
+        {
+            return false;
+        }
+
+        return double.TryParse(
+            line.AsSpan(idx, end - idx),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out value);
     }
 
     private static string QuoteArg(string arg)
@@ -2253,6 +2943,22 @@ public sealed class HotSwapIntegrationTests
         }
 
         throw new XunitException($"timeout after {timeout.TotalSeconds:0}s.");
+    }
+
+    private static async Task WaitForProcessExitAsync(Process proc, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (proc.HasExited)
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new XunitException($"timeout after {timeout.TotalSeconds:0}s waiting for process exit.");
     }
 
     private sealed class AsyncLineCollector : IDisposable

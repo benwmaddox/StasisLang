@@ -45,9 +45,14 @@ This provides explicit developer-controlled state adjustment while preserving sa
 - Path uses the existing Cranelift lowering/AOT pipeline, then runs `main`/`tick` from the compiled module in-process (no `stasis-cranelift-jit-runner` process).
 - Supports state-preserving swaps by loading a new module, verifying state-map compatibility, copying persisted state, and atomically switching active tick target under a lock.
 - Includes optional `on_code_swap` invocation (`void` or `i32`) before state handoff.
+- Supports data-binding reload from JSON in this path:
+  - auto-discovers `data/*.json` near the source like the runner path
+  - emits `DATABIND: registered ...` on startup
+  - emits `DATABIND: reloaded ...` when file content changes and bindings are applied
+- Added integration coverage:
+  - `HotSwapIntegrationTests.WatchTickInProcessSwap_AppliesAndReloadsDataBinding`
 - Current constraints:
   - headless programs only (graphics/runtime host APIs are rejected)
-  - no data-binding reload in this path yet
 
 This is the first implementation slice toward the in-process architecture target.
 
@@ -142,6 +147,42 @@ This is the first implementation slice toward the in-process architecture target
   - `CliSnapshotTests.Error_ParseError_EmitsStructuredDiagnosticEvent_WhenEnabled`
   - `HotSwapIntegrationTests.WatchTickInProcessSwap_SwapsOnEdit_WithoutJitRunnerProcess` (asserts `swap_state` events when enabled)
 
+### Brickout portrait-window verification on JIT watch path
+
+- Added optional JIT runner window-size telemetry:
+  - set `STASIS_JIT_LOG_WINDOW_SIZE=1`
+  - runner emits `WINDOW init size=<w>x<h> orientation=<...>` (and after swap apply)
+- Added integration coverage:
+  - `HotSwapIntegrationTests.WatchTickJitSwap_BrickoutV1_StartsPortraitWindow`
+  - verifies Brickout v1 starts with a portrait window (`height > width`) while running through watch + Cranelift JIT runner.
+
+### Incremental JIT backend scope locked (v1)
+
+- Locked v1 backend scope to full-module CLIF swap payloads with frontend function-level gating.
+- Documented in `docs/incremental-jit-v1-scope.md`.
+- Deferred function-patch runner protocol to v2 (explicitly tracked in task list).
+
+### Long-run soak + latency harness coverage
+
+- Added env-gated long soak coverage:
+  - `HotSwapIntegrationTests.WatchTickJitSwap_PipeOverlay_LongSoak_100PlusSwaps`
+  - enabled with `STASIS_RUN_LONG_HOTSWAP=1`
+  - default cycles `120` (override `STASIS_LONG_HOTSWAP_CYCLES`)
+- Added env-gated latency harness coverage:
+  - `HotSwapIntegrationTests.WatchTickJitSwap_PipeOverlay_LatencyHarness_SingleVsMultiFunction`
+  - enabled with `STASIS_RUN_HOTSWAP_PERF=1`
+  - default iterations per phase `8` (override `STASIS_HOTSWAP_PERF_ITERATIONS`)
+  - optional budgets:
+    - `STASIS_PERF_MAX_SINGLE_LATENCY_MS`
+    - `STASIS_PERF_MAX_MULTI_LATENCY_MS`
+
+### Hotstate metadata write hardening
+
+- Hardened `WriteAllTextAtomic` in `Stasis.Cli/Program.cs`:
+  - unique per-attempt temporary files
+  - retry-safe cleanup on sharing/permission errors
+- Prevents watch-loop crashes from locked stale `.tmp` files during hotstate metadata writes.
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -157,6 +198,7 @@ This is the first implementation slice toward the in-process architecture target
 
 ## Next concrete step
 
-Complete issue #159 end-to-end editor integration.
-- Wire the VS Code extension/LSP host to emit stdin overlay commands automatically for unsaved buffers.
-- Add structured swap outcome events back to editor surfaces (status + diagnostics mapping).
+Execute remaining in-process architecture steps.
+- Replace in-process AOT+link load path with direct in-process JIT codegen.
+- Keep generation-retirement semantics as direct-JIT plumbing lands.
+- Keep graphics/headful support scoped separately after parity is stable.

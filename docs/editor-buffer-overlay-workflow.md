@@ -57,3 +57,18 @@ When `STASIS_WATCH_EVENT_JSON=1` is set, watch prints:
 - `WATCH_EVENT {"type":"diagnostic", ...}`
 
 This is intended for editor/tooling consumers to avoid parsing human-formatted logs.
+
+## 5) Troubleshooting (stale process cleanup)
+
+If watch/restart loops become unhealthy, clear stale runner processes before restarting watch.
+
+- Windows (PowerShell):
+  - `Get-Process stasis-cranelift-jit-runner,stasis_runner -ErrorAction SilentlyContinue | Stop-Process -Force`
+- Linux:
+  - `pkill -f stasis-cranelift-jit-runner || true`
+  - `pkill -f stasis_runner || true`
+
+Recommended:
+
+- use a unique module name per concurrent watch session (`--module <name>`) to reduce contention in `build/hotstate`.
+- keep heavy soak/perf tests opt-in via env vars to avoid polluting normal edit loops.

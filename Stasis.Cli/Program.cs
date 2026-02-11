@@ -3201,6 +3201,40 @@ static bool TryGetDataBindingPlan(string sourcePath, LayoutPlan layout, string m
     return true;
 }
 
+static bool TryGetInProcessDataBindingPlan(string sourcePath, LayoutPlan layout, string moduleName, string hotStateDefPath, out DataBindingPlan? plan)
+{
+    plan = null;
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_DISABLE_DATA_BIND"), "1", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    var repoRoot = FindRepoRoot() ?? Directory.GetCurrentDirectory();
+    var dataFile = FindDataBindingJson(sourcePath, repoRoot);
+    if (string.IsNullOrEmpty(dataFile))
+    {
+        return true;
+    }
+
+    dataFile = Path.GetFullPath(dataFile);
+    var state = layout.Globals.FirstOrDefault(g => string.Equals(g.Name, "state", StringComparison.Ordinal));
+    if (state is null)
+    {
+        Console.Error.WriteLine("error: data binding requires a global named 'state'.");
+        return false;
+    }
+
+    var hotDir = Path.Combine(repoRoot, "build", "hotstate");
+    Directory.CreateDirectory(hotDir);
+    var baseName = Path.GetFileNameWithoutExtension(sourcePath);
+    var bindingStructMetaPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.data.struct-meta.json");
+    var bindingFields = BuildDataBindingFieldList(layout, state, excludeSpriteFields: true, maxFields: 256);
+    EmitStructMetadataJson(bindingStructMetaPath, state, bindingFields);
+
+    plan = new DataBindingPlan(dataFile, bindingStructMetaPath, hotStateDefPath);
+    return true;
+}
+
 static IReadOnlyList<FieldLayout> BuildDataBindingFieldList(LayoutPlan layout, GlobalLayout state, bool excludeSpriteFields, int maxFields)
 {
     var stateFields = state.Fields
@@ -3468,12 +3502,6 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             return 1;
         }
 
-        if (FindDataBindingJson(sourcePath, repoRoot) is not null)
-        {
-            Console.Error.WriteLine("error: in-process tick host does not support data binding yet. Disable STASIS_CRANELIFT_INPROC_TICK for this program.");
-            return 1;
-        }
-
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
@@ -3582,6 +3610,11 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             {
                 return 1;
             }
+
+            if (!TryGetInProcessDataBindingPlan(sourcePath, layout, moduleName, plan.DefPath, out var inProcessDataBindingPlan))
+            {
+                return 1;
+            }
             planMs = phase.ElapsedMilliseconds;
             phase.Restart();
 
@@ -3601,7 +3634,14 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             if (startHost)
             {
                 var hostSw = Stopwatch.StartNew();
-                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps, retireWindowFrames);
+                host = InProcessTickHost.Start(
+                    hotDll,
+                    moduleName,
+                    ParseStateMapEntries(plan.MapPath),
+                    hookKind,
+                    fps,
+                    retireWindowFrames,
+                    inProcessDataBindingPlan);
                 hostSw.Stop();
                 hostMs = hostSw.ElapsedMilliseconds;
                 if (host is null)
@@ -5634,18 +5674,15 @@ static void WriteAllTextAtomic(string path, string contents, Encoding encoding, 
         Directory.CreateDirectory(dir);
     }
 
-    var tmp = path + ".tmp";
-    File.WriteAllText(tmp, contents, encoding);
-
-    // Best-effort atomic replace on Windows; retry to handle brief sharing violations (e.g. runner polling swap files).
+    // Best-effort atomic replace on Windows; retry to handle brief sharing violations
+    // (e.g. runner polling swap files). Use unique temp names per attempt to avoid
+    // collisions with stale/locked .tmp files from previous runs.
     for (var i = 0; i < attempts; i++)
     {
+        var tmp = $"{path}.{Environment.ProcessId}.{Thread.CurrentThread.ManagedThreadId}.{i}.tmp";
         try
         {
-            if (!File.Exists(tmp))
-            {
-                File.WriteAllText(tmp, contents, encoding);
-            }
+            File.WriteAllText(tmp, contents, encoding);
             if (OperatingSystem.IsWindows() && File.Exists(path))
             {
                 File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
@@ -5658,22 +5695,41 @@ static void WriteAllTextAtomic(string path, string contents, Encoding encoding, 
         }
         catch (IOException) when (i + 1 < attempts)
         {
+            TryDeleteFile(tmp);
             Thread.Sleep(sleepMs);
         }
         catch (UnauthorizedAccessException) when (i + 1 < attempts)
         {
+            TryDeleteFile(tmp);
             Thread.Sleep(sleepMs);
         }
     }
 
-    // Fall back: last attempt, let exceptions propagate for visibility.
+    // Fall back: final attempt, let exceptions propagate for visibility.
+    var finalTmp = $"{path}.{Environment.ProcessId}.{Thread.CurrentThread.ManagedThreadId}.final.tmp";
+    File.WriteAllText(finalTmp, contents, encoding);
     if (OperatingSystem.IsWindows() && File.Exists(path))
     {
-        File.Replace(tmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+        File.Replace(finalTmp, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
     }
     else
     {
-        File.Move(tmp, path, overwrite: true);
+        File.Move(finalTmp, path, overwrite: true);
+    }
+}
+
+static void TryDeleteFile(string path)
+{
+    try
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+    catch
+    {
+        // Best effort.
     }
 }
 
@@ -7187,6 +7243,7 @@ sealed class InProcessTickHost : IDisposable
     private readonly CancellationTokenSource cts = new();
     private readonly int fps;
     private readonly int retireWindowFrames;
+    private readonly InProcessDataBinding? dataBinding;
     private Thread? tickThread;
     private LoadedModule? current;
     private PendingSwapPlan? pendingSwap;
@@ -7203,11 +7260,12 @@ sealed class InProcessTickHost : IDisposable
     public bool IsRunning => running;
     public int ExitCode => exitCode;
 
-    private InProcessTickHost(LoadedModule initial, int fps, int retireWindowFrames)
+    private InProcessTickHost(LoadedModule initial, int fps, int retireWindowFrames, InProcessDataBinding? dataBinding)
     {
         current = initial;
         this.fps = fps;
         this.retireWindowFrames = Math.Max(0, retireWindowFrames);
+        this.dataBinding = dataBinding;
         currentGeneration = initial.Generation;
         running = true;
         tickThread = new Thread(TickLoop)
@@ -7218,7 +7276,14 @@ sealed class InProcessTickHost : IDisposable
         tickThread.Start();
     }
 
-    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps, int retireWindowFrames)
+    public static InProcessTickHost? Start(
+        string dllPath,
+        string moduleName,
+        IReadOnlyList<StateMapEntry> stateMap,
+        SwapHookKind hookKind,
+        int fps,
+        int retireWindowFrames,
+        DataBindingPlan? dataBindingPlan)
     {
         var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, generation: 1, out var error);
         if (loaded is null)
@@ -7227,7 +7292,27 @@ sealed class InProcessTickHost : IDisposable
             return null;
         }
 
-        return new InProcessTickHost(loaded, fps, retireWindowFrames);
+        InProcessDataBinding? dataBinding = null;
+        if (dataBindingPlan is not null)
+        {
+            if (!InProcessDataBinding.TryCreate(dataBindingPlan, out dataBinding, out var bindError))
+            {
+                Console.Error.WriteLine($"error: failed to initialize in-process data binding: {bindError}");
+                try
+                {
+                    loaded.Dispose();
+                }
+                catch
+                {
+                    // best effort
+                }
+                return null;
+            }
+
+            Console.Error.WriteLine($"DATABIND: registered {dataBindingPlan.JsonPath} ({dataBinding!.FieldCount} fields)");
+        }
+
+        return new InProcessTickHost(loaded, fps, retireWindowFrames, dataBinding);
     }
 
     public InProcessGenerationTelemetry GetGenerationTelemetry()
@@ -7353,6 +7438,22 @@ sealed class InProcessTickHost : IDisposable
                         running = false;
                         return;
                     }
+
+                    if (dataBinding is not null)
+                    {
+                        if (!dataBinding.ApplyIfChanged(module, out var changed, out var bindError))
+                        {
+                            if (!string.IsNullOrWhiteSpace(bindError))
+                            {
+                                Console.Error.WriteLine($"DATABIND error: {bindError}");
+                            }
+                        }
+                        else if (changed)
+                        {
+                            Console.Error.WriteLine($"DATABIND: reloaded {dataBinding.JsonPath}");
+                        }
+                    }
+
                     tickRc = module.Tick();
                     RetireReadyGenerationsLocked();
                 }
@@ -7584,6 +7685,389 @@ sealed class InProcessTickHost : IDisposable
         }
 
         return (missingSave, missingRestore);
+    }
+
+    private sealed class InProcessDataBinding
+    {
+        private readonly string jsonPath;
+        private readonly List<BoundField> fields;
+        private DateTime lastWriteUtc;
+        private long lastLength;
+        private bool initialized;
+
+        private InProcessDataBinding(string jsonPath, List<BoundField> fields)
+        {
+            this.jsonPath = jsonPath;
+            this.fields = fields;
+            lastWriteUtc = DateTime.MinValue;
+            lastLength = -1;
+            initialized = false;
+        }
+
+        public string JsonPath => jsonPath;
+        public int FieldCount => fields.Count;
+
+        public static bool TryCreate(DataBindingPlan plan, out InProcessDataBinding? binding, out string? error)
+        {
+            binding = null;
+            error = null;
+
+            try
+            {
+                var bytes = File.ReadAllBytes(plan.StructMetaPath);
+                if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                {
+                    bytes = bytes[3..];
+                }
+
+                var metadata = JsonSerializer.Deserialize(bytes, StasisCliJson.Default.StructMetadata);
+                if (metadata is null)
+                {
+                    error = $"failed to parse struct metadata: {plan.StructMetaPath}";
+                    return false;
+                }
+
+                if (metadata.Version != 1)
+                {
+                    error = $"unsupported struct metadata version: {metadata.Version}";
+                    return false;
+                }
+
+                var mappedFields = new List<BoundField>(metadata.Fields.Count);
+                foreach (var f in metadata.Fields)
+                {
+                    mappedFields.Add(new BoundField(
+                        f.Name,
+                        f.JsonPath,
+                        f.Type,
+                        f.Size,
+                        f.ArrayCount));
+                }
+
+                binding = new InProcessDataBinding(Path.GetFullPath(plan.JsonPath), mappedFields);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        public bool ApplyIfChanged(LoadedModule module, out bool changed, out string? error)
+        {
+            changed = false;
+            error = null;
+
+            try
+            {
+                if (!File.Exists(jsonPath))
+                {
+                    return true;
+                }
+
+                var info = new FileInfo(jsonPath);
+                if (!initialized && info.Length == 0)
+                {
+                    return true;
+                }
+
+                if (initialized && info.LastWriteTimeUtc == lastWriteUtc && info.Length == lastLength)
+                {
+                    return true;
+                }
+
+                using var fs = new FileStream(jsonPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var doc = JsonDocument.Parse(fs);
+                ApplyDocument(module, doc.RootElement);
+                lastWriteUtc = info.LastWriteTimeUtc;
+                lastLength = info.Length;
+                initialized = true;
+                changed = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private void ApplyDocument(LoadedModule module, JsonElement root)
+        {
+            foreach (var field in fields)
+            {
+                if (!module.StateSymbols.TryGetValue(field.Name, out var stateSymbol))
+                {
+                    continue;
+                }
+
+                if (!TryResolveValue(root, field, out var value, out var aosArray, out var aosLeaf))
+                {
+                    continue;
+                }
+
+                var target = stateSymbol.Pointer;
+                if (field.ArrayCount > 1)
+                {
+                    var elemBytes = GetElementBytes(field);
+                    if (elemBytes <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (value.HasValue && value.Value.ValueKind == JsonValueKind.Array)
+                    {
+                        var i = 0;
+                        foreach (var element in value.Value.EnumerateArray())
+                        {
+                            if (i >= field.ArrayCount)
+                            {
+                                break;
+                            }
+
+                            ApplyScalar(field, IntPtr.Add(target, i * elemBytes), element);
+                            i++;
+                        }
+                        continue;
+                    }
+
+                    if (aosArray.HasValue)
+                    {
+                        var i = 0;
+                        foreach (var element in aosArray.Value.EnumerateArray())
+                        {
+                            if (i >= field.ArrayCount)
+                            {
+                                break;
+                            }
+
+                            if (element.ValueKind == JsonValueKind.Object &&
+                                element.TryGetProperty(aosLeaf!, out var leafValue))
+                            {
+                                ApplyScalar(field, IntPtr.Add(target, i * elemBytes), leafValue);
+                            }
+                            i++;
+                        }
+                        continue;
+                    }
+                }
+
+                if (value.HasValue)
+                {
+                    ApplyScalar(field, target, value.Value);
+                }
+            }
+        }
+
+        private static bool TryResolveValue(
+            JsonElement root,
+            BoundField field,
+            out JsonElement? value,
+            out JsonElement? aosArray,
+            out string? aosLeaf)
+        {
+            value = null;
+            aosArray = null;
+            aosLeaf = null;
+
+            if (TryGetByPath(root, field.JsonPath, out var byPath))
+            {
+                value = byPath;
+                return true;
+            }
+
+            if (!string.Equals(field.JsonPath, field.Name, StringComparison.Ordinal) &&
+                TryGetByPath(root, field.Name, out var byName))
+            {
+                value = byName;
+                return true;
+            }
+
+            if (field.ArrayCount > 1 &&
+                TryGetArrayObjectPath(root, field.JsonPath, out var arr, out var leaf))
+            {
+                aosArray = arr;
+                aosLeaf = leaf;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetByPath(JsonElement root, string path, out JsonElement value)
+        {
+            value = root;
+            foreach (var part in path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(part, out value))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryGetArrayObjectPath(JsonElement root, string path, out JsonElement array, out string leaf)
+        {
+            array = default;
+            leaf = string.Empty;
+            var dot = path.LastIndexOf('.');
+            if (dot <= 0 || dot + 1 >= path.Length)
+            {
+                return false;
+            }
+
+            var basePath = path[..dot];
+            leaf = path[(dot + 1)..];
+            if (!TryGetByPath(root, basePath, out var baseValue))
+            {
+                return false;
+            }
+
+            if (baseValue.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            array = baseValue;
+            return true;
+        }
+
+        private static int GetElementBytes(BoundField field)
+        {
+            if (field.ArrayCount > 1 && field.Size > 0)
+            {
+                var elem = field.Size / field.ArrayCount;
+                if (elem > 0 && elem * field.ArrayCount == field.Size)
+                {
+                    return elem;
+                }
+            }
+
+            return field.Type switch
+            {
+                "bool" => 1,
+                "u8" => 1,
+                "u16" => 2,
+                "u32" => 4,
+                "i32" => 4,
+                "f32" => 4,
+                "f64" => 8,
+                "string" => 1,
+                _ => 0
+            };
+        }
+
+        private static void ApplyScalar(BoundField field, IntPtr destination, JsonElement value)
+        {
+            switch (field.Type)
+            {
+                case "bool":
+                {
+                    var b = value.ValueKind == JsonValueKind.True ||
+                            (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var num) && num != 0);
+                    Marshal.WriteByte(destination, b ? (byte)1 : (byte)0);
+                    return;
+                }
+                case "u8":
+                    if (value.TryGetInt64(out var u8)) Marshal.WriteByte(destination, unchecked((byte)u8));
+                    return;
+                case "u16":
+                    if (value.TryGetInt64(out var u16)) Marshal.WriteInt16(destination, unchecked((short)u16));
+                    return;
+                case "u32":
+                    if (value.TryGetInt64(out var u32)) Marshal.WriteInt32(destination, unchecked((int)u32));
+                    return;
+                case "i32":
+                    if (value.TryGetInt64(out var i32)) Marshal.WriteInt32(destination, unchecked((int)i32));
+                    return;
+                case "f32":
+                    if (value.TryGetDouble(out var f32))
+                    {
+                        Marshal.WriteInt32(destination, BitConverter.SingleToInt32Bits((float)f32));
+                    }
+                    return;
+                case "f64":
+                    if (value.TryGetDouble(out var f64))
+                    {
+                        Marshal.WriteInt64(destination, BitConverter.DoubleToInt64Bits(f64));
+                    }
+                    return;
+                case "string":
+                    if (value.ValueKind == JsonValueKind.String)
+                    {
+                        ApplyString(field, destination, value.GetString() ?? string.Empty);
+                    }
+                    return;
+            }
+        }
+
+        private static void ApplyString(BoundField field, IntPtr destination, string text)
+        {
+            if (field.ArrayCount <= 1 || field.Size <= 0 || field.ArrayCount > field.Size)
+            {
+                return;
+            }
+
+            var headerBytes = field.Size - field.ArrayCount;
+            if (headerBytes != 4 && headerBytes != 8)
+            {
+                return;
+            }
+
+            var payloadCapacity = field.ArrayCount;
+            var payload = IntPtr.Add(destination, headerBytes);
+            var maxCopy = Math.Max(0, payloadCapacity - 1);
+            if (headerBytes == 4)
+            {
+                var bytes = Encoding.UTF8.GetBytes(text);
+                var written = 0;
+                for (var i = 0; i < bytes.Length && written < maxCopy; i++)
+                {
+                    var b = bytes[i];
+                    if (b == 0 || b >= 0x80)
+                    {
+                        break;
+                    }
+
+                    Marshal.WriteByte(payload, written, b);
+                    written++;
+                }
+
+                if (payloadCapacity > 0)
+                {
+                    Marshal.WriteByte(payload, written, 0);
+                }
+
+                Marshal.WriteInt32(destination, written);
+                return;
+            }
+
+            var utf8 = Encoding.UTF8.GetBytes(text);
+            var copyLen = 0;
+            while (copyLen < utf8.Length && copyLen < maxCopy && utf8[copyLen] != 0)
+            {
+                Marshal.WriteByte(payload, copyLen, utf8[copyLen]);
+                copyLen++;
+            }
+
+            if (payloadCapacity > 0)
+            {
+                Marshal.WriteByte(payload, copyLen, 0);
+            }
+
+            Marshal.WriteInt32(destination, copyLen);
+            Marshal.WriteInt32(IntPtr.Add(destination, 4), text.EnumerateRunes().Count());
+        }
+
+        private readonly record struct BoundField(
+            string Name,
+            string JsonPath,
+            string Type,
+            int Size,
+            int ArrayCount);
     }
 
     private sealed class PendingSwapPlan
