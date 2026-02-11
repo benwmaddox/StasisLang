@@ -11,16 +11,20 @@ public sealed record FunctionSemanticHashEntry(
     string CallableKey,
     string EmittedName,
     string SignatureHash,
-    string BodyHash);
+    string BodyHash,
+    bool IsInline);
 
 public sealed record FunctionSemanticProfile(
     ulong LayoutHash,
+    string DeclarationHash,
     IReadOnlyDictionary<string, FunctionSemanticHashEntry> Functions);
 
 public sealed record FunctionSemanticDiff(
     bool AnyChange,
     bool LayoutChanged,
+    bool DeclarationChanged,
     bool SignatureChanged,
+    bool InlineBodyChanged,
     bool FunctionSetChanged,
     bool RequiresConservativeRebuild,
     IReadOnlyList<string> ChangedBodyCallableKeys,
@@ -41,6 +45,7 @@ public static class FunctionSemanticFingerprint
         ArgumentNullException.ThrowIfNull(layout);
 
         var lex = Lexer.Lex(source);
+        var declarationHash = ComputeDeclarationHash(compilationUnit, lex.Tokens, includeTests);
         var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, includeTests, allowReachabilityFallback);
         var reachableDeclarations = compilationUnit.Declarations
             .OfType<FunctionDeclarationSyntax>()
@@ -63,11 +68,12 @@ public static class FunctionSemanticFingerprint
             var signatureEnd = fn.Body.OpenBrace.Span.Start;
             var signatureHash = HashTokenRange(lex.Tokens, signatureStart, signatureEnd);
             var bodyHash = HashTokenRange(lex.Tokens, fn.Body.Span.Start, fn.Body.Span.End);
+            var isInline = fn.Attributes.Any(attr => string.Equals(attr.Text, "inline", StringComparison.Ordinal));
 
-            functions[callableKey] = new FunctionSemanticHashEntry(callableKey, emittedName, signatureHash, bodyHash);
+            functions[callableKey] = new FunctionSemanticHashEntry(callableKey, emittedName, signatureHash, bodyHash, isInline);
         }
 
-        return new FunctionSemanticProfile(SemanticFingerprint.ComputeLayoutHash(layout), functions);
+        return new FunctionSemanticProfile(SemanticFingerprint.ComputeLayoutHash(layout), declarationHash, functions);
     }
 
     public static FunctionSemanticDiff Diff(FunctionSemanticProfile? previous, FunctionSemanticProfile current)
@@ -79,7 +85,9 @@ public static class FunctionSemanticFingerprint
             return new FunctionSemanticDiff(
                 AnyChange: current.Functions.Count > 0,
                 LayoutChanged: false,
+                DeclarationChanged: false,
                 SignatureChanged: false,
+                InlineBodyChanged: false,
                 FunctionSetChanged: false,
                 RequiresConservativeRebuild: true,
                 ChangedBodyCallableKeys: current.Functions.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray(),
@@ -88,7 +96,9 @@ public static class FunctionSemanticFingerprint
         }
 
         var layoutChanged = previous.LayoutHash != current.LayoutHash;
+        var declarationChanged = !string.Equals(previous.DeclarationHash, current.DeclarationHash, StringComparison.Ordinal);
         var signatureChanged = false;
+        var inlineBodyChanged = false;
         var functionSetChanged = false;
         var changedBodyKeys = new List<string>();
 
@@ -114,10 +124,14 @@ public static class FunctionSemanticFingerprint
             if (!string.Equals(prevEntry.BodyHash, currEntry.BodyHash, StringComparison.Ordinal))
             {
                 changedBodyKeys.Add(key);
+                if (prevEntry.IsInline || currEntry.IsInline)
+                {
+                    inlineBodyChanged = true;
+                }
             }
         }
 
-        var requiresConservativeRebuild = layoutChanged || signatureChanged || functionSetChanged;
+        var requiresConservativeRebuild = layoutChanged || declarationChanged || signatureChanged || inlineBodyChanged || functionSetChanged;
         var anyChange = requiresConservativeRebuild || changedBodyKeys.Count > 0;
         var recompiledFunctions = anyChange
             ? (requiresConservativeRebuild ? current.Functions.Count : changedBodyKeys.Count)
@@ -129,7 +143,9 @@ public static class FunctionSemanticFingerprint
         return new FunctionSemanticDiff(
             AnyChange: anyChange,
             LayoutChanged: layoutChanged,
+            DeclarationChanged: declarationChanged,
             SignatureChanged: signatureChanged,
+            InlineBodyChanged: inlineBodyChanged,
             FunctionSetChanged: functionSetChanged,
             RequiresConservativeRebuild: requiresConservativeRebuild,
             ChangedBodyCallableKeys: changedBodyKeys,
@@ -137,7 +153,44 @@ public static class FunctionSemanticFingerprint
             ReusedFunctions: reusedFunctions);
     }
 
+    private static string ComputeDeclarationHash(
+        CompilationUnitSyntax compilationUnit,
+        IReadOnlyList<Token> tokens,
+        bool includeTests)
+    {
+        var ranges = new List<(int Start, int End)>();
+        foreach (var declaration in compilationUnit.Declarations)
+        {
+            switch (declaration)
+            {
+                case FunctionDeclarationSyntax fn when fn.IsExtern || fn.Body is null:
+                    ranges.Add((fn.Span.Start, fn.Span.End));
+                    break;
+                case FunctionDeclarationSyntax fn:
+                    {
+                        var start = (fn.ExportKeyword ?? fn.ExternKeyword ?? fn.FunctionKeyword).Span.Start;
+                        var end = fn.Body!.OpenBrace.Span.Start;
+                        ranges.Add((start, end));
+                        break;
+                    }
+                case TestDeclarationSyntax test when includeTests:
+                    ranges.Add((test.Span.Start, test.Span.End));
+                    break;
+                case TestDeclarationSyntax:
+                    break;
+                default:
+                    ranges.Add((declaration.Span.Start, declaration.Span.End));
+                    break;
+            }
+        }
+
+        return HashTokenRanges(tokens, ranges);
+    }
+
     private static string HashTokenRange(IReadOnlyList<Token> tokens, int startInclusive, int endExclusive)
+        => HashTokenRanges(tokens, new[] { (startInclusive, endExclusive) });
+
+    private static string HashTokenRanges(IReadOnlyList<Token> tokens, IReadOnlyList<(int Start, int End)> ranges)
     {
         using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Span<byte> u32 = stackalloc byte[4];
@@ -150,7 +203,18 @@ public static class FunctionSemanticFingerprint
                 continue;
             }
 
-            if (token.Span.Start < startInclusive || token.Span.End > endExclusive)
+            var inRange = false;
+            for (var r = 0; r < ranges.Count; r++)
+            {
+                var range = ranges[r];
+                if (token.Span.Start >= range.Start && token.Span.End <= range.End)
+                {
+                    inRange = true;
+                    break;
+                }
+            }
+
+            if (!inRange)
             {
                 continue;
             }

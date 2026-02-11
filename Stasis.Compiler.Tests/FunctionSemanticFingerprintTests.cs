@@ -80,7 +80,9 @@ public class FunctionSemanticFingerprintTests
 
         Assert.True(diff.AnyChange);
         Assert.False(diff.LayoutChanged);
+        Assert.False(diff.DeclarationChanged);
         Assert.False(diff.SignatureChanged);
+        Assert.False(diff.InlineBodyChanged);
         Assert.False(diff.FunctionSetChanged);
         Assert.False(diff.RequiresConservativeRebuild);
         Assert.Single(diff.ChangedBodyCallableKeys);
@@ -116,6 +118,7 @@ public class FunctionSemanticFingerprintTests
         var diff = FunctionSemanticFingerprint.Diff(profileA, profileB);
 
         Assert.True(diff.AnyChange);
+        Assert.True(diff.DeclarationChanged);
         Assert.True(diff.SignatureChanged || diff.FunctionSetChanged);
         Assert.True(diff.RequiresConservativeRebuild);
         Assert.Equal(profileB.Functions.Count, diff.RecompiledFunctions);
@@ -155,6 +158,86 @@ public class FunctionSemanticFingerprintTests
 
         Assert.True(diff.AnyChange);
         Assert.True(diff.LayoutChanged);
+        Assert.True(diff.RequiresConservativeRebuild);
+        Assert.Equal(profileB.Functions.Count, diff.RecompiledFunctions);
+        Assert.Equal(0, diff.ReusedFunctions);
+    }
+
+    [Fact]
+    public void Const_initializer_change_forces_conservative_rebuild()
+    {
+        var sourceA = """
+            const bonus: i32 = 1;
+
+            function main(): i32 {
+                return tick();
+            }
+
+            function tick(): i32 {
+                return bonus;
+            }
+            """;
+
+        var sourceB = """
+            const bonus: i32 = 2;
+
+            function main(): i32 {
+                return tick();
+            }
+
+            function tick(): i32 {
+                return bonus;
+            }
+            """;
+
+        var profileA = Compute(sourceA);
+        var profileB = Compute(sourceB);
+        var diff = FunctionSemanticFingerprint.Diff(profileA, profileB);
+
+        Assert.True(diff.AnyChange);
+        Assert.True(diff.DeclarationChanged);
+        Assert.True(diff.RequiresConservativeRebuild);
+        Assert.Equal(profileB.Functions.Count, diff.RecompiledFunctions);
+        Assert.Equal(0, diff.ReusedFunctions);
+    }
+
+    [Fact]
+    public void Inline_callee_body_change_forces_conservative_rebuild()
+    {
+        var sourceA = """
+            function @inline inc(value: i32): i32 {
+                return value + 1;
+            }
+
+            function main(): i32 {
+                return tick();
+            }
+
+            function tick(): i32 {
+                return inc(10);
+            }
+            """;
+
+        var sourceB = """
+            function @inline inc(value: i32): i32 {
+                return value + 2;
+            }
+
+            function main(): i32 {
+                return tick();
+            }
+
+            function tick(): i32 {
+                return inc(10);
+            }
+            """;
+
+        var profileA = Compute(sourceA);
+        var profileB = Compute(sourceB);
+        var diff = FunctionSemanticFingerprint.Diff(profileA, profileB);
+
+        Assert.True(diff.AnyChange);
+        Assert.True(diff.InlineBodyChanged);
         Assert.True(diff.RequiresConservativeRebuild);
         Assert.Equal(profileB.Functions.Count, diff.RecompiledFunctions);
         Assert.Equal(0, diff.ReusedFunctions);
