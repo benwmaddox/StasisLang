@@ -23,20 +23,33 @@ public static class SourceImporter
         diagnostics.Add(new Diagnostic(message, span, filePath));
     }
 
-    public static SourceImportResult ExpandImports(string entryPath, string source, List<Diagnostic> diagnostics)
+    public static SourceImportResult ExpandImports(
+        string entryPath,
+        string source,
+        List<Diagnostic> diagnostics,
+        Func<string, string?>? sourceLoader = null)
     {
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var expanded = ExpandImportsInner(entryPath, source, diagnostics, visited).ExpandedSource;
+        var expanded = ExpandImportsInner(entryPath, source, diagnostics, visited, sourceLoader).ExpandedSource;
         return new SourceImportResult(source, expanded);
     }
 
-    public static SourceImportResultWithMap ExpandImportsWithMap(string entryPath, string source, List<Diagnostic> diagnostics)
+    public static SourceImportResultWithMap ExpandImportsWithMap(
+        string entryPath,
+        string source,
+        List<Diagnostic> diagnostics,
+        Func<string, string?>? sourceLoader = null)
     {
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        return ExpandImportsInner(entryPath, source, diagnostics, visited);
+        return ExpandImportsInner(entryPath, source, diagnostics, visited, sourceLoader);
     }
 
-    private static SourceImportResultWithMap ExpandImportsInner(string currentPath, string source, List<Diagnostic> diagnostics, HashSet<string> visited)
+    private static SourceImportResultWithMap ExpandImportsInner(
+        string currentPath,
+        string source,
+        List<Diagnostic> diagnostics,
+        HashSet<string> visited,
+        Func<string, string?>? sourceLoader)
     {
         if (diagnostics.Count >= DiagnosticPolicy.MaxErrors)
         {
@@ -75,15 +88,20 @@ public static class SourceImporter
                 if (TryParseImportLine(line, out var importPath))
                 {
                     var baseDir = Path.GetDirectoryName(fullPath) ?? string.Empty;
-                    var resolvedPath = ResolveImportPathWithPlatformFallback(baseDir, importPath);
-                    if (!File.Exists(resolvedPath))
+                    var resolvedPath = ResolveImportPathWithPlatformFallback(baseDir, importPath, sourceLoader);
+                    var importedSource = sourceLoader?.Invoke(resolvedPath);
+                    if (importedSource is null && !File.Exists(resolvedPath))
                     {
                         AddDiagnostic(diagnostics, $"Import not found: {importPath}", new SourceSpan(lineStart, lineLength), fullPath);
                     }
                     else
                     {
-                        var importedSource = File.ReadAllText(resolvedPath);
-                        var expanded = ExpandImportsInner(resolvedPath, importedSource, diagnostics, visited);
+                        if (importedSource is null)
+                        {
+                            importedSource = File.ReadAllText(resolvedPath);
+                        }
+
+                        var expanded = ExpandImportsInner(resolvedPath, importedSource, diagnostics, visited, sourceLoader);
 
                         var importExpandedStart = sb.Length;
                         sb.AppendLine(expanded.ExpandedSource);
@@ -168,10 +186,23 @@ public static class SourceImporter
         return new SourceImportResultWithMap(source, expandedText, trimmedSegments);
     }
 
-    private static string ResolveImportPathWithPlatformFallback(string baseDir, string importPath)
+    private static string ResolveImportPathWithPlatformFallback(
+        string baseDir,
+        string importPath,
+        Func<string, string?>? sourceLoader)
     {
+        static bool ExistsWithOverlay(string path, Func<string, string?>? loader)
+        {
+            if (loader is not null && loader(path) is not null)
+            {
+                return true;
+            }
+
+            return File.Exists(path);
+        }
+
         var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
-        if (File.Exists(resolvedPath))
+        if (ExistsWithOverlay(resolvedPath, sourceLoader))
         {
             return resolvedPath;
         }
@@ -190,7 +221,7 @@ public static class SourceImporter
         var dir = Path.GetDirectoryName(resolvedPath) ?? string.Empty;
         var baseName = Path.GetFileNameWithoutExtension(resolvedPath);
         var platformPath = Path.Combine(dir, $"{baseName}.{platform}.stasis");
-        if (File.Exists(platformPath))
+        if (ExistsWithOverlay(platformPath, sourceLoader))
         {
             return platformPath;
         }
