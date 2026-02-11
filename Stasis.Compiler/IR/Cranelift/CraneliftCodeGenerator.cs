@@ -24,6 +24,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 {
     private readonly string _moduleName;
     private string _lastIr = string.Empty;
+    private IReadOnlyDictionary<string, string> _lastFunctionBodiesByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
+    private int _lastFunctionsBuilt;
+    private int _lastFunctionsReused;
     private bool _disposed;
 
     public CraneliftCodeGenerator(string moduleName = "module")
@@ -33,6 +36,9 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
     /// <inheritdoc />
     public string BackendName => "cranelift";
+    public IReadOnlyDictionary<string, string> LastFunctionBodiesByCallableKey => _lastFunctionBodiesByCallableKey;
+    public int LastFunctionsBuilt => _lastFunctionsBuilt;
+    public int LastFunctionsReused => _lastFunctionsReused;
 
     /// <inheritdoc />
     public CodeGenerationResult Generate(
@@ -47,6 +53,10 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
         try
         {
+            _lastFunctionBodiesByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
+            _lastFunctionsBuilt = 0;
+            _lastFunctionsReused = 0;
+
             using var builder = new CraneliftModuleBuilder(_moduleName);
 
             var reachableFunctions = Reachability.CollectReachableFunctions(compilationUnit, options.IncludeTests, options.AllowReachabilityFallback);
@@ -75,7 +85,23 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
             EmitGlobals(compilationUnit, semanticResult.Symbols, layout, builder);
 
             // Emit functions with bodies
-            EmitFunctions(compilationUnit, semanticResult.Symbols, builder, diagnostics, layout, options.IncludeTests, options.EmitTestHarness, reachableFunctions, namesWithCollisions, externFallbackSymbolNames, _moduleName);
+            EmitFunctions(
+                compilationUnit,
+                semanticResult.Symbols,
+                builder,
+                diagnostics,
+                layout,
+                options,
+                reachableFunctions,
+                namesWithCollisions,
+                externFallbackSymbolNames,
+                _moduleName,
+                out var functionBodiesByCallableKey,
+                out var functionsBuilt,
+                out var functionsReused);
+            _lastFunctionBodiesByCallableKey = functionBodiesByCallableKey;
+            _lastFunctionsBuilt = functionsBuilt;
+            _lastFunctionsReused = functionsReused;
 
             // Generate CLIF text
             _lastIr = builder.EmitToString();
@@ -878,13 +904,23 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
         CraneliftModuleBuilder builder,
         List<Diagnostic> diagnostics,
         LayoutPlan layout,
-        bool includeTests,
-        bool emitTestHarness,
+        CodeGenerationOptions options,
         HashSet<string> reachableFunctions,
         IReadOnlySet<string> namesWithCollisions,
         IReadOnlyDictionary<string, string> externFallbackSymbolNames,
-        string moduleName)
+        string moduleName,
+        out IReadOnlyDictionary<string, string> functionBodiesByCallableKey,
+        out int functionsBuilt,
+        out int functionsReused)
     {
+        var includeTests = options.IncludeTests;
+        var emitTestHarness = options.EmitTestHarness;
+        var rebuildFunctionKeys = options.RebuildFunctionKeys;
+        var reuseFunctionBodiesByCallableKey = options.ReuseFunctionBodiesByCallableKey;
+        functionsBuilt = 0;
+        functionsReused = 0;
+        var localFunctionBodiesByCallableKey = new Dictionary<string, string>(StringComparer.Ordinal);
+
         var typeMapper = builder.TypeMapper;
         var structs = compilationUnit.Declarations
             .OfType<StructDeclarationSyntax>()
@@ -951,15 +987,31 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
 
             var attributes = GetFunctionAttributes(func);
 
-            // Generate function body
-            var body = functionBuilder.BuildFunctionBody(func, symbol);
-            if (attributes.Count > 0)
+            var callableKey = CallableIdentity.GetCallableKey(func);
+            string body;
+            string? reusedBody = null;
+            var canReuse = rebuildFunctionKeys is not null &&
+                           !rebuildFunctionKeys.Contains(callableKey) &&
+                           reuseFunctionBodiesByCallableKey is not null &&
+                           reuseFunctionBodiesByCallableKey.TryGetValue(callableKey, out reusedBody);
+            if (canReuse)
             {
-                body = $"; attrs: {string.Join(" ", attributes)}{Environment.NewLine}{body}";
+                body = reusedBody!;
+                functionsReused++;
+            }
+            else
+            {
+                body = functionBuilder.BuildFunctionBody(func, symbol);
+                if (attributes.Count > 0)
+                {
+                    body = $"; attrs: {string.Join(" ", attributes)}{Environment.NewLine}{body}";
+                }
+                functionsBuilt++;
             }
             var emittedName = CallableIdentity.GetEmittedFunctionName(func, namesWithCollisions);
             var mangledName = MangleFunctionName(moduleName, emittedName);
             builder.DefineFunctionWithBody(mangledName, returnType, paramTypes, body);
+            localFunctionBodiesByCallableKey[callableKey] = body;
         }
 
         // Emit test functions if requested
@@ -989,6 +1041,8 @@ public sealed class CraneliftCodeGenerator : ICodeGenerator
                 EmitTestHarness(compilationUnit, builder, diagnostics, moduleName);
             }
         }
+
+        functionBodiesByCallableKey = localFunctionBodiesByCallableKey;
     }
 
     private static string SanitizeTestName(string name)

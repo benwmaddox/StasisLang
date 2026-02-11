@@ -11,6 +11,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Stasis.Compiler;
 using Stasis.Compiler.IR;
+using Stasis.Compiler.IR.Cranelift;
 using Stasis.Compiler.Layout;
 using Stasis.Compiler.Semantic;
 using Stasis.Compiler.Syntax;
@@ -3138,6 +3139,8 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
 
     InProcessTickHost? host = null;
     var swapDllSerial = 0;
+    FunctionSemanticProfile? lastAppliedFunctionProfile = null;
+    IReadOnlyDictionary<string, string>? lastAppliedFunctionBodiesByCallableKey = null;
 
     int BuildAndApply(bool startHost, out string timingLine, out double loadMs)
     {
@@ -3156,6 +3159,8 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         var linkMs = 0L;
         var planMs = 0L;
         var hostMs = 0L;
+        var fnBuilt = 0;
+        var fnReused = 0;
 
         var phase = Stopwatch.StartNew();
         var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
@@ -3228,15 +3233,48 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         layoutMs = phase.ElapsedMilliseconds;
         phase.Restart();
 
+        var functionProfile = FunctionSemanticFingerprint.ComputeProfile(
+            source,
+            parse.CompilationUnit,
+            layout,
+            includeTests: false,
+            allowReachabilityFallback: true);
+        var functionDiff = FunctionSemanticFingerprint.Diff(lastAppliedFunctionProfile, functionProfile);
+        if (!startHost && !functionDiff.AnyChange)
+        {
+            timingLine = "HOTRELOAD skip: function semantic hashes unchanged.";
+            return 2;
+        }
+
+        IReadOnlySet<string>? rebuildFunctionKeys = null;
+        IReadOnlyDictionary<string, string>? reusableFunctionBodies = null;
+        if (!functionDiff.RequiresConservativeRebuild)
+        {
+            rebuildFunctionKeys = new HashSet<string>(functionDiff.ChangedBodyCallableKeys, StringComparer.Ordinal);
+            reusableFunctionBodies = lastAppliedFunctionBodiesByCallableKey;
+        }
+
         var options = new CodeGenerationOptions(
             ModuleName: moduleName,
             IncludeTests: false,
             EmitTestHarness: false,
             HeadlessGraphics: true,
-            AllowReachabilityFallback: true);
+            AllowReachabilityFallback: true,
+            RebuildFunctionKeys: rebuildFunctionKeys,
+            ReuseFunctionBodiesByCallableKey: reusableFunctionBodies);
 
         using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
         var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        if (generator is CraneliftCodeGenerator craneliftGenerator)
+        {
+            fnBuilt = craneliftGenerator.LastFunctionsBuilt;
+            fnReused = craneliftGenerator.LastFunctionsReused;
+        }
+        else
+        {
+            fnBuilt = functionDiff.RecompiledFunctions;
+            fnReused = functionDiff.ReusedFunctions;
+        }
         lowerMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (result.Diagnostics.Count > 0)
@@ -3328,9 +3366,21 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                 }
             }
 
+            lastAppliedFunctionProfile = functionProfile;
+            if (generator is CraneliftCodeGenerator updatedGenerator)
+            {
+                lastAppliedFunctionBodiesByCallableKey = new Dictionary<string, string>(
+                    updatedGenerator.LastFunctionBodiesByCallableKey,
+                    StringComparer.Ordinal);
+            }
+            else
+            {
+                lastAppliedFunctionBodiesByCallableKey = null;
+            }
+
             swTotal.Stop();
             timingLine =
-                $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} host={hostMs} total={swTotal.ElapsedMilliseconds}";
+                $"HOTRELOAD phases(ms): read={readMs} parse={parseMs} sema={semaMs} layout={layoutMs} lower={lowerMs} clif={clifWriteMs} aotSpawn={aotSpawnMs} aotCompile={aotCompileMs} plan={planMs} link={linkMs} host={hostMs} fnBuilt={fnBuilt} fnReused={fnReused} total={swTotal.ElapsedMilliseconds}";
             return 0;
         }
         finally
@@ -3451,6 +3501,10 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                     : loadMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
                 Console.WriteLine($"HOTSWAP(ms): total={totalMs} latency=0 load={loadText}");
             }
+        }
+        else if (exit == 2)
+        {
+            Console.WriteLine("HOTSWAP(skip): function semantic hashes unchanged; no swap queued.");
         }
         else if (host is not null && host.IsRunning)
         {
@@ -4034,8 +4088,8 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     StreamWriter? runnerStdin = null;
     StreamReader? runnerOut = null;
 
-    var pendingSwaps = new Dictionary<ulong, (DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
-    var sentButNotQueued = new Queue<(DateTime ChangeUtc, DateTime SendUtc, long LowerMs)>();
+    var pendingSwaps = new Dictionary<ulong, (DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
+    var sentButNotQueued = new Queue<(DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
     var pendingLock = new object();
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
@@ -4199,7 +4253,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                         var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
                         if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var appliedId))
                         {
-                            (DateTime ChangeUtc, DateTime SendUtc, long LowerMs)? pending = null;
+                            (DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? pending = null;
                             lock (pendingLock)
                             {
                                 if (pendingSwaps.TryGetValue(appliedId, out var p))
@@ -4231,6 +4285,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                                     $"HOTSWAP(ms): total={endToEndMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
                                     $"latency={runnerMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
                                     $"lower={pending.Value.LowerMs} compile={compileMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
+                                    $"fnBuilt={pending.Value.FnBuilt} fnReused={pending.Value.FnReused} " +
                                     $"apply={applyMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} id={appliedId}");
                             }
                         }
@@ -4357,10 +4412,22 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         return true;
     }
 
-    int BuildClif(string? previousSemanticFingerprint, out string clif, out long lowerMs, out string semanticFingerprint, out bool semanticChanged)
+    int BuildClif(
+        FunctionSemanticProfile? previousFunctionProfile,
+        IReadOnlyDictionary<string, string>? previousFunctionBodies,
+        out string clif,
+        out long lowerMs,
+        out FunctionSemanticProfile? functionProfile,
+        out FunctionSemanticDiff? functionDiff,
+        out IReadOnlyDictionary<string, string>? functionBodiesByCallableKey,
+        out int fnBuilt,
+        out int fnReused)
     {
-        semanticFingerprint = string.Empty;
-        semanticChanged = false;
+        functionProfile = null;
+        functionDiff = null;
+        functionBodiesByCallableKey = null;
+        fnBuilt = 0;
+        fnReused = 0;
         var sw = Stopwatch.StartNew();
         var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
         if (importDiagnostics.Count > 0)
@@ -4415,8 +4482,13 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var layout = new LayoutPlanner(parse.CompilationUnit, sema.Symbols).Plan();
         MaybeLogGlobalMemoryUsageOnLayoutChange(sourcePath, moduleName, layout, enable: true);
 
-        semanticFingerprint = SemanticFingerprint.ComputeFileFingerprint(source, layout);
-        semanticChanged = !string.Equals(previousSemanticFingerprint, semanticFingerprint, StringComparison.Ordinal);
+        functionProfile = FunctionSemanticFingerprint.ComputeProfile(
+            source,
+            parse.CompilationUnit,
+            layout,
+            includeTests: false,
+            allowReachabilityFallback: true);
+        functionDiff = FunctionSemanticFingerprint.Diff(previousFunctionProfile, functionProfile);
 
         if (!TryGetDataBindingPlan(sourcePath, layout, moduleName, new[] { $"{moduleName}__main", $"{moduleName}__tick" }, out var bindPlan))
         {
@@ -4430,12 +4502,20 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             Console.WriteLine($"Data binding: {dataBindingPlan.JsonPath}");
         }
 
-        if (!semanticChanged && previousSemanticFingerprint is not null)
+        if (!functionDiff.AnyChange && previousFunctionProfile is not null)
         {
             sw.Stop();
             lowerMs = sw.ElapsedMilliseconds;
             clif = string.Empty;
-            return 0;
+            return 2;
+        }
+
+        IReadOnlySet<string>? rebuildFunctionKeys = null;
+        IReadOnlyDictionary<string, string>? reusableFunctionBodies = null;
+        if (!functionDiff.RequiresConservativeRebuild)
+        {
+            rebuildFunctionKeys = new HashSet<string>(functionDiff.ChangedBodyCallableKeys, StringComparer.Ordinal);
+            reusableFunctionBodies = previousFunctionBodies;
         }
 
         var options = new CodeGenerationOptions(
@@ -4443,10 +4523,26 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             IncludeTests: false,
             EmitTestHarness: false,
             HeadlessGraphics: !usesGraphics,
-            AllowReachabilityFallback: true);
+            AllowReachabilityFallback: true,
+            RebuildFunctionKeys: rebuildFunctionKeys,
+            ReuseFunctionBodiesByCallableKey: reusableFunctionBodies);
 
         using var generator = CodeGeneratorFactory.Create(BackendType.Cranelift, moduleName);
         var result = generator.Generate(parse.CompilationUnit, sema, layout, options);
+        if (generator is CraneliftCodeGenerator craneliftGenerator)
+        {
+            fnBuilt = craneliftGenerator.LastFunctionsBuilt;
+            fnReused = craneliftGenerator.LastFunctionsReused;
+            functionBodiesByCallableKey = new Dictionary<string, string>(
+                craneliftGenerator.LastFunctionBodiesByCallableKey,
+                StringComparer.Ordinal);
+        }
+        else
+        {
+            fnBuilt = functionDiff.RecompiledFunctions;
+            fnReused = functionDiff.ReusedFunctions;
+            functionBodiesByCallableKey = null;
+        }
         sw.Stop();
         lowerMs = sw.ElapsedMilliseconds;
         if (result.Diagnostics.Count > 0)
@@ -4465,11 +4561,21 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     }
 
     string? lastGoodClif = null;
-    string? lastAppliedSemanticFingerprint = null;
+    FunctionSemanticProfile? lastAppliedFunctionProfile = null;
+    IReadOnlyDictionary<string, string>? lastAppliedFunctionBodiesByCallableKey = null;
     var lastRunnerRestartAttemptUtc = DateTime.MinValue;
     var consecutiveRunnerExits = 0;
 
-    var initialRc = BuildClif(lastAppliedSemanticFingerprint, out var initialClif, out var initialLowerMs, out var initialSemanticFingerprint, out var initialSemanticChanged);
+    var initialRc = BuildClif(
+        lastAppliedFunctionProfile,
+        lastAppliedFunctionBodiesByCallableKey,
+        out var initialClif,
+        out var initialLowerMs,
+        out var initialFunctionProfile,
+        out var initialFunctionDiff,
+        out var initialFunctionBodiesByCallableKey,
+        out var initialFnBuilt,
+        out var initialFnReused);
     if (initialRc != 0)
     {
         Console.Error.WriteLine("warning: initial build failed; waiting for changes.");
@@ -4481,11 +4587,13 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             return 1;
         }
         lastGoodClif = initialClif;
-        if (initialSemanticChanged)
+        if (initialFunctionDiff is not null && initialFunctionDiff.AnyChange)
         {
-            lastAppliedSemanticFingerprint = initialSemanticFingerprint;
+            lastAppliedFunctionProfile = initialFunctionProfile;
+            lastAppliedFunctionBodiesByCallableKey = initialFunctionBodiesByCallableKey;
         }
-        _ = initialLowerMs;
+        _ = initialFnBuilt;
+        _ = initialFnReused;
         Console.WriteLine($"HOTSWAP(ms): total={initialLowerMs} latency=-1");
     }
 
@@ -4556,22 +4664,31 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
 
         var changeUtc = DateTime.UtcNow;
         var swTotal = Stopwatch.StartNew();
-        var rc = BuildClif(lastAppliedSemanticFingerprint, out var clif, out var lowerMs, out var semanticFingerprint, out var semanticChanged);
+        var rc = BuildClif(
+            lastAppliedFunctionProfile,
+            lastAppliedFunctionBodiesByCallableKey,
+            out var clif,
+            out var lowerMs,
+            out var functionProfile,
+            out var functionDiff,
+            out var functionBodiesByCallableKey,
+            out var fnBuilt,
+            out var fnReused);
         if (rc != 0)
         {
+            if (rc == 2)
+            {
+                Console.WriteLine("HOTSWAP(skip): function semantic hashes unchanged; no swap queued.");
+                if ((runner is null || runner.HasExited) && lastGoodClif is not null)
+                {
+                    _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
+                }
+                continue;
+            }
+
             if (runner is not null && !runner.HasExited)
             {
                 Console.Error.WriteLine("warning: rebuild failed; keeping previous code; waiting for changes.");
-            }
-            continue;
-        }
-
-        if (!semanticChanged)
-        {
-            Console.WriteLine("HOTSWAP(skip): semantic fingerprint unchanged; no swap queued.");
-            if ((runner is null || runner.HasExited) && lastGoodClif is not null)
-            {
-                _ = EnsureRunnerStarted(lastGoodClif).GetAwaiter().GetResult();
             }
             continue;
         }
@@ -4583,7 +4700,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                 return 1;
             }
             lastGoodClif = clif;
-            lastAppliedSemanticFingerprint = semanticFingerprint;
+            lastAppliedFunctionProfile = functionProfile;
+            lastAppliedFunctionBodiesByCallableKey = functionBodiesByCallableKey;
+            _ = fnBuilt;
+            _ = fnReused;
             Console.WriteLine($"HOTSWAP(ms): total={lowerMs} latency=-1");
             continue;
         }
@@ -4614,13 +4734,16 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         runnerIn.Flush();
         lock (pendingLock)
         {
-            sentButNotQueued.Enqueue((ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs));
+            sentButNotQueued.Enqueue((ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs, FnBuilt: fnBuilt, FnReused: fnReused));
         }
 
         lastGoodClif = clif;
-        lastAppliedSemanticFingerprint = semanticFingerprint;
+        lastAppliedFunctionProfile = functionProfile;
+        lastAppliedFunctionBodiesByCallableKey = functionBodiesByCallableKey;
         swTotal.Stop();
         _ = lowerMs;
+        _ = fnBuilt;
+        _ = fnReused;
     }
 
     try

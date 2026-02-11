@@ -43,7 +43,7 @@ public static class SemanticFingerprint
         return Convert.ToHexString(digest).ToLowerInvariant();
     }
 
-    private static ulong ComputeLayoutHash(LayoutPlan layout)
+    public static ulong ComputeLayoutHash(LayoutPlan layout)
     {
         // FNV-1a 64
         ulong hash = 14695981039346656037UL;
