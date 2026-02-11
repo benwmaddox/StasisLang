@@ -4,7 +4,9 @@
 - `docs/spec.md` is the canonical language spec for Rewrite V1.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
 - `docs/rewrite_v1_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
-- `crates/stasis_compiler` hosts compiler substrate and bindings used by orchestration.
+- `compiler/` holds compiler source written in Stasis.
+- Planned primary orchestration file is `compiler/incremental_compiler.stasis`.
+- `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
 - `crates/stasis_jit` hosts Cranelift JIT integration, function pointer table, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
 - `apps/stasis` is the single in-process graphical runner app.
