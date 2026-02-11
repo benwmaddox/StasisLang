@@ -123,6 +123,39 @@ If violated:
 - diagnostics reported
 - old code continues running
 
+### 4.5 Language Conversion Semantics
+
+Numeric conversions use receiver-form helpers in two categories:
+
+`from_*` conversions (mutating target):
+- Assignment-like operations that write into the receiver target.
+- Statement-style side-effect operations.
+- Example: `f32Value.from_i32(i32Value);`
+
+`to_*` conversions (pure value):
+- Pure operations on basic numeric types.
+- Expression-safe and may be used in declarations/initializers.
+- Example: `let alpha: f32 = ticks_i32.to_f32();`
+
+Example:
+
+```stasis
+let ticks_i32: i32;
+let alpha: f32;
+
+ticks_i32.from_u32(DebugUI.swapFlashTicks);
+alpha.from_i32(ticks_i32);
+alpha /= 180.0;
+```
+
+Equivalent declaration+initializer style with pure conversions:
+
+```stasis
+let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+let alpha: f32 = ticks_i32.to_f32();
+alpha /= 180.0;
+```
+
 ## 5. JIT & Runtime Boundary
 
 ### 5.1 Function Pointer Table ABI
@@ -149,7 +182,7 @@ Examples:
 
 - logging
 - input state
-- entity spawning
+- entity/system helpers
 - rendering commands
 - audio events
 
@@ -207,11 +240,11 @@ function on_code_swap(): void {
 Properties:
 
 - Optional
-- Runs once per successful swap
+- Runs once per successful swap attempt
 - Runs between ticks
 - Executes before new code
 - May mutate global data
-- Must not call gameplay entry points
+- Must not invoke gameplay entrypoints
 
 ### 7.3 Enforcement Rules
 
@@ -245,7 +278,7 @@ Provide immediate confirmation of successful swap.
 
 ```stasis
 global DebugUI {
-    swapFlashTicks : u32;
+    swapFlashTicks: u32;
 }
 ```
 
@@ -261,7 +294,7 @@ During draw:
 
 ```stasis
 function draw_debug_ui(): void {
-    if DebugUI.swapFlashTicks > 0 {
+    if (DebugUI.swapFlashTicks > 0) {
         let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
         let alpha: f32 = ticks_i32.to_f32();
         alpha /= 180.0;
@@ -290,8 +323,6 @@ Rules:
 - No `dt`-driven logic inside Stasis gameplay semantics
 - Rendering may interpolate visually
 - Simulation remains deterministic
-- `from_*` conversion helpers are target-mutating operations (assignment-like).
-- `to_*` conversion helpers are pure value conversions for basic numeric types.
 
 The engine defines `TICKS_PER_SECOND`.
 
