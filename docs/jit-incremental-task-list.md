@@ -34,7 +34,7 @@ This tracks remaining work after the merged incremental hot-swap foundations.
 ## 4) Testing Matrix
 
 - [x] Unit tests for overlay import expansion (`SourceImporterTests`).
-- [ ] Deterministic tests for overlay command handling (`set`, `clear`, `clear_all`) in watch loop.
+- [x] Deterministic tests for overlay command handling (`set`, `clear`, `clear_all`) in watch loop.
 - [x] JIT-runner watch integration test for overlay-triggered swap without disk edits.
 - [ ] Long-run swap soak test (100+ swaps) for stability and bounded retirement/memory metrics.
 - [ ] Performance regression harness for edit->applied latency (single-function and multi-function edits).
