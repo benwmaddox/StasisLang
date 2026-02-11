@@ -2547,6 +2547,33 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
     using var proc = Process.Start(psi)!;
     Task<string>? stdOutTask = null;
     Task<string>? stdErrTask = null;
+    static string? TryReadTaskResult(Task<string>? task, int waitMs)
+    {
+        if (task is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!task.IsCompleted)
+            {
+                if (waitMs <= 0 || !task.Wait(waitMs))
+                {
+                    return null;
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return task.Status == TaskStatus.RanToCompletion
+            ? task.Result
+            : null;
+    }
+
     if (psi.RedirectStandardOutput)
     {
         stdOutTask = proc.StandardOutput.ReadToEndAsync();
@@ -2586,16 +2613,9 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
             // Best effort.
         }
 
-        string? timedOutStdOut = null;
-        string? timedOutStdErr = null;
-        if (stdOutTask is not null)
-        {
-            try { timedOutStdOut = stdOutTask.GetAwaiter().GetResult(); } catch { }
-        }
-        if (stdErrTask is not null)
-        {
-            try { timedOutStdErr = stdErrTask.GetAwaiter().GetResult(); } catch { }
-        }
+        // Bound output draining to avoid hanging if descendants keep inherited stdio handles open.
+        var timedOutStdOut = TryReadTaskResult(stdOutTask, waitMs: 250);
+        var timedOutStdErr = TryReadTaskResult(stdErrTask, waitMs: 250);
 
         if (!string.IsNullOrWhiteSpace(timedOutStdOut))
         {
@@ -2610,16 +2630,8 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
         return 124;
     }
 
-    string? stdOut = null;
-    string? stdErr = null;
-    if (stdOutTask is not null)
-    {
-        stdOut = stdOutTask.GetAwaiter().GetResult();
-    }
-    if (stdErrTask is not null)
-    {
-        stdErr = stdErrTask.GetAwaiter().GetResult();
-    }
+    var stdOut = TryReadTaskResult(stdOutTask, waitMs: 2000);
+    var stdErr = TryReadTaskResult(stdErrTask, waitMs: 2000);
 
     if (proc.ExitCode != 0)
     {
