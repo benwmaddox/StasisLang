@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -1896,10 +1897,10 @@ static string? FindGraphicsSharedLibrary()
     return null;
 }
 
-static (bool graphics, bool audio) GetRuntimeImportFlags(string entryPath)
+static (bool graphics, bool audio) GetRuntimeImportFlags(string entryPath, Func<string, string?>? sourceLoader = null)
 {
-    var graphics = DetectsModuleImport(entryPath, "graphics.stasis");
-    var audio = DetectsModuleImport(entryPath, "audio.stasis");
+    var graphics = DetectsModuleImport(entryPath, "graphics.stasis", sourceLoader);
+    var audio = DetectsModuleImport(entryPath, "audio.stasis", sourceLoader);
     return (graphics, audio);
 }
 
@@ -2160,14 +2161,19 @@ static IReadOnlyList<string> PrepareLinkLibraries(IReadOnlyList<string>? linkLib
     return list;
 }
 
-static bool DetectsModuleImport(string entryPath, string moduleFileName)
+static bool DetectsModuleImport(string entryPath, string moduleFileName, Func<string, string?>? sourceLoader = null)
 {
     var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var targetPath = ResolveStdlibModulePath(moduleFileName);
-    return DetectsModuleImportInner(Path.GetFullPath(entryPath), moduleFileName, targetPath, visited);
+    return DetectsModuleImportInner(Path.GetFullPath(entryPath), moduleFileName, targetPath, visited, sourceLoader);
 }
 
-static bool DetectsModuleImportInner(string path, string moduleFileName, string? targetPath, HashSet<string> visited)
+static bool DetectsModuleImportInner(
+    string path,
+    string moduleFileName,
+    string? targetPath,
+    HashSet<string> visited,
+    Func<string, string?>? sourceLoader)
 {
     if (!visited.Add(path))
     {
@@ -2177,7 +2183,7 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
     string source;
     try
     {
-        source = File.ReadAllText(path);
+        source = sourceLoader?.Invoke(path) ?? File.ReadAllText(path);
     }
     catch
     {
@@ -2199,13 +2205,14 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
         var line = source.Substring(lineStart, lineLength).TrimEnd('\r');
         if (TryParseImportLine(line, out var importPath))
         {
-            var resolved = Path.GetFullPath(Path.Combine(baseDir, importPath));
+            var resolved = ResolveImportPathWithPlatformFallback(baseDir, importPath, sourceLoader);
             if (IsTargetModule(resolved, moduleFileName, targetPath))
             {
                 return true;
             }
 
-            if (File.Exists(resolved) && DetectsModuleImportInner(resolved, moduleFileName, targetPath, visited))
+            if (PathExistsWithSourceLoader(resolved, sourceLoader) &&
+                DetectsModuleImportInner(resolved, moduleFileName, targetPath, visited, sourceLoader))
             {
                 return true;
             }
@@ -2215,6 +2222,42 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
     }
 
     return false;
+}
+
+static string ResolveImportPathWithPlatformFallback(string baseDir, string importPath, Func<string, string?>? sourceLoader)
+{
+    var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
+    if (PathExistsWithSourceLoader(resolvedPath, sourceLoader))
+    {
+        return resolvedPath;
+    }
+
+    if (Path.GetExtension(resolvedPath).Length == 0)
+    {
+        return resolvedPath;
+    }
+    var platform = SourceImporter.GetActivePlatformTag();
+    if (string.IsNullOrWhiteSpace(platform))
+    {
+        return resolvedPath;
+    }
+
+    var dir = Path.GetDirectoryName(resolvedPath) ?? string.Empty;
+    var baseName = Path.GetFileNameWithoutExtension(resolvedPath);
+    var platformPath = Path.Combine(dir, $"{baseName}.{platform}.stasis");
+    return PathExistsWithSourceLoader(platformPath, sourceLoader)
+        ? platformPath
+        : resolvedPath;
+}
+
+static bool PathExistsWithSourceLoader(string path, Func<string, string?>? sourceLoader)
+{
+    if (sourceLoader is not null && sourceLoader(path) is not null)
+    {
+        return true;
+    }
+
+    return File.Exists(path);
 }
 
 static bool IsTargetModule(string resolvedPath, string moduleFileName, string? targetPath)
@@ -3291,6 +3334,19 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         e.Cancel = true;
         cts.Cancel();
     };
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange()
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN"), "1", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine("warning: STASIS_BUFFER_OVERLAY_STDIN is ignored in AOT runner watch mode to avoid consuming guest stdin; use JIT/in-process watch for buffer overlay swaps.");
+    }
 
     InProcessTickHost? host = null;
     var swapDllSerial = 0;
@@ -3668,14 +3724,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    var debounce = TimeSpan.FromMilliseconds(75);
-    var lastChange = DateTime.UtcNow;
-    using var changeSignal = new ManualResetEventSlim(false);
-    void OnChange(object? _, FileSystemEventArgs __)
-    {
-        lastChange = DateTime.UtcNow;
-        changeSignal.Set();
-    }
+    void OnChange(object? _, FileSystemEventArgs __) => SignalChange();
 
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -3836,6 +3885,16 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         e.Cancel = true;
         cts.Cancel();
     };
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange()
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
+    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
 
     string? activeDll = null;
     Process? runner = null;
@@ -3861,12 +3920,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var runnerSpawnMs = 0L;
 
         var phase = Stopwatch.StartNew();
-        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource, sourceLoader);
         readMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (importDiagnostics.Count > 0)
         {
-            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath, sourceLoader);
             return 1;
         }
 
@@ -3875,24 +3934,24 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         phase.Restart();
         if (HasErrors(parse.Diagnostics))
         {
-            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath, sourceLoader);
             return 1;
         }
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
         if (HasErrors(linkDiagnostics))
         {
-            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            PrintDiagnostics(linkDiagnostics, source, sourcePath, sourceLoader);
             return 1;
         }
-        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath, sourceLoader);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(sema.Diagnostics))
             {
                 return 1;
@@ -3922,7 +3981,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         phase.Restart();
         if (result.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            PrintDiagnostics(result.Diagnostics, source, sourcePath, sourceLoader);
             Console.WriteLine(result.Ir);
             return HasErrors(result.Diagnostics) ? 1 : 0;
         }
@@ -4211,14 +4270,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    var debounce = TimeSpan.FromMilliseconds(75);
-    var lastChange = DateTime.UtcNow;
-    using var changeSignal = new ManualResetEventSlim(false);
-    void OnChange(object? _, FileSystemEventArgs __)
-    {
-        lastChange = DateTime.UtcNow;
-        changeSignal.Set();
-    }
+    void OnChange(object? _, FileSystemEventArgs __) => SignalChange();
 
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -4305,6 +4357,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         e.Cancel = true;
         cts.Cancel();
     };
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange() => changeSignal.Set();
+    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
+    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
 
     Process? runner = null;
     DataBindingPlan? dataBindingPlan = null;
@@ -4712,10 +4768,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         fnBuilt = 0;
         fnReused = 0;
         var sw = Stopwatch.StartNew();
-        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource, sourceLoader);
         if (importDiagnostics.Count > 0)
         {
-            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
@@ -4724,7 +4780,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var parse = Parser.Parse(source);
         if (HasErrors(parse.Diagnostics))
         {
-            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
@@ -4734,18 +4790,18 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
         if (HasErrors(linkDiagnostics))
         {
-            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            PrintDiagnostics(linkDiagnostics, source, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
         }
 
-        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath, sourceLoader);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         if (sema.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(sema.Diagnostics))
             {
                 clif = string.Empty;
@@ -4830,7 +4886,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         lowerMs = sw.ElapsedMilliseconds;
         if (result.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            PrintDiagnostics(result.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(result.Diagnostics))
             {
                 Console.WriteLine(result.Ir);
@@ -4887,7 +4943,6 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    using var changeSignal = new ManualResetEventSlim(false);
     void OnChange(object? _, FileSystemEventArgs __) => changeSignal.Set();
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -5886,7 +5941,11 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
     }
 }
 
-static string LoadSourceWithImports(string path, out List<Diagnostic> importDiagnostics, out string sourceForDiagnostics)
+static string LoadSourceWithImports(
+    string path,
+    out List<Diagnostic> importDiagnostics,
+    out string sourceForDiagnostics,
+    Func<string, string?>? sourceLoader = null)
 {
     static string ReadAllTextShared(string p)
     {
@@ -5895,9 +5954,10 @@ static string LoadSourceWithImports(string path, out List<Diagnostic> importDiag
         return sr.ReadToEnd();
     }
 
-    var original = ReadAllTextShared(path);
+    var fullPath = Path.GetFullPath(path);
+    var original = sourceLoader?.Invoke(fullPath) ?? ReadAllTextShared(fullPath);
     var diagnostics = new List<Diagnostic>();
-    var result = SourceImporter.ExpandImports(path, original, diagnostics);
+    var result = SourceImporter.ExpandImports(fullPath, original, diagnostics, sourceLoader);
     importDiagnostics = diagnostics;
     sourceForDiagnostics = result.OriginalSource;
     return result.ExpandedSource;
@@ -6570,8 +6630,16 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     return executeExit;
 }
 
-static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)
+static void PrintDiagnostics(
+    IEnumerable<Diagnostic> diagnostics,
+    string source,
+    string? filePath = null,
+    Func<string, string?>? sourceLoader = null)
 {
+    var rootFullPath = string.IsNullOrWhiteSpace(filePath)
+        ? null
+        : TryGetFullPathSafe(filePath);
+
     foreach (var d in diagnostics)
     {
         if (d.Severity == DiagnosticSeverity.Warning && ShouldSuppressWarnings())
@@ -6579,15 +6647,43 @@ static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source,
             continue;
         }
 
-        var (line, column, lineText) = GetLineInfo(source, d.Span.Start);
+        var diagnosticFilePath = string.IsNullOrWhiteSpace(d.FilePath) ? filePath : d.FilePath;
+        var diagnosticSource = source;
+        var diagnosticFullPath = string.IsNullOrWhiteSpace(diagnosticFilePath)
+            ? null
+            : TryGetFullPathSafe(diagnosticFilePath);
+        if (diagnosticFullPath is not null &&
+            !string.Equals(diagnosticFullPath, rootFullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            var loadedSource = sourceLoader?.Invoke(diagnosticFullPath) ??
+                               (TryReadTextShared(diagnosticFullPath, out var text) ? text : null);
+            if (!string.IsNullOrEmpty(loadedSource))
+            {
+                diagnosticSource = loadedSource;
+            }
+        }
+
+        var (line, column, lineText) = GetLineInfo(diagnosticSource, d.Span.Start);
         var length = Math.Max(1, d.Span.Length);
         var markerLen = Math.Min(length, Math.Max(1, Math.Max(0, lineText.Length - (column - 1))));
         var marker = new string(' ', Math.Max(0, column - 1)) + new string('^', markerLen);
-        var location = filePath is null ? $"line {line}, column {column}" : $"{filePath}:{line}:{column}";
+        var location = diagnosticFilePath is null ? $"line {line}, column {column}" : $"{diagnosticFilePath}:{line}:{column}";
         var prefix = d.Severity == DiagnosticSeverity.Warning ? "warning" : "error";
         Console.Error.WriteLine($"{prefix}: {d.Message} ({location})");
         Console.Error.WriteLine(lineText);
         Console.Error.WriteLine(marker);
+    }
+}
+
+static string? TryGetFullPathSafe(string path)
+{
+    try
+    {
+        return Path.GetFullPath(path);
+    }
+    catch
+    {
+        return null;
     }
 }
 
@@ -7593,7 +7689,187 @@ sealed class InProcessTickHost : IDisposable
         }
     }
 
-    readonly record struct StateSymbol(string Name, int Size, IntPtr Pointer);
+readonly record struct StateSymbol(string Name, int Size, IntPtr Pointer);
+}
+
+sealed class BufferOverlayBridge : IDisposable
+{
+    private readonly ConcurrentDictionary<string, string> sourcesByPath =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource cts = new();
+    private readonly Task readerTask;
+    private readonly Action onOverlayChanged;
+
+    private BufferOverlayBridge(Action onOverlayChanged)
+    {
+        this.onOverlayChanged = onOverlayChanged;
+        readerTask = Task.Run(ReadCommandsLoop);
+    }
+
+    public static BufferOverlayBridge? StartIfEnabled(CancellationToken watchToken, Action onOverlayChanged)
+    {
+        if (!IsEnabled())
+        {
+            return null;
+        }
+
+        var bridge = new BufferOverlayBridge(onOverlayChanged);
+        watchToken.Register(bridge.Dispose);
+        return bridge;
+    }
+
+    public string? TryLoad(string path)
+    {
+        var fullPath = NormalizePath(path);
+        return sourcesByPath.TryGetValue(fullPath, out var source) ? source : null;
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            cts.Cancel();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            readerTask.Wait(250);
+        }
+        catch
+        {
+            // Best-effort shutdown.
+        }
+    }
+
+    private async Task ReadCommandsLoop()
+    {
+        StreamReader? reader = null;
+        try
+        {
+            var stdin = Console.OpenStandardInput();
+            reader = new StreamReader(stdin, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+
+            while (!cts.IsCancellationRequested)
+            {
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                TryApplyCommand(line);
+            }
+        }
+        finally
+        {
+            try
+            {
+                reader?.Dispose();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    private void TryApplyCommand(string line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("kind", out var kindElement) || kindElement.ValueKind != JsonValueKind.String)
+            {
+                return;
+            }
+
+            var kind = kindElement.GetString();
+            switch (kind)
+            {
+                case "set":
+                case "overlay.set":
+                    if (!root.TryGetProperty("path", out var setPathElement) ||
+                        !root.TryGetProperty("text", out var textElement) ||
+                        setPathElement.ValueKind != JsonValueKind.String ||
+                        textElement.ValueKind != JsonValueKind.String)
+                    {
+                        return;
+                    }
+
+                    var setPath = NormalizePath(setPathElement.GetString()!);
+                    var text = textElement.GetString() ?? string.Empty;
+                    sourcesByPath[setPath] = text;
+                    onOverlayChanged();
+                    return;
+                case "clear":
+                case "overlay.clear":
+                    if (!root.TryGetProperty("path", out var clearPathElement) ||
+                        clearPathElement.ValueKind != JsonValueKind.String)
+                    {
+                        return;
+                    }
+
+                    var clearPath = NormalizePath(clearPathElement.GetString()!);
+                    _ = sourcesByPath.TryRemove(clearPath, out _);
+                    onOverlayChanged();
+                    return;
+                case "clear_all":
+                case "overlay.clear_all":
+                    sourcesByPath.Clear();
+                    onOverlayChanged();
+                    return;
+            }
+        }
+        catch
+        {
+            // Ignore malformed overlay messages.
+        }
+    }
+
+    private static string NormalizePath(string rawPath)
+    {
+        if (rawPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase) &&
+            Uri.TryCreate(rawPath, UriKind.Absolute, out var uri) &&
+            uri.IsFile)
+        {
+            return Path.GetFullPath(uri.LocalPath);
+        }
+
+        return Path.GetFullPath(rawPath);
+    }
+
+    private static bool IsEnabled()
+    {
+        var env = Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN");
+        if (string.Equals(env, "1", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        return false;
+    }
 }
 
 sealed record CompileResult(
