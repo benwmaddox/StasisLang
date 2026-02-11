@@ -118,6 +118,13 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
                 timeout: TimeSpan.FromMinutes(5));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(state): compiled") &&
+                      outLines.AnyContains("HOTSWAP(state): queued") &&
+                      outLines.AnyContains("HOTSWAP(state): applied"),
+                timeout: TimeSpan.FromMinutes(2));
         }
         finally
         {
@@ -228,6 +235,13 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
                 timeout: TimeSpan.FromMinutes(5));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(state): compiled") &&
+                      outLines.AnyContains("HOTSWAP(state): queued") &&
+                      outLines.AnyContains("HOTSWAP(state): applied"),
+                timeout: TimeSpan.FromMinutes(2));
         }
         finally
         {
@@ -849,6 +863,7 @@ public sealed class HotSwapIntegrationTests
             await Task.Delay(500);
 
             Assert.Equal(swapCountAfterHook, outLines.CountContains("HOTSWAP(ms):"));
+            Assert.True(outLines.AnyContains("HOTSWAP(state): rejected"), "watch did not report a rejected swap state.");
             Assert.False(proc.HasExited, "watch process exited after layout rejection.");
         }
         finally
@@ -972,6 +987,13 @@ public sealed class HotSwapIntegrationTests
                 proc,
                 () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount,
                 timeout: TimeSpan.FromMinutes(5));
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(state): compiled") &&
+                      outLines.AnyContains("HOTSWAP(state): queued") &&
+                      outLines.AnyContains("HOTSWAP(state): applied"),
+                timeout: TimeSpan.FromMinutes(2));
 
             var jitRunnerCount = Process.GetProcessesByName("stasis-cranelift-jit-runner")
                 .Count(p =>

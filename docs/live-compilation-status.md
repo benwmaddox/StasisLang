@@ -72,6 +72,23 @@ This is the first implementation slice toward the in-process architecture target
   - `FunctionSemanticFingerprintTests` for hash/diff behavior
   - `CraneliftIncrementalCodegenTests` for body reuse parity and counters
 
+### Explicit two-phase swap commit model (#157)
+
+- Added explicit swap transition states in watch output:
+  - `HOTSWAP(state): compiled ...`
+  - `HOTSWAP(state): queued ...`
+  - `HOTSWAP(state): applied ...`
+  - `HOTSWAP(state): rejected ...`
+- In-process tick host now uses an explicit pending-swap artifact:
+  - compile/link runs before queueing swap work
+  - swaps are queued via `QueueSwap(...)`
+  - commit is executed by the tick thread at safe points between ticks
+  - hook order is deterministic: old-code `on_code_swap` executes before state transfer to the new module
+- Swap commit remains all-or-nothing:
+  - layout mismatch, hook failure, load failure, or restore failure rejects the full swap
+  - old code/data remain active on rejection
+- Runner watch path now tracks pending patches with build IDs and emits transition telemetry for queued/applied/rejected outcomes.
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -89,8 +106,7 @@ This is the first implementation slice toward the in-process architecture target
 
 ## Next concrete step
 
-Implement issue #157: explicit two-phase swap commit model.
-- Introduce a `PendingSwapPlan` that is produced off-thread.
-- Apply pending swaps only at safe points (between ticks on main loop boundary).
-- Keep strict all-or-nothing swap semantics with clear rejection diagnostics.
-- Extend telemetry with queued/applied/rejected counters and timings.
+Implement issue #158: generation-based code memory retirement.
+- Add explicit code generation/version tracking per successful swap.
+- Keep old generations alive for a bounded safe window.
+- Retire/free old generations in bulk with deterministic policy and diagnostics.

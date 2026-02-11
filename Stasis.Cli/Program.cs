@@ -3141,6 +3141,22 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     var swapDllSerial = 0;
     FunctionSemanticProfile? lastAppliedFunctionProfile = null;
     IReadOnlyDictionary<string, string>? lastAppliedFunctionBodiesByCallableKey = null;
+    ulong nextSwapId = 1;
+    var compiledCount = 0L;
+    var queuedCount = 0L;
+    var appliedCount = 0L;
+    var rejectedCount = 0L;
+
+    static string SanitizeSwapMessage(string message) =>
+        message.Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Replace('"', '\'');
+
+    void PrintSwapState(string state, string details)
+    {
+        Console.WriteLine(
+            $"HOTSWAP(state): {state} {details} counts=compiled:{compiledCount} queued:{queuedCount} applied:{appliedCount} rejected:{rejectedCount}");
+    }
 
     int BuildAndApply(bool startHost, out string timingLine, out double loadMs)
     {
@@ -3354,16 +3370,44 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                     return 1;
                 }
 
+                var swapId = nextSwapId++;
+                compiledCount++;
+                PrintSwapState("compiled", $"id={swapId}");
+
+                var stateMap = ParseStateMapEntries(plan.MapPath);
                 var swapSw = Stopwatch.StartNew();
-                var swap = host.Swap(hotDll, ParseStateMapEntries(plan.MapPath), hookKind);
+                var queued = host.QueueSwap(swapId, hotDll, stateMap, hookKind);
+                if (!queued.Accepted || queued.CompletionTask is null)
+                {
+                    swapSw.Stop();
+                    hostMs = swapSw.ElapsedMilliseconds;
+                    rejectedCount++;
+                    PrintSwapState("rejected", $"id={swapId} reason=\"{SanitizeSwapMessage(queued.Message)}\"");
+                    return 1;
+                }
+
+                queuedCount++;
+                PrintSwapState("queued", $"id={queued.SwapId}");
+                if (queued.SupersededSwapId != 0)
+                {
+                    rejectedCount++;
+                    PrintSwapState("rejected", $"id={queued.SupersededSwapId} reason=\"superseded\"");
+                }
+
+                var swap = queued.CompletionTask.GetAwaiter().GetResult();
                 swapSw.Stop();
                 hostMs = swapSw.ElapsedMilliseconds;
                 loadMs = swap.LoadMs;
                 if (!swap.Success)
                 {
+                    rejectedCount++;
+                    PrintSwapState("rejected", $"id={queued.SwapId} reason=\"{SanitizeSwapMessage(swap.Message)}\"");
                     Console.Error.WriteLine($"warning: in-process swap rejected: {swap.Message}");
                     return 1;
                 }
+
+                appliedCount++;
+                PrintSwapState("applied", $"id={queued.SwapId}");
             }
 
             lastAppliedFunctionProfile = functionProfile;
@@ -4088,9 +4132,29 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
     StreamWriter? runnerStdin = null;
     StreamReader? runnerOut = null;
 
-    var pendingSwaps = new Dictionary<ulong, (DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
-    var sentButNotQueued = new Queue<(DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
+    var pendingSwaps = new Dictionary<ulong, (ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
+    var sentButNotQueued = new Queue<(ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)>();
     var pendingLock = new object();
+    long nextBuildId = 0;
+    long compiledCount = 0;
+    long queuedCount = 0;
+    long appliedCount = 0;
+    long rejectedCount = 0;
+
+    static string SanitizeSwapMessage(string message) =>
+        message.Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Replace('"', '\'');
+
+    void PrintSwapState(string state, string details)
+    {
+        var compiled = Interlocked.Read(ref compiledCount);
+        var queued = Interlocked.Read(ref queuedCount);
+        var applied = Interlocked.Read(ref appliedCount);
+        var rejected = Interlocked.Read(ref rejectedCount);
+        Console.WriteLine(
+            $"HOTSWAP(state): {state} {details} counts=compiled:{compiled} queued:{queued} applied:{applied} rejected:{rejected}");
+    }
 
     static void StartLogPump(StreamReader reader, string path, CancellationToken token, Action<string>? onLine = null)
     {
@@ -4253,7 +4317,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                         var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
                         if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var appliedId))
                         {
-                            (DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? pending = null;
+                            (ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? pending = null;
                             lock (pendingLock)
                             {
                                 if (pendingSwaps.TryGetValue(appliedId, out var p))
@@ -4281,6 +4345,8 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                                 var restoreMs = ParseUs(line, "restore_us");
                                 var applyMs = saveMs + restoreMs;
 
+                                Interlocked.Increment(ref appliedCount);
+                                PrintSwapState("applied", $"id={appliedId} build={pending.Value.BuildId}");
                                 Console.WriteLine(
                                     $"HOTSWAP(ms): total={endToEndMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
                                     $"latency={runnerMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)} " +
@@ -4295,6 +4361,9 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                         var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
                         if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var queuedId))
                         {
+                            (ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? queued = null;
+                            (ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? superseded = null;
+                            ulong supersededId = 0;
                             lock (pendingLock)
                             {
                                 var supersedesMatch = Regex.Match(line, @"\bsupersedes=(\d+)\b");
@@ -4302,13 +4371,31 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                                     ulong.TryParse(supersedesMatch.Groups[1].Value, out var supersedesId) &&
                                     supersedesId != 0)
                                 {
+                                    supersededId = supersedesId;
+                                    if (pendingSwaps.TryGetValue(supersedesId, out var previous))
+                                    {
+                                        superseded = previous;
+                                    }
+
                                     _ = pendingSwaps.Remove(supersedesId);
                                 }
 
                                 if (sentButNotQueued.Count > 0)
                                 {
-                                    pendingSwaps[queuedId] = sentButNotQueued.Dequeue();
+                                    queued = sentButNotQueued.Dequeue();
+                                    pendingSwaps[queuedId] = queued.Value;
                                 }
+                            }
+
+                            if (superseded is not null)
+                            {
+                                Interlocked.Increment(ref rejectedCount);
+                                PrintSwapState("rejected", $"id={supersededId} build={superseded.Value.BuildId} reason=\"superseded\"");
+                            }
+                            if (queued is not null)
+                            {
+                                Interlocked.Increment(ref queuedCount);
+                                PrintSwapState("queued", $"id={queuedId} build={queued.Value.BuildId}");
                             }
                         }
                     }
@@ -4317,9 +4404,23 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
                         var idMatch = Regex.Match(line, @"\bid=(\d+)\b");
                         if (idMatch.Success && ulong.TryParse(idMatch.Groups[1].Value, out var failedId))
                         {
+                            (ulong BuildId, DateTime ChangeUtc, DateTime SendUtc, long LowerMs, int FnBuilt, int FnReused)? failed = null;
                             lock (pendingLock)
                             {
+                                if (pendingSwaps.TryGetValue(failedId, out var pending))
+                                {
+                                    failed = pending;
+                                }
+
                                 _ = pendingSwaps.Remove(failedId);
+                            }
+
+                            if (failed is not null)
+                            {
+                                Interlocked.Increment(ref rejectedCount);
+                                PrintSwapState(
+                                    "rejected",
+                                    $"id={failedId} build={failed.Value.BuildId} reason=\"{SanitizeSwapMessage(line)}\"");
                             }
                         }
                     }
@@ -4727,6 +4828,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
             continue;
         }
 
+        var buildId = (ulong)Interlocked.Increment(ref nextBuildId);
+        Interlocked.Increment(ref compiledCount);
+        PrintSwapState("compiled", $"build={buildId}");
+
         var sendUtc = DateTime.UtcNow;
         var clifBytes = Encoding.UTF8.GetByteCount(clif);
         WriteUtf8(runnerIn, $"SWAP {clifBytes}\n");
@@ -4734,7 +4839,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         runnerIn.Flush();
         lock (pendingLock)
         {
-            sentButNotQueued.Enqueue((ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs, FnBuilt: fnBuilt, FnReused: fnReused));
+            sentButNotQueued.Enqueue((BuildId: buildId, ChangeUtc: changeUtc, SendUtc: sendUtc, LowerMs: lowerMs, FnBuilt: fnBuilt, FnReused: fnReused));
         }
 
         lastGoodClif = clif;
@@ -6702,6 +6807,7 @@ sealed class CraneliftRunnerServer : IDisposable
 sealed record StateMapEntry(string Name, int Size);
 
 readonly record struct InProcessSwapResult(bool Success, string Message, double LoadMs);
+readonly record struct InProcessSwapQueueResult(bool Accepted, ulong SwapId, ulong SupersededSwapId, string Message, Task<InProcessSwapResult>? CompletionTask);
 
 enum SwapHookKind
 {
@@ -6729,6 +6835,7 @@ sealed class InProcessTickHost : IDisposable
     private readonly int fps;
     private Thread? tickThread;
     private LoadedModule? current;
+    private PendingSwapPlan? pendingSwap;
     private volatile bool running;
     private volatile int exitCode;
     private bool disposed;
@@ -6761,71 +6868,56 @@ sealed class InProcessTickHost : IDisposable
         return new InProcessTickHost(loaded, fps);
     }
 
-    public InProcessSwapResult Swap(string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
+    public InProcessSwapQueueResult QueueSwap(ulong swapId, string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
     {
-        if (!running || disposed)
+        PendingSwapPlan? superseded = null;
+        PendingSwapPlan? queued = null;
+        lock (gate)
         {
-            return new InProcessSwapResult(false, "host is not running", -1);
-        }
-
-        var loadSw = Stopwatch.StartNew();
-        var incoming = LoadedModule.TryLoad(dllPath, current?.ModuleName ?? "module", newStateMap, newHookKind, out var loadError);
-        loadSw.Stop();
-        var loadMs = loadSw.Elapsed.TotalMilliseconds;
-        if (incoming is null)
-        {
-            return new InProcessSwapResult(false, loadError ?? "failed to load new module", loadMs);
-        }
-
-        LoadedModule? old = null;
-        try
-        {
-            lock (gate)
+            if (!running || disposed || current is null)
             {
-                if (!running || disposed || current is null)
-                {
-                    incoming.Dispose();
-                    return new InProcessSwapResult(false, "host is not running", loadMs);
-                }
-
-                var (missingSave, missingRestore) = CompareLayouts(current.StateSymbols, incoming.StateSymbols);
-                if (missingSave > 0 || missingRestore > 0)
-                {
-                    incoming.Dispose();
-                    return new InProcessSwapResult(
-                        false,
-                        $"state layout changed (missing_save={missingSave} missing_restore={missingRestore})",
-                        loadMs);
-                }
-
-                var preHookSnapshot = CaptureState(current.StateSymbols);
-                if (current.InvokeSwapHook() != 0)
-                {
-                    RestoreState(current.StateSymbols, preHookSnapshot, out _);
-                    incoming.Dispose();
-                    return new InProcessSwapResult(false, "on_code_swap returned non-zero", loadMs);
-                }
-
-                var transferSnapshot = CaptureState(current.StateSymbols);
-                RestoreState(incoming.StateSymbols, transferSnapshot, out var missingRestoreAfterCopy);
-                if (missingRestoreAfterCopy > 0)
-                {
-                    incoming.Dispose();
-                    return new InProcessSwapResult(false, $"state restore failed (missing={missingRestoreAfterCopy})", loadMs);
-                }
-
-                old = current;
-                current = incoming;
+                return new InProcessSwapQueueResult(false, swapId, 0, "host is not running", null);
             }
 
-            old?.Dispose();
-            return new InProcessSwapResult(true, string.Empty, loadMs);
+            superseded = pendingSwap;
+            var completion = new TaskCompletionSource<InProcessSwapResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingSwap = new PendingSwapPlan(
+                swapId,
+                dllPath,
+                current.ModuleName,
+                newStateMap,
+                newHookKind,
+                completion);
+            queued = pendingSwap;
         }
-        catch (Exception ex)
+
+        if (superseded is not null)
         {
-            try { incoming.Dispose(); } catch { }
-            return new InProcessSwapResult(false, ex.Message, loadMs);
+            superseded.Completion.TrySetResult(new InProcessSwapResult(false, "superseded by newer queued swap", -1));
         }
+
+        if (queued is null)
+        {
+            return new InProcessSwapQueueResult(false, swapId, 0, "failed to queue swap", null);
+        }
+
+        return new InProcessSwapQueueResult(
+            true,
+            queued.SwapId,
+            superseded?.SwapId ?? 0,
+            string.Empty,
+            queued.Completion.Task);
+    }
+
+    public InProcessSwapResult Swap(string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
+    {
+        var queue = QueueSwap(0, dllPath, newStateMap, newHookKind);
+        if (!queue.Accepted || queue.CompletionTask is null)
+        {
+            return new InProcessSwapResult(false, queue.Message, -1);
+        }
+
+        return queue.CompletionTask.GetAwaiter().GetResult();
     }
 
     private void TickLoop()
@@ -6859,9 +6951,20 @@ sealed class InProcessTickHost : IDisposable
 
             while (!cts.Token.IsCancellationRequested)
             {
+                PendingSwapPlan? swapPlan = null;
+                InProcessSwapResult swapResult = default;
+                var hasSwapResult = false;
                 int tickRc;
                 lock (gate)
                 {
+                    if (pendingSwap is not null)
+                    {
+                        swapPlan = pendingSwap;
+                        pendingSwap = null;
+                        swapResult = ApplyPendingSwapLocked(swapPlan);
+                        hasSwapResult = true;
+                    }
+
                     module = current;
                     if (module is null)
                     {
@@ -6870,6 +6973,11 @@ sealed class InProcessTickHost : IDisposable
                         return;
                     }
                     tickRc = module.Tick();
+                }
+
+                if (hasSwapResult && swapPlan is not null)
+                {
+                    swapPlan.Completion.TrySetResult(swapResult);
                 }
 
                 if (tickRc != 0)
@@ -6896,6 +7004,13 @@ sealed class InProcessTickHost : IDisposable
         }
         finally
         {
+            PendingSwapPlan? orphanedPlan = null;
+            lock (gate)
+            {
+                orphanedPlan = pendingSwap;
+                pendingSwap = null;
+            }
+            orphanedPlan?.Completion.TrySetResult(new InProcessSwapResult(false, "host stopped before swap commit", -1));
             running = false;
         }
     }
@@ -6918,12 +7033,76 @@ sealed class InProcessTickHost : IDisposable
             // Best effort.
         }
 
+        PendingSwapPlan? pending = null;
         lock (gate)
         {
+            pending = pendingSwap;
+            pendingSwap = null;
             current?.Dispose();
             current = null;
         }
+        pending?.Completion.TrySetResult(new InProcessSwapResult(false, "host disposed before swap commit", -1));
         cts.Dispose();
+    }
+
+    private InProcessSwapResult ApplyPendingSwapLocked(PendingSwapPlan plan)
+    {
+        if (!running || disposed || current is null)
+        {
+            return new InProcessSwapResult(false, "host is not running", -1);
+        }
+
+        var loadSw = Stopwatch.StartNew();
+        var incoming = LoadedModule.TryLoad(plan.DllPath, plan.ModuleName, plan.StateMap, plan.HookKind, out var loadError);
+        loadSw.Stop();
+        var loadMs = loadSw.Elapsed.TotalMilliseconds;
+        if (incoming is null)
+        {
+            return new InProcessSwapResult(false, loadError ?? "failed to load new module", loadMs);
+        }
+
+        LoadedModule? old = null;
+        try
+        {
+            var (missingSave, missingRestore) = CompareLayouts(current.StateSymbols, incoming.StateSymbols);
+            if (missingSave > 0 || missingRestore > 0)
+            {
+                incoming.Dispose();
+                return new InProcessSwapResult(
+                    false,
+                    $"state layout changed (missing_save={missingSave} missing_restore={missingRestore})",
+                    loadMs);
+            }
+
+            var preHookSnapshot = CaptureState(current.StateSymbols);
+            if (current.InvokeSwapHook() != 0)
+            {
+                RestoreState(current.StateSymbols, preHookSnapshot, out _);
+                incoming.Dispose();
+                return new InProcessSwapResult(false, "on_code_swap returned non-zero", loadMs);
+            }
+
+            var transferSnapshot = CaptureState(current.StateSymbols);
+            RestoreState(incoming.StateSymbols, transferSnapshot, out var missingRestoreAfterCopy);
+            if (missingRestoreAfterCopy > 0)
+            {
+                incoming.Dispose();
+                return new InProcessSwapResult(false, $"state restore failed (missing={missingRestoreAfterCopy})", loadMs);
+            }
+
+            old = current;
+            current = incoming;
+            return new InProcessSwapResult(true, string.Empty, loadMs);
+        }
+        catch (Exception ex)
+        {
+            try { incoming.Dispose(); } catch { }
+            return new InProcessSwapResult(false, ex.Message, loadMs);
+        }
+        finally
+        {
+            old?.Dispose();
+        }
     }
 
     private static Dictionary<string, byte[]> CaptureState(IReadOnlyDictionary<string, StateSymbol> symbols)
@@ -6975,6 +7154,32 @@ sealed class InProcessTickHost : IDisposable
         }
 
         return (missingSave, missingRestore);
+    }
+
+    private sealed class PendingSwapPlan
+    {
+        public ulong SwapId { get; }
+        public string DllPath { get; }
+        public string ModuleName { get; }
+        public IReadOnlyList<StateMapEntry> StateMap { get; }
+        public SwapHookKind HookKind { get; }
+        public TaskCompletionSource<InProcessSwapResult> Completion { get; }
+
+        public PendingSwapPlan(
+            ulong swapId,
+            string dllPath,
+            string moduleName,
+            IReadOnlyList<StateMapEntry> stateMap,
+            SwapHookKind hookKind,
+            TaskCompletionSource<InProcessSwapResult> completion)
+        {
+            SwapId = swapId;
+            DllPath = dllPath;
+            ModuleName = moduleName;
+            StateMap = stateMap;
+            HookKind = hookKind;
+            Completion = completion;
+        }
     }
 
     private sealed class LoadedModule : IDisposable
