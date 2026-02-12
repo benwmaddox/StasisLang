@@ -69,6 +69,8 @@ pub struct RunnerSummary {
     pub swap_indicator_armed_count: u32,
     pub swap_flash_peak_ticks: u32,
     pub swap_flash_ticks_remaining: u32,
+    pub last_compile_duration_ms: Option<u64>,
+    pub last_commit_duration_ms: Option<u64>,
     pub window: Option<WindowConfig>,
     pub last_swap_status: Option<SwapCommitStatus>,
     pub has_in_flight_work: bool,
@@ -135,6 +137,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut compile_successes: u32 = 0;
     let mut compile_failures: u32 = 0;
     let mut compile_diagnostics: Vec<String> = Vec::new();
+    let mut last_compile_duration_ms: Option<u64> = None;
+    let mut last_commit_duration_ms: Option<u64> = None;
     let mut last_seen_compile_id: Option<RequestId> = None;
     let mut last_seen_commit_id: Option<RequestId> = None;
     let mut last_swap_status: Option<SwapCommitStatus> = None;
@@ -217,6 +221,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             &mut compile_successes,
             &mut compile_failures,
             &mut compile_diagnostics,
+            &mut last_compile_duration_ms,
+            &mut last_commit_duration_ms,
             &mut last_swap_status,
             &mut events,
         );
@@ -295,6 +301,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             &mut compile_successes,
             &mut compile_failures,
             &mut compile_diagnostics,
+            &mut last_compile_duration_ms,
+            &mut last_commit_duration_ms,
             &mut last_swap_status,
             &mut events,
         );
@@ -326,6 +334,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         window_width: window.map(|w| w.width),
         window_height: window.map(|w| w.height),
         has_in_flight_work,
+        last_compile_duration_ms,
+        last_commit_duration_ms,
     });
 
     RunnerSummary {
@@ -342,6 +352,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         swap_indicator_armed_count,
         swap_flash_peak_ticks,
         swap_flash_ticks_remaining,
+        last_compile_duration_ms,
+        last_commit_duration_ms,
         window,
         last_swap_status,
         has_in_flight_work,
@@ -356,6 +368,8 @@ fn observe_pipeline_results(
     compile_successes: &mut u32,
     compile_failures: &mut u32,
     compile_diagnostics: &mut Vec<String>,
+    last_compile_duration_ms: &mut Option<u64>,
+    last_commit_duration_ms: &mut Option<u64>,
     last_swap_status: &mut Option<SwapCommitStatus>,
     events: &mut Vec<RunnerEvent>,
 ) -> Option<(RequestId, SwapCommitStatus)> {
@@ -363,6 +377,7 @@ fn observe_pipeline_results(
     if let Some(result) = pipeline.last_compile_result() {
         if *last_seen_compile_id != Some(result.request_id) {
             *last_seen_compile_id = Some(result.request_id);
+            *last_compile_duration_ms = pipeline.last_compile_duration().map(duration_ms);
             match result.status {
                 CompileStatus::Success => {
                     *compile_successes += 1;
@@ -370,6 +385,7 @@ fn observe_pipeline_results(
                         request_id: result.request_id.0,
                         status: "success".to_string(),
                         diagnostics: Vec::new(),
+                        compile_duration_ms: *last_compile_duration_ms,
                     });
                 }
                 CompileStatus::Failed => {
@@ -390,6 +406,7 @@ fn observe_pipeline_results(
                         request_id: result.request_id.0,
                         status: "failed".to_string(),
                         diagnostics: event_diagnostics,
+                        compile_duration_ms: *last_compile_duration_ms,
                     });
                 }
             }
@@ -400,6 +417,7 @@ fn observe_pipeline_results(
         *last_swap_status = Some(result.status.clone());
         if *last_seen_commit_id != Some(result.request_id) {
             *last_seen_commit_id = Some(result.request_id);
+            *last_commit_duration_ms = pipeline.last_commit_duration().map(duration_ms);
             new_commit = Some((result.request_id, result.status.clone()));
             let status = match result.status {
                 SwapCommitStatus::Success => "success",
@@ -413,10 +431,16 @@ fn observe_pipeline_results(
                 swapped_fn_ids,
                 new_generation,
                 error: result.error.clone(),
+                commit_duration_ms: *last_commit_duration_ms,
             });
         }
     }
     new_commit
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    let millis = duration.as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 fn sleep_for_tick(tick_sleep_micros: u64) {
@@ -505,7 +529,8 @@ mod tests {
                 window_width: None,
                 window_height: None,
                 ticks_executed: _,
-                has_in_flight_work: false
+                has_in_flight_work: false,
+                ..
             }
         ));
         assert!(summary.events.iter().any(|event| matches!(
@@ -513,7 +538,8 @@ mod tests {
             RunnerEvent::CompileResult {
                 ref status,
                 request_id: _,
-                diagnostics: _
+                diagnostics: _,
+                ..
             } if status == "success"
         )));
         assert!(summary.events.iter().any(|event| matches!(
@@ -532,7 +558,8 @@ mod tests {
                 request_id: _,
                 swapped_fn_ids: _,
                 new_generation: _,
-                error: _
+                error: _,
+                ..
             } if status == "success"
         )));
         assert!(summary.events.iter().any(|event| matches!(
@@ -582,7 +609,8 @@ mod tests {
             RunnerEvent::CompileResult {
                 ref status,
                 request_id: _,
-                ref diagnostics
+                ref diagnostics,
+                ..
             } if status == "failed" && !diagnostics.is_empty()
         )));
         assert!(matches!(
@@ -598,7 +626,8 @@ mod tests {
                 window_width: None,
                 window_height: None,
                 ticks_executed: _,
-                has_in_flight_work: false
+                has_in_flight_work: false,
+                ..
             }
         ));
     }
@@ -642,7 +671,8 @@ mod tests {
                 request_id: _,
                 swapped_fn_ids: _,
                 new_generation: None,
-                ref error
+                ref error,
+                ..
             } if status == "failed" && error.as_deref() == Some("simulated swap rejection: layout mismatch")
         )));
     }

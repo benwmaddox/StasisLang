@@ -179,6 +179,12 @@ fn main() {
         "swap_flash_ticks_remaining={}",
         summary.swap_flash_ticks_remaining
     );
+    if let Some(compile_ms) = summary.last_compile_duration_ms {
+        println!("last_compile_duration_ms={compile_ms}");
+    }
+    if let Some(commit_ms) = summary.last_commit_duration_ms {
+        println!("last_commit_duration_ms={commit_ms}");
+    }
     println!("has_in_flight_work={}", summary.has_in_flight_work);
     if let Some(window) = summary.window {
         println!(

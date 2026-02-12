@@ -9,6 +9,7 @@ pub enum RunnerEvent {
         request_id: u64,
         status: String,
         diagnostics: Vec<String>,
+        compile_duration_ms: Option<u64>,
     },
     HookResult {
         request_id: u64,
@@ -26,6 +27,7 @@ pub enum RunnerEvent {
         swapped_fn_ids: Vec<u32>,
         new_generation: Option<u64>,
         error: Option<String>,
+        commit_duration_ms: Option<u64>,
     },
     Summary {
         ticks_executed: u32,
@@ -39,6 +41,8 @@ pub enum RunnerEvent {
         window_width: Option<u32>,
         window_height: Option<u32>,
         has_in_flight_work: bool,
+        last_compile_duration_ms: Option<u64>,
+        last_commit_duration_ms: Option<u64>,
     },
 }
 
@@ -68,6 +72,7 @@ mod tests {
             request_id: 7,
             status: "success".to_string(),
             diagnostics: Vec::new(),
+            compile_duration_ms: Some(12),
         };
 
         let json = serde_json::to_string(&event.with_schema_version())

@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 enum CompilerThreadMessage {
     Compile(CompileRequest),
@@ -41,10 +42,14 @@ pub struct DevHotSwapPipeline {
     pending_files: BTreeSet<PathBuf>,
     target_mode: TargetMode,
     in_flight_compile: Option<RequestId>,
+    in_flight_compile_started_at: Option<Instant>,
     in_flight_commit: Option<RequestId>,
+    in_flight_commit_started_at: Option<Instant>,
     next_request_id: u64,
     last_compile_result: Option<CompileResult>,
+    last_compile_duration: Option<Duration>,
     last_commit_result: Option<SwapCommitResult>,
+    last_commit_duration: Option<Duration>,
     compiler_thread: Option<JoinHandle<()>>,
 }
 
@@ -86,10 +91,14 @@ impl DevHotSwapPipeline {
             pending_files: BTreeSet::new(),
             target_mode,
             in_flight_compile: None,
+            in_flight_compile_started_at: None,
             in_flight_commit: None,
+            in_flight_commit_started_at: None,
             next_request_id: 1,
             last_compile_result: None,
+            last_compile_duration: None,
             last_commit_result: None,
+            last_commit_duration: None,
             compiler_thread: Some(compiler_thread),
         }
     }
@@ -149,6 +158,14 @@ impl DevHotSwapPipeline {
         self.last_commit_result.as_ref()
     }
 
+    pub fn last_compile_duration(&self) -> Option<Duration> {
+        self.last_compile_duration
+    }
+
+    pub fn last_commit_duration(&self) -> Option<Duration> {
+        self.last_commit_duration
+    }
+
     fn drain_file_changes(&mut self) {
         loop {
             match self.file_change_rx.try_recv() {
@@ -179,6 +196,7 @@ impl DevHotSwapPipeline {
             .compiler_tx
             .send(CompilerThreadMessage::Compile(request));
         self.in_flight_compile = Some(request_id);
+        self.in_flight_compile_started_at = Some(Instant::now());
     }
 
     fn drain_compile_results(&mut self) {
@@ -205,6 +223,10 @@ impl DevHotSwapPipeline {
                     self.last_compile_result = Some(result.clone());
                     if self.in_flight_compile == Some(result.request_id) {
                         self.in_flight_compile = None;
+                        self.last_compile_duration = self
+                            .in_flight_compile_started_at
+                            .take()
+                            .map(|started| started.elapsed());
                         if result.status == CompileStatus::Success {
                             self.enqueue_commit_request(
                                 result.request_id,
@@ -246,6 +268,7 @@ impl DevHotSwapPipeline {
         };
         let _ = self.commit_request_tx.send(request);
         self.in_flight_commit = Some(request_id);
+        self.in_flight_commit_started_at = Some(Instant::now());
     }
 
     fn drain_commit_results(&mut self) {
@@ -266,6 +289,10 @@ impl DevHotSwapPipeline {
                     self.last_commit_result = Some(result.clone());
                     if self.in_flight_commit == Some(result.request_id) {
                         self.in_flight_commit = None;
+                        self.last_commit_duration = self
+                            .in_flight_commit_started_at
+                            .take()
+                            .map(|started| started.elapsed());
                     }
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
