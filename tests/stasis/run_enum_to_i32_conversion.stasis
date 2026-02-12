@@ -1,5 +1,3 @@
-import "../../src/stdlib/stdlib.stasis";
-
 enum Phase {
     Idle = 10,
     Play = 11

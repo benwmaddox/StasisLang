@@ -1,0 +1,7 @@
+import "../../compiler/incremental_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+    compiler_set_source("function main(): i32 { for (let i: i32 = 0; i < 3; ) { return 0; } return 1; }");
+    return run_incremental_compiler();
+}

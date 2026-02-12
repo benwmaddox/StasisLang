@@ -1,175 +1,5 @@
 import "../src/stdlib/stdlib.stasis";
-
-const COMPILER_MAX_SOURCE: i32 = 65536;
-const COMPILER_MAX_TOKENS: i32 = 8192;
-const COMPILER_MAX_ERRORS: i32 = 64;
-const COMPILER_MAX_FILES: i32 = 128;
-const COMPILER_MAX_PATH: i32 = 260;
-const COMPILER_MAX_PARSE_GUARD: i32 = 8192;
-const COMPILER_MAX_PARAMS: i32 = 64;
-const COMPILER_MAX_ARGS: i32 = 256;
-const COMPILER_MAX_BODY_STMTS: i32 = 4096;
-const COMPILER_MAX_CALL_NEST: i32 = 256;
-
-enum CompilerErrorCode {
-    None = 0,
-    EntryMissingMain = 41,
-    EntryInvalidMainSignature = 42,
-    EntryMultipleMain = 43,
-    LexUnexpectedChar = 1001,
-    LexUnterminatedString = 1002,
-    LexTokenOverflow = 1003,
-    ParseExpectFunctionOrExtern = 2001,
-    ParseExpectFunctionAfterExtern = 2002,
-    ParseExpectIdentifier = 2003,
-    ParseExpectLParen = 2004,
-    ParseExpectRParen = 2005,
-    ParseExpectColon = 2006,
-    ParseExpectSemicolon = 2007,
-    ParseExpectLBrace = 2008,
-    ParseExpectRBrace = 2009,
-    ParseExpectExpression = 2010,
-    ParseExpectReturnExpr = 2011,
-    ParseItemGuardExhausted = 2012,
-    ParseParamGuardExhausted = 2013,
-    ParseArgGuardExhausted = 2014,
-    ParseBodyGuardExhausted = 2015,
-    ParseCallGuardExhausted = 2016,
-    ParseExpectAssignInLet = 2017,
-    ParseExpectRBracket = 2018,
-    IncrementalFileOverflow = 3001,
-    IncrementalFilePathEmpty = 3002
-}
-
-enum CompilerStatus {
-    Idle,
-    Ok,
-    LexError,
-    ParseError
-}
-
-enum TokenKind {
-    Invalid,
-    Identifier,
-    IntLiteral,
-    StringLiteral,
-    KwFunction,
-    KwExtern,
-    KwReturn,
-    KwLet,
-    KwIf,
-    KwElse,
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    LBracket,
-    RBracket,
-    Colon,
-    Semicolon,
-    Comma,
-    Dot,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Percent,
-    Assign,
-    PlusEq,
-    MinusEq,
-    StarEq,
-    SlashEq,
-    PercentEq,
-    EqEq,
-    NotEq,
-    Less,
-    LessEq,
-    Greater,
-    GreaterEq,
-    AndAnd,
-    OrOr,
-    Bang,
-    Eof
-}
-
-struct CompilerToken {
-    kind: TokenKind;
-    start: i32;
-    end: i32;
-    int_value: i32;
-    text_start: i32;
-    text_len: i32;
-}
-
-struct CompilerError {
-    code: i32;
-    pos: i32;
-    detail_a: i32;
-    detail_b: i32;
-}
-
-struct CompilerFile {
-    path: ascii[260];
-    source: ascii[65536];
-    source_len: i32;
-    source_hash: i32;
-    dirty: bool;
-    last_status: CompilerStatus;
-    parsed_function_count: i32;
-    parsed_extern_count: i32;
-    parsed_return_count: i32;
-    parsed_call_count: i32;
-    parsed_main_declaration_count: i32;
-    parsed_main_valid_i32_count: i32;
-    parsed_main_invalid_signature_count: i32;
-    last_error_code: i32;
-    last_error_pos: i32;
-    last_error_detail_a: i32;
-    last_error_detail_b: i32;
-}
-
-struct CompilerState {
-    source: ascii[65536];
-    source_len: i32;
-
-    files: CompilerFile[128];
-    file_count: i32;
-    current_file_index: i32;
-
-    tokens: CompilerToken[8192];
-    token_count: i32;
-    parse_index: i32;
-
-    status: CompilerStatus;
-    errors: CompilerError[64];
-    error_count: i32;
-
-    parsed_function_count: i32;
-    parsed_extern_count: i32;
-    parsed_return_count: i32;
-    parsed_call_count: i32;
-    parsed_let_count: i32;
-    parsed_if_count: i32;
-    parsed_assignment_count: i32;
-    parsed_main_declaration_count: i32;
-    parsed_main_valid_i32_count: i32;
-    parsed_main_invalid_signature_count: i32;
-
-    captured_identifier_start: i32;
-    captured_identifier_len: i32;
-    current_signature_name_start: i32;
-    current_signature_name_len: i32;
-    current_signature_param_count: i32;
-    current_signature_return_type_start: i32;
-    current_signature_return_type_len: i32;
-
-    incremental_scanned_files: i32;
-    incremental_parsed_files: i32;
-    incremental_reused_files: i32;
-    incremental_failed_files: i32;
-}
-
-global Compiler: CompilerState;
+import "compiler_state.stasis";
 
 function compiler_reset_state(): void {
     ascii_clear(Compiler.source);
@@ -184,6 +14,11 @@ function compiler_reset_state(): void {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_let_count = 0;
+    Compiler.parsed_if_count = 0;
+    Compiler.parsed_for_count = 0;
+    Compiler.parsed_foreach_count = 0;
+    Compiler.parsed_assignment_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -297,6 +132,8 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_call_count = 0;
     Compiler.parsed_let_count = 0;
     Compiler.parsed_if_count = 0;
+    Compiler.parsed_for_count = 0;
+    Compiler.parsed_foreach_count = 0;
     Compiler.parsed_assignment_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
@@ -414,6 +251,8 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_call_count = 0;
     Compiler.parsed_let_count = 0;
     Compiler.parsed_if_count = 0;
+    Compiler.parsed_for_count = 0;
+    Compiler.parsed_foreach_count = 0;
     Compiler.parsed_assignment_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
@@ -451,50 +290,6 @@ function compiler_run_incremental_pipeline(): i32 {
 
 function run_incremental_compiler(): i32 {
     return compiler_run_incremental_pipeline();
-}
-
-function compiler_get_file_count(): i32 {
-    return Compiler.file_count;
-}
-
-function compiler_get_scanned_file_count(): i32 {
-    return Compiler.incremental_scanned_files;
-}
-
-function compiler_get_parsed_file_count(): i32 {
-    return Compiler.incremental_parsed_files;
-}
-
-function compiler_get_reused_file_count(): i32 {
-    return Compiler.incremental_reused_files;
-}
-
-function compiler_get_failed_file_count(): i32 {
-    return Compiler.incremental_failed_files;
-}
-
-function compiler_get_main_declaration_count(): i32 {
-    return Compiler.parsed_main_declaration_count;
-}
-
-function compiler_get_main_valid_i32_count(): i32 {
-    return Compiler.parsed_main_valid_i32_count;
-}
-
-function compiler_get_main_invalid_signature_count(): i32 {
-    return Compiler.parsed_main_invalid_signature_count;
-}
-
-function compiler_get_let_count(): i32 {
-    return Compiler.parsed_let_count;
-}
-
-function compiler_get_if_count(): i32 {
-    return Compiler.parsed_if_count;
-}
-
-function compiler_get_assignment_count(): i32 {
-    return Compiler.parsed_assignment_count;
 }
 
 function compiler_validate_entry_main_i32(): i32 {
@@ -660,6 +455,33 @@ function compiler_is_keyword_else(start: i32, len: i32): bool {
     return true;
 }
 
+function compiler_is_keyword_for(start: i32, len: i32): bool {
+    if (len != 3) { return false; }
+    if (Compiler.source[start + 0] != 102) { return false; } // f
+    if (Compiler.source[start + 1] != 111) { return false; } // o
+    if (Compiler.source[start + 2] != 114) { return false; } // r
+    return true;
+}
+
+function compiler_is_keyword_foreach(start: i32, len: i32): bool {
+    if (len != 7) { return false; }
+    if (Compiler.source[start + 0] != 102) { return false; } // f
+    if (Compiler.source[start + 1] != 111) { return false; } // o
+    if (Compiler.source[start + 2] != 114) { return false; } // r
+    if (Compiler.source[start + 3] != 101) { return false; } // e
+    if (Compiler.source[start + 4] != 97) { return false; }  // a
+    if (Compiler.source[start + 5] != 99) { return false; }  // c
+    if (Compiler.source[start + 6] != 104) { return false; } // h
+    return true;
+}
+
+function compiler_is_keyword_in(start: i32, len: i32): bool {
+    if (len != 2) { return false; }
+    if (Compiler.source[start + 0] != 105) { return false; } // i
+    if (Compiler.source[start + 1] != 110) { return false; } // n
+    return true;
+}
+
 function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     let len: i32 = end - start;
     if (compiler_is_keyword_function(start, len)) {
@@ -679,6 +501,15 @@ function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     }
     if (compiler_is_keyword_else(start, len)) {
         return compiler_emit_token(TokenKind.KwElse, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_for(start, len)) {
+        return compiler_emit_token(TokenKind.KwFor, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_foreach(start, len)) {
+        return compiler_emit_token(TokenKind.KwForeach, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_in(start, len)) {
+        return compiler_emit_token(TokenKind.KwIn, start, end, 0, start, len);
     }
     return compiler_emit_token(TokenKind.Identifier, start, end, 0, start, len);
 }
@@ -1402,6 +1233,95 @@ function parser_parse_if_statement(): bool {
     return true;
 }
 
+function parser_parse_let_clause_without_semicolon(): bool {
+    if (!parser_expect_identifier()) {
+        return false;
+    }
+    let has_type: i32 = 0;
+    if (parser_match(TokenKind.Colon)) {
+        has_type = 1;
+        if (!parser_parse_type_name()) {
+            return false;
+        }
+    }
+    if (!parser_match(TokenKind.Assign)) {
+        parser_error(CompilerErrorCode.ParseExpectAssignInLet);
+        return false;
+    }
+    Compiler.parsed_assignment_count += 1;
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    if (has_type == 1) {
+        // Declaration with explicit type and initializer.
+    }
+    return true;
+}
+
+function parser_parse_for_statement(): bool {
+    Compiler.parsed_for_count += 1;
+    if (!parser_expect(TokenKind.LParen, CompilerErrorCode.ParseExpectLParen)) {
+        return false;
+    }
+
+    if (parser_match(TokenKind.KwLet)) {
+        Compiler.parsed_let_count += 1;
+        if (!parser_parse_let_clause_without_semicolon()) {
+            return false;
+        }
+    } else {
+        if (!parser_parse_expression()) {
+            return false;
+        }
+    }
+
+    if (!parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon)) {
+        return false;
+    }
+
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    if (!parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon)) {
+        return false;
+    }
+
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    if (!parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen)) {
+        return false;
+    }
+
+    return parser_parse_block();
+}
+
+function parser_parse_foreach_statement(): bool {
+    Compiler.parsed_foreach_count += 1;
+    if (!parser_expect(TokenKind.LParen, CompilerErrorCode.ParseExpectLParen)) {
+        return false;
+    }
+    if (!parser_expect_identifier()) {
+        return false;
+    }
+    if (parser_match(TokenKind.Comma)) {
+        if (!parser_expect_identifier()) {
+            return false;
+        }
+    }
+    if (!parser_expect(TokenKind.KwIn, CompilerErrorCode.ParseExpectIn)) {
+        return false;
+    }
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    if (!parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen)) {
+        return false;
+    }
+
+    return parser_parse_block();
+}
+
 function parser_parse_statement(): bool {
     if (parser_match(TokenKind.KwLet)) {
         Compiler.parsed_let_count += 1;
@@ -1409,6 +1329,12 @@ function parser_parse_statement(): bool {
     }
     if (parser_match(TokenKind.KwIf)) {
         return parser_parse_if_statement();
+    }
+    if (parser_match(TokenKind.KwFor)) {
+        return parser_parse_for_statement();
+    }
+    if (parser_match(TokenKind.KwForeach)) {
+        return parser_parse_foreach_statement();
     }
     if (parser_current_kind() == TokenKind.LBrace) {
         return parser_parse_block();

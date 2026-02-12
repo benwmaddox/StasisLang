@@ -20,10 +20,6 @@ if not defined STASIS_CRANELIFT_AOT (
   set "STASIS_CRANELIFT_AOT=%AOT_EXE%"
 )
 
-if not defined STASIS_BOOTSTRAP_NO_PREPROCESS (
-  set "STASIS_BOOTSTRAP_NO_PREPROCESS=1"
-)
-
 if exist "C:\Program Files\LLVM\bin\clang.exe" (
   set "PATH=C:\Program Files\LLVM\bin;%PATH%"
 )

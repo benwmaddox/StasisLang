@@ -47,6 +47,21 @@ function Map-IfStasisPath(
 }
 
 function Transform-StasisSource([string] $Text) {
+    # enum_to_i32 intrinsic surface:
+    # rewrite to an injected builtin helper so source uses intrinsic-style call shape
+    # without requiring per-file stdlib declarations during bootstrap.
+    $Text = [regex]::Replace(
+        $Text,
+        '\benum_to_i32\s*\(',
+        'stasisBuiltinEnumToI32(')
+
+    if (
+        $Text.Contains("stasisBuiltinEnumToI32(") -and
+        (-not [regex]::IsMatch($Text, '(?m)^[ \t]*function[ \t]+stasisBuiltinEnumToI32[ \t]*\('))
+    ) {
+        $Text = $Text + "`r`nfunction stasisBuiltinEnumToI32(value: i32): i32 {`r`n    return value;`r`n}`r`n"
+    }
+
     # Receiver-form mutating conversions -> legacy bootstrap calls.
     # from_i32: target = i32_to_f32(expr);
     $Text = [regex]::Replace(

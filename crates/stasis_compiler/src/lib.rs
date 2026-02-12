@@ -390,6 +390,40 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cranelift_run_helper_parser_s4_loops_counts_fixture() {
+        let source = fixture_path("run_parser_s4_loops_counts.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected loop parse success for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_parser_invalid_for_missing_step_fixture() {
+        let source = fixture_path("run_parser_invalid_for_missing_step.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "expected parse error exit code 2 for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn cranelift_run_helper_enum_to_i32_conversion_fixture() {
         let source = fixture_path("run_enum_to_i32_conversion.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());

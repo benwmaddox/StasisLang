@@ -4,6 +4,8 @@ This directory is for compiler logic written in `.stasis`.
 
 Planned primary entrypoint:
 - `compiler/incremental_compiler.stasis`
+- Shared compiler state/types:
+- `compiler/compiler_state.stasis`
 
 Ownership boundary (Rewrite V1):
 - `.stasis` owns lexer, parser, semantic checks, diagnostics, and incremental compile policy.
@@ -25,6 +27,7 @@ Current entrypoint validation API in `compiler/incremental_compiler.stasis`:
 Current single-source execution mode:
 - `compiler_set_source(...)` updates the in-memory source buffer directly.
 - `run_incremental_compiler()` and `run_incremental_compiler_with_main_entry()` parse/validate that single source when no file database entries are present.
+- Fixtures can read compiler metrics directly from `Compiler.*` fields (no trivial getter wrappers).
 
 Console extern naming (Rewrite V1):
 - Source-level preferred name: `print_i32`.
