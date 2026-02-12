@@ -178,6 +178,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Unchanged function bodies skip backend regeneration.
 - Tests:
 - Incremental cache hit/miss tests and file-level invalidation tests.
+- Current runtime coverage fixture:
+- `tests/stasis/run_incremental_file_db_counts.stasis` (exercises `compiler_upsert_file` parse + reuse counters).
 - Done gate:
 - Semantic pass always runs per changed file; backend work is correctly gated.
 - Status: `pending`
@@ -285,9 +287,4 @@ Each PR must include:
 ## Backlog
 
 - Add `schema_version` field to every JSONL runner event payload for strict editor/tool compatibility negotiation.
-- Cranelift lowering: support nested array field base expressions in stores/loads so file-db source/path writes in `.stasis` can run safely (currently blocks runtime coverage of `compiler_upsert_file` path).
-- Bootstrap compiler source sync + fix plan (from `main`):
-- Pull `Stasis.Compiler` and `Stasis.Cli` source needed by `bootstrap/windows/stasis-cli/*.dll`.
-- In lowering/codegen, add chained l-value/r-value support for `global.structArray[idx].innerArray[idx2]` in both load and store.
-- Add regression tests in bootstrap compiler tests for nested load/store + `compiler_upsert_file` style paths.
-- After fix, flip `.stasis` `compiler_file_db_supported()` guard to `true` and enable file-db runtime fixtures.
+- Add dedicated `Stasis.Compiler.Tests` coverage for chained array-field load/store paths (`a[i].field[j]`) to keep the bootstrap backend fix pinned.

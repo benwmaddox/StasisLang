@@ -37,8 +37,7 @@ enum CompilerErrorCode {
     ParseExpectRBracket = 2018,
     ParseExpectIn = 2019,
     IncrementalFileOverflow = 3001,
-    IncrementalFilePathEmpty = 3002,
-    IncrementalFileDbBackendUnsupported = 3003
+    IncrementalFilePathEmpty = 3002
 }
 
 enum CompilerStatus {

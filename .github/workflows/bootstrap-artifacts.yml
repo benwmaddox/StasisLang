@@ -1,0 +1,37 @@
+name: Bootstrap Artifacts
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  build-bootstrap-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build bootstrap CLI
+        run: dotnet build Stasis.Cli/Stasis.Cli.csproj -c Release
+
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-cli-${{ matrix.os }}
+          path: Stasis.Cli/bin/Release/net9.0/**

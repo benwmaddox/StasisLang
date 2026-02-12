@@ -1,0 +1,28 @@
+import "../../compiler/incremental_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+
+    if (!compiler_upsert_file("main_a.stasis", "function main(): i32 { let x: i32 = 1; if (x == 1) { x += 1; } return x; }")) {
+        return 40;
+    }
+
+    if (run_incremental_compiler() != 0) { return 41; }
+    if (Compiler.file_count != 1) { return 42; }
+    if (Compiler.incremental_scanned_files != 1) { return 43; }
+    if (Compiler.incremental_parsed_files != 1) { return 44; }
+    if (Compiler.incremental_reused_files != 0) { return 45; }
+    if (Compiler.parsed_let_count != 1) { return 46; }
+    if (Compiler.parsed_if_count != 1) { return 47; }
+    if (Compiler.parsed_assignment_count != 2) { return 48; }
+
+    if (run_incremental_compiler() != 0) { return 49; }
+    if (Compiler.incremental_scanned_files != 1) { return 50; }
+    if (Compiler.incremental_parsed_files != 0) { return 51; }
+    if (Compiler.incremental_reused_files != 1) { return 52; }
+    if (Compiler.parsed_let_count != 1) { return 53; }
+    if (Compiler.parsed_if_count != 1) { return 54; }
+    if (Compiler.parsed_assignment_count != 2) { return 55; }
+
+    return 0;
+}

@@ -1,0 +1,19 @@
+import "../../compiler/incremental_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+
+    Compiler.files[0].path[0] = 65;
+    if (u8_to_i32(Compiler.files[0].path[0]) != 65) { return 80; }
+
+    ascii_clear(Compiler.files[0].source);
+    ascii_copy(Compiler.files[0].source, "abc");
+    Compiler.files[0].source_len = length(Compiler.files[0].source);
+    if (Compiler.files[0].source_len != 3) { return 81; }
+
+    if (!compiler_upsert_file("file_a.stasis", "function main(): i32 { return 0; }")) { return 82; }
+    if (run_incremental_compiler() != 0) { return 83; }
+    if (Compiler.incremental_parsed_files != 1) { return 84; }
+
+    return 0;
+}

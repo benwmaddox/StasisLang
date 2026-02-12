@@ -85,17 +85,44 @@ function Transform-StasisSource([string] $Text) {
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dllPath = Join-Path $scriptDir "stasis-cli\Stasis.Cli.dll"
-if (-not (Test-Path $dllPath)) {
-    Write-Error "error: bootstrap compiler not found at '$dllPath'"
-    exit 1
-}
-
 $repoRoot = Resolve-RealPath (Join-Path $scriptDir "..\..")
 if ($null -eq $repoRoot) {
     Write-Error "error: could not resolve repository root"
     exit 1
 }
+
+$prebuiltDllPath = Join-Path $scriptDir "stasis-cli\Stasis.Cli.dll"
+$sourceProjectPath = Join-Path $repoRoot "Stasis.Cli\Stasis.Cli.csproj"
+$sourceDllPath = Join-Path $repoRoot "Stasis.Cli\bin\Release\net9.0\Stasis.Cli.dll"
+
+$dllPath = $prebuiltDllPath
+if ($env:STASIS_BOOTSTRAP_USE_PREBUILT -ne "1" -and (Test-Path $sourceProjectPath)) {
+    if (-not (Test-Path $sourceDllPath)) {
+        Push-Location $repoRoot
+        try {
+            & dotnet build $sourceProjectPath -c Release
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "error: failed to build bootstrap compiler from source."
+                exit $LASTEXITCODE
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+
+    if (Test-Path $sourceDllPath) {
+        $dllPath = $sourceDllPath
+    }
+}
+
+if (-not (Test-Path $dllPath)) {
+    Write-Error "error: bootstrap compiler not found at '$dllPath'"
+    exit 1
+}
+
+$stableTempRoot = Join-Path $repoRoot ".stasis_cache\tmp"
+New-Item -ItemType Directory -Path $stableTempRoot -Force | Out-Null
+$env:STASIS_TEMP_DIR = $stableTempRoot
 
 $argsList = @()
 if ($ForwardArgs) {

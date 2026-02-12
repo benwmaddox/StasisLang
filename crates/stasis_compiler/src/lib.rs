@@ -484,8 +484,8 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn cranelift_run_helper_incremental_file_db_unsupported_fixture() {
-        let source = fixture_path("run_incremental_file_db_unsupported.stasis");
+    fn cranelift_run_helper_incremental_file_db_counts_fixture() {
+        let source = fixture_path("run_incremental_file_db_counts.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());
 
         let output = run_cranelift_helper(&source);
@@ -493,7 +493,24 @@ mod tests {
         assert_eq!(
             output.status.code(),
             Some(0),
-            "expected clean unsupported-file-db behavior for {}\n{}",
+            "expected incremental file-db parse success for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_chained_array_field_access_fixture() {
+        let source = fixture_path("run_chained_array_field_access.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected chained array-field access success for {}\n{}",
             source.display(),
             text
         );
