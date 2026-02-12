@@ -111,7 +111,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Rust: expression lowering/eval codegen primitives.
 - `.stasis`: semantic rules and compile pipeline ordering.
 - Scope:
-- Add `let`, assignment, infix arithmetic/comparison, block scopes, `if`.
+- Add `let`, assignment, infix arithmetic/comparison, block scopes, and `if`/`else if`/`else`.
 - Deliverable:
 - Small real programs beyond single return execute correctly.
 - Tests:

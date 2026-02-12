@@ -244,10 +244,18 @@ Rules:
 ```stasis
 if (condition) {
     // ...
+} else if (otherCondition) {
+    // ...
 } else {
     // ...
 }
 ```
+
+Rules:
+- `else if` is supported as a direct language form.
+- `else if` chains are evaluated top-to-bottom; the first `true` branch executes.
+- `else` is optional.
+- If no branch condition is `true` and no `else` is present, control falls through.
 
 ### 6.5 Looping
 
@@ -364,6 +372,18 @@ Conceptual lowered targets:
 - `Enemy_transform_position_x[i] += 2.0`
 
 Nested struct paths are flattened deterministically during lowering, and the current iteration index is applied at the array element dimension.
+
+#### 6.5.5 `continue` (planned post-checklist feature)
+
+`continue` is planned for the new compiler, but intentionally deferred until after all Rewrite V1 checklist slices (S0-S12) are complete.
+
+Planned behavior:
+- Valid only inside `for` and `foreach` loops.
+- Skips the remainder of the current iteration body.
+- Proceeds to the next iteration according to the loop's normal step/iteration rule.
+
+Status:
+- Documented target behavior only; not required in current S0-S12 implementation.
 
 ### 6.6 Return
 
