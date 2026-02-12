@@ -162,9 +162,12 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Stable layout hash for unchanged declarations.
 - Tests:
 - Layout determinism tests across repeated compiles.
+- Current runtime coverage fixtures:
+- `tests/stasis/run_layout_hash_deterministic.stasis`
+- `tests/stasis/run_layout_hash_changes_on_layout_update.stasis`
 - Done gate:
 - Layout-affecting changes are detected reliably.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S7 - Incremental Compiler V1
 - Language:

@@ -61,6 +61,7 @@ enum TokenKind {
     KwFor,
     KwForeach,
     KwIn,
+    KwGlobal,
     LParen,
     RParen,
     LBrace,
@@ -126,6 +127,8 @@ struct CompilerFile {
     parsed_for_count: i32;
     parsed_foreach_count: i32;
     parsed_assignment_count: i32;
+    parsed_global_count: i32;
+    layout_hash: i32;
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -160,6 +163,8 @@ struct CompilerState {
     parsed_for_count: i32;
     parsed_foreach_count: i32;
     parsed_assignment_count: i32;
+    parsed_global_count: i32;
+    layout_hash: i32;
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;

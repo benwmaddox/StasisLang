@@ -19,6 +19,8 @@ function compiler_reset_state(): void {
     Compiler.parsed_for_count = 0;
     Compiler.parsed_foreach_count = 0;
     Compiler.parsed_assignment_count = 0;
+    Compiler.parsed_global_count = 0;
+    Compiler.layout_hash = 216613626;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -51,6 +53,19 @@ function compiler_hash_ascii(src: ascii[]): i32 {
         hash = hash * 16777619 + u8_to_i32(src[i]) + 1;
     }
     return hash;
+}
+
+function compiler_hash_mix(hash: i32, value: i32): i32 {
+    return hash * 16777619 + value + 1;
+}
+
+function compiler_hash_source_span(hash: i32, start: i32, len: i32): i32 {
+    let result: i32 = hash;
+    let i: i32 = 0;
+    for (i = 0; i < len; i += 1) {
+        result = compiler_hash_mix(result, u8_to_i32(Compiler.source[start + i]));
+    }
+    return result;
 }
 
 function compiler_find_file(path: ascii[]): i32 {
@@ -112,6 +127,8 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     Compiler.files[new_index].parsed_for_count = 0;
     Compiler.files[new_index].parsed_foreach_count = 0;
     Compiler.files[new_index].parsed_assignment_count = 0;
+    Compiler.files[new_index].parsed_global_count = 0;
+    Compiler.files[new_index].layout_hash = 216613626;
     Compiler.files[new_index].parsed_main_declaration_count = 0;
     Compiler.files[new_index].parsed_main_valid_i32_count = 0;
     Compiler.files[new_index].parsed_main_invalid_signature_count = 0;
@@ -140,6 +157,8 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_for_count = 0;
     Compiler.parsed_foreach_count = 0;
     Compiler.parsed_assignment_count = 0;
+    Compiler.parsed_global_count = 0;
+    Compiler.layout_hash = 216613626;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -205,6 +224,8 @@ function compiler_run_incremental_pipeline(): i32 {
             Compiler.parsed_for_count = 0;
             Compiler.parsed_foreach_count = 0;
             Compiler.parsed_assignment_count = 0;
+            Compiler.parsed_global_count = 0;
+            Compiler.layout_hash = 216613626;
             Compiler.parsed_main_declaration_count = 0;
             Compiler.parsed_main_valid_i32_count = 0;
             Compiler.parsed_main_invalid_signature_count = 0;
@@ -220,6 +241,8 @@ function compiler_run_incremental_pipeline(): i32 {
                 Compiler.files[i].parsed_for_count = 0;
                 Compiler.files[i].parsed_foreach_count = 0;
                 Compiler.files[i].parsed_assignment_count = 0;
+                Compiler.files[i].parsed_global_count = 0;
+                Compiler.files[i].layout_hash = 216613626;
                 Compiler.files[i].parsed_main_declaration_count = 0;
                 Compiler.files[i].parsed_main_valid_i32_count = 0;
                 Compiler.files[i].parsed_main_invalid_signature_count = 0;
@@ -238,6 +261,8 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_for_count = 0;
                     Compiler.files[i].parsed_foreach_count = 0;
                     Compiler.files[i].parsed_assignment_count = 0;
+                    Compiler.files[i].parsed_global_count = 0;
+                    Compiler.files[i].layout_hash = 216613626;
                     Compiler.files[i].parsed_main_declaration_count = 0;
                     Compiler.files[i].parsed_main_valid_i32_count = 0;
                     Compiler.files[i].parsed_main_invalid_signature_count = 0;
@@ -254,6 +279,8 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_for_count = Compiler.parsed_for_count;
                     Compiler.files[i].parsed_foreach_count = Compiler.parsed_foreach_count;
                     Compiler.files[i].parsed_assignment_count = Compiler.parsed_assignment_count;
+                    Compiler.files[i].parsed_global_count = Compiler.parsed_global_count;
+                    Compiler.files[i].layout_hash = Compiler.layout_hash;
                     Compiler.files[i].parsed_main_declaration_count = Compiler.parsed_main_declaration_count;
                     Compiler.files[i].parsed_main_valid_i32_count = Compiler.parsed_main_valid_i32_count;
                     Compiler.files[i].parsed_main_invalid_signature_count = Compiler.parsed_main_invalid_signature_count;
@@ -279,6 +306,8 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_for_count = 0;
     Compiler.parsed_foreach_count = 0;
     Compiler.parsed_assignment_count = 0;
+    Compiler.parsed_global_count = 0;
+    Compiler.layout_hash = 216613626;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -294,6 +323,8 @@ function compiler_run_incremental_pipeline(): i32 {
         Compiler.parsed_for_count += Compiler.files[i].parsed_for_count;
         Compiler.parsed_foreach_count += Compiler.files[i].parsed_foreach_count;
         Compiler.parsed_assignment_count += Compiler.files[i].parsed_assignment_count;
+        Compiler.parsed_global_count += Compiler.files[i].parsed_global_count;
+        Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, Compiler.files[i].layout_hash);
         Compiler.parsed_main_declaration_count += Compiler.files[i].parsed_main_declaration_count;
         Compiler.parsed_main_valid_i32_count += Compiler.files[i].parsed_main_valid_i32_count;
         Compiler.parsed_main_invalid_signature_count += Compiler.files[i].parsed_main_invalid_signature_count;
@@ -512,6 +543,17 @@ function compiler_is_keyword_in(start: i32, len: i32): bool {
     return true;
 }
 
+function compiler_is_keyword_global(start: i32, len: i32): bool {
+    if (len != 6) { return false; }
+    if (Compiler.source[start + 0] != 103) { return false; } // g
+    if (Compiler.source[start + 1] != 108) { return false; } // l
+    if (Compiler.source[start + 2] != 111) { return false; } // o
+    if (Compiler.source[start + 3] != 98) { return false; }  // b
+    if (Compiler.source[start + 4] != 97) { return false; }  // a
+    if (Compiler.source[start + 5] != 108) { return false; } // l
+    return true;
+}
+
 function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     let len: i32 = end - start;
     if (compiler_is_keyword_function(start, len)) {
@@ -540,6 +582,9 @@ function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     }
     if (compiler_is_keyword_in(start, len)) {
         return compiler_emit_token(TokenKind.KwIn, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_global(start, len)) {
+        return compiler_emit_token(TokenKind.KwGlobal, start, end, 0, start, len);
     }
     return compiler_emit_token(TokenKind.Identifier, start, end, 0, start, len);
 }
@@ -849,7 +894,23 @@ function parser_expect_identifier_capture(): bool {
 }
 
 function parser_parse_type_name(): bool {
-    return parser_expect_identifier();
+    if (!parser_expect_identifier()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        if (!parser_match(TokenKind.LBracket)) {
+            return true;
+        }
+        if (parser_current_kind() == TokenKind.IntLiteral) {
+            Compiler.parse_index += 1;
+        }
+        if (!parser_expect(TokenKind.RBracket, CompilerErrorCode.ParseExpectRBracket)) {
+            return false;
+        }
+    }
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
+    return false;
 }
 
 function parser_identifier_text_eq(start: i32, len: i32, expected: ascii[]): bool {
@@ -882,6 +943,74 @@ function parser_record_signature_main_entry(): void {
     } else {
         Compiler.parsed_main_invalid_signature_count += 1;
     }
+}
+
+function parser_mix_layout_identifier_capture(): void {
+    Compiler.layout_hash = compiler_hash_source_span(
+        Compiler.layout_hash,
+        Compiler.captured_identifier_start,
+        Compiler.captured_identifier_len
+    );
+}
+
+function parser_parse_type_name_layout_hash(): bool {
+    if (!parser_expect_identifier_capture()) {
+        return false;
+    }
+    parser_mix_layout_identifier_capture();
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        if (!parser_match(TokenKind.LBracket)) {
+            return true;
+        }
+        Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, 91);
+        if (parser_current_kind() == TokenKind.IntLiteral) {
+            Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, Compiler.tokens[Compiler.parse_index].int_value);
+            Compiler.parse_index += 1;
+        } else {
+            Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, -1);
+        }
+        if (!parser_expect(TokenKind.RBracket, CompilerErrorCode.ParseExpectRBracket)) {
+            return false;
+        }
+        Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, 93);
+    }
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
+    return false;
+}
+
+function parser_parse_global_declaration(): bool {
+    Compiler.parsed_global_count += 1;
+    Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, 103); // g
+    if (!parser_expect_identifier_capture()) {
+        return false;
+    }
+    parser_mix_layout_identifier_capture();
+    if (!parser_expect(TokenKind.LBrace, CompilerErrorCode.ParseExpectLBrace)) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_BODY_STMTS; guard += 1) {
+        if (parser_match(TokenKind.RBrace)) {
+            return true;
+        }
+        if (!parser_expect_identifier_capture()) {
+            return false;
+        }
+        parser_mix_layout_identifier_capture();
+        if (!parser_expect(TokenKind.Colon, CompilerErrorCode.ParseExpectColon)) {
+            return false;
+        }
+        if (!parser_parse_type_name_layout_hash()) {
+            return false;
+        }
+        if (!parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon)) {
+            return false;
+        }
+        Compiler.layout_hash = compiler_hash_mix(Compiler.layout_hash, 59); // ;
+    }
+    parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
+    return false;
 }
 
 function parser_parse_param_list(): bool {
@@ -1391,6 +1520,10 @@ function parser_parse_function_body(): bool {
 }
 
 function parser_parse_item(): bool {
+    if (parser_match(TokenKind.KwGlobal)) {
+        return parser_parse_global_declaration();
+    }
+
     if (parser_match(TokenKind.KwExtern)) {
         if (!parser_expect(TokenKind.KwFunction, CompilerErrorCode.ParseExpectFunctionAfterExtern)) {
             return false;

@@ -7,6 +7,8 @@
 - `compiler/` holds compiler source written in Stasis.
 - Planned primary orchestration file is `compiler/incremental_compiler.stasis`.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
+- `Stasis.Compiler/` and `Stasis.Cli/` are bootstrap compiler sources imported from `main` for branch compatibility.
+- Treat `Stasis.Compiler/` + `Stasis.Cli/` as bootstrap-only (not the long-term Rewrite V1 self-hosted compiler target).
 - `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
 - `apps/stasis` is the single in-process graphical runner app.

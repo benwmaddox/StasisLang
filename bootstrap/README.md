@@ -2,6 +2,13 @@
 
 This folder contains the bootstrap compiler runtime used while Rewrite V1 self-hosting is in progress.
 
+Bootstrap source in this branch:
+
+- `Stasis.Compiler/`
+- `Stasis.Cli/`
+
+These are retained specifically as bootstrap compiler sources for compatibility/testing while self-hosted compiler logic continues to move into `.stasis`.
+
 ## Location
 
 - Compiler CLI binaries: `bootstrap/windows/stasis-cli/`

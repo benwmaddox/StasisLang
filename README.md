@@ -16,6 +16,9 @@ Everything else is intentionally rebuilt around a minimal Rust-first architectur
   Compiler pipeline script. Core pass orchestration lives in `.stasis`.
 - `crates/stasis_compiler`
   Rust substrate/binding layer used by the Stasis compiler orchestration.
+- `Stasis.Compiler/` and `Stasis.Cli/`
+  Bootstrap compiler source imported from `main` for compatibility/testing in this branch.
+  These are explicitly bootstrap-only and not the Rewrite V1 self-hosted compiler target.
 - `crates/stasis_jit`
   Cranelift code generation management for JIT (dev) and AOT (prod), plus function pointer table support for hot swap flows.
 - `crates/stasis_runner`
