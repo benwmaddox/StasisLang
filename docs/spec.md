@@ -88,7 +88,9 @@ Rules:
 - `ascii[N]` payload bytes must be valid single-byte ASCII.
 - `utf8[N]` payload bytes must be valid UTF-8.
 - For `utf8[N]`, `char_length` must match decoded character count.
-- Mutations to string payloads must keep header values synchronized with payload contents.
+- `ascii[N]` allows direct payload byte writes; written bytes must remain in ASCII range (`0..127`), and header values must remain consistent.
+- `utf8[N]` payload mutation must go through checked helper APIs (direct raw-byte mutation is not allowed in source-level semantics).
+- Mutations must keep header values synchronized with payload contents.
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
 ### 4.3 Numeric Conversion Semantics
@@ -144,6 +146,8 @@ Rules:
 - Struct/array element expressions can infer local type when source type is uniquely known.
 - Example: `let enemy = state.enemies[0];` infers `Enemy` element view/reference type.
 - A binding inferred from an element expression aliases that element; it is not an implicit copy.
+- For primitive locals, `let b = a;` copies the primitive value.
+- For struct/element references, `let b = a;` binds another alias to the same referenced element.
 - If inference has multiple valid candidate types, declaration is rejected with an ambiguity diagnostic and requires explicit annotation.
 - Numeric literal defaults are deterministic:
 - integer literals infer as `i32` by default
@@ -169,6 +173,8 @@ Logical operators are:
 Semantics:
 - `&&` and `||` are short-circuit operators with left-to-right evaluation.
 - `!` is unary logical negation.
+- Operands for logical operators must be `bool`.
+- Logical operator results are `bool`.
 
 ### 5.3 Assignment Operators
 
@@ -278,6 +284,7 @@ Rules:
 - `condition` is required, evaluated before each iteration, and must be `bool`.
 - `step` is required and runs after each body execution.
 - A variable declared in `init` is scoped to the loop (condition, step, and body).
+- A variable declared in `init` must not shadow an existing local variable name from an enclosing scope; shadowing is a compile-time error.
 - Omitting any of `init`, `condition`, or `step` is a compile-time error.
 - `for` lowering is explicit control flow equivalent to:
 - run `init`
@@ -423,6 +430,8 @@ If declarations share a function name, they must use the same parameter count.
 Struct and array returns are allowed.
 
 Rewrite V1 treats these as strongly typed references/views, not implicit by-value copies.
+- Struct/array returns must reference global-backed storage (for example a global struct field/element path).
+- Struct-typed temporaries are not materialized as standalone local value objects in Rewrite V1.
 
 ## 8. Enums
 
@@ -442,6 +451,8 @@ Rules:
 - Enum comparisons and assignments must be type-correct.
 - Enum underlying type is `i32`.
 - Explicit enum member values must be within `i32` range; out-of-range values are compile-time errors.
+- No implicit enum <-> `i32` conversion is allowed.
+- Enum/integer conversion requires explicit conversion helpers.
 
 ## 9. Modules and Imports
 
@@ -457,8 +468,12 @@ Rules:
 - Imports are resolved relative to the importing file.
 - Imported files are included once.
 - Import graphs are compilation graph edges, not textual expansion.
+- Import cycles are hard errors.
 - Ambiguous references across modules must produce diagnostics.
-- Detailed tie-break/qualification behavior across colliding module symbols is intentionally deferred; Rewrite V1 requires ambiguity to fail explicitly.
+- Disambiguation is explicit `module.symbol` only.
+- For Rewrite V1, `module` is the imported file basename (without extension).
+- When a symbol name collides across imports, unqualified use is invalid and must be rewritten as `module.symbol`.
+- Module naming rules may evolve in later revisions.
 
 ## 10. Testing Construct
 
@@ -477,7 +492,7 @@ Rules:
 - Runtime test discovery modes:
 - entry-file mode: discover tests in the entry file only (no cascading import traversal)
 - directory mode: discover tests in all `.stasis` files in the target directory (including root)
-- Tests run in deterministic discovery order.
+- Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
 - Tests may call extern/runtime functions.
 
 ## 11. Memory Model
