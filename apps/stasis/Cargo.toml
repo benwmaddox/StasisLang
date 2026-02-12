@@ -1,0 +1,12 @@
+[package]
+name = "stasis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stasis_runner = { path = "../../crates/stasis_runner" }
+
+[[bin]]
+name = "stasis"
+path = "src/main.rs"
