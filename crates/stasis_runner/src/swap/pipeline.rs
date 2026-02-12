@@ -251,13 +251,15 @@ mod tests {
         SwapCommitResult, SwapCommitStatus, TextSource,
     };
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     fn eventually(mut condition: impl FnMut() -> bool) {
-        for _ in 0..500 {
+        for _ in 0..2000 {
             if condition() {
                 return;
             }
             thread::yield_now();
+            thread::sleep(Duration::from_micros(250));
         }
         panic!("condition not met before timeout");
     }

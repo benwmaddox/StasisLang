@@ -1,3 +1,46 @@
+use std::env;
+use std::path::PathBuf;
+
+use stasis::{run_with_default_backend, RunnerConfig};
+
+fn parse_args() -> RunnerConfig {
+    let mut config = RunnerConfig::default();
+    let mut args = env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--ticks" => {
+                if let Some(value) = args.next() {
+                    if let Ok(parsed) = value.parse::<u32>() {
+                        config.max_ticks = parsed;
+                    }
+                }
+            }
+            "--watch-file" => {
+                if let Some(value) = args.next() {
+                    config.inject_file_change = Some(PathBuf::from(value));
+                }
+            }
+            "--fail-compile" => {
+                config.fail_compile = true;
+            }
+            _ => {}
+        }
+    }
+
+    config
+}
+
 fn main() {
-    println!("stasis runner scaffold ready");
+    let config = parse_args();
+    let summary = run_with_default_backend(config);
+
+    println!("ticks_executed={}", summary.ticks_executed);
+    println!("compile_successes={}", summary.compile_successes);
+    println!("compile_failures={}", summary.compile_failures);
+    println!("swap_commits={}", summary.swap_commits);
+    println!("has_in_flight_work={}", summary.has_in_flight_work);
+
+    let exit_code = if summary.compile_failures > 0 { 1 } else { 0 };
+    std::process::exit(exit_code);
 }

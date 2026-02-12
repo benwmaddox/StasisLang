@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 stasis_runner = { path = "../../crates/stasis_runner" }
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "stasis"
 path = "src/main.rs"

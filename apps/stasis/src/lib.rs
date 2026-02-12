@@ -1,0 +1,191 @@
+#![forbid(unsafe_code)]
+
+use stasis_runner::swap::contracts::{
+    CodeGeneration, CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity,
+    FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId,
+    SwapCommitResult, SwapCommitStatus, TextSource,
+};
+use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
+use std::path::PathBuf;
+use std::thread;
+
+#[derive(Debug, Clone)]
+pub struct RunnerConfig {
+    pub max_ticks: u32,
+    pub inject_file_change: Option<PathBuf>,
+    pub fail_compile: bool,
+}
+
+impl Default for RunnerConfig {
+    fn default() -> Self {
+        Self {
+            max_ticks: 120,
+            inject_file_change: None,
+            fail_compile: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerSummary {
+    pub ticks_executed: u32,
+    pub compile_successes: u32,
+    pub compile_failures: u32,
+    pub swap_commits: u32,
+    pub last_swap_status: Option<SwapCommitStatus>,
+    pub has_in_flight_work: bool,
+}
+
+pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
+    let backend = move |request: CompileRequest| -> CompileResult {
+        if config.fail_compile {
+            CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "simulated compile failure".to_string(),
+                    path: request.changed_files.first().cloned(),
+                    line: Some(1),
+                    column: Some(1),
+                }],
+            )
+        } else {
+            let patch_set = FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(1) }],
+            };
+            CompileResult::success(request.request_id, LayoutHash([1; 32]), patch_set)
+        }
+    };
+
+    run_with_backend(config, backend)
+}
+
+pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) -> RunnerSummary {
+    let mut pipeline = DevHotSwapPipeline::new(backend);
+    let mut generation: u64 = 0;
+    let mut swap_commits: u32 = 0;
+    let mut compile_successes: u32 = 0;
+    let mut compile_failures: u32 = 0;
+    let mut last_seen_compile_id: Option<RequestId> = None;
+    let mut last_swap_status: Option<SwapCommitStatus> = None;
+    let mut file_change_sent = false;
+
+    let mut observe_results = |pipeline: &DevHotSwapPipeline| {
+        if let Some(result) = pipeline.last_compile_result() {
+            if last_seen_compile_id != Some(result.request_id) {
+                last_seen_compile_id = Some(result.request_id);
+                match result.status {
+                    CompileStatus::Success => compile_successes += 1,
+                    CompileStatus::Failed => compile_failures += 1,
+                }
+            }
+        }
+
+        if let Some(result) = pipeline.last_commit_result() {
+            last_swap_status = Some(result.status.clone());
+        }
+    };
+
+    for tick in 0..config.max_ticks {
+        if !file_change_sent {
+            if let Some(path) = &config.inject_file_change {
+                let event = FileChangeEvent::new(
+                    path.clone(),
+                    u64::from(tick) + 1,
+                    TextSource::FileWatcher,
+                    FileChangeKind::Modified,
+                );
+                pipeline.submit_file_change(event);
+                file_change_sent = true;
+            }
+        }
+
+        pipeline.pump_coordinator();
+
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            generation += 1;
+            let swapped_ids = request
+                .fn_patch_set
+                .functions
+                .iter()
+                .map(|patch| patch.fn_id)
+                .collect();
+            SwapCommitResult::success(request.request_id, swapped_ids, CodeGeneration(generation))
+        });
+        swap_commits += processed as u32;
+
+        pipeline.pump_coordinator();
+        observe_results(&pipeline);
+        thread::yield_now();
+    }
+
+    for _ in 0..500 {
+        if !pipeline.has_in_flight_work() && pipeline.pending_commit_requests() == 0 {
+            break;
+        }
+
+        pipeline.pump_coordinator();
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            generation += 1;
+            let swapped_ids = request
+                .fn_patch_set
+                .functions
+                .iter()
+                .map(|patch| patch.fn_id)
+                .collect();
+            SwapCommitResult::success(request.request_id, swapped_ids, CodeGeneration(generation))
+        });
+        swap_commits += processed as u32;
+        pipeline.pump_coordinator();
+        observe_results(&pipeline);
+        thread::yield_now();
+    }
+
+    RunnerSummary {
+        ticks_executed: config.max_ticks,
+        compile_successes,
+        compile_failures,
+        swap_commits,
+        last_swap_status,
+        has_in_flight_work: pipeline.has_in_flight_work(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_loop_compiles_and_commits_one_change() {
+        let config = RunnerConfig {
+            max_ticks: 200,
+            inject_file_change: Some(PathBuf::from(
+                "samples/brickout_revenge/brickout_revenge_v1.stasis",
+            )),
+            fail_compile: false,
+        };
+
+        let summary = run_with_default_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commits, 1);
+        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert!(!summary.has_in_flight_work);
+    }
+
+    #[test]
+    fn runner_loop_reports_compile_failure_and_skips_commit() {
+        let config = RunnerConfig {
+            max_ticks: 200,
+            inject_file_change: Some(PathBuf::from("samples/invalid.stasis")),
+            fail_compile: true,
+        };
+
+        let summary = run_with_default_backend(config);
+        assert_eq!(summary.compile_successes, 0);
+        assert_eq!(summary.compile_failures, 1);
+        assert_eq!(summary.swap_commits, 0);
+        assert_eq!(summary.last_swap_status, None);
+        assert!(!summary.has_in_flight_work);
+    }
+}

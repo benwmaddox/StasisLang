@@ -50,7 +50,7 @@ This section is temporary and should be removed once S0 establishes working Carg
 - Workspace compile smoke.
 - Done gate:
 - Clean build/test on branch with no placeholder dead modules.
-- Status: `pending`
+- Status: `completed`
 
 ### S1 - Minimal Front-End Parse
 - Language:
@@ -209,7 +209,7 @@ This section is temporary and should be removed once S0 establishes working Carg
 - Done gate:
 - On failure, old code/data remain active.
 - Runtime/compiler ownership boundaries enforced in code paths.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S10 - `on_code_swap` Hook
 - Language:
