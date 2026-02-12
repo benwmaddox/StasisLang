@@ -103,7 +103,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end golden stdout tests.
 - Done gate:
 - Output is deterministic and ABI contract is documented.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S4 - Core Statements and Expressions
 - Language:

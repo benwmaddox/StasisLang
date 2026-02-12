@@ -21,3 +21,8 @@ Current entrypoint validation API in `compiler/incremental_compiler.stasis`:
 - `42` when `main` signature is invalid
 - `43` when multiple `main` declarations are present
 - `run_incremental_compiler_with_main_entry()` runs pipeline + entry validation.
+
+Console extern naming (Rewrite V1):
+- Source-level preferred name: `print_i32`.
+- Bootstrap runtime currently exposes `print_int`; stdlib provides `print_i32(value: i32)` wrapper over `print_int(value)`.
+- `print_string` is available directly in bootstrap runtime.

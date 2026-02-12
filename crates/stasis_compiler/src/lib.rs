@@ -214,6 +214,40 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cranelift_run_helper_print_i32_and_print_string_output() {
+        let source = fixture_path("run_print_i32_and_string.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert!(
+            output.status.success(),
+            "expected success for {}\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("S3_PRINT_START:"),
+            "missing print_string prefix in output for {}\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("42"),
+            "missing print_i32 value in output for {}\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains(":S3_PRINT_END"),
+            "missing print_string suffix in output for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bootstrap_compiles_entry_validation_ok_fixture() {
         let source = fixture_path("entry_validation_ok.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());

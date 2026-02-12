@@ -4,6 +4,12 @@
 
 import "memory.stasis";
 
+// Rewrite V1 canonical integer print name.
+// Bootstrap currently provides `print_int`; this wrapper keeps source-level API aligned.
+function print_i32(value: i32): void {
+    print_int(value);
+}
+
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }
