@@ -247,6 +247,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "stasis_compiler",
  "stasis_jit",
  "stasis_runner",
 ]

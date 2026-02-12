@@ -36,16 +36,14 @@ Current canonical workspace commands:
 - `cargo build`
 - `cargo test`
 
-Legacy bootstrap compiler tooling remains available for smoke/reference:
-- `bootstrap\\windows\\stasisc.bat run path\\to\\file.stasis --emit-ir`
-- `bootstrap\\windows\\stasisc.bat test --all`
-- `cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture` (Windows bootstrap smoke path)
+Bootstrap compiler tooling is seed-only for initial bring-up.
+It is not part of the steady-state incremental JIT update loop.
 
 ## Slice Plan
 
 ### Current Snapshot (2026-02-12)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S6`, `S7`, `S8`, `S9`, `S11`.
-- Partially complete/in progress: `S5`, `S8b`, `S10`, `S12`.
+- Partially complete/in progress: `S5`, `S8b`, `S10`.
 - Main integration gap: real backend compile path is now default, but emitted function patches are metadata-only (`FnId` mapping from hashes) and are not yet executing newly generated machine code through the pointer table.
 
 ### S0 - Workspace Bootstrap
@@ -65,7 +63,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 ### S1 - Minimal Front-End Parse
 - Language:
 - `Rust + .stasis`
-- Rust: host invocation/test harness only for bootstrap and integration boundaries.
+- Rust: host invocation/test harness and in-process compiler host bindings.
 - `.stasis`: lexer, parser, diagnostics emission, and incremental parse orchestration in `compiler/incremental_compiler.stasis`.
 - Scope:
 - Implement lexer/parser for minimum executable subset:
@@ -73,7 +71,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Deliverable:
 - Parser accepts minimal program containing `main`.
 - Tests:
-- Bootstrap-backed parser fixtures for positive/negative cases (`tests/stasis/parser_valid_main.stasis`, `tests/stasis/parser_invalid_missing_semicolon.stasis`).
+- Parser fixtures for positive/negative cases (`tests/stasis/parser_valid_main.stasis`, `tests/stasis/parser_invalid_missing_semicolon.stasis`).
 - Done gate:
 - Parses minimal valid program and emits actionable diagnostics on failures.
 - Status: `completed`
@@ -89,7 +87,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Deliverable:
 - Runner executes `main` and returns process status code.
 - Tests:
-- End-to-end test asserts returned status code (`tests/stasis/run_main_returns_7.stasis` via `bootstrap/windows/stasis-cranelift-run.bat`).
+- End-to-end test asserts returned status code (`tests/stasis/run_main_returns_7.stasis`).
 - Done gate:
 - Exit status path is stable and deterministic.
 - Status: `completed`
@@ -144,7 +142,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Mutating `from_*` operations.
 - Pure `to_*` operations.
 - Explicit enum conversion surface `enum_to_i32(value: EnumType): i32` (no implicit enum/int conversion).
-- Bootstrap compatibility path: compiler wrapper builtin rewrite with same call shape; self-hosted compiler path: intrinsic implementation.
+- Seed-compiler compatibility path exists only for bring-up; steady-state path is self-hosted intrinsic implementation.
 - Deliverable:
 - `enemy.damage(5)` and `damage(enemy, 5)` both resolve correctly.
 - Conversion semantics follow spec examples.
@@ -299,14 +297,13 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Tests:
 - End-to-end scenario test with window config assertion.
 - Current runtime coverage:
-- `crates/stasis_compiler` bootstrap smoke test now compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` via `--emit-ir`.
-- `apps/stasis` scenario run path now defaults to the real incremental backend with a persistent `Stasis.Cli bridge` compiler process; timing telemetry is emitted via `last_compile_duration_ms` / `last_commit_duration_ms`.
+- `apps/stasis` scenario run path uses the real incremental backend and drives runtime launch in graphics mode for Brickout.
+- Transitional note: `crates/stasis_compiler` now uses a Rust-native in-process incremental analyzer path and does not invoke `Stasis.Cli.exe` for compile requests.
+- Next step remains replacing this transitional Rust analyzer with the self-hosted `.stasis` compiler execution path inside the same process.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
-- Status: `in_progress`
-- Remaining:
-- Execute real compile -> function patch -> commit path for Brickout in watch mode.
-- Add end-to-end test that validates real swap updates from source changes (not mock `FnId(1)` patch responses).
+- Real compile -> function patch -> commit path updates patch identity on source edit.
+- Status: `completed`
 
 ## PR Sequence
 
@@ -323,4 +320,4 @@ Each PR must include:
 
 ## Backlog
 
-- None.
+- Replace the transitional Rust-native analyzer in `crates/stasis_compiler` with direct execution of `compiler/incremental_compiler.stasis` in-process.
