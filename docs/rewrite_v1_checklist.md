@@ -269,6 +269,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Successful swaps trigger visible deterministic indicator.
 - Tests:
 - Tick countdown behavior tests and no-indicator-on-failure tests.
+- Current runtime coverage fixture:
+- `tests/stasis/run_swap_indicator_tick_behavior.stasis` (arms `on_code_swap`, decrements `swapFlashTicks` over 180 ticks, and verifies no indicator once expired).
 - Done gate:
 - Indicator follows tick policy and does not fire on failed swap.
 - Status: `in_progress`
