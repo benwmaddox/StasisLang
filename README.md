@@ -30,7 +30,12 @@ Everything else is intentionally rebuilt around a minimal Rust-first architectur
 cargo build
 cargo test
 cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge
+cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge --events-jsonl
 ```
+
+Structured event stream options:
+- `--events-jsonl` prints JSONL events to stdout (compile/swap/summary).
+- `--events-jsonl-file path\to\events.jsonl` writes JSONL events to a file.
 
 Legacy bootstrap compiler tooling remains available for reference:
 

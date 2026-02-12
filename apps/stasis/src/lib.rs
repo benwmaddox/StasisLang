@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod events;
 mod watch;
+
+pub use events::RunnerEvent;
 
 use stasis_runner::swap::contracts::{
     CodeGeneration, CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity,
@@ -47,6 +50,7 @@ pub struct RunnerSummary {
     pub swap_failure_reasons: Vec<String>,
     pub last_swap_status: Option<SwapCommitStatus>,
     pub has_in_flight_work: bool,
+    pub events: Vec<RunnerEvent>,
 }
 
 pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
@@ -88,7 +92,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut compile_failures: u32 = 0;
     let mut compile_diagnostics: Vec<String> = Vec::new();
     let mut last_seen_compile_id: Option<RequestId> = None;
+    let mut last_seen_commit_id: Option<RequestId> = None;
     let mut last_swap_status: Option<SwapCommitStatus> = None;
+    let mut events: Vec<RunnerEvent> = Vec::new();
     let mut file_change_sent = false;
     let swap_failure_reason = config.swap_failure_reason.clone();
 
@@ -97,17 +103,33 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             if last_seen_compile_id != Some(result.request_id) {
                 last_seen_compile_id = Some(result.request_id);
                 match result.status {
-                    CompileStatus::Success => compile_successes += 1,
+                    CompileStatus::Success => {
+                        compile_successes += 1;
+                        events.push(RunnerEvent::CompileResult {
+                            request_id: result.request_id.0,
+                            status: "success".to_string(),
+                            diagnostics: Vec::new(),
+                        });
+                    }
                     CompileStatus::Failed => {
                         compile_failures += 1;
+                        let mut event_diagnostics = Vec::new();
                         if result.diagnostics.is_empty() {
-                            compile_diagnostics
-                                .push("compile failed with no diagnostics".to_string());
+                            let message = "compile failed with no diagnostics".to_string();
+                            compile_diagnostics.push(message.clone());
+                            event_diagnostics.push(message);
                         } else {
                             for diagnostic in &result.diagnostics {
-                                compile_diagnostics.push(format_diagnostic(diagnostic));
+                                let formatted = format_diagnostic(diagnostic);
+                                compile_diagnostics.push(formatted.clone());
+                                event_diagnostics.push(formatted);
                             }
                         }
+                        events.push(RunnerEvent::CompileResult {
+                            request_id: result.request_id.0,
+                            status: "failed".to_string(),
+                            diagnostics: event_diagnostics,
+                        });
                     }
                 }
             }
@@ -115,6 +137,22 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
 
         if let Some(result) = pipeline.last_commit_result() {
             last_swap_status = Some(result.status.clone());
+            if last_seen_commit_id != Some(result.request_id) {
+                last_seen_commit_id = Some(result.request_id);
+                let status = match result.status {
+                    SwapCommitStatus::Success => "success",
+                    SwapCommitStatus::Failed => "failed",
+                };
+                let swapped_fn_ids = result.swapped_fn_ids.iter().map(|id| id.0).collect();
+                let new_generation = result.new_generation.map(|generation| generation.0);
+                events.push(RunnerEvent::SwapCommitResult {
+                    request_id: result.request_id.0,
+                    status: status.to_string(),
+                    swapped_fn_ids,
+                    new_generation,
+                    error: result.error.clone(),
+                });
+            }
         }
     };
 
@@ -205,6 +243,16 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         }
     }
 
+    let has_in_flight_work = pipeline.has_in_flight_work();
+    events.push(RunnerEvent::Summary {
+        ticks_executed: config.max_ticks,
+        compile_successes,
+        compile_failures,
+        swap_commit_successes,
+        swap_commit_failures,
+        has_in_flight_work,
+    });
+
     RunnerSummary {
         ticks_executed: config.max_ticks,
         compile_successes,
@@ -214,7 +262,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         swap_commit_failures,
         swap_failure_reasons,
         last_swap_status,
-        has_in_flight_work: pipeline.has_in_flight_work(),
+        has_in_flight_work,
+        events,
     }
 }
 
@@ -267,6 +316,36 @@ mod tests {
         assert_eq!(summary.swap_failure_reasons.len(), 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
+        assert_eq!(summary.events.len(), 3);
+        assert!(matches!(
+            summary.events[0],
+            RunnerEvent::CompileResult {
+                ref status,
+                request_id: _,
+                diagnostics: _
+            } if status == "success"
+        ));
+        assert!(matches!(
+            summary.events[1],
+            RunnerEvent::SwapCommitResult {
+                ref status,
+                request_id: _,
+                swapped_fn_ids: _,
+                new_generation: _,
+                error: _
+            } if status == "success"
+        ));
+        assert!(matches!(
+            summary.events[2],
+            RunnerEvent::Summary {
+                compile_successes: 1,
+                compile_failures: 0,
+                swap_commit_successes: 1,
+                swap_commit_failures: 0,
+                ticks_executed: _,
+                has_in_flight_work: false
+            }
+        ));
     }
 
     #[test]
@@ -290,6 +369,26 @@ mod tests {
         assert!(summary.compile_diagnostics[0].contains("simulated compile failure"));
         assert_eq!(summary.last_swap_status, None);
         assert!(!summary.has_in_flight_work);
+        assert_eq!(summary.events.len(), 2);
+        assert!(matches!(
+            summary.events[0],
+            RunnerEvent::CompileResult {
+                ref status,
+                request_id: _,
+                ref diagnostics
+            } if status == "failed" && !diagnostics.is_empty()
+        ));
+        assert!(matches!(
+            summary.events[1],
+            RunnerEvent::Summary {
+                compile_successes: 0,
+                compile_failures: 1,
+                swap_commit_successes: 0,
+                swap_commit_failures: 0,
+                ticks_executed: _,
+                has_in_flight_work: false
+            }
+        ));
     }
 
     #[test]
@@ -312,6 +411,17 @@ mod tests {
         assert_eq!(summary.swap_failure_reasons.len(), 1);
         assert!(summary.swap_failure_reasons[0].contains("layout mismatch"));
         assert!(!summary.has_in_flight_work);
+        assert_eq!(summary.events.len(), 3);
+        assert!(matches!(
+            summary.events[1],
+            RunnerEvent::SwapCommitResult {
+                ref status,
+                request_id: _,
+                swapped_fn_ids: _,
+                new_generation: None,
+                ref error
+            } if status == "failed" && error.as_deref() == Some("simulated swap rejection: layout mismatch")
+        ));
     }
 
     #[test]
@@ -354,5 +464,6 @@ mod tests {
         assert_eq!(summary.compile_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
+        assert!(summary.events.len() >= 3);
     }
 }

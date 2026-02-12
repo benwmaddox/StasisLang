@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 stasis_runner = { path = "../../crates/stasis_runner" }
 notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"
