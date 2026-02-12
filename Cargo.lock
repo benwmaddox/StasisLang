@@ -247,6 +247,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "stasis_jit",
  "stasis_runner",
 ]
 
@@ -257,6 +258,9 @@ version = "0.1.0"
 [[package]]
 name = "stasis_jit"
 version = "0.1.0"
+dependencies = [
+ "stasis_runner",
+]
 
 [[package]]
 name = "stasis_runner"

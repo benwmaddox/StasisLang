@@ -8,11 +8,12 @@ pub use events::RunnerEvent;
 pub use scenarios::WindowConfig;
 
 use stasis_runner::swap::contracts::{
-    CodeGeneration, CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity,
-    FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId,
-    SwapCommitResult, SwapCommitStatus, TextSource,
+    CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
+    FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, SwapCommitResult,
+    SwapCommitStatus, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
+use stasis_jit::FunctionPointerTable;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -102,7 +103,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let window = config.window;
 
     let mut pipeline = DevHotSwapPipeline::new(backend);
-    let mut generation: u64 = 0;
+    let mut pointer_table = FunctionPointerTable::new();
     let mut hook_runs: u32 = 0;
     let mut hook_failures: u32 = 0;
     let mut hook_failure_reasons: Vec<String> = Vec::new();
@@ -179,18 +180,12 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 swap_failure_reasons.push(reason.clone());
                 SwapCommitResult::failed(request.request_id, reason.clone())
             } else {
-                generation += 1;
                 swap_commit_successes += 1;
-                let swapped_ids = request
-                    .fn_patch_set
-                    .functions
-                    .iter()
-                    .map(|patch| patch.fn_id)
-                    .collect();
+                let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
                 SwapCommitResult::success(
                     request.request_id,
-                    swapped_ids,
-                    CodeGeneration(generation),
+                    outcome.swapped_fn_ids,
+                    outcome.new_generation,
                 )
             }
         });
@@ -263,18 +258,12 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 swap_failure_reasons.push(reason.clone());
                 SwapCommitResult::failed(request.request_id, reason.clone())
             } else {
-                generation += 1;
                 swap_commit_successes += 1;
-                let swapped_ids = request
-                    .fn_patch_set
-                    .functions
-                    .iter()
-                    .map(|patch| patch.fn_id)
-                    .collect();
+                let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
                 SwapCommitResult::success(
                     request.request_id,
-                    swapped_ids,
-                    CodeGeneration(generation),
+                    outcome.swapped_fn_ids,
+                    outcome.new_generation,
                 )
             }
         });

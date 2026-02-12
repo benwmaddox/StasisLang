@@ -194,13 +194,16 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `Rust`
 - Scope:
 - Implement stable `FnId -> code_ptr` indirection and generation-based code regions.
+- Current implementation:
+- `crates/stasis_jit::FunctionPointerTable` now owns `FnId -> CodePtr` mapping, generation increments, and safe-window retirement bookkeeping.
+- `apps/stasis` swap commit path now sources commit generation IDs from `FunctionPointerTable`.
 - Deliverable:
 - Runtime dispatch goes through pointer table only.
 - Tests:
 - ABI and indirect-call tests.
 - Done gate:
 - No direct raw-address calls from runtime callsites.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S8b - Cranelift AOT Production Path
 - Language:

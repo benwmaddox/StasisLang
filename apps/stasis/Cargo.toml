@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 stasis_runner = { path = "../../crates/stasis_runner" }
+stasis_jit = { path = "../../crates/stasis_jit" }
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
