@@ -19,8 +19,14 @@ pub fn incremental_compiler_source_path() -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
+    use std::sync::{Mutex, OnceLock};
 
     use super::incremental_compiler_source_path;
+
+    fn external_process_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -50,6 +56,7 @@ mod tests {
 
     #[cfg(windows)]
     fn run_bootstrap_emit_ir(source: &Path) -> Output {
+        let _guard = external_process_lock().lock().expect("external process lock poisoned");
         Command::new("cmd")
             .arg("/C")
             .arg(bootstrap_path())
@@ -72,6 +79,7 @@ mod tests {
 
     #[cfg(windows)]
     fn run_cranelift_helper(source: &Path) -> Output {
+        let _guard = external_process_lock().lock().expect("external process lock poisoned");
         Command::new("cmd")
             .arg("/C")
             .arg(cranelift_run_helper_path())

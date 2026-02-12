@@ -121,6 +121,11 @@ struct CompilerFile {
     parsed_extern_count: i32;
     parsed_return_count: i32;
     parsed_call_count: i32;
+    parsed_let_count: i32;
+    parsed_if_count: i32;
+    parsed_for_count: i32;
+    parsed_foreach_count: i32;
+    parsed_assignment_count: i32;
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;

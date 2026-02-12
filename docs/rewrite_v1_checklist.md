@@ -283,3 +283,4 @@ Each PR must include:
 ## Backlog
 
 - Add `schema_version` field to every JSONL runner event payload for strict editor/tool compatibility negotiation.
+- Cranelift lowering: support nested array field base expressions in stores/loads so file-db source/path writes in `.stasis` can run safely (currently blocks runtime coverage of `compiler_upsert_file` path).
