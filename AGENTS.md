@@ -17,12 +17,14 @@
 ## Build, Test, and Development Commands
 - Primary implementation toolchain is Rust/Cargo.
 - Use:
-- `bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir`
-- `bootstrap\windows\stasisc.bat test --all`
+- `cargo build`
+- `cargo test`
+- `cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
-- Before S0 is complete, bootstrap tooling is the canonical runnable path.
-- After S0, Cargo commands become canonical for build/test/run.
+- Legacy bootstrap tooling remains available for compiler smoke/reference:
+- `bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir`
+- `bootstrap\windows\stasisc.bat test --all`
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.

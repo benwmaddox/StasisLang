@@ -27,14 +27,15 @@ Locked decisions:
 4. Update docs in the same PR when behavior changes.
 5. Preserve deterministic tick-based behavior.
 
-## Pre-S0 Bootstrap Reality (Temporary)
+## Tooling Note
 
-Until S0 is complete, workspace crate manifests/sources may not all exist yet.
-Use bootstrap compiler tooling for Stasis compile smoke checks:
+Current canonical workspace commands:
+- `cargo build`
+- `cargo test`
+
+Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `bootstrap\\windows\\stasisc.bat run path\\to\\file.stasis --emit-ir`
 - `bootstrap\\windows\\stasisc.bat test --all`
-
-This section is temporary and should be removed once S0 establishes working Cargo workspace builds/tests.
 
 ## Slice Plan
 

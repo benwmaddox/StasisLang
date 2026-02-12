@@ -16,9 +16,21 @@ fn parse_args() -> RunnerConfig {
                     }
                 }
             }
+            "--tick-sleep-us" => {
+                if let Some(value) = args.next() {
+                    if let Ok(parsed) = value.parse::<u64>() {
+                        config.tick_sleep_micros = parsed;
+                    }
+                }
+            }
             "--watch-file" => {
                 if let Some(value) = args.next() {
                     config.inject_file_change = Some(PathBuf::from(value));
+                }
+            }
+            "--watch-dir" => {
+                if let Some(value) = args.next() {
+                    config.watch_directory = Some(PathBuf::from(value));
                 }
             }
             "--fail-compile" => {

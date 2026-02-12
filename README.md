@@ -24,14 +24,20 @@ Everything else is intentionally rebuilt around a minimal Rust-first architectur
   Single graphical in-process runner (`winit + glutin + glow`) with watch + compile + swap loop.
 - `docs/rewrite_v1_checklist.md`
   Build checklist aligned to PRD.
-## Build (Current Pre-S0)
+## Build/Test (Current)
+
+```bash
+cargo build
+cargo test
+cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge
+```
+
+Legacy bootstrap compiler tooling remains available for reference:
 
 ```bash
 bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir
 bootstrap\windows\stasisc.bat test --all
 ```
-
-Cargo build/test/run commands become canonical after S0 (workspace bootstrap) is complete.
 
 ## Notes
 
