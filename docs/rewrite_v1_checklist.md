@@ -302,4 +302,4 @@ Each PR must include:
 
 ## Backlog
 
-- Add dedicated `Stasis.Compiler.Tests` coverage for chained array-field load/store paths (`a[i].field[j]`) to keep the bootstrap backend fix pinned.
+- None.
