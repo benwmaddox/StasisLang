@@ -20,6 +20,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     use super::incremental_compiler_source_path;
 
@@ -78,16 +79,33 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn is_app_control_block(output: &Output) -> bool {
+        let text = combined_output_text(output).to_ascii_lowercase();
+        text.contains("application control policy has blocked this file")
+            || text.contains("an application control policy has blocked this file")
+    }
+
+    #[cfg(windows)]
     fn run_cranelift_helper(source: &Path) -> Output {
         let _guard = external_process_lock().lock().expect("external process lock poisoned");
-        Command::new("cmd")
-            .arg("/C")
-            .arg(cranelift_run_helper_path())
-            .arg(source)
-            .env("STASIS_DISABLE_ARTIFACT_CACHE", "1")
-            .current_dir(repo_root())
-            .output()
-            .expect("failed to execute cranelift run helper")
+        let mut last = None;
+        for attempt in 0..3 {
+            let output = Command::new("cmd")
+                .arg("/C")
+                .arg(cranelift_run_helper_path())
+                .arg(source)
+                .current_dir(repo_root())
+                .output()
+                .expect("failed to execute cranelift run helper");
+            if !is_app_control_block(&output) {
+                return output;
+            }
+            last = Some(output);
+            if attempt < 2 {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+        last.expect("expected at least one cranelift helper attempt")
     }
 
     #[test]
@@ -459,6 +477,23 @@ mod tests {
             output.status.code(),
             Some(0),
             "expected receiver/function call parse success for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_incremental_file_db_unsupported_fixture() {
+        let source = fixture_path("run_incremental_file_db_unsupported.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected clean unsupported-file-db behavior for {}\n{}",
             source.display(),
             text
         );

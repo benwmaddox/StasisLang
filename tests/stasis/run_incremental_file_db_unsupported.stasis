@@ -1,0 +1,15 @@
+import "../../compiler/incremental_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+
+    if (compiler_upsert_file("a.stasis", "function main(): i32 { return 0; }")) {
+        return 70;
+    }
+
+    if (Compiler.file_count != 0) { return 71; }
+    if (Compiler.error_count != 1) { return 72; }
+    if (Compiler.errors[0].code != 3003) { return 73; }
+
+    return 0;
+}

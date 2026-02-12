@@ -63,7 +63,18 @@ function compiler_find_file(path: ascii[]): i32 {
     return -1;
 }
 
+function compiler_file_db_supported(): bool {
+    // Temporary guard: current bootstrap lowering cannot safely handle nested
+    // array field access for Compiler.files[*].path/source read/write chains.
+    return false;
+}
+
 function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
+    if (!compiler_file_db_supported()) {
+        compiler_push_error(CompilerErrorCode.IncrementalFileDbBackendUnsupported, 0, 0, 0);
+        return false;
+    }
+
     if (length(path) == 0) {
         compiler_push_error(CompilerErrorCode.IncrementalFilePathEmpty, 0, 0, 0);
         return false;
