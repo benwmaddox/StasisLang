@@ -35,6 +35,7 @@ function compiler_reset_state(): void {
     Compiler.incremental_parsed_files = 0;
     Compiler.incremental_reused_files = 0;
     Compiler.incremental_failed_files = 0;
+    Compiler.incremental_layout_changed_files = 0;
 }
 
 function compiler_set_source(src: ascii[]): void {
@@ -166,6 +167,7 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.incremental_parsed_files = 0;
     Compiler.incremental_reused_files = 0;
     Compiler.incremental_failed_files = 0;
+    Compiler.incremental_layout_changed_files = 0;
 
     if (Compiler.file_count == 0) {
         // Backward-compatible single-source mode used by compiler_set_source().
@@ -208,6 +210,7 @@ function compiler_run_incremental_pipeline(): i32 {
             }
         } else {
             Compiler.current_file_index = i;
+            let previous_layout_hash: i32 = Compiler.files[i].layout_hash;
             ascii_clear(Compiler.source);
             ascii_copy(Compiler.source, Compiler.files[i].source);
             Compiler.source_len = Compiler.files[i].source_len;
@@ -281,6 +284,9 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_assignment_count = Compiler.parsed_assignment_count;
                     Compiler.files[i].parsed_global_count = Compiler.parsed_global_count;
                     Compiler.files[i].layout_hash = Compiler.layout_hash;
+                    if (previous_layout_hash != Compiler.layout_hash) {
+                        Compiler.incremental_layout_changed_files += 1;
+                    }
                     Compiler.files[i].parsed_main_declaration_count = Compiler.parsed_main_declaration_count;
                     Compiler.files[i].parsed_main_valid_i32_count = Compiler.parsed_main_valid_i32_count;
                     Compiler.files[i].parsed_main_invalid_signature_count = Compiler.parsed_main_invalid_signature_count;

@@ -181,6 +181,7 @@ struct CompilerState {
     incremental_parsed_files: i32;
     incremental_reused_files: i32;
     incremental_failed_files: i32;
+    incremental_layout_changed_files: i32;
 }
 
 global Compiler: CompilerState;

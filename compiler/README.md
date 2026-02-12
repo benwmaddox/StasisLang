@@ -29,6 +29,7 @@ Current single-source execution mode:
 - `run_incremental_compiler()` and `run_incremental_compiler_with_main_entry()` parse/validate that single source when no file database entries are present.
 - Fixtures can read compiler metrics directly from `Compiler.*` fields (no trivial getter wrappers).
 - Layout metadata baseline is exposed via `Compiler.parsed_global_count` and `Compiler.layout_hash`.
+- File-db incremental layout updates are exposed via `Compiler.incremental_layout_changed_files`.
 
 Console extern naming (Rewrite V1):
 - Source-level preferred name: `print_i32`.

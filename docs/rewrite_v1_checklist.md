@@ -165,6 +165,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Current runtime coverage fixtures:
 - `tests/stasis/run_layout_hash_deterministic.stasis`
 - `tests/stasis/run_layout_hash_changes_on_layout_update.stasis`
+- `tests/stasis/run_layout_hash_file_db_change_detection.stasis`
 - Done gate:
 - Layout-affecting changes are detected reliably.
 - Status: `in_progress`
