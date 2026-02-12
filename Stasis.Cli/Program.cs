@@ -19,6 +19,13 @@ using Stasis.Compiler.Syntax;
 using Stasis.Cli;
 
 var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
+if (cliArgs.Count > 0 && string.Equals(cliArgs.Peek(), "bridge", StringComparison.OrdinalIgnoreCase))
+{
+    cliArgs.Dequeue();
+    var bridgeExit = RunBridgeMode(cliArgs);
+    Environment.Exit(bridgeExit);
+    return;
+}
 if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
 {
     PrintUsage();
@@ -5722,6 +5729,130 @@ static void PrintUsage()
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
     Console.WriteLine("Tick watch (experimental): set STASIS_CRANELIFT_INPROC_TICK=1 to run headless tick hot-swap in-process (no stasis-cranelift-jit-runner process).");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
+}
+
+static int RunBridgeMode(Queue<string> args)
+{
+    var moduleName = "module";
+    string? optLevel = null;
+    var tickHostFps = 60;
+    while (args.Count > 0)
+    {
+        var arg = args.Dequeue();
+        switch (arg)
+        {
+            case "--module" when args.Count > 0:
+                moduleName = args.Dequeue();
+                break;
+            case "--opt-level" when args.Count > 0:
+                optLevel = args.Dequeue();
+                break;
+            case "--fps" when args.Count > 0:
+                if (!int.TryParse(args.Dequeue(), out tickHostFps) || tickHostFps < 1 || tickHostFps > 240)
+                {
+                    Console.Error.WriteLine("error: --fps expects an integer between 1 and 240.");
+                    return 1;
+                }
+                break;
+            default:
+                Console.Error.WriteLine($"error: unknown bridge argument '{arg}'");
+                return 1;
+        }
+    }
+
+    // Keep bridge protocol output in one stream.
+    Console.SetError(Console.Out);
+    Console.WriteLine("BRIDGE_READY 1");
+
+    for (;;)
+    {
+        var line = Console.ReadLine();
+        if (line == null)
+        {
+            return 0;
+        }
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            continue;
+        }
+
+        string op = string.Empty;
+        ulong requestId = 0;
+        string? requestPath = null;
+        try
+        {
+            using var json = JsonDocument.Parse(line);
+            var root = json.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                Console.WriteLine("BRIDGE_PROTOCOL_ERROR command_not_object");
+                continue;
+            }
+            if (root.TryGetProperty("op", out var opElement) && opElement.ValueKind == JsonValueKind.String)
+            {
+                op = opElement.GetString() ?? string.Empty;
+            }
+            if (root.TryGetProperty("request_id", out var requestIdElement))
+            {
+                if (requestIdElement.ValueKind == JsonValueKind.Number && requestIdElement.TryGetUInt64(out var parsedRequestId))
+                {
+                    requestId = parsedRequestId;
+                }
+                else
+                {
+                    Console.WriteLine("BRIDGE_PROTOCOL_ERROR invalid_request_id");
+                    continue;
+                }
+            }
+            if (root.TryGetProperty("path", out var pathElement) && pathElement.ValueKind == JsonValueKind.String)
+            {
+                requestPath = pathElement.GetString();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR bad_json {ex.Message}");
+            continue;
+        }
+
+        if (string.Equals(op, "quit", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("BRIDGE_BYE");
+            return 0;
+        }
+
+        if (!string.Equals(op, "compile", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR unknown_op {op}");
+            continue;
+        }
+
+        if (string.IsNullOrWhiteSpace(requestPath))
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR missing_path {requestId}");
+            continue;
+        }
+
+        Console.WriteLine($"BRIDGE_BEGIN {requestId}");
+        var exit = ProcessFile(
+            requestPath,
+            mode: "run",
+            includeTests: false,
+            moduleName,
+            emitIrOnly: false,
+            outputPath: null,
+            optLevel,
+            enableLto: false,
+            enableGraphics: false,
+            graphicsLibPath: null,
+            backend: BackendType.Cranelift,
+            tickHostFps,
+            llvmTargetTriple: null,
+            useLowerLock: true,
+            useCraneliftRunner: false,
+            enableHotState: false);
+        Console.WriteLine($"BRIDGE_END {requestId} {exit}");
+    }
 }
 
 static bool TryPromptForRunPath(string root, out string? path, out bool? watch)

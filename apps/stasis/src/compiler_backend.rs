@@ -6,8 +6,9 @@ use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const METRIC_STATUS: &str = "INC_STATUS=";
@@ -15,6 +16,29 @@ const METRIC_LAYOUT: &str = "INC_LAYOUT_HASH=";
 const METRIC_FILE: &str = "INC_FILE_PATH=";
 const METRIC_FN: &str = "INC_FN=";
 const METRIC_ERR: &str = "INC_ERR=";
+const BRIDGE_READY: &str = "BRIDGE_READY";
+const BRIDGE_BEGIN: &str = "BRIDGE_BEGIN";
+const BRIDGE_END: &str = "BRIDGE_END";
+const BRIDGE_PROTOCOL_ERROR: &str = "BRIDGE_PROTOCOL_ERROR";
+
+#[derive(serde::Serialize)]
+struct BridgeCompileCommand<'a> {
+    op: &'a str,
+    request_id: u64,
+    path: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct BridgeQuitCommand<'a> {
+    op: &'a str,
+    request_id: u64,
+}
+
+struct BridgeSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
 
 #[derive(Debug, Clone)]
 struct IncrementalOutput {
@@ -53,18 +77,14 @@ pub struct IncrementalCompilerBackend {
     last_layout_hash_i32: i32,
     fn_id_by_signature: BTreeMap<String, FnId>,
     next_fn_id: u32,
+    bridge: Option<BridgeSession>,
+    next_bridge_request_id: u64,
 }
 
 impl IncrementalCompilerBackend {
     pub fn new() -> Self {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        let cli_exe_path = repo_root
-            .join("bootstrap")
-            .join("windows")
-            .join("stasis-cli")
-            .join("Stasis.Cli.exe");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let cli_exe_path = resolve_cli_exe_path(&repo_root);
         let aot_helper_path = repo_root
             .join("tools")
             .join("cranelift-aot")
@@ -72,7 +92,9 @@ impl IncrementalCompilerBackend {
             .join("debug")
             .join("stasis-cranelift-aot.exe");
         let stable_temp_dir = repo_root.join(".stasis_cache").join("tmp");
-        let incremental_compiler_path = repo_root.join("compiler").join("incremental_compiler.stasis");
+        let incremental_compiler_path = repo_root
+            .join("compiler")
+            .join("incremental_compiler.stasis");
         Self {
             repo_root,
             cli_exe_path,
@@ -84,6 +106,8 @@ impl IncrementalCompilerBackend {
             last_layout_hash_i32: 0,
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
+            bridge: None,
+            next_bridge_request_id: 1,
         }
     }
 
@@ -93,7 +117,7 @@ impl IncrementalCompilerBackend {
         }
         if !self.cli_exe_path.exists() {
             return Err(format!(
-                "missing bootstrap CLI at {}",
+                "missing CLI executable at {}",
                 self.cli_exe_path.display()
             ));
         }
@@ -160,31 +184,16 @@ impl IncrementalCompilerBackend {
             &self.incremental_compiler_path,
             &changed_sources,
         )?;
-        let mut command = Command::new(&self.cli_exe_path);
-        command
-            .arg("run")
-            .arg(&harness_path)
-            .arg("--backend")
-            .arg("cranelift")
-            .arg("--no-cranelift-runner")
-            .env("STASIS_CRANELIFT_AOT", &self.aot_helper_path)
-            .env("STASIS_TEMP_DIR", &self.stable_temp_dir)
-            .current_dir(&self.repo_root);
-        if let Some(clang_bin_dir) = &self.clang_bin_dir {
-            let mut path_value = clang_bin_dir.to_string_lossy().into_owned();
-            path_value.push(';');
-            path_value.push_str(&std::env::var("PATH").unwrap_or_default());
-            command.env("PATH", path_value);
-        }
-
-        let output = command
-            .output()
-            .map_err(|error| format!("failed launching incremental compiler harness: {error}"))?;
+        let result = self.compile_harness_via_bridge(&harness_path).or_else(|first_error| {
+            self.reset_bridge();
+            self.compile_harness_via_bridge(&harness_path).map_err(|retry_error| {
+                format!(
+                    "incremental bridge compile failed after restart.\nfirst: {first_error}\nretry: {retry_error}"
+                )
+            })
+        });
         let _ = fs::remove_file(&harness_path);
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        parse_incremental_output(&stdout, &stderr)
+        result
     }
 
     fn fn_id_for_key(&mut self, key: &str) -> Result<FnId, String> {
@@ -198,6 +207,184 @@ impl IncrementalCompilerBackend {
         self.next_fn_id += 1;
         self.fn_id_by_signature.insert(key.to_string(), next);
         Ok(next)
+    }
+
+    fn compile_harness_via_bridge(
+        &mut self,
+        harness_path: &Path,
+    ) -> Result<IncrementalOutput, String> {
+        let request_id = self.next_bridge_request_id;
+        self.next_bridge_request_id = self.next_bridge_request_id.wrapping_add(1).max(1);
+        let harness_key = normalize_path_key(harness_path);
+
+        let command = BridgeCompileCommand {
+            op: "compile",
+            request_id,
+            path: &harness_key,
+        };
+        let payload = serde_json::to_string(&command)
+            .map_err(|error| format!("failed to serialize bridge compile command: {error}"))?;
+
+        let session = self.ensure_bridge_session()?;
+        session
+            .stdin
+            .write_all(payload.as_bytes())
+            .and_then(|_| session.stdin.write_all(b"\n"))
+            .and_then(|_| session.stdin.flush())
+            .map_err(|error| format!("failed writing compile command to bridge: {error}"))?;
+
+        let mut in_request = false;
+        let mut collected = String::new();
+        loop {
+            let line = read_bridge_line(&mut session.stdout)?;
+            if !in_request {
+                if let Some(begin_id) = parse_bridge_begin(&line) {
+                    if begin_id == request_id {
+                        in_request = true;
+                    }
+                }
+                continue;
+            }
+
+            if let Some((end_id, exit_code)) = parse_bridge_end(&line) {
+                if end_id != request_id {
+                    continue;
+                }
+                if exit_code != 0 {
+                    return Err(format!(
+                        "bridge compile returned exit code {exit_code}.\noutput:\n{collected}"
+                    ));
+                }
+                return parse_incremental_output(&collected, "");
+            }
+
+            if line.starts_with(BRIDGE_PROTOCOL_ERROR) {
+                return Err(format!(
+                    "bridge protocol error during compile request {request_id}: {line}"
+                ));
+            }
+
+            collected.push_str(&line);
+            collected.push('\n');
+        }
+    }
+
+    fn ensure_bridge_session(&mut self) -> Result<&mut BridgeSession, String> {
+        if self.bridge.is_none() {
+            self.bridge = Some(self.spawn_bridge_session()?);
+        }
+        self.bridge
+            .as_mut()
+            .ok_or_else(|| "internal error: bridge session missing after spawn".to_string())
+    }
+
+    fn spawn_bridge_session(&self) -> Result<BridgeSession, String> {
+        let mut command = Command::new(&self.cli_exe_path);
+        command
+            .arg("bridge")
+            .env("STASIS_CRANELIFT_AOT", &self.aot_helper_path)
+            .env("STASIS_TEMP_DIR", &self.stable_temp_dir)
+            .current_dir(&self.repo_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(clang_bin_dir) = &self.clang_bin_dir {
+            let mut path_value = clang_bin_dir.to_string_lossy().into_owned();
+            path_value.push(';');
+            path_value.push_str(&std::env::var("PATH").unwrap_or_default());
+            command.env("PATH", path_value);
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to launch bridge process: {error}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "bridge process missing stdin pipe".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "bridge process missing stdout pipe".to_string())?;
+        let mut stdout = BufReader::new(stdout);
+
+        let mut startup = String::new();
+        loop {
+            let line = read_bridge_line(&mut stdout)?;
+            if line.starts_with(BRIDGE_READY) {
+                break;
+            }
+            startup.push_str(&line);
+            startup.push('\n');
+            if startup.len() > 16 * 1024 {
+                return Err(format!(
+                    "bridge startup did not emit {BRIDGE_READY}. output:\n{startup}"
+                ));
+            }
+        }
+
+        Ok(BridgeSession {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
+    fn reset_bridge(&mut self) {
+        if let Some(mut session) = self.bridge.take() {
+            let quit = BridgeQuitCommand {
+                op: "quit",
+                request_id: 0,
+            };
+            if let Ok(payload) = serde_json::to_string(&quit) {
+                let _ = session.stdin.write_all(payload.as_bytes());
+                let _ = session.stdin.write_all(b"\n");
+                let _ = session.stdin.flush();
+            }
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
+    }
+}
+
+fn resolve_cli_exe_path(repo_root: &Path) -> PathBuf {
+    if let Ok(override_path) = std::env::var("STASIS_BOOTSTRAP_CLI") {
+        let path = PathBuf::from(override_path);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    let release = repo_root
+        .join("Stasis.Cli")
+        .join("bin")
+        .join("Release")
+        .join("net9.0")
+        .join("Stasis.Cli.exe");
+    if release.exists() {
+        return release;
+    }
+
+    let debug = repo_root
+        .join("Stasis.Cli")
+        .join("bin")
+        .join("Debug")
+        .join("net9.0")
+        .join("Stasis.Cli.exe");
+    if debug.exists() {
+        return debug;
+    }
+
+    repo_root
+        .join("bootstrap")
+        .join("windows")
+        .join("stasis-cli")
+        .join("Stasis.Cli.exe")
+}
+
+impl Drop for IncrementalCompilerBackend {
+    fn drop(&mut self) {
+        self.reset_bridge();
     }
 }
 
@@ -329,7 +516,10 @@ fn write_harness_file(
     let import_path = normalize_path_key(incremental_compiler_path);
 
     let mut program = String::new();
-    program.push_str(&format!("import \"{}\";\n\n", escape_stasis_string(&import_path)));
+    program.push_str(&format!(
+        "import \"{}\";\n\n",
+        escape_stasis_string(&import_path)
+    ));
     program.push_str("function print_metric(name: ascii[], value: i32): void {\n");
     program.push_str("    print_string(name);\n");
     program.push_str("    print_int(value);\n");
@@ -360,7 +550,9 @@ fn write_harness_file(
     program.push_str("        print_string(Compiler.files[i].path);\n");
     program.push_str("        print_char(10);\n");
     program.push_str("        let j: i32 = 0;\n");
-    program.push_str("        for (j = 0; j < Compiler.files[i].tracked_function_count; j = j + 1) {\n");
+    program.push_str(
+        "        for (j = 0; j < Compiler.files[i].tracked_function_count; j = j + 1) {\n",
+    );
     program.push_str("            print_string(\"INC_FN=\");\n");
     program.push_str("            print_int(i);\n");
     program.push_str("            print_char(44);\n");
@@ -391,6 +583,30 @@ fn write_harness_file(
     fs::write(&harness_path, program)
         .map_err(|error| format!("failed writing {}: {error}", harness_path.display()))?;
     Ok(harness_path)
+}
+
+fn read_bridge_line(reader: &mut BufReader<ChildStdout>) -> Result<String, String> {
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|error| format!("failed reading bridge output: {error}"))?;
+    if read == 0 {
+        return Err("bridge process closed output stream unexpectedly".to_string());
+    }
+    Ok(line.trim_end_matches(&['\r', '\n'][..]).to_string())
+}
+
+fn parse_bridge_begin(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix(BRIDGE_BEGIN)?.trim();
+    rest.parse::<u64>().ok()
+}
+
+fn parse_bridge_end(line: &str) -> Option<(u64, i32)> {
+    let rest = line.strip_prefix(BRIDGE_END)?.trim();
+    let mut parts = rest.split_whitespace();
+    let request_id = parts.next()?.parse::<u64>().ok()?;
+    let exit_code = parts.next()?.parse::<i32>().ok()?;
+    Some((request_id, exit_code))
 }
 
 fn parse_incremental_output(stdout: &str, stderr: &str) -> Result<IncrementalOutput, String> {
@@ -429,7 +645,8 @@ fn parse_incremental_output(stdout: &str, stderr: &str) -> Result<IncrementalOut
                     parts[3].trim().parse::<i32>(),
                     parts[4].trim().parse::<i32>(),
                 );
-                if let (Ok(file_index), Ok(ordinal), Ok(id_hash), Ok(sig_hash), Ok(body_hash)) = parsed
+                if let (Ok(file_index), Ok(ordinal), Ok(id_hash), Ok(sig_hash), Ok(body_hash)) =
+                    parsed
                 {
                     functions.push(FunctionMetric {
                         file_index,
@@ -464,9 +681,7 @@ fn parse_incremental_output(stdout: &str, stderr: &str) -> Result<IncrementalOut
     }
 
     let status = status.ok_or_else(|| {
-        format!(
-            "incremental harness did not emit status.\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        )
+        format!("incremental harness did not emit status.\nstdout:\n{stdout}\nstderr:\n{stderr}")
     })?;
     let layout_hash = layout_hash.unwrap_or(0);
     let file_paths = file_paths.into_values().collect();
@@ -683,7 +898,9 @@ fn expand_layout_hash(layout_hash: i32) -> LayoutHash {
 fn hash_identifier(name: &str) -> i32 {
     let mut hash: i32 = 216613626;
     for byte in name.bytes() {
-        hash = hash.wrapping_mul(16777619).wrapping_add(i32::from(byte) + 1);
+        hash = hash
+            .wrapping_mul(16777619)
+            .wrapping_add(i32::from(byte) + 1);
     }
     hash
 }
@@ -748,5 +965,14 @@ function main(): i32 { return 0; }
     #[test]
     fn identifier_hash_matches_incremental_function() {
         assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    }
+
+    #[test]
+    fn bridge_markers_parse() {
+        assert_eq!(parse_bridge_begin("BRIDGE_BEGIN 42"), Some(42));
+        assert_eq!(parse_bridge_begin("BRIDGE_BEGIN nope"), None);
+        assert_eq!(parse_bridge_end("BRIDGE_END 42 0"), Some((42, 0)));
+        assert_eq!(parse_bridge_end("BRIDGE_END 42"), None);
+        assert_eq!(parse_bridge_end("not_a_marker"), None);
     }
 }

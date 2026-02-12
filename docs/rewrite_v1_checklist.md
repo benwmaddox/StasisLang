@@ -46,7 +46,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 ### Current Snapshot (2026-02-12)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S5`, `S8b`, `S10`, `S12`.
-- Main integration gap: `apps/stasis` default flow still uses a simulated compile backend; full real-compiler patch generation/execution is not wired yet.
+- Main integration gap: real backend compile path is now default, but emitted function patches are metadata-only (`FnId` mapping from hashes) and are not yet executing newly generated machine code through the pointer table.
 
 ### S0 - Workspace Bootstrap
 - Language:
@@ -300,6 +300,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end scenario test with window config assertion.
 - Current runtime coverage:
 - `crates/stasis_compiler` bootstrap smoke test now compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` via `--emit-ir`.
+- `apps/stasis` scenario run path now defaults to the real incremental backend with a persistent `Stasis.Cli bridge` compiler process; timing telemetry is emitted via `last_compile_duration_ms` / `last_commit_duration_ms`.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Status: `in_progress`

@@ -9,13 +9,13 @@ pub use events::RunnerEvent;
 pub use scenarios::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
+use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
     FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, SwapCommitResult,
     SwapCommitStatus, TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use stasis_jit::FunctionPointerTable;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -844,8 +844,9 @@ mod tests {
             .join("stasis")
             .join("run_main_returns_7.stasis");
         let config = RunnerConfig {
-            max_ticks: 450,
-            tick_sleep_micros: 0,
+            // Real backend compile can take multiple seconds on busy CI/dev hosts.
+            max_ticks: 7000,
+            tick_sleep_micros: 1000,
             window: None,
             inject_file_change: Some(fixture),
             watch_directory: None,
