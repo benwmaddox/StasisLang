@@ -252,7 +252,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end scenario test with window config assertion.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
-- Status: `pending`
+- Status: `in_progress`
 
 ## PR Sequence
 

@@ -31,6 +31,7 @@ cargo build
 cargo test
 cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge
 cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge --events-jsonl
+cargo run -p stasis -- --scenario brickout-revenge-v1 --ticks 300
 ```
 
 Structured event stream options:

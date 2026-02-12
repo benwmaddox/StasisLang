@@ -1,0 +1,34 @@
+use crate::RunnerConfig;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowConfig {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowConfig {
+    pub fn is_vertical(self) -> bool {
+        self.height > self.width
+    }
+}
+
+pub const BRICKOUT_REVENGE_V1_WINDOW: WindowConfig = WindowConfig {
+    width: 720,
+    height: 1280,
+};
+
+pub fn brickout_revenge_v1_runner_config(max_ticks: u32) -> RunnerConfig {
+    RunnerConfig {
+        max_ticks,
+        tick_sleep_micros: 0,
+        inject_file_change: Some(PathBuf::from(
+            "samples/brickout_revenge/brickout_revenge_v1.stasis",
+        )),
+        watch_directory: None,
+        fail_compile: false,
+        disable_on_code_swap_hook: false,
+        hook_failure_reason: None,
+        swap_failure_reason: None,
+    }
+}

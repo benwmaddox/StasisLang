@@ -4,7 +4,11 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
 
-use stasis::{run_with_default_backend, RunnerConfig};
+use stasis::{
+    run_with_default_backend,
+    scenarios::{brickout_revenge_v1_runner_config, BRICKOUT_REVENGE_V1_WINDOW},
+    RunnerConfig,
+};
 
 struct CliOptions {
     runner: RunnerConfig,
@@ -75,6 +79,13 @@ fn parse_args() -> CliOptions {
                     events_jsonl_file = Some(PathBuf::from(value));
                 }
             }
+            "--scenario" => {
+                if let Some(value) = args.next() {
+                    if value == "brickout-revenge-v1" {
+                        config = brickout_revenge_v1_runner_config(config.max_ticks);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -112,6 +123,10 @@ fn write_events_jsonl(
 
 fn main() {
     let options = parse_args();
+    let is_brickout_profile = options.runner.inject_file_change.as_ref()
+        == Some(&PathBuf::from(
+            "samples/brickout_revenge/brickout_revenge_v1.stasis",
+        ));
     let summary = run_with_default_backend(options.runner);
     let exit_code = if summary.compile_failures > 0 || summary.swap_commit_failures > 0 {
         1
@@ -144,6 +159,12 @@ fn main() {
         summary.swap_flash_ticks_remaining
     );
     println!("has_in_flight_work={}", summary.has_in_flight_work);
+    if is_brickout_profile {
+        println!(
+            "window_profile=brickout_revenge_v1 {}x{}",
+            BRICKOUT_REVENGE_V1_WINDOW.width, BRICKOUT_REVENGE_V1_WINDOW.height
+        );
+    }
     for diagnostic in &summary.compile_diagnostics {
         println!("compile_diagnostic={diagnostic}");
     }

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod events;
+pub mod scenarios;
 mod watch;
 
 pub use events::RunnerEvent;
@@ -215,9 +216,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             swap_flash_ticks_remaining -= 1;
         }
         thread::yield_now();
-        if config.tick_sleep_micros > 0 {
-            thread::sleep(Duration::from_micros(config.tick_sleep_micros));
-        }
+        sleep_for_tick(config.tick_sleep_micros);
     }
 
     for _ in 0..500 {
@@ -297,9 +296,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             }
         }
         thread::yield_now();
-        if config.tick_sleep_micros > 0 {
-            thread::sleep(Duration::from_micros(config.tick_sleep_micros));
-        }
+        sleep_for_tick(config.tick_sleep_micros);
     }
 
     let has_in_flight_work = pipeline.has_in_flight_work();
@@ -405,6 +402,16 @@ fn observe_pipeline_results(
     new_commit
 }
 
+fn sleep_for_tick(tick_sleep_micros: u64) {
+    let micros = if tick_sleep_micros > 0 {
+        tick_sleep_micros
+    } else {
+        // Tiny default pause improves cross-thread determinism for test/runtime loops.
+        50
+    };
+    thread::sleep(Duration::from_micros(micros));
+}
+
 fn format_diagnostic(diagnostic: &Diagnostic) -> String {
     let severity = match diagnostic.severity {
         DiagnosticSeverity::Error => "error",
@@ -429,6 +436,7 @@ fn format_diagnostic(diagnostic: &Diagnostic) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenarios::{brickout_revenge_v1_runner_config, BRICKOUT_REVENGE_V1_WINDOW};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -697,5 +705,23 @@ mod tests {
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
         assert!(summary.events.len() >= 3);
+    }
+
+    #[test]
+    fn brickout_revenge_profile_is_vertical() {
+        assert!(BRICKOUT_REVENGE_V1_WINDOW.is_vertical());
+    }
+
+    #[test]
+    fn brickout_revenge_profile_runs_incremental_swap_loop() {
+        let config = brickout_revenge_v1_runner_config(200);
+        let summary = run_with_default_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
+        assert_eq!(summary.swap_indicator_armed_count, 1);
+        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert!(!summary.has_in_flight_work);
     }
 }
