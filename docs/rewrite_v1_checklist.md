@@ -238,7 +238,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Tick countdown behavior tests and no-indicator-on-failure tests.
 - Done gate:
 - Indicator follows tick policy and does not fire on failed swap.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S12 - Brickout Revenge End-to-End
 - Language:

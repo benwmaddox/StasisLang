@@ -134,6 +134,15 @@ fn main() {
     println!("hook_failures={}", summary.hook_failures);
     println!("swap_commit_successes={}", summary.swap_commit_successes);
     println!("swap_commit_failures={}", summary.swap_commit_failures);
+    println!(
+        "swap_indicator_armed_count={}",
+        summary.swap_indicator_armed_count
+    );
+    println!("swap_flash_peak_ticks={}", summary.swap_flash_peak_ticks);
+    println!(
+        "swap_flash_ticks_remaining={}",
+        summary.swap_flash_ticks_remaining
+    );
     println!("has_in_flight_work={}", summary.has_in_flight_work);
     for diagnostic in &summary.compile_diagnostics {
         println!("compile_diagnostic={diagnostic}");
