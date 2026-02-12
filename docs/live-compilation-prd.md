@@ -356,6 +356,39 @@ Rules:
 - Runtime never blocks frame loop
 - Swap commit bounded and deterministic
 
+### 12.1 Dev File-Change Ownership
+
+When a source file changes during development, ownership is:
+
+- Runtime/Main Thread: owns tick loop, safe-point detection, and final swap commit; never performs parsing/semantic/codegen work inline with tick execution.
+- Compiler Service Thread: owns lex/parse/index/semantic/hash analysis for changed files and produces either diagnostics or a swap candidate patch.
+- Codegen Service (Cranelift): owns JIT code emission for dev mode and AOT emission for prod mode; never mutates runtime state directly.
+- Swap Coordinator: owns two-phase commit transaction boundaries, all-or-nothing swap rules, and generation retirement scheduling after successful commit.
+
+### 12.2 High-Level Interface Contracts (Development Mode)
+
+Interfaces are message-based and versioned. No cross-thread shared mutable compiler/runtime objects.
+
+- `FileChangeEvent`: producer file watcher/input bridge; consumer compiler service; fields `path`, `revision`, `text_source`, `change_kind`.
+- `CompileRequest`: producer swap coordinator; consumer compiler service; fields `request_id`, `changed_files[]`, `target_mode=jit-dev`.
+- `CompileResult`: producer compiler service; consumer swap coordinator; fields `request_id`, `status`, `diagnostics[]`, `layout_hash`, `fn_patch_set`.
+- `SwapCommitRequest`: producer swap coordinator; consumer runtime/main thread safe-point gate; fields `request_id`, `layout_hash`, `fn_patch_set`, `hook_symbol`.
+- `SwapCommitResult`: producer runtime/main thread; consumer swap coordinator + UI/status bridge; fields `request_id`, `status`, `swapped_fn_ids[]`, `new_generation`, `error`.
+
+### 12.3 Development Change Sequence (Single File Save)
+
+1. Watcher emits `FileChangeEvent`.
+2. Swap coordinator coalesces pending events and emits `CompileRequest`.
+3. Compiler service runs full-file semantic pass.
+4. Compiler/codegen returns `CompileResult` with diagnostics or patch.
+5. If diagnostics exist, patch is discarded and old code remains active.
+6. If eligible, coordinator waits for between-ticks safe point.
+7. Main thread runs `on_code_swap()` (if present) using old pointers.
+8. Main thread atomically applies pointer-table update and records new generation.
+9. Runtime publishes `SwapCommitResult`; debug UI updates swap indicator only on success.
+
+Failure at any sequence step aborts commit and preserves old code/data.
+
 ## 13. Code Memory Management
 
 - Executable memory allocated per generation

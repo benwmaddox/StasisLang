@@ -606,6 +606,29 @@ Swap is rejected if:
 
 On rejection, old code and old data remain active.
 
+### 14.4 Development File-Change Boundary Contracts
+
+During development, file-change handling uses explicit role ownership and message boundaries.
+
+Role ownership:
+- Runtime/main thread owns tick loop, safe-point gating, and final commit.
+- Compiler service thread owns lex/parse/index/semantic/hash and patch assembly.
+- Codegen service owns backend emission (JIT for dev, AOT for prod artifacts).
+- Swap coordinator owns transactional all-or-nothing commit orchestration.
+
+Required high-level message contracts:
+- `FileChangeEvent(path, revision, text_source, change_kind)`
+- `CompileRequest(request_id, changed_files[], target_mode)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set)`
+- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
+- `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
+
+Rules:
+- Compiler/codegen services must not mutate runtime game state directly.
+- Runtime must not execute parser/semantic/codegen work on tick path.
+- Commit may occur only between ticks and must be all-or-nothing.
+- Any failure at compile or commit stage preserves old code and old data.
+
 ## 15. Swap Hook
 
 Optional hook:

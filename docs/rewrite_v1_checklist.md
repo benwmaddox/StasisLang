@@ -199,12 +199,16 @@ This section is temporary and should be removed once S0 establishes working Carg
 - `.stasis`: swap eligibility policy inputs and diagnostics policy.
 - Scope:
 - Implement background compile patch generation and between-ticks commit.
+- Implement typed boundary contracts for dev flow messages:
+- `FileChangeEvent`, `CompileRequest`, `CompileResult`, `SwapCommitRequest`, `SwapCommitResult`.
 - Deliverable:
 - Atomic swap behavior: all-or-nothing commit.
 - Tests:
 - Swap success, swap rejection, and no-partial-commit tests.
+- Boundary contract tests for message ordering and failure propagation.
 - Done gate:
 - On failure, old code/data remain active.
+- Runtime/compiler ownership boundaries enforced in code paths.
 - Status: `pending`
 
 ### S10 - `on_code_swap` Hook
