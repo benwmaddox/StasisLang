@@ -117,9 +117,15 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Small real programs beyond single return execute correctly.
 - Tests:
 - Semantic and codegen unit tests plus end-to-end fixtures.
+- Added parser coverage fixtures:
+- `tests/stasis/parser_s4_valid_control_flow.stasis`
+- `tests/stasis/parser_s4_invalid_let_missing_init_or_type.stasis`
+- Added runtime smoke fixtures that execute `compiler/incremental_compiler.stasis` parse counts and failure paths:
+- `tests/stasis/run_parser_s4_counts.stasis`
+- `tests/stasis/run_parser_invalid_let_missing_init_or_type.stasis`
 - Done gate:
 - Behavior matches `docs/spec.md` operator and assignment rules.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S5 - Call Model and Conversion Semantics
 - Language:

@@ -22,6 +22,10 @@ Current entrypoint validation API in `compiler/incremental_compiler.stasis`:
 - `43` when multiple `main` declarations are present
 - `run_incremental_compiler_with_main_entry()` runs pipeline + entry validation.
 
+Current single-source execution mode:
+- `compiler_set_source(...)` updates the in-memory source buffer directly.
+- `run_incremental_compiler()` and `run_incremental_compiler_with_main_entry()` parse/validate that single source when no file database entries are present.
+
 Console extern naming (Rewrite V1):
 - Source-level preferred name: `print_i32`.
 - Bootstrap runtime currently exposes `print_int`; stdlib provides `print_i32(value: i32)` wrapper over `print_int(value)`.

@@ -299,6 +299,80 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn bootstrap_compiles_parser_s4_valid_control_flow_fixture() {
+        let source = fixture_path("parser_s4_valid_control_flow.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        assert!(
+            output.status.success(),
+            "expected compile success for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bootstrap_reports_parser_error_for_s4_invalid_let_fixture() {
+        let source = fixture_path("parser_s4_invalid_let_missing_init_or_type.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        let text = combined_output_text(&output);
+        assert!(
+            !output.status.success(),
+            "expected parse failure for {}, but compile succeeded.\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("Local variables must declare a type")
+                || text.contains("let name: type = value")
+                || text.contains("Expected '='"),
+            "expected let-declaration diagnostic for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_parser_s4_counts_fixture() {
+        let source = fixture_path("run_parser_s4_counts.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected exit code 0 for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_parser_invalid_let_missing_init_or_type_fixture() {
+        let source = fixture_path("run_parser_invalid_let_missing_init_or_type.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "expected parse error exit code 2 for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bootstrap_compiles_entry_validation_ok_fixture() {
         let source = fixture_path("entry_validation_ok.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());

@@ -30,6 +30,8 @@ const ERR_PARSE_PARAM_GUARD_EXHAUSTED: i32 = 2013;
 const ERR_PARSE_ARG_GUARD_EXHAUSTED: i32 = 2014;
 const ERR_PARSE_BODY_GUARD_EXHAUSTED: i32 = 2015;
 const ERR_PARSE_CALL_GUARD_EXHAUSTED: i32 = 2016;
+const ERR_PARSE_EXPECT_ASSIGN_IN_LET: i32 = 2017;
+const ERR_PARSE_EXPECT_RBRACKET: i32 = 2018;
 const ERR_INCREMENTAL_FILE_OVERFLOW: i32 = 3001;
 const ERR_INCREMENTAL_FILE_PATH_EMPTY: i32 = 3002;
 const ERR_ENTRY_MISSING_MAIN: i32 = 41;
@@ -51,13 +53,39 @@ enum TokenKind {
     KwFunction,
     KwExtern,
     KwReturn,
+    KwLet,
+    KwIf,
+    KwElse,
     LParen,
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Colon,
     Semicolon,
     Comma,
+    Dot,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Assign,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    EqEq,
+    NotEq,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+    AndAnd,
+    OrOr,
+    Bang,
     Eof
 }
 
@@ -117,6 +145,9 @@ struct CompilerState {
     parsed_extern_count: i32;
     parsed_return_count: i32;
     parsed_call_count: i32;
+    parsed_let_count: i32;
+    parsed_if_count: i32;
+    parsed_assignment_count: i32;
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -171,7 +202,6 @@ function compiler_set_source(src: ascii[]): void {
     ascii_clear(Compiler.source);
     ascii_copy(Compiler.source, src);
     Compiler.source_len = length(Compiler.source);
-    compiler_upsert_file("__single_file__.stasis", src);
 }
 
 function compiler_hash_ascii(src: ascii[]): i32 {
@@ -262,6 +292,9 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_let_count = 0;
+    Compiler.parsed_if_count = 0;
+    Compiler.parsed_assignment_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -271,7 +304,30 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.incremental_failed_files = 0;
 
     if (Compiler.file_count == 0) {
-        // Allow empty session to be a no-op success.
+        // Backward-compatible single-source mode used by compiler_set_source().
+        if (Compiler.source_len <= 0) {
+            Compiler.status = CompilerStatus.Ok;
+            return compiler_get_status_code();
+        }
+
+        Compiler.incremental_scanned_files = 1;
+        Compiler.current_file_index = -1;
+        Compiler.token_count = 0;
+        Compiler.parse_index = 0;
+
+        if (!compiler_lex()) {
+            Compiler.status = CompilerStatus.LexError;
+            Compiler.incremental_failed_files = 1;
+            return compiler_get_status_code();
+        }
+
+        if (!compiler_parse_program()) {
+            Compiler.status = CompilerStatus.ParseError;
+            Compiler.incremental_failed_files = 1;
+            return compiler_get_status_code();
+        }
+
+        Compiler.incremental_parsed_files = 1;
         Compiler.status = CompilerStatus.Ok;
         return compiler_get_status_code();
     }
@@ -353,6 +409,9 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_let_count = 0;
+    Compiler.parsed_if_count = 0;
+    Compiler.parsed_assignment_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -421,6 +480,18 @@ function compiler_get_main_valid_i32_count(): i32 {
 
 function compiler_get_main_invalid_signature_count(): i32 {
     return Compiler.parsed_main_invalid_signature_count;
+}
+
+function compiler_get_let_count(): i32 {
+    return Compiler.parsed_let_count;
+}
+
+function compiler_get_if_count(): i32 {
+    return Compiler.parsed_if_count;
+}
+
+function compiler_get_assignment_count(): i32 {
+    return Compiler.parsed_assignment_count;
 }
 
 function compiler_validate_entry_main_i32(): i32 {
@@ -562,6 +633,30 @@ function compiler_is_keyword_return(start: i32, len: i32): bool {
     return true;
 }
 
+function compiler_is_keyword_let(start: i32, len: i32): bool {
+    if (len != 3) { return false; }
+    if (Compiler.source[start + 0] != 108) { return false; } // l
+    if (Compiler.source[start + 1] != 101) { return false; } // e
+    if (Compiler.source[start + 2] != 116) { return false; } // t
+    return true;
+}
+
+function compiler_is_keyword_if(start: i32, len: i32): bool {
+    if (len != 2) { return false; }
+    if (Compiler.source[start + 0] != 105) { return false; } // i
+    if (Compiler.source[start + 1] != 102) { return false; } // f
+    return true;
+}
+
+function compiler_is_keyword_else(start: i32, len: i32): bool {
+    if (len != 4) { return false; }
+    if (Compiler.source[start + 0] != 101) { return false; } // e
+    if (Compiler.source[start + 1] != 108) { return false; } // l
+    if (Compiler.source[start + 2] != 115) { return false; } // s
+    if (Compiler.source[start + 3] != 101) { return false; } // e
+    return true;
+}
+
 function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     let len: i32 = end - start;
     if (compiler_is_keyword_function(start, len)) {
@@ -572,6 +667,15 @@ function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
     }
     if (compiler_is_keyword_return(start, len)) {
         return compiler_emit_token(TokenKind.KwReturn, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_let(start, len)) {
+        return compiler_emit_token(TokenKind.KwLet, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_if(start, len)) {
+        return compiler_emit_token(TokenKind.KwIf, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_else(start, len)) {
+        return compiler_emit_token(TokenKind.KwElse, start, end, 0, start, len);
     }
     return compiler_emit_token(TokenKind.Identifier, start, end, 0, start, len);
 }
@@ -593,6 +697,14 @@ function compiler_emit_single_char_token(b: u8, index: i32): i32 {
         if (!compiler_emit_token(TokenKind.RBrace, index, index + 1, 0, index, 1)) { return -1; }
         return 1;
     }
+    if (b == 91) {
+        if (!compiler_emit_token(TokenKind.LBracket, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 93) {
+        if (!compiler_emit_token(TokenKind.RBracket, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
     if (b == 58) {
         if (!compiler_emit_token(TokenKind.Colon, index, index + 1, 0, index, 1)) { return -1; }
         return 1;
@@ -603,6 +715,46 @@ function compiler_emit_single_char_token(b: u8, index: i32): i32 {
     }
     if (b == 44) {
         if (!compiler_emit_token(TokenKind.Comma, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 46) {
+        if (!compiler_emit_token(TokenKind.Dot, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 43) {
+        if (!compiler_emit_token(TokenKind.Plus, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 45) {
+        if (!compiler_emit_token(TokenKind.Minus, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 42) {
+        if (!compiler_emit_token(TokenKind.Star, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 47) {
+        if (!compiler_emit_token(TokenKind.Slash, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 37) {
+        if (!compiler_emit_token(TokenKind.Percent, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 61) {
+        if (!compiler_emit_token(TokenKind.Assign, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 60) {
+        if (!compiler_emit_token(TokenKind.Less, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 62) {
+        if (!compiler_emit_token(TokenKind.Greater, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 33) {
+        if (!compiler_emit_token(TokenKind.Bang, index, index + 1, 0, index, 1)) { return -1; }
         return 1;
     }
     return 0;
@@ -695,13 +847,74 @@ function compiler_lex(): bool {
                             }
                             i = end - 1;
                         } else {
-                            let emitted: i32 = compiler_emit_single_char_token(b, i);
-                            if (emitted == -1) {
-                                return false;
+                            let consumed_two_char: i32 = 0;
+                            if (i + 1 < len) {
+                                let next: u8 = Compiler.source[i + 1];
+                                if (b == 43 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.PlusEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 45 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.MinusEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 42 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.StarEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 47 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.SlashEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 37 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.PercentEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 61 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.EqEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 33 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.NotEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 60 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.LessEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 62 && next == 61) {
+                                    if (!compiler_emit_token(TokenKind.GreaterEq, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 38 && next == 38) {
+                                    if (!compiler_emit_token(TokenKind.AndAnd, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
+                                if (consumed_two_char == 0 && b == 124 && next == 124) {
+                                    if (!compiler_emit_token(TokenKind.OrOr, i, i + 2, 0, i, 2)) { return false; }
+                                    i += 1;
+                                    consumed_two_char = 1;
+                                }
                             }
-                            if (emitted == 0) {
-                                compiler_push_error(ERR_LEX_UNEXPECTED_CHAR, i, u8_to_i32(b), Compiler.current_file_index);
-                                return false;
+                            if (consumed_two_char == 0) {
+                                let emitted: i32 = compiler_emit_single_char_token(b, i);
+                                if (emitted == -1) {
+                                    return false;
+                                }
+                                if (emitted == 0) {
+                                    compiler_push_error(ERR_LEX_UNEXPECTED_CHAR, i, u8_to_i32(b), Compiler.current_file_index);
+                                    return false;
+                                }
                             }
                         }
                     }
@@ -867,6 +1080,13 @@ function parser_parse_signature(is_extern: bool): bool {
 
 function parser_parse_primary(): bool {
     let kind: TokenKind = parser_current_kind();
+    if (kind == TokenKind.LParen) {
+        Compiler.parse_index += 1;
+        if (!parser_parse_expression()) {
+            return false;
+        }
+        return parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN);
+    }
     if (kind == TokenKind.Identifier || kind == TokenKind.IntLiteral || kind == TokenKind.StringLiteral) {
         Compiler.parse_index += 1;
         return true;
@@ -876,34 +1096,64 @@ function parser_parse_primary(): bool {
 }
 
 function parser_parse_expression(): bool {
+    return parser_parse_assignment();
+}
+
+function parser_is_assignment_operator(kind: TokenKind): bool {
+    if (kind == TokenKind.Assign) { return true; }
+    if (kind == TokenKind.PlusEq) { return true; }
+    if (kind == TokenKind.MinusEq) { return true; }
+    if (kind == TokenKind.StarEq) { return true; }
+    if (kind == TokenKind.SlashEq) { return true; }
+    if (kind == TokenKind.PercentEq) { return true; }
+    return false;
+}
+
+function parser_parse_postfix(): bool {
     if (!parser_parse_primary()) {
         return false;
     }
 
     let call_guard: i32 = 0;
     for (call_guard = 0; call_guard < COMPILER_MAX_CALL_NEST; call_guard += 1) {
-        if (!parser_match(TokenKind.LParen)) {
-            return true;
-        }
-        Compiler.parsed_call_count += 1;
-        if (parser_match(TokenKind.RParen)) {
-            // Empty arg call.
-        } else {
-            if (!parser_parse_expression()) {
-                return false;
+        if (parser_match(TokenKind.LParen)) {
+            Compiler.parsed_call_count += 1;
+            if (parser_match(TokenKind.RParen)) {
+                // Empty arg call.
+            } else {
+                if (!parser_parse_expression()) {
+                    return false;
+                }
+                let arg_guard: i32 = 0;
+                for (arg_guard = 0; arg_guard < COMPILER_MAX_ARGS; arg_guard += 1) {
+                    if (parser_match(TokenKind.Comma)) {
+                        if (!parser_parse_expression()) {
+                            return false;
+                        }
+                    } else {
+                        arg_guard = COMPILER_MAX_ARGS;
+                    }
+                }
+                if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+                    return false;
+                }
             }
-            let arg_guard: i32 = 0;
-            for (arg_guard = 0; arg_guard < COMPILER_MAX_ARGS; arg_guard += 1) {
-                if (parser_match(TokenKind.Comma)) {
+        } else {
+            if (parser_match(TokenKind.Dot)) {
+                if (!parser_expect_identifier()) {
+                    return false;
+                }
+            } else {
+                if (parser_match(TokenKind.LBracket)) {
                     if (!parser_parse_expression()) {
                         return false;
                     }
+                    if (!parser_expect(TokenKind.RBracket, ERR_PARSE_EXPECT_RBRACKET)) {
+                        return false;
+                    }
                 } else {
-                    arg_guard = COMPILER_MAX_ARGS;
+                    return true;
                 }
-            }
-            if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
-                return false;
             }
         }
     }
@@ -912,23 +1162,174 @@ function parser_parse_expression(): bool {
     return false;
 }
 
-function parser_parse_statement(): bool {
-    if (parser_match(TokenKind.KwReturn)) {
-        Compiler.parsed_return_count += 1;
-        if (!parser_parse_expression()) {
-            parser_error(ERR_PARSE_EXPECT_RETURN_EXPR);
-            return false;
-        }
-        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+function parser_parse_unary(): bool {
+    if (parser_match(TokenKind.Bang)) {
+        return parser_parse_unary();
     }
-
-    if (!parser_parse_expression()) {
-        return false;
+    if (parser_match(TokenKind.Minus)) {
+        return parser_parse_unary();
     }
-    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    if (parser_match(TokenKind.Plus)) {
+        return parser_parse_unary();
+    }
+    return parser_parse_postfix();
 }
 
-function parser_parse_function_body(): bool {
+function parser_parse_multiplicative(): bool {
+    if (!parser_parse_unary()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        let matched_op: i32 = 0;
+        if (parser_match(TokenKind.Star)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.Slash)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.Percent)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0) {
+            return true;
+        }
+        if (!parser_parse_unary()) {
+            return false;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_additive(): bool {
+    if (!parser_parse_multiplicative()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        let matched_op: i32 = 0;
+        if (parser_match(TokenKind.Plus)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.Minus)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0) {
+            return true;
+        }
+        if (!parser_parse_multiplicative()) {
+            return false;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_comparison(): bool {
+    if (!parser_parse_additive()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        let matched_op: i32 = 0;
+        if (parser_match(TokenKind.Less)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.LessEq)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.Greater)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.GreaterEq)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0) {
+            return true;
+        }
+        if (!parser_parse_additive()) {
+            return false;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_equality(): bool {
+    if (!parser_parse_comparison()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        let matched_op: i32 = 0;
+        if (parser_match(TokenKind.EqEq)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0 && parser_match(TokenKind.NotEq)) {
+            matched_op = 1;
+        }
+        if (matched_op == 0) {
+            return true;
+        }
+        if (!parser_parse_comparison()) {
+            return false;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_logical_and(): bool {
+    if (!parser_parse_equality()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        if (parser_match(TokenKind.AndAnd)) {
+            if (!parser_parse_equality()) {
+                return false;
+            }
+        } else {
+            return true;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_logical_or(): bool {
+    if (!parser_parse_logical_and()) {
+        return false;
+    }
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_CALL_NEST; guard += 1) {
+        if (parser_match(TokenKind.OrOr)) {
+            if (!parser_parse_logical_and()) {
+                return false;
+            }
+        } else {
+            return true;
+        }
+    }
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_assignment(): bool {
+    if (!parser_parse_logical_or()) {
+        return false;
+    }
+    let kind: TokenKind = parser_current_kind();
+    if (parser_is_assignment_operator(kind)) {
+        Compiler.parse_index += 1;
+        Compiler.parsed_assignment_count += 1;
+        return parser_parse_assignment();
+    }
+    return true;
+}
+
+function parser_parse_block(): bool {
     if (!parser_expect(TokenKind.LBrace, ERR_PARSE_EXPECT_LBRACE)) {
         return false;
     }
@@ -945,6 +1346,89 @@ function parser_parse_function_body(): bool {
 
     parser_error(ERR_PARSE_BODY_GUARD_EXHAUSTED);
     return false;
+}
+
+function parser_parse_let_statement(): bool {
+    if (!parser_expect_identifier()) {
+        return false;
+    }
+    let has_type: i32 = 0;
+    let has_initializer: i32 = 0;
+    if (parser_match(TokenKind.Colon)) {
+        has_type = 1;
+        if (!parser_parse_type_name()) {
+            return false;
+        }
+    }
+    if (parser_match(TokenKind.Assign)) {
+        has_initializer = 1;
+        Compiler.parsed_assignment_count += 1;
+        if (!parser_parse_expression()) {
+            return false;
+        }
+    }
+    if (has_type == 0 && has_initializer == 0) {
+        parser_error(ERR_PARSE_EXPECT_ASSIGN_IN_LET);
+        return false;
+    }
+    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+}
+
+function parser_parse_if_statement(): bool {
+    Compiler.parsed_if_count += 1;
+    if (!parser_expect(TokenKind.LParen, ERR_PARSE_EXPECT_LPAREN)) {
+        return false;
+    }
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+        return false;
+    }
+    if (!parser_parse_block()) {
+        return false;
+    }
+    if (parser_match(TokenKind.KwElse)) {
+        if (parser_match(TokenKind.KwIf)) {
+            return parser_parse_if_statement();
+        }
+        if (!parser_parse_block()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function parser_parse_statement(): bool {
+    if (parser_match(TokenKind.KwLet)) {
+        Compiler.parsed_let_count += 1;
+        return parser_parse_let_statement();
+    }
+    if (parser_match(TokenKind.KwIf)) {
+        return parser_parse_if_statement();
+    }
+    if (parser_current_kind() == TokenKind.LBrace) {
+        return parser_parse_block();
+    }
+    if (parser_match(TokenKind.KwReturn)) {
+        Compiler.parsed_return_count += 1;
+        if (parser_match(TokenKind.Semicolon)) {
+            return true;
+        }
+        if (!parser_parse_expression()) {
+            parser_error(ERR_PARSE_EXPECT_RETURN_EXPR);
+            return false;
+        }
+        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    }
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+}
+
+function parser_parse_function_body(): bool {
+    return parser_parse_block();
 }
 
 function parser_parse_item(): bool {
