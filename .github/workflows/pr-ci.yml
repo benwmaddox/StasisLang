@@ -100,4 +100,4 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
-        run: cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture
+        run: cargo test -p stasis_compiler -- --nocapture

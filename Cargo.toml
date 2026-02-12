@@ -6,6 +6,9 @@ members = [
   "crates/stasis_jit",
   "crates/stasis_runner",
 ]
+exclude = [
+  "tools/cranelift-aot",
+]
 
 [workspace.package]
 version = "0.1.0"

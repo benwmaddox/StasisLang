@@ -68,10 +68,10 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Deliverable:
 - Parser accepts minimal program containing `main`.
 - Tests:
-- Parser unit tests and parse snapshots for positive/negative cases.
+- Bootstrap-backed parser fixtures for positive/negative cases (`tests/stasis/parser_valid_main.stasis`, `tests/stasis/parser_invalid_missing_semicolon.stasis`).
 - Done gate:
 - Parses minimal valid program and emits actionable diagnostics on failures.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S2 - Minimal Execution (`main(): i32`)
 - Language:
@@ -87,7 +87,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end test asserts returned status code.
 - Done gate:
 - Exit status path is stable and deterministic.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S3 - Console Externs
 - Language:

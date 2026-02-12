@@ -13,7 +13,19 @@ This folder contains a built bootstrap compiler pulled from `main` so Rewrite V1
 bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir
 bootstrap\windows\stasisc.bat test --all
 bootstrap\windows\stasisc.bat build path\to\file.stasis --backend cranelift
+bootstrap\windows\stasis-cranelift-run.bat path\to\file.stasis
 ```
+
+## Cranelift Run Helper
+
+`bootstrap\windows\stasis-cranelift-run.bat` provides a reproducible local dev path for running `.stasis` files with Cranelift on this branch.
+
+What it does:
+- Builds `tools/cranelift-aot` if needed.
+- Sets `STASIS_CRANELIFT_AOT` to the built helper binary.
+- Adds a common local `clang.exe` path (LLVM or VS Build Tools) to `PATH` when present.
+- Runs:
+  - `stasisc run <file> --backend cranelift --no-cranelift-runner`
 
 ## Receiver-Style Compatibility Shim
 
