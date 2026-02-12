@@ -16,8 +16,11 @@ Locked decisions:
 ## Language Ownership Legend
 
 - `Rust`: Host app/runtime boundary, platform integration, Cranelift integration, process/watch plumbing.
-- `.stasis`: Compiler pipeline orchestration and language-level compile logic.
+- `.stasis`: Compiler pipeline orchestration and language-level compile logic (lexer/parser/semantics/incremental policy source of truth).
 - `Rust + .stasis`: Rust provides execution/binding substrate; `.stasis` defines compiler behavior/policies.
+
+Boundary rule:
+- Rust must not become a second source of truth for lexer/parser semantics; frontend behavior lands in `compiler/incremental_compiler.stasis`.
 
 ## Execution Rules
 
@@ -36,6 +39,7 @@ Current canonical workspace commands:
 Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `bootstrap\\windows\\stasisc.bat run path\\to\\file.stasis --emit-ir`
 - `bootstrap\\windows\\stasisc.bat test --all`
+- `cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture` (Windows bootstrap smoke path)
 
 ## Slice Plan
 
@@ -56,8 +60,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 ### S1 - Minimal Front-End Parse
 - Language:
 - `Rust + .stasis`
-- Rust: lexer/parser data structures, AST, diagnostics primitives.
-- `.stasis`: parser pipeline orchestration in `compiler/incremental_compiler.stasis`.
+- Rust: host invocation/test harness only for bootstrap and integration boundaries.
+- `.stasis`: lexer, parser, diagnostics emission, and incremental parse orchestration in `compiler/incremental_compiler.stasis`.
 - Scope:
 - Implement lexer/parser for minimum executable subset:
 - `function`, `return`, integer/string literals, call expression, extern declaration.
@@ -67,7 +71,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Parser unit tests and parse snapshots for positive/negative cases.
 - Done gate:
 - Parses minimal valid program and emits actionable diagnostics on failures.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S2 - Minimal Execution (`main(): i32`)
 - Language:

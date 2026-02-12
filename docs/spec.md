@@ -663,6 +663,16 @@ Diagnostics should not silently skip invalid semantics.
 - C usage: only where unavoidable for platform bindings.
 - Compiler orchestration: implemented in `.stasis` source.
 
+### 17.1 Language Ownership Boundary
+
+- `.stasis` owns compiler language logic: lexing/tokenization, parsing (including incremental parse behavior), semantic rules/diagnostics, and compile policy (file invalidation and hash-gating decisions).
+- Rust owns host/runtime and backend integration: file watcher/input bridge, cross-thread message transport and swap coordinator, Cranelift JIT/AOT code emission, executable memory management, and runtime ABI/extern bridge.
+
+Rules:
+- New compiler frontend behavior must be implemented in `.stasis` first.
+- Rust may expose helper surfaces and tests, but must not become a second source of truth for lexer/parser semantics.
+- Tick-path runtime must remain free of parser/semantic/codegen work.
+
 ## 18. Status Note
 
 This document defines Rewrite V1 direction.

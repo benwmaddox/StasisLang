@@ -5,4 +5,11 @@ This directory is for compiler logic written in `.stasis`.
 Planned primary entrypoint:
 - `compiler/incremental_compiler.stasis`
 
-Rust crates under `crates/` provide substrate/runtime bindings, but compiler orchestration and policy logic belong here.
+Ownership boundary (Rewrite V1):
+- `.stasis` owns lexer, parser, semantic checks, diagnostics, and incremental compile policy.
+- Rust owns host runtime, file watching, message plumbing, Cranelift integration, and swap commit/runtime ABI.
+- Rust `stasis_compiler` crate provides bootstrap/test harness and boundary integration only; compiler language logic stays in `.stasis`.
+
+Smoke compile path:
+- Local Windows: `bootstrap\\windows\\stasisc.bat run compiler\\incremental_compiler.stasis --emit-ir`
+- Rust smoke test (Windows): `cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture`

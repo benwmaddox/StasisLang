@@ -19,16 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+  debounce:
     runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.debounce.outputs.should_run }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Debounce synchronize runs (max once per hour per PR)
         id: debounce
         uses: actions/github-script@v7
@@ -79,6 +74,30 @@ jobs:
 
             core.setOutput("should_run", "true");
 
+  test:
+    needs: debounce
+    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.debounce.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Run Cargo Test
-        if: ${{ steps.debounce.outputs.should_run == 'true' }}
         run: cargo test --workspace --all-targets
+
+  bootstrap-smoke-windows:
+    needs: debounce
+    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.debounce.outputs.should_run == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bootstrap Compile Smoke (compiler .stasis)
+        run: cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture

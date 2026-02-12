@@ -1,0 +1,850 @@
+import "../src/stdlib/stdlib.stasis";
+
+const COMPILER_MAX_SOURCE: i32 = 65536;
+const COMPILER_MAX_TOKENS: i32 = 8192;
+const COMPILER_MAX_ERRORS: i32 = 64;
+const COMPILER_MAX_FILES: i32 = 128;
+const COMPILER_MAX_PATH: i32 = 260;
+const COMPILER_MAX_PARSE_GUARD: i32 = 8192;
+const COMPILER_MAX_PARAMS: i32 = 64;
+const COMPILER_MAX_ARGS: i32 = 256;
+const COMPILER_MAX_BODY_STMTS: i32 = 4096;
+const COMPILER_MAX_CALL_NEST: i32 = 256;
+
+const ERR_LEX_UNEXPECTED_CHAR: i32 = 1001;
+const ERR_LEX_UNTERMINATED_STRING: i32 = 1002;
+const ERR_LEX_TOKEN_OVERFLOW: i32 = 1003;
+const ERR_PARSE_EXPECT_FUNCTION_OR_EXTERN: i32 = 2001;
+const ERR_PARSE_EXPECT_FUNCTION_AFTER_EXTERN: i32 = 2002;
+const ERR_PARSE_EXPECT_IDENTIFIER: i32 = 2003;
+const ERR_PARSE_EXPECT_LPAREN: i32 = 2004;
+const ERR_PARSE_EXPECT_RPAREN: i32 = 2005;
+const ERR_PARSE_EXPECT_COLON: i32 = 2006;
+const ERR_PARSE_EXPECT_SEMICOLON: i32 = 2007;
+const ERR_PARSE_EXPECT_LBRACE: i32 = 2008;
+const ERR_PARSE_EXPECT_RBRACE: i32 = 2009;
+const ERR_PARSE_EXPECT_EXPRESSION: i32 = 2010;
+const ERR_PARSE_EXPECT_RETURN_EXPR: i32 = 2011;
+const ERR_PARSE_ITEM_GUARD_EXHAUSTED: i32 = 2012;
+const ERR_PARSE_PARAM_GUARD_EXHAUSTED: i32 = 2013;
+const ERR_PARSE_ARG_GUARD_EXHAUSTED: i32 = 2014;
+const ERR_PARSE_BODY_GUARD_EXHAUSTED: i32 = 2015;
+const ERR_PARSE_CALL_GUARD_EXHAUSTED: i32 = 2016;
+const ERR_INCREMENTAL_FILE_OVERFLOW: i32 = 3001;
+const ERR_INCREMENTAL_FILE_PATH_EMPTY: i32 = 3002;
+
+enum CompilerStatus {
+    Idle,
+    Ok,
+    LexError,
+    ParseError
+}
+
+enum TokenKind {
+    Invalid,
+    Identifier,
+    IntLiteral,
+    StringLiteral,
+    KwFunction,
+    KwExtern,
+    KwReturn,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Colon,
+    Semicolon,
+    Comma,
+    Eof
+}
+
+struct CompilerToken {
+    kind: TokenKind;
+    start: i32;
+    end: i32;
+    int_value: i32;
+    text_start: i32;
+    text_len: i32;
+}
+
+struct CompilerError {
+    code: i32;
+    pos: i32;
+    detail_a: i32;
+    detail_b: i32;
+}
+
+struct CompilerFile {
+    path: ascii[260];
+    source: ascii[65536];
+    source_len: i32;
+    source_hash: i32;
+    dirty: bool;
+    last_status: CompilerStatus;
+    parsed_function_count: i32;
+    parsed_extern_count: i32;
+    parsed_return_count: i32;
+    parsed_call_count: i32;
+    last_error_code: i32;
+    last_error_pos: i32;
+    last_error_detail_a: i32;
+    last_error_detail_b: i32;
+}
+
+struct CompilerState {
+    source: ascii[65536];
+    source_len: i32;
+
+    files: CompilerFile[128];
+    file_count: i32;
+    current_file_index: i32;
+
+    tokens: CompilerToken[8192];
+    token_count: i32;
+    parse_index: i32;
+
+    status: CompilerStatus;
+    errors: CompilerError[64];
+    error_count: i32;
+
+    parsed_function_count: i32;
+    parsed_extern_count: i32;
+    parsed_return_count: i32;
+    parsed_call_count: i32;
+
+    incremental_scanned_files: i32;
+    incremental_parsed_files: i32;
+    incremental_reused_files: i32;
+    incremental_failed_files: i32;
+}
+
+global Compiler: CompilerState;
+
+function compiler_reset_state(): void {
+    ascii_clear(Compiler.source);
+    Compiler.source_len = 0;
+    Compiler.file_count = 0;
+    Compiler.current_file_index = -1;
+    Compiler.token_count = 0;
+    Compiler.parse_index = 0;
+    Compiler.status = CompilerStatus.Idle;
+    Compiler.error_count = 0;
+    Compiler.parsed_function_count = 0;
+    Compiler.parsed_extern_count = 0;
+    Compiler.parsed_return_count = 0;
+    Compiler.parsed_call_count = 0;
+    Compiler.incremental_scanned_files = 0;
+    Compiler.incremental_parsed_files = 0;
+    Compiler.incremental_reused_files = 0;
+    Compiler.incremental_failed_files = 0;
+}
+
+function compiler_set_source(src: ascii[]): void {
+    // Backward-compatible single-file path.
+    ascii_clear(Compiler.source);
+    ascii_copy(Compiler.source, src);
+    Compiler.source_len = length(Compiler.source);
+    compiler_upsert_file("__single_file__.stasis", src);
+}
+
+function compiler_hash_ascii(src: ascii[]): i32 {
+    // Simple deterministic rolling hash.
+    let hash: i32 = 216613626;
+    let len: i32 = length(src);
+    let i: i32 = 0;
+    for (i = 0; i < len; i += 1) {
+        hash = hash * 16777619 + u8_to_i32(src[i]) + 1;
+    }
+    return hash;
+}
+
+function compiler_find_file(path: ascii[]): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.file_count; i += 1) {
+        if (ascii_eq(Compiler.files[i].path, path)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
+    if (length(path) == 0) {
+        compiler_push_error(ERR_INCREMENTAL_FILE_PATH_EMPTY, 0, 0, 0);
+        return false;
+    }
+
+    let hash: i32 = compiler_hash_ascii(src);
+    let index: i32 = compiler_find_file(path);
+
+    if (index >= 0) {
+        if (Compiler.files[index].source_hash == hash) {
+            Compiler.files[index].dirty = false;
+            return true;
+        }
+
+        ascii_clear(Compiler.files[index].source);
+        ascii_copy(Compiler.files[index].source, src);
+        Compiler.files[index].source_len = length(Compiler.files[index].source);
+        Compiler.files[index].source_hash = hash;
+        Compiler.files[index].dirty = true;
+        return true;
+    }
+
+    if (Compiler.file_count >= COMPILER_MAX_FILES) {
+        compiler_push_error(ERR_INCREMENTAL_FILE_OVERFLOW, 0, Compiler.file_count, COMPILER_MAX_FILES);
+        return false;
+    }
+
+    let new_index: i32 = Compiler.file_count;
+    Compiler.file_count += 1;
+
+    ascii_clear(Compiler.files[new_index].path);
+    ascii_copy(Compiler.files[new_index].path, path);
+
+    ascii_clear(Compiler.files[new_index].source);
+    ascii_copy(Compiler.files[new_index].source, src);
+    Compiler.files[new_index].source_len = length(Compiler.files[new_index].source);
+    Compiler.files[new_index].source_hash = hash;
+    Compiler.files[new_index].dirty = true;
+    Compiler.files[new_index].last_status = CompilerStatus.Idle;
+    Compiler.files[new_index].parsed_function_count = 0;
+    Compiler.files[new_index].parsed_extern_count = 0;
+    Compiler.files[new_index].parsed_return_count = 0;
+    Compiler.files[new_index].parsed_call_count = 0;
+    Compiler.files[new_index].last_error_code = 0;
+    Compiler.files[new_index].last_error_pos = 0;
+    Compiler.files[new_index].last_error_detail_a = 0;
+    Compiler.files[new_index].last_error_detail_b = 0;
+    return true;
+}
+
+function compiler_get_status_code(): i32 {
+    if (Compiler.status == CompilerStatus.Ok) { return 0; }
+    if (Compiler.status == CompilerStatus.LexError) { return 1; }
+    if (Compiler.status == CompilerStatus.ParseError) { return 2; }
+    return -1;
+}
+
+function compiler_run_incremental_pipeline(): i32 {
+    Compiler.error_count = 0;
+    Compiler.parsed_function_count = 0;
+    Compiler.parsed_extern_count = 0;
+    Compiler.parsed_return_count = 0;
+    Compiler.parsed_call_count = 0;
+    Compiler.incremental_scanned_files = 0;
+    Compiler.incremental_parsed_files = 0;
+    Compiler.incremental_reused_files = 0;
+    Compiler.incremental_failed_files = 0;
+
+    if (Compiler.file_count == 0) {
+        // Allow empty session to be a no-op success.
+        Compiler.status = CompilerStatus.Ok;
+        return compiler_get_status_code();
+    }
+
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.file_count; i += 1) {
+        Compiler.incremental_scanned_files += 1;
+
+        if (!Compiler.files[i].dirty) {
+            Compiler.incremental_reused_files += 1;
+            if (Compiler.files[i].last_status != CompilerStatus.Ok) {
+                Compiler.incremental_failed_files += 1;
+                compiler_replay_cached_error_for_file(i);
+            }
+        } else {
+            Compiler.current_file_index = i;
+            ascii_clear(Compiler.source);
+            ascii_copy(Compiler.source, Compiler.files[i].source);
+            Compiler.source_len = Compiler.files[i].source_len;
+            Compiler.token_count = 0;
+            Compiler.parse_index = 0;
+
+            // Per-file counters from the active parse.
+            Compiler.parsed_function_count = 0;
+            Compiler.parsed_extern_count = 0;
+            Compiler.parsed_return_count = 0;
+            Compiler.parsed_call_count = 0;
+
+            if (!compiler_lex()) {
+                Compiler.files[i].last_status = CompilerStatus.LexError;
+                Compiler.files[i].parsed_function_count = 0;
+                Compiler.files[i].parsed_extern_count = 0;
+                Compiler.files[i].parsed_return_count = 0;
+                Compiler.files[i].parsed_call_count = 0;
+                compiler_capture_last_error_for_file(i);
+                Compiler.files[i].dirty = false;
+                Compiler.incremental_failed_files += 1;
+            } else {
+                if (!compiler_parse_program()) {
+                    Compiler.files[i].last_status = CompilerStatus.ParseError;
+                    Compiler.files[i].parsed_function_count = 0;
+                    Compiler.files[i].parsed_extern_count = 0;
+                    Compiler.files[i].parsed_return_count = 0;
+                    Compiler.files[i].parsed_call_count = 0;
+                    compiler_capture_last_error_for_file(i);
+                    Compiler.files[i].dirty = false;
+                    Compiler.incremental_failed_files += 1;
+                } else {
+                    Compiler.files[i].parsed_function_count = Compiler.parsed_function_count;
+                    Compiler.files[i].parsed_extern_count = Compiler.parsed_extern_count;
+                    Compiler.files[i].parsed_return_count = Compiler.parsed_return_count;
+                    Compiler.files[i].parsed_call_count = Compiler.parsed_call_count;
+                    Compiler.files[i].last_error_code = 0;
+                    Compiler.files[i].last_error_pos = 0;
+                    Compiler.files[i].last_error_detail_a = 0;
+                    Compiler.files[i].last_error_detail_b = 0;
+                    Compiler.files[i].last_status = CompilerStatus.Ok;
+                    Compiler.files[i].dirty = false;
+                    Compiler.incremental_parsed_files += 1;
+                }
+            }
+        }
+    }
+
+    // Aggregate stable counts from file cache.
+    Compiler.parsed_function_count = 0;
+    Compiler.parsed_extern_count = 0;
+    Compiler.parsed_return_count = 0;
+    Compiler.parsed_call_count = 0;
+    let has_lex_error: i32 = 0;
+    let has_parse_error: i32 = 0;
+    for (i = 0; i < Compiler.file_count; i += 1) {
+        Compiler.parsed_function_count += Compiler.files[i].parsed_function_count;
+        Compiler.parsed_extern_count += Compiler.files[i].parsed_extern_count;
+        Compiler.parsed_return_count += Compiler.files[i].parsed_return_count;
+        Compiler.parsed_call_count += Compiler.files[i].parsed_call_count;
+        if (Compiler.files[i].last_status == CompilerStatus.LexError) {
+            has_lex_error = 1;
+        }
+        if (Compiler.files[i].last_status == CompilerStatus.ParseError) {
+            has_parse_error = 1;
+        }
+    }
+
+    if (has_lex_error == 1) {
+        Compiler.status = CompilerStatus.LexError;
+    } else {
+        if (has_parse_error == 1) {
+            Compiler.status = CompilerStatus.ParseError;
+        } else {
+            Compiler.status = CompilerStatus.Ok;
+        }
+    }
+
+    return compiler_get_status_code();
+}
+
+function run_incremental_compiler(): i32 {
+    return compiler_run_incremental_pipeline();
+}
+
+function compiler_get_file_count(): i32 {
+    return Compiler.file_count;
+}
+
+function compiler_get_scanned_file_count(): i32 {
+    return Compiler.incremental_scanned_files;
+}
+
+function compiler_get_parsed_file_count(): i32 {
+    return Compiler.incremental_parsed_files;
+}
+
+function compiler_get_reused_file_count(): i32 {
+    return Compiler.incremental_reused_files;
+}
+
+function compiler_get_failed_file_count(): i32 {
+    return Compiler.incremental_failed_files;
+}
+
+function compiler_capture_last_error_for_file(file_index: i32): void {
+    if (file_index < 0 || file_index >= Compiler.file_count) {
+        return;
+    }
+    if (Compiler.error_count <= 0) {
+        return;
+    }
+    let last: i32 = Compiler.error_count - 1;
+    Compiler.files[file_index].last_error_code = Compiler.errors[last].code;
+    Compiler.files[file_index].last_error_pos = Compiler.errors[last].pos;
+    Compiler.files[file_index].last_error_detail_a = Compiler.errors[last].detail_a;
+    Compiler.files[file_index].last_error_detail_b = Compiler.errors[last].detail_b;
+}
+
+function compiler_replay_cached_error_for_file(file_index: i32): void {
+    if (file_index < 0 || file_index >= Compiler.file_count) {
+        return;
+    }
+    if (Compiler.files[file_index].last_error_code == 0) {
+        return;
+    }
+    compiler_push_error(
+        Compiler.files[file_index].last_error_code,
+        Compiler.files[file_index].last_error_pos,
+        Compiler.files[file_index].last_error_detail_a,
+        Compiler.files[file_index].last_error_detail_b
+    );
+}
+
+function compiler_push_error(code: i32, pos: i32, detail_a: i32, detail_b: i32): void {
+    if (Compiler.error_count >= COMPILER_MAX_ERRORS) {
+        return;
+    }
+    let index: i32 = Compiler.error_count;
+    Compiler.errors[index].code = code;
+    Compiler.errors[index].pos = pos;
+    Compiler.errors[index].detail_a = detail_a;
+    Compiler.errors[index].detail_b = detail_b;
+    Compiler.error_count += 1;
+}
+
+function compiler_emit_token(
+    kind: TokenKind,
+    start: i32,
+    end: i32,
+    int_value: i32,
+    text_start: i32,
+    text_len: i32
+): bool {
+    if (Compiler.token_count >= COMPILER_MAX_TOKENS) {
+        compiler_push_error(ERR_LEX_TOKEN_OVERFLOW, start, Compiler.token_count, Compiler.current_file_index);
+        return false;
+    }
+    let index: i32 = Compiler.token_count;
+    Compiler.tokens[index].kind = kind;
+    Compiler.tokens[index].start = start;
+    Compiler.tokens[index].end = end;
+    Compiler.tokens[index].int_value = int_value;
+    Compiler.tokens[index].text_start = text_start;
+    Compiler.tokens[index].text_len = text_len;
+    Compiler.token_count += 1;
+    return true;
+}
+
+function compiler_is_space(b: u8): bool {
+    return b == 32 || b == 9 || b == 10 || b == 13;
+}
+
+function compiler_is_digit(b: u8): bool {
+    return b >= 48 && b <= 57;
+}
+
+function compiler_is_ident_start(b: u8): bool {
+    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95;
+}
+
+function compiler_is_ident_continue(b: u8): bool {
+    return compiler_is_ident_start(b) || compiler_is_digit(b);
+}
+
+function compiler_is_keyword_function(start: i32, len: i32): bool {
+    if (len != 8) { return false; }
+    if (Compiler.source[start + 0] != 102) { return false; } // f
+    if (Compiler.source[start + 1] != 117) { return false; } // u
+    if (Compiler.source[start + 2] != 110) { return false; } // n
+    if (Compiler.source[start + 3] != 99) { return false; }  // c
+    if (Compiler.source[start + 4] != 116) { return false; } // t
+    if (Compiler.source[start + 5] != 105) { return false; } // i
+    if (Compiler.source[start + 6] != 111) { return false; } // o
+    if (Compiler.source[start + 7] != 110) { return false; } // n
+    return true;
+}
+
+function compiler_is_keyword_extern(start: i32, len: i32): bool {
+    if (len != 6) { return false; }
+    if (Compiler.source[start + 0] != 101) { return false; } // e
+    if (Compiler.source[start + 1] != 120) { return false; } // x
+    if (Compiler.source[start + 2] != 116) { return false; } // t
+    if (Compiler.source[start + 3] != 101) { return false; } // e
+    if (Compiler.source[start + 4] != 114) { return false; } // r
+    if (Compiler.source[start + 5] != 110) { return false; } // n
+    return true;
+}
+
+function compiler_is_keyword_return(start: i32, len: i32): bool {
+    if (len != 6) { return false; }
+    if (Compiler.source[start + 0] != 114) { return false; } // r
+    if (Compiler.source[start + 1] != 101) { return false; } // e
+    if (Compiler.source[start + 2] != 116) { return false; } // t
+    if (Compiler.source[start + 3] != 117) { return false; } // u
+    if (Compiler.source[start + 4] != 114) { return false; } // r
+    if (Compiler.source[start + 5] != 110) { return false; } // n
+    return true;
+}
+
+function compiler_lex_identifier_or_keyword(start: i32, end: i32): bool {
+    let len: i32 = end - start;
+    if (compiler_is_keyword_function(start, len)) {
+        return compiler_emit_token(TokenKind.KwFunction, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_extern(start, len)) {
+        return compiler_emit_token(TokenKind.KwExtern, start, end, 0, start, len);
+    }
+    if (compiler_is_keyword_return(start, len)) {
+        return compiler_emit_token(TokenKind.KwReturn, start, end, 0, start, len);
+    }
+    return compiler_emit_token(TokenKind.Identifier, start, end, 0, start, len);
+}
+
+function compiler_emit_single_char_token(b: u8, index: i32): i32 {
+    if (b == 40) {
+        if (!compiler_emit_token(TokenKind.LParen, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 41) {
+        if (!compiler_emit_token(TokenKind.RParen, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 123) {
+        if (!compiler_emit_token(TokenKind.LBrace, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 125) {
+        if (!compiler_emit_token(TokenKind.RBrace, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 58) {
+        if (!compiler_emit_token(TokenKind.Colon, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 59) {
+        if (!compiler_emit_token(TokenKind.Semicolon, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    if (b == 44) {
+        if (!compiler_emit_token(TokenKind.Comma, index, index + 1, 0, index, 1)) { return -1; }
+        return 1;
+    }
+    return 0;
+}
+
+function compiler_lex(): bool {
+    let len: i32 = Compiler.source_len;
+    let i: i32 = 0;
+    for (i = 0; i < len; i += 1) {
+        let b: u8 = Compiler.source[i];
+
+        if (compiler_is_space(b)) {
+            // Skip whitespace.
+        } else {
+            if (b == 47 && i + 1 < len && Compiler.source[i + 1] == 47) {
+                // Line comments: // ...
+                let found_nl: i32 = 0;
+                let nl_pos: i32 = len;
+                let j: i32 = 0;
+                for (j = i + 2; j < len && found_nl == 0; j += 1) {
+                    let c: u8 = Compiler.source[j];
+                    if (c == 10 || c == 13) {
+                        nl_pos = j;
+                        found_nl = 1;
+                    }
+                }
+                if (found_nl == 1) {
+                    i = nl_pos;
+                } else {
+                    i = len;
+                }
+            } else {
+                if (compiler_is_ident_start(b)) {
+                    let start: i32 = i;
+                    let end: i32 = i + 1;
+                    let j: i32 = 0;
+                    for (j = i + 1; j < len; j += 1) {
+                        if (!compiler_is_ident_continue(Compiler.source[j])) {
+                            end = j;
+                            j = len;
+                        } else {
+                            end = j + 1;
+                        }
+                    }
+                    if (!compiler_lex_identifier_or_keyword(start, end)) {
+                        return false;
+                    }
+                    i = end - 1;
+                } else {
+                    if (compiler_is_digit(b)) {
+                        let start: i32 = i;
+                        let end: i32 = i + 1;
+                        let value: i32 = u8_to_i32(b) - 48;
+                        let j: i32 = 0;
+                        for (j = i + 1; j < len; j += 1) {
+                            let c: u8 = Compiler.source[j];
+                            if (!compiler_is_digit(c)) {
+                                end = j;
+                                j = len;
+                            } else {
+                                value = value * 10 + (u8_to_i32(c) - 48);
+                                end = j + 1;
+                            }
+                        }
+                        if (!compiler_emit_token(TokenKind.IntLiteral, start, end, value, start, end - start)) {
+                            return false;
+                        }
+                        i = end - 1;
+                    } else {
+                        if (b == 34) {
+                            let start: i32 = i;
+                            let found_end: i32 = 0;
+                            let end: i32 = i + 1;
+                            let j: i32 = 0;
+                            for (j = i + 1; j < len && found_end == 0; j += 1) {
+                                let c: u8 = Compiler.source[j];
+                                if (c == 34) {
+                                    found_end = 1;
+                                    end = j + 1;
+                                }
+                            }
+                            if (found_end == 0) {
+                                compiler_push_error(ERR_LEX_UNTERMINATED_STRING, start, 0, Compiler.current_file_index);
+                                return false;
+                            }
+                            let text_start: i32 = start + 1;
+                            let text_len: i32 = end - start - 2;
+                            if (!compiler_emit_token(TokenKind.StringLiteral, start, end, 0, text_start, text_len)) {
+                                return false;
+                            }
+                            i = end - 1;
+                        } else {
+                            let emitted: i32 = compiler_emit_single_char_token(b, i);
+                            if (emitted == -1) {
+                                return false;
+                            }
+                            if (emitted == 0) {
+                                compiler_push_error(ERR_LEX_UNEXPECTED_CHAR, i, u8_to_i32(b), Compiler.current_file_index);
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!compiler_emit_token(TokenKind.Eof, len, len, 0, len, 0)) {
+        return false;
+    }
+    return true;
+}
+
+function parser_current_kind(): TokenKind {
+    if (Compiler.parse_index < Compiler.token_count) {
+        return Compiler.tokens[Compiler.parse_index].kind;
+    }
+    return TokenKind.Eof;
+}
+
+function parser_current_pos(): i32 {
+    if (Compiler.parse_index < Compiler.token_count) {
+        return Compiler.tokens[Compiler.parse_index].start;
+    }
+    if (Compiler.token_count > 0) {
+        return Compiler.tokens[Compiler.token_count - 1].end;
+    }
+    return 0;
+}
+
+function parser_error(code: i32): void {
+    compiler_push_error(code, parser_current_pos(), Compiler.parse_index, Compiler.current_file_index);
+}
+
+function parser_match(kind: TokenKind): bool {
+    if (parser_current_kind() == kind) {
+        Compiler.parse_index += 1;
+        return true;
+    }
+    return false;
+}
+
+function parser_expect(kind: TokenKind, err_code: i32): bool {
+    if (parser_match(kind)) {
+        return true;
+    }
+    parser_error(err_code);
+    return false;
+}
+
+function parser_expect_identifier(): bool {
+    if (parser_current_kind() == TokenKind.Identifier) {
+        Compiler.parse_index += 1;
+        return true;
+    }
+    parser_error(ERR_PARSE_EXPECT_IDENTIFIER);
+    return false;
+}
+
+function parser_parse_type_name(): bool {
+    return parser_expect_identifier();
+}
+
+function parser_parse_param_list(): bool {
+    if (!parser_expect(TokenKind.LParen, ERR_PARSE_EXPECT_LPAREN)) {
+        return false;
+    }
+    if (parser_match(TokenKind.RParen)) {
+        return true;
+    }
+
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_PARAMS; guard += 1) {
+        if (!parser_expect_identifier()) {
+            return false;
+        }
+        if (!parser_expect(TokenKind.Colon, ERR_PARSE_EXPECT_COLON)) {
+            return false;
+        }
+        if (!parser_parse_type_name()) {
+            return false;
+        }
+        if (parser_match(TokenKind.Comma)) {
+            // Continue with next parameter.
+        } else {
+            if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    parser_error(ERR_PARSE_PARAM_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_signature(): bool {
+    if (!parser_expect_identifier()) {
+        return false;
+    }
+    if (!parser_parse_param_list()) {
+        return false;
+    }
+    if (!parser_expect(TokenKind.Colon, ERR_PARSE_EXPECT_COLON)) {
+        return false;
+    }
+    if (!parser_parse_type_name()) {
+        return false;
+    }
+    return true;
+}
+
+function parser_parse_primary(): bool {
+    let kind: TokenKind = parser_current_kind();
+    if (kind == TokenKind.Identifier || kind == TokenKind.IntLiteral || kind == TokenKind.StringLiteral) {
+        Compiler.parse_index += 1;
+        return true;
+    }
+    parser_error(ERR_PARSE_EXPECT_EXPRESSION);
+    return false;
+}
+
+function parser_parse_expression(): bool {
+    if (!parser_parse_primary()) {
+        return false;
+    }
+
+    let call_guard: i32 = 0;
+    for (call_guard = 0; call_guard < COMPILER_MAX_CALL_NEST; call_guard += 1) {
+        if (!parser_match(TokenKind.LParen)) {
+            return true;
+        }
+        Compiler.parsed_call_count += 1;
+        if (parser_match(TokenKind.RParen)) {
+            // Empty arg call.
+        } else {
+            if (!parser_parse_expression()) {
+                return false;
+            }
+            let arg_guard: i32 = 0;
+            for (arg_guard = 0; arg_guard < COMPILER_MAX_ARGS; arg_guard += 1) {
+                if (parser_match(TokenKind.Comma)) {
+                    if (!parser_parse_expression()) {
+                        return false;
+                    }
+                } else {
+                    arg_guard = COMPILER_MAX_ARGS;
+                }
+            }
+            if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+                return false;
+            }
+        }
+    }
+
+    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_statement(): bool {
+    if (parser_match(TokenKind.KwReturn)) {
+        Compiler.parsed_return_count += 1;
+        if (!parser_parse_expression()) {
+            parser_error(ERR_PARSE_EXPECT_RETURN_EXPR);
+            return false;
+        }
+        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    }
+
+    if (!parser_parse_expression()) {
+        return false;
+    }
+    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+}
+
+function parser_parse_function_body(): bool {
+    if (!parser_expect(TokenKind.LBrace, ERR_PARSE_EXPECT_LBRACE)) {
+        return false;
+    }
+
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_BODY_STMTS; guard += 1) {
+        if (parser_match(TokenKind.RBrace)) {
+            return true;
+        }
+        if (!parser_parse_statement()) {
+            return false;
+        }
+    }
+
+    parser_error(ERR_PARSE_BODY_GUARD_EXHAUSTED);
+    return false;
+}
+
+function parser_parse_item(): bool {
+    if (parser_match(TokenKind.KwExtern)) {
+        if (!parser_expect(TokenKind.KwFunction, ERR_PARSE_EXPECT_FUNCTION_AFTER_EXTERN)) {
+            return false;
+        }
+        if (!parser_parse_signature()) {
+            return false;
+        }
+        Compiler.parsed_extern_count += 1;
+        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    }
+
+    if (parser_match(TokenKind.KwFunction)) {
+        if (!parser_parse_signature()) {
+            return false;
+        }
+        Compiler.parsed_function_count += 1;
+        return parser_parse_function_body();
+    }
+
+    parser_error(ERR_PARSE_EXPECT_FUNCTION_OR_EXTERN);
+    return false;
+}
+
+function compiler_parse_program(): bool {
+    Compiler.parse_index = 0;
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_PARSE_GUARD; guard += 1) {
+        if (parser_current_kind() == TokenKind.Eof) {
+            return true;
+        }
+        if (!parser_parse_item()) {
+            return false;
+        }
+    }
+    parser_error(ERR_PARSE_ITEM_GUARD_EXHAUSTED);
+    return false;
+}
