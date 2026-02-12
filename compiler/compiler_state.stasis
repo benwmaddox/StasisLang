@@ -8,6 +8,7 @@ const COMPILER_MAX_PARAMS: i32 = 64;
 const COMPILER_MAX_ARGS: i32 = 256;
 const COMPILER_MAX_BODY_STMTS: i32 = 4096;
 const COMPILER_MAX_CALL_NEST: i32 = 256;
+const COMPILER_MAX_TRACKED_FUNCTIONS: i32 = 512;
 
 enum CompilerErrorCode {
     None = 0,
@@ -129,6 +130,10 @@ struct CompilerFile {
     parsed_assignment_count: i32;
     parsed_global_count: i32;
     layout_hash: i32;
+    tracked_function_count: i32;
+    function_id_hashes: i32[512];
+    function_sig_hashes: i32[512];
+    function_body_hashes: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -165,6 +170,10 @@ struct CompilerState {
     parsed_assignment_count: i32;
     parsed_global_count: i32;
     layout_hash: i32;
+    tracked_function_count: i32;
+    function_id_hashes: i32[512];
+    function_sig_hashes: i32[512];
+    function_body_hashes: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -182,6 +191,9 @@ struct CompilerState {
     incremental_reused_files: i32;
     incremental_failed_files: i32;
     incremental_layout_changed_files: i32;
+    incremental_reused_functions: i32;
+    incremental_changed_functions: i32;
+    incremental_codegen_functions: i32;
 }
 
 global Compiler: CompilerState;

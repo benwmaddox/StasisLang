@@ -21,6 +21,7 @@ function compiler_reset_state(): void {
     Compiler.parsed_assignment_count = 0;
     Compiler.parsed_global_count = 0;
     Compiler.layout_hash = 216613626;
+    Compiler.tracked_function_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -36,6 +37,9 @@ function compiler_reset_state(): void {
     Compiler.incremental_reused_files = 0;
     Compiler.incremental_failed_files = 0;
     Compiler.incremental_layout_changed_files = 0;
+    Compiler.incremental_reused_functions = 0;
+    Compiler.incremental_changed_functions = 0;
+    Compiler.incremental_codegen_functions = 0;
 }
 
 function compiler_set_source(src: ascii[]): void {
@@ -67,6 +71,93 @@ function compiler_hash_source_span(hash: i32, start: i32, len: i32): i32 {
         result = compiler_hash_mix(result, u8_to_i32(Compiler.source[start + i]));
     }
     return result;
+}
+
+function compiler_reset_current_function_tracking(): void {
+    Compiler.tracked_function_count = 0;
+}
+
+function compiler_clear_file_function_tracking(file_index: i32): void {
+    if (file_index < 0 || file_index >= Compiler.file_count) {
+        return;
+    }
+    Compiler.files[file_index].tracked_function_count = 0;
+}
+
+function compiler_record_current_function(id_hash: i32, sig_hash: i32, body_hash: i32): void {
+    if (Compiler.tracked_function_count >= COMPILER_MAX_TRACKED_FUNCTIONS) {
+        return;
+    }
+    let index: i32 = Compiler.tracked_function_count;
+    Compiler.tracked_function_count += 1;
+    Compiler.function_id_hashes[index] = id_hash;
+    Compiler.function_sig_hashes[index] = sig_hash;
+    Compiler.function_body_hashes[index] = body_hash;
+}
+
+function compiler_find_file_function_index(file_index: i32, id_hash: i32): i32 {
+    if (file_index < 0 || file_index >= Compiler.file_count) {
+        return -1;
+    }
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.files[file_index].tracked_function_count; i += 1) {
+        if (Compiler.files[file_index].function_id_hashes[i] == id_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_find_current_function_index(id_hash: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        if (Compiler.function_id_hashes[i] == id_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_record_dirty_file_function_metrics(file_index: i32): void {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        let id_hash: i32 = Compiler.function_id_hashes[i];
+        let previous_index: i32 = compiler_find_file_function_index(file_index, id_hash);
+        if (previous_index < 0) {
+            Compiler.incremental_changed_functions += 1;
+            Compiler.incremental_codegen_functions += 1;
+        } else {
+            if (
+                Compiler.function_sig_hashes[i] == Compiler.files[file_index].function_sig_hashes[previous_index] &&
+                Compiler.function_body_hashes[i] == Compiler.files[file_index].function_body_hashes[previous_index]
+            ) {
+                Compiler.incremental_reused_functions += 1;
+            } else {
+                Compiler.incremental_changed_functions += 1;
+                Compiler.incremental_codegen_functions += 1;
+            }
+        }
+    }
+
+    for (i = 0; i < Compiler.files[file_index].tracked_function_count; i += 1) {
+        let previous_id_hash: i32 = Compiler.files[file_index].function_id_hashes[i];
+        if (compiler_find_current_function_index(previous_id_hash) < 0) {
+            Compiler.incremental_changed_functions += 1;
+        }
+    }
+}
+
+function compiler_store_current_functions_to_file(file_index: i32): void {
+    if (file_index < 0 || file_index >= Compiler.file_count) {
+        return;
+    }
+    Compiler.files[file_index].tracked_function_count = Compiler.tracked_function_count;
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        Compiler.files[file_index].function_id_hashes[i] = Compiler.function_id_hashes[i];
+        Compiler.files[file_index].function_sig_hashes[i] = Compiler.function_sig_hashes[i];
+        Compiler.files[file_index].function_body_hashes[i] = Compiler.function_body_hashes[i];
+    }
 }
 
 function compiler_find_file(path: ascii[]): i32 {
@@ -130,6 +221,7 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     Compiler.files[new_index].parsed_assignment_count = 0;
     Compiler.files[new_index].parsed_global_count = 0;
     Compiler.files[new_index].layout_hash = 216613626;
+    Compiler.files[new_index].tracked_function_count = 0;
     Compiler.files[new_index].parsed_main_declaration_count = 0;
     Compiler.files[new_index].parsed_main_valid_i32_count = 0;
     Compiler.files[new_index].parsed_main_invalid_signature_count = 0;
@@ -160,6 +252,7 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_assignment_count = 0;
     Compiler.parsed_global_count = 0;
     Compiler.layout_hash = 216613626;
+    Compiler.tracked_function_count = 0;
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
@@ -168,6 +261,9 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.incremental_reused_files = 0;
     Compiler.incremental_failed_files = 0;
     Compiler.incremental_layout_changed_files = 0;
+    Compiler.incremental_reused_functions = 0;
+    Compiler.incremental_changed_functions = 0;
+    Compiler.incremental_codegen_functions = 0;
 
     if (Compiler.file_count == 0) {
         // Backward-compatible single-source mode used by compiler_set_source().
@@ -180,6 +276,7 @@ function compiler_run_incremental_pipeline(): i32 {
         Compiler.current_file_index = -1;
         Compiler.token_count = 0;
         Compiler.parse_index = 0;
+        compiler_reset_current_function_tracking();
 
         if (!compiler_lex()) {
             Compiler.status = CompilerStatus.LexError;
@@ -194,6 +291,8 @@ function compiler_run_incremental_pipeline(): i32 {
         }
 
         Compiler.incremental_parsed_files = 1;
+        Compiler.incremental_changed_functions = Compiler.tracked_function_count;
+        Compiler.incremental_codegen_functions = Compiler.tracked_function_count;
         Compiler.status = CompilerStatus.Ok;
         return compiler_get_status_code();
     }
@@ -207,6 +306,8 @@ function compiler_run_incremental_pipeline(): i32 {
             if (Compiler.files[i].last_status != CompilerStatus.Ok) {
                 Compiler.incremental_failed_files += 1;
                 compiler_replay_cached_error_for_file(i);
+            } else {
+                Compiler.incremental_reused_functions += Compiler.files[i].tracked_function_count;
             }
         } else {
             Compiler.current_file_index = i;
@@ -229,6 +330,7 @@ function compiler_run_incremental_pipeline(): i32 {
             Compiler.parsed_assignment_count = 0;
             Compiler.parsed_global_count = 0;
             Compiler.layout_hash = 216613626;
+            compiler_reset_current_function_tracking();
             Compiler.parsed_main_declaration_count = 0;
             Compiler.parsed_main_valid_i32_count = 0;
             Compiler.parsed_main_invalid_signature_count = 0;
@@ -246,6 +348,7 @@ function compiler_run_incremental_pipeline(): i32 {
                 Compiler.files[i].parsed_assignment_count = 0;
                 Compiler.files[i].parsed_global_count = 0;
                 Compiler.files[i].layout_hash = 216613626;
+                compiler_clear_file_function_tracking(i);
                 Compiler.files[i].parsed_main_declaration_count = 0;
                 Compiler.files[i].parsed_main_valid_i32_count = 0;
                 Compiler.files[i].parsed_main_invalid_signature_count = 0;
@@ -266,6 +369,7 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_assignment_count = 0;
                     Compiler.files[i].parsed_global_count = 0;
                     Compiler.files[i].layout_hash = 216613626;
+                    compiler_clear_file_function_tracking(i);
                     Compiler.files[i].parsed_main_declaration_count = 0;
                     Compiler.files[i].parsed_main_valid_i32_count = 0;
                     Compiler.files[i].parsed_main_invalid_signature_count = 0;
@@ -287,6 +391,8 @@ function compiler_run_incremental_pipeline(): i32 {
                     if (previous_layout_hash != Compiler.layout_hash) {
                         Compiler.incremental_layout_changed_files += 1;
                     }
+                    compiler_record_dirty_file_function_metrics(i);
+                    compiler_store_current_functions_to_file(i);
                     Compiler.files[i].parsed_main_declaration_count = Compiler.parsed_main_declaration_count;
                     Compiler.files[i].parsed_main_valid_i32_count = Compiler.parsed_main_valid_i32_count;
                     Compiler.files[i].parsed_main_invalid_signature_count = Compiler.parsed_main_invalid_signature_count;
@@ -951,6 +1057,47 @@ function parser_record_signature_main_entry(): void {
     }
 }
 
+function parser_record_function_fingerprint(
+    signature_start_token: i32,
+    signature_end_token: i32,
+    body_start_token: i32,
+    body_end_token: i32
+): void {
+    if (signature_start_token < 0 || signature_end_token < signature_start_token) {
+        return;
+    }
+    if (body_start_token < 0 || body_end_token < body_start_token) {
+        return;
+    }
+
+    let id_hash: i32 = compiler_hash_source_span(
+        216613626,
+        Compiler.current_signature_name_start,
+        Compiler.current_signature_name_len
+    );
+
+    let signature_start: i32 = Compiler.tokens[signature_start_token].start;
+    let signature_end: i32 = Compiler.tokens[signature_end_token].end;
+    let signature_hash: i32 = compiler_hash_source_span(
+        216613626,
+        signature_start,
+        signature_end - signature_start
+    );
+    signature_hash = compiler_hash_mix(signature_hash, Compiler.current_signature_param_count);
+    signature_hash = compiler_hash_mix(signature_hash, id_hash);
+
+    let body_start: i32 = Compiler.tokens[body_start_token].start;
+    let body_end: i32 = Compiler.tokens[body_end_token].end;
+    let body_hash: i32 = compiler_hash_source_span(
+        216613626,
+        body_start,
+        body_end - body_start
+    );
+    body_hash = compiler_hash_mix(body_hash, id_hash);
+
+    compiler_record_current_function(id_hash, signature_hash, body_hash);
+}
+
 function parser_mix_layout_identifier_capture(): void {
     Compiler.layout_hash = compiler_hash_source_span(
         Compiler.layout_hash,
@@ -1542,11 +1689,24 @@ function parser_parse_item(): bool {
     }
 
     if (parser_match(TokenKind.KwFunction)) {
+        let signature_start_token: i32 = Compiler.parse_index;
         if (!parser_parse_signature(false)) {
             return false;
         }
+        let signature_end_token: i32 = Compiler.parse_index - 1;
+        let body_start_token: i32 = Compiler.parse_index;
         Compiler.parsed_function_count += 1;
-        return parser_parse_function_body();
+        if (!parser_parse_function_body()) {
+            return false;
+        }
+        let body_end_token: i32 = Compiler.parse_index - 1;
+        parser_record_function_fingerprint(
+            signature_start_token,
+            signature_end_token,
+            body_start_token,
+            body_end_token
+        );
+        return true;
     }
 
     parser_error(CompilerErrorCode.ParseExpectFunctionOrExtern);

@@ -501,6 +501,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cranelift_run_helper_incremental_function_hash_metrics_fixture() {
+        let source = fixture_path("run_incremental_function_hash_metrics.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected incremental function-hash metrics success for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn cranelift_run_helper_chained_array_field_access_fixture() {
         let source = fixture_path("run_chained_array_field_access.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());

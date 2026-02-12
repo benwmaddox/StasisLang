@@ -15,6 +15,9 @@ function main(): i32 {
     if (Compiler.parsed_let_count != 1) { return 46; }
     if (Compiler.parsed_if_count != 1) { return 47; }
     if (Compiler.parsed_assignment_count != 2) { return 48; }
+    if (Compiler.incremental_reused_functions != 0) { return 56; }
+    if (Compiler.incremental_changed_functions != 1) { return 57; }
+    if (Compiler.incremental_codegen_functions != 1) { return 58; }
 
     if (run_incremental_compiler() != 0) { return 49; }
     if (Compiler.incremental_scanned_files != 1) { return 50; }
@@ -23,6 +26,9 @@ function main(): i32 {
     if (Compiler.parsed_let_count != 1) { return 53; }
     if (Compiler.parsed_if_count != 1) { return 54; }
     if (Compiler.parsed_assignment_count != 2) { return 55; }
+    if (Compiler.incremental_reused_functions != 1) { return 59; }
+    if (Compiler.incremental_changed_functions != 0) { return 60; }
+    if (Compiler.incremental_codegen_functions != 0) { return 61; }
 
     return 0;
 }

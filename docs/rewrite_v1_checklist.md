@@ -184,9 +184,10 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Incremental cache hit/miss tests and file-level invalidation tests.
 - Current runtime coverage fixture:
 - `tests/stasis/run_incremental_file_db_counts.stasis` (exercises `compiler_upsert_file` parse + reuse counters).
+- `tests/stasis/run_incremental_function_hash_metrics.stasis` (exercises per-function reused/changed/codegen hash gating counters).
 - Done gate:
 - Semantic pass always runs per changed file; backend work is correctly gated.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S8 - Function Pointer Table ABI
 - Language:
