@@ -265,6 +265,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `.stasis` (feature logic) + `Rust` (draw host bridge only)
 - Scope:
 - Integrate `DebugUI.swapFlashTicks` behavior in Stasis game code.
+- Current implementation:
+- `samples/brickout_revenge/brickout_revenge_v1.stasis` now defines `on_code_swap()` to arm `swap_flash_ticks` and renders/decrements indicator ticks in `draw_swap_indicator()`.
 - Deliverable:
 - Successful swaps trigger visible deterministic indicator.
 - Tests:

@@ -72,11 +72,13 @@ const BENCH_AUTO_EXIT: i32 = 1;
 const BENCH_WARMUP_FRAMES: i32 = 200;
 const BENCH_TOTAL_FRAMES: i32 = 2000;
 const BENCH_SKIP_MAXIMIZE: i32 = 1;
+const SWAP_FLASH_TICKS_MAX: i32 = 180;
 
 global bench_frame: i32;
 global bench_sum_ms: i32;
 global bench_sum_us: i32;
 global bench_count: i32;
+global swap_flash_ticks: i32;
 
 // Virtual resolution + safe gameplay area.
 // The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
@@ -2433,10 +2435,30 @@ function draw_ui(): void {
     draw_ui_panels();
 }
 
+function draw_swap_indicator(): void {
+    if (swap_flash_ticks <= 0) { return; }
+
+    let alpha: f32;
+    alpha.from_i32(swap_flash_ticks);
+    let max_ticks: f32;
+    max_ticks.from_i32(SWAP_FLASH_TICKS_MAX);
+    alpha = alpha / max_ticks;
+    if (alpha < 0.1) { alpha = 0.1; }
+
+    let size: f32 = 12.0 * state.layout.play_scale;
+    let x: f32 = play_to_screen_x(VIRTUAL_W - 22.0);
+    let y: f32 = play_to_screen_y(8.0);
+    draw_filled_rect(x, y, size, size, 0.25, 0.95, 0.35, alpha);
+    draw_rect(x, y, size, size, 0.9, 1.0, 0.9, alpha);
+
+    swap_flash_ticks = swap_flash_ticks - 1;
+}
+
 function draw_frame(): void {
     if (state.screen == BrickoutScreen.Menu) {
         draw_main_menu();
         draw_tap_pulses();
+        draw_swap_indicator();
         return;
     }
     draw_bricks();
@@ -2445,6 +2467,7 @@ function draw_frame(): void {
     draw_drag_preview();
     draw_ui();
     draw_tap_pulses();
+    draw_swap_indicator();
 }
 
 // Timing
@@ -2531,6 +2554,10 @@ function draw_drag_preview(): void {
     play_draw_rect(x, y, w, h, r, g, b, a);
 }
 
+function on_code_swap(): void {
+    swap_flash_ticks = SWAP_FLASH_TICKS_MAX;
+}
+
 function main(): i32 {
     ensure_config_loaded();
 
@@ -2615,6 +2642,7 @@ function main(): i32 {
     bench_sum_ms = 0;
     bench_sum_us = 0;
     bench_count = 0;
+    swap_flash_ticks = 0;
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
