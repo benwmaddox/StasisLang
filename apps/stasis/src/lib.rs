@@ -5,6 +5,7 @@ pub mod scenarios;
 mod watch;
 
 pub use events::RunnerEvent;
+pub use scenarios::WindowConfig;
 
 use stasis_runner::swap::contracts::{
     CodeGeneration, CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity,
@@ -23,6 +24,7 @@ const SWAP_FLASH_TICKS_MAX: u32 = 180;
 pub struct RunnerConfig {
     pub max_ticks: u32,
     pub tick_sleep_micros: u64,
+    pub window: Option<WindowConfig>,
     pub inject_file_change: Option<PathBuf>,
     pub watch_directory: Option<PathBuf>,
     pub fail_compile: bool,
@@ -36,6 +38,7 @@ impl Default for RunnerConfig {
         Self {
             max_ticks: 120,
             tick_sleep_micros: 0,
+            window: None,
             inject_file_change: None,
             watch_directory: None,
             fail_compile: false,
@@ -61,6 +64,7 @@ pub struct RunnerSummary {
     pub swap_indicator_armed_count: u32,
     pub swap_flash_peak_ticks: u32,
     pub swap_flash_ticks_remaining: u32,
+    pub window: Option<WindowConfig>,
     pub last_swap_status: Option<SwapCommitStatus>,
     pub has_in_flight_work: bool,
     pub events: Vec<RunnerEvent>,
@@ -95,6 +99,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         .watch_directory
         .as_deref()
         .and_then(|dir| WatchService::start(dir).ok());
+    let window = config.window;
 
     let mut pipeline = DevHotSwapPipeline::new(backend);
     let mut generation: u64 = 0;
@@ -309,6 +314,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         swap_indicator_armed_count,
         swap_flash_peak_ticks,
         swap_flash_ticks_remaining,
+        window_width: window.map(|w| w.width),
+        window_height: window.map(|w| w.height),
         has_in_flight_work,
     });
 
@@ -326,6 +333,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         swap_indicator_armed_count,
         swap_flash_peak_ticks,
         swap_flash_ticks_remaining,
+        window,
         last_swap_status,
         has_in_flight_work,
         events,
@@ -445,6 +453,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 200,
             tick_sleep_micros: 0,
+            window: None,
             inject_file_change: Some(PathBuf::from(
                 "samples/brickout_revenge/brickout_revenge_v1.stasis",
             )),
@@ -468,6 +477,7 @@ mod tests {
         assert_eq!(summary.swap_indicator_armed_count, 1);
         assert_eq!(summary.swap_flash_peak_ticks, SWAP_FLASH_TICKS_MAX);
         assert!(summary.swap_flash_ticks_remaining < SWAP_FLASH_TICKS_MAX);
+        assert!(summary.window.is_none());
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
         assert_eq!(summary.events.len(), 5);
@@ -481,6 +491,8 @@ mod tests {
                 swap_indicator_armed_count: 1,
                 swap_flash_peak_ticks: SWAP_FLASH_TICKS_MAX,
                 swap_flash_ticks_remaining: _,
+                window_width: None,
+                window_height: None,
                 ticks_executed: _,
                 has_in_flight_work: false
             }
@@ -526,6 +538,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 200,
             tick_sleep_micros: 0,
+            window: None,
             inject_file_change: Some(PathBuf::from("samples/invalid.stasis")),
             watch_directory: None,
             fail_compile: true,
@@ -546,6 +559,7 @@ mod tests {
         assert_eq!(summary.swap_indicator_armed_count, 0);
         assert_eq!(summary.swap_flash_peak_ticks, 0);
         assert_eq!(summary.swap_flash_ticks_remaining, 0);
+        assert!(summary.window.is_none());
         assert_eq!(summary.compile_diagnostics.len(), 1);
         assert!(summary.compile_diagnostics[0].contains("simulated compile failure"));
         assert_eq!(summary.last_swap_status, None);
@@ -569,6 +583,8 @@ mod tests {
                 swap_indicator_armed_count: 0,
                 swap_flash_peak_ticks: 0,
                 swap_flash_ticks_remaining: 0,
+                window_width: None,
+                window_height: None,
                 ticks_executed: _,
                 has_in_flight_work: false
             }
@@ -580,6 +596,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 200,
             tick_sleep_micros: 0,
+            window: None,
             inject_file_change: Some(PathBuf::from("samples/swap_fail.stasis")),
             watch_directory: None,
             fail_compile: false,
@@ -602,6 +619,7 @@ mod tests {
         assert_eq!(summary.swap_indicator_armed_count, 0);
         assert_eq!(summary.swap_flash_peak_ticks, 0);
         assert_eq!(summary.swap_flash_ticks_remaining, 0);
+        assert!(summary.window.is_none());
         assert!(!summary.has_in_flight_work);
         assert_eq!(summary.events.len(), 4);
         assert!(summary.events.iter().any(|event| matches!(
@@ -621,6 +639,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 200,
             tick_sleep_micros: 0,
+            window: None,
             inject_file_change: Some(PathBuf::from("samples/hook_fail.stasis")),
             watch_directory: None,
             fail_compile: false,
@@ -644,6 +663,7 @@ mod tests {
         assert_eq!(summary.swap_indicator_armed_count, 0);
         assert_eq!(summary.swap_flash_peak_ticks, 0);
         assert_eq!(summary.swap_flash_ticks_remaining, 0);
+        assert!(summary.window.is_none());
         assert!(!summary.has_in_flight_work);
         assert_eq!(summary.events.len(), 4);
         assert!(summary.events.iter().any(|event| matches!(
@@ -681,6 +701,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 300,
             tick_sleep_micros: 1000,
+            window: None,
             inject_file_change: None,
             watch_directory: Some(temp_root.clone()),
             fail_compile: false,
@@ -701,6 +722,7 @@ mod tests {
         assert!(summary.swap_indicator_armed_count >= 1);
         assert_eq!(summary.swap_flash_peak_ticks, SWAP_FLASH_TICKS_MAX);
         assert!(summary.swap_flash_ticks_remaining <= SWAP_FLASH_TICKS_MAX);
+        assert!(summary.window.is_none());
         assert_eq!(summary.compile_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
@@ -721,6 +743,8 @@ mod tests {
         assert_eq!(summary.swap_commit_successes, 1);
         assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.swap_indicator_armed_count, 1);
+        assert_eq!(summary.window, Some(BRICKOUT_REVENGE_V1_WINDOW));
+        assert!(summary.window.expect("window should exist").is_vertical());
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
     }

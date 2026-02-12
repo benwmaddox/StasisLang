@@ -34,6 +34,8 @@ pub enum RunnerEvent {
         swap_indicator_armed_count: u32,
         swap_flash_peak_ticks: u32,
         swap_flash_ticks_remaining: u32,
+        window_width: Option<u32>,
+        window_height: Option<u32>,
         has_in_flight_work: bool,
     },
 }

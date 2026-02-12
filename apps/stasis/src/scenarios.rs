@@ -22,6 +22,7 @@ pub fn brickout_revenge_v1_runner_config(max_ticks: u32) -> RunnerConfig {
     RunnerConfig {
         max_ticks,
         tick_sleep_micros: 0,
+        window: Some(BRICKOUT_REVENGE_V1_WINDOW),
         inject_file_change: Some(PathBuf::from(
             "samples/brickout_revenge/brickout_revenge_v1.stasis",
         )),

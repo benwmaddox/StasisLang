@@ -5,9 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use stasis::{
-    run_with_default_backend,
-    scenarios::{brickout_revenge_v1_runner_config, BRICKOUT_REVENGE_V1_WINDOW},
-    RunnerConfig,
+    run_with_default_backend, scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
 };
 
 struct CliOptions {
@@ -159,11 +157,15 @@ fn main() {
         summary.swap_flash_ticks_remaining
     );
     println!("has_in_flight_work={}", summary.has_in_flight_work);
-    if is_brickout_profile {
+    if let Some(window) = summary.window {
         println!(
-            "window_profile=brickout_revenge_v1 {}x{}",
-            BRICKOUT_REVENGE_V1_WINDOW.width, BRICKOUT_REVENGE_V1_WINDOW.height
+            "window_profile={}x{} vertical={}",
+            window.width,
+            window.height,
+            window.is_vertical()
         );
+    } else if is_brickout_profile {
+        println!("window_profile=brickout_revenge_v1 <unset>");
     }
     for diagnostic in &summary.compile_diagnostics {
         println!("compile_diagnostic={diagnostic}");
