@@ -123,6 +123,7 @@ pub struct CompileResult {
     pub diagnostics: Vec<Diagnostic>,
     pub layout_hash: Option<LayoutHash>,
     pub fn_patch_set: Option<FunctionPatchSet>,
+    pub hook_symbol: Option<String>,
 }
 
 impl CompileResult {
@@ -131,6 +132,15 @@ impl CompileResult {
         layout_hash: LayoutHash,
         fn_patch_set: FunctionPatchSet,
     ) -> Self {
+        Self::success_with_hook_symbol(request_id, layout_hash, fn_patch_set, None)
+    }
+
+    pub fn success_with_hook_symbol(
+        request_id: RequestId,
+        layout_hash: LayoutHash,
+        fn_patch_set: FunctionPatchSet,
+        hook_symbol: Option<String>,
+    ) -> Self {
         Self {
             contract_version: CONTRACT_VERSION,
             request_id,
@@ -138,6 +148,7 @@ impl CompileResult {
             diagnostics: Vec::new(),
             layout_hash: Some(layout_hash),
             fn_patch_set: Some(fn_patch_set),
+            hook_symbol,
         }
     }
 
@@ -149,6 +160,7 @@ impl CompileResult {
             diagnostics,
             layout_hash: None,
             fn_patch_set: None,
+            hook_symbol: None,
         }
     }
 }
@@ -245,6 +257,21 @@ mod tests {
         assert!(result.diagnostics.is_empty());
         assert_eq!(result.layout_hash, Some(layout_hash));
         assert_eq!(result.fn_patch_set, Some(patches));
+        assert_eq!(result.hook_symbol, None);
+    }
+
+    #[test]
+    fn compile_success_can_include_hook_symbol() {
+        let result = CompileResult::success_with_hook_symbol(
+            RequestId(8),
+            LayoutHash([5; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(12) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(result.hook_symbol.as_deref(), Some("on_code_swap"));
     }
 
     #[test]
@@ -264,6 +291,7 @@ mod tests {
         assert_eq!(result.diagnostics, vec![diagnostic]);
         assert!(result.layout_hash.is_none());
         assert!(result.fn_patch_set.is_none());
+        assert!(result.hook_symbol.is_none());
     }
 
     #[test]

@@ -371,7 +371,7 @@ Interfaces are message-based and versioned. No cross-thread shared mutable compi
 
 - `FileChangeEvent`: producer file watcher/input bridge; consumer compiler service; fields `path`, `revision`, `text_source`, `change_kind`.
 - `CompileRequest`: producer swap coordinator; consumer compiler service; fields `request_id`, `changed_files[]`, `target_mode=jit-dev`.
-- `CompileResult`: producer compiler service; consumer swap coordinator; fields `request_id`, `status`, `diagnostics[]`, `layout_hash`, `fn_patch_set`.
+- `CompileResult`: producer compiler service; consumer swap coordinator; fields `request_id`, `status`, `diagnostics[]`, `layout_hash`, `fn_patch_set`, optional `hook_symbol`.
 - `SwapCommitRequest`: producer swap coordinator; consumer runtime/main thread safe-point gate; fields `request_id`, `layout_hash`, `fn_patch_set`, `hook_symbol`.
 - `SwapCommitResult`: producer runtime/main thread; consumer swap coordinator + UI/status bridge; fields `request_id`, `status`, `swapped_fn_ids[]`, `new_generation`, `error`.
 

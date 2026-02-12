@@ -654,7 +654,7 @@ Role ownership:
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
 - `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?)`
 - `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
 - `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
 

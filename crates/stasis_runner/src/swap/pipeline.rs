@@ -210,6 +210,7 @@ impl DevHotSwapPipeline {
                                 result.request_id,
                                 result.layout_hash,
                                 result.fn_patch_set,
+                                result.hook_symbol.clone(),
                             );
                         }
                     }
@@ -224,6 +225,7 @@ impl DevHotSwapPipeline {
         request_id: RequestId,
         layout_hash: Option<LayoutHash>,
         fn_patch_set: Option<FunctionPatchSet>,
+        hook_symbol: Option<String>,
     ) {
         let Some(layout_hash) = layout_hash else {
             return;
@@ -237,7 +239,7 @@ impl DevHotSwapPipeline {
             request_id,
             layout_hash,
             fn_patch_set,
-            hook_symbol: Some("on_code_swap".to_string()),
+            hook_symbol,
         };
         let _ = self.commit_request_tx.send(request);
         self.in_flight_commit = Some(request_id);
@@ -338,6 +340,7 @@ mod tests {
         assert_eq!(pipeline.last_commit_result(), None);
 
         let processed = pipeline.process_commits_at_safe_point(|request| {
+            assert_eq!(request.hook_symbol, None);
             let swapped = request
                 .fn_patch_set
                 .functions
@@ -443,6 +446,30 @@ mod tests {
     }
 
     #[test]
+    fn compile_hook_symbol_propagates_to_commit_request() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success_with_hook_symbol(
+                request.request_id,
+                LayoutHash([6; 32]),
+                sample_patch_set(),
+                Some("on_code_swap".to_string()),
+            )
+        });
+
+        pipeline.submit_file_change(sample_change("samples/hook_symbol.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            assert_eq!(request.hook_symbol.as_deref(), Some("on_code_swap"));
+            SwapCommitResult::success(request.request_id, vec![FnId(7)], CodeGeneration(1))
+        });
+        assert_eq!(processed, 1);
+    }
+
+    #[test]
     fn compile_contract_version_mismatch_is_reported_and_commit_not_queued() {
         let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| CompileResult {
             contract_version: CONTRACT_VERSION + 1,
@@ -451,6 +478,7 @@ mod tests {
             diagnostics: Vec::new(),
             layout_hash: Some(LayoutHash([1; 32])),
             fn_patch_set: Some(sample_patch_set()),
+            hook_symbol: Some("on_code_swap".to_string()),
         });
 
         pipeline.submit_file_change(sample_change("samples/version_mismatch.stasis", 1));

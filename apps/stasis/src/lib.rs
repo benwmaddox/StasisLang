@@ -90,7 +90,17 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
             let patch_set = FunctionPatchSet {
                 functions: vec![FunctionPatch { fn_id: FnId(1) }],
             };
-            CompileResult::success(request.request_id, LayoutHash([1; 32]), patch_set)
+            let hook_symbol = if request.target_mode == TargetMode::JitDev {
+                Some("on_code_swap".to_string())
+            } else {
+                None
+            };
+            CompileResult::success_with_hook_symbol(
+                request.request_id,
+                LayoutHash([1; 32]),
+                patch_set,
+                hook_symbol,
+            )
         }
     };
 
@@ -759,6 +769,7 @@ mod tests {
         assert_eq!(summary.compile_successes, 1);
         assert_eq!(summary.compile_failures, 0);
         assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.hook_runs, 0);
 
         let modes = seen_modes.lock().expect("poisoned");
         assert_eq!(modes.as_slice(), &[TargetMode::AotProd]);

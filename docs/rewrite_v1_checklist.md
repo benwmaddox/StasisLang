@@ -250,6 +250,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `.stasis`: hook definition and rule enforcement semantics.
 - Scope:
 - Run optional `function on_code_swap(): void` before pointer swap.
+- Current implementation:
+- `CompileResult` now carries optional `hook_symbol`; pipeline forwards it into `SwapCommitRequest` (instead of hardcoded symbol) so hook execution is compiler-declared.
 - Deliverable:
 - Explicit state adjustment point between ticks.
 - Tests:
