@@ -213,6 +213,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Current implementation:
 - `DevHotSwapPipeline` now supports explicit `TargetMode` (`JitDev` or `AotProd`) dispatch.
 - `apps/stasis` runner config/CLI can request `AotProd` compile requests (`--target-mode aot` / `--aot-prod`).
+- `crates/stasis_jit::compile_clif_to_object` invokes `tools/cranelift-aot` to produce native object artifacts.
 - Deliverable:
 - Production mode runs from AOT artifacts without requiring runtime JIT.
 - Tests:
