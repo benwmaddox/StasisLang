@@ -18,6 +18,14 @@ function print_utf8(value: utf8[]): void {
     print_string(value);
 }
 
+// Rewrite V1 enum conversion surface.
+// Current bootstrap-compatible implementation uses an i32-typed parameter so enum
+// values can be passed explicitly and lowered to their underlying i32 value.
+// Planned self-hosted behavior keeps this call shape as a true intrinsic.
+function enum_to_i32(value: i32): i32 {
+    return value;
+}
+
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }

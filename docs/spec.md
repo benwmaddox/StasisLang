@@ -477,8 +477,9 @@ Rules:
 ```stasis
 let phase: Phase = Phase.Play;
 ```
-- Enum/integer conversion uses explicit built-in intrinsic conversion.
-- Planned intrinsic for Rewrite V1 compiler path: `enum_to_i32(value: EnumType): i32`.
+- Enum/integer conversion uses explicit conversion calls.
+- Current Rewrite V1 conversion surface: `enum_to_i32(value: EnumType): i32`.
+- In bootstrap compatibility mode this is provided by stdlib with the same call shape; in self-hosted mode this remains the intrinsic surface.
 
 ## 9. Modules and Imports
 

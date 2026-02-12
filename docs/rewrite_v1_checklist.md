@@ -138,7 +138,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Implement conversion semantics:
 - Mutating `from_*` operations.
 - Pure `to_*` operations.
-- Explicit enum conversion intrinsic `enum_to_i32(value: EnumType): i32` (no implicit enum/int conversion).
+- Explicit enum conversion surface `enum_to_i32(value: EnumType): i32` (no implicit enum/int conversion).
+- Bootstrap compatibility path: stdlib helper with same call shape; self-hosted compiler path: intrinsic implementation.
 - Deliverable:
 - `enemy.damage(5)` and `damage(enemy, 5)` both resolve correctly.
 - Conversion semantics follow spec examples.

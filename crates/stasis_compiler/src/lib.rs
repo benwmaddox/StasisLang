@@ -390,6 +390,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cranelift_run_helper_enum_to_i32_conversion_fixture() {
+        let source = fixture_path("run_enum_to_i32_conversion.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(11),
+            "expected enum_to_i32 conversion exit code 11 for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bootstrap_compiles_entry_validation_ok_fixture() {
         let source = fixture_path("entry_validation_ok.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());
