@@ -302,5 +302,4 @@ Each PR must include:
 
 ## Backlog
 
-- Add `schema_version` field to every JSONL runner event payload for strict editor/tool compatibility negotiation.
 - Add dedicated `Stasis.Compiler.Tests` coverage for chained array-field load/store paths (`a[i].field[j]`) to keep the bootstrap backend fix pinned.

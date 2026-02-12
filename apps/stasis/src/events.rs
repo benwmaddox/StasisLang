@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+pub const RUNNER_EVENT_SCHEMA_VERSION: u16 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RunnerEvent {
@@ -38,4 +40,39 @@ pub enum RunnerEvent {
         window_height: Option<u32>,
         has_in_flight_work: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+pub struct VersionedRunnerEvent<'a> {
+    pub schema_version: u16,
+    #[serde(flatten)]
+    pub event: &'a RunnerEvent,
+}
+
+impl RunnerEvent {
+    pub fn with_schema_version(&self) -> VersionedRunnerEvent<'_> {
+        VersionedRunnerEvent {
+            schema_version: RUNNER_EVENT_SCHEMA_VERSION,
+            event: self,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_event_serialization_includes_schema_version_and_tag() {
+        let event = RunnerEvent::CompileResult {
+            request_id: 7,
+            status: "success".to_string(),
+            diagnostics: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&event.with_schema_version())
+            .expect("event serialization should succeed");
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains("\"event\":\"compile_result\""));
+    }
 }

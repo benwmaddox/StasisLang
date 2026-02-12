@@ -124,7 +124,7 @@ fn write_events_jsonl(
     };
 
     for event in &summary.events {
-        let line = serde_json::to_string(event)
+        let line = serde_json::to_string(&event.with_schema_version())
             .map_err(|err| format!("failed to serialize event: {err}"))?;
         writeln!(writer, "{line}").map_err(|err| format!("failed to write event line: {err}"))?;
     }
