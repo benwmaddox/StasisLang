@@ -1,0 +1,384 @@
+use crate::swap::contracts::{
+    CompileRequest, CompileResult, CompileStatus, FileChangeEvent, FunctionPatchSet, LayoutHash,
+    RequestId, SwapCommitRequest, SwapCommitResult, TargetMode, CONTRACT_VERSION,
+};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::thread;
+use std::thread::JoinHandle;
+
+enum CompilerThreadMessage {
+    Compile(CompileRequest),
+    Shutdown,
+}
+
+pub trait CompilerBackend: Send + 'static {
+    fn compile(&mut self, request: CompileRequest) -> CompileResult;
+}
+
+impl<F> CompilerBackend for F
+where
+    F: FnMut(CompileRequest) -> CompileResult + Send + 'static,
+{
+    fn compile(&mut self, request: CompileRequest) -> CompileResult {
+        self(request)
+    }
+}
+
+/// Dev-mode pipeline with explicit thread/channel boundaries:
+/// watcher -> coordinator -> compiler thread -> main-thread safe-point commit gate.
+pub struct DevHotSwapPipeline {
+    file_change_tx: Sender<FileChangeEvent>,
+    file_change_rx: Receiver<FileChangeEvent>,
+    compiler_tx: Sender<CompilerThreadMessage>,
+    compile_result_rx: Receiver<CompileResult>,
+    commit_request_tx: Sender<SwapCommitRequest>,
+    commit_request_rx: Receiver<SwapCommitRequest>,
+    commit_result_tx: Sender<SwapCommitResult>,
+    commit_result_rx: Receiver<SwapCommitResult>,
+    pending_files: BTreeSet<PathBuf>,
+    in_flight_compile: Option<RequestId>,
+    in_flight_commit: Option<RequestId>,
+    next_request_id: u64,
+    last_compile_result: Option<CompileResult>,
+    last_commit_result: Option<SwapCommitResult>,
+    compiler_thread: Option<JoinHandle<()>>,
+}
+
+impl DevHotSwapPipeline {
+    pub fn new<B: CompilerBackend>(mut backend: B) -> Self {
+        let (file_change_tx, file_change_rx) = unbounded::<FileChangeEvent>();
+        let (compiler_tx, compiler_rx) = unbounded::<CompilerThreadMessage>();
+        let (compile_result_tx, compile_result_rx) = unbounded::<CompileResult>();
+        let (commit_request_tx, commit_request_rx) = unbounded::<SwapCommitRequest>();
+        let (commit_result_tx, commit_result_rx) = unbounded::<SwapCommitResult>();
+
+        let compiler_thread = thread::spawn(move || {
+            while let Ok(message) = compiler_rx.recv() {
+                match message {
+                    CompilerThreadMessage::Compile(request) => {
+                        let result = backend.compile(request);
+                        if compile_result_tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    CompilerThreadMessage::Shutdown => break,
+                }
+            }
+        });
+
+        Self {
+            file_change_tx,
+            file_change_rx,
+            compiler_tx,
+            compile_result_rx,
+            commit_request_tx,
+            commit_request_rx,
+            commit_result_tx,
+            commit_result_rx,
+            pending_files: BTreeSet::new(),
+            in_flight_compile: None,
+            in_flight_commit: None,
+            next_request_id: 1,
+            last_compile_result: None,
+            last_commit_result: None,
+            compiler_thread: Some(compiler_thread),
+        }
+    }
+
+    pub fn watcher_sender(&self) -> Sender<FileChangeEvent> {
+        self.file_change_tx.clone()
+    }
+
+    pub fn submit_file_change(&self, event: FileChangeEvent) {
+        // If watcher side is disconnected, runtime should continue without panic.
+        let _ = self.file_change_tx.send(event);
+    }
+
+    /// Runs coordinator work on the caller thread.
+    /// Should be called in the runtime loop outside hot gameplay paths.
+    pub fn pump_coordinator(&mut self) {
+        self.drain_file_changes();
+        self.maybe_dispatch_compile_request();
+        self.drain_compile_results();
+        self.drain_commit_results();
+    }
+
+    /// Safe-point gate called between ticks on the main thread.
+    pub fn process_commits_at_safe_point<F>(&mut self, mut apply_commit: F) -> usize
+    where
+        F: FnMut(SwapCommitRequest) -> SwapCommitResult,
+    {
+        let mut processed = 0usize;
+        loop {
+            match self.commit_request_rx.try_recv() {
+                Ok(request) => {
+                    let result = apply_commit(request);
+                    let _ = self.commit_result_tx.send(result);
+                    processed += 1;
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        processed
+    }
+
+    pub fn has_in_flight_work(&self) -> bool {
+        self.in_flight_compile.is_some()
+            || self.in_flight_commit.is_some()
+            || !self.pending_files.is_empty()
+    }
+
+    pub fn pending_commit_requests(&self) -> usize {
+        self.commit_request_rx.len()
+    }
+
+    pub fn last_compile_result(&self) -> Option<&CompileResult> {
+        self.last_compile_result.as_ref()
+    }
+
+    pub fn last_commit_result(&self) -> Option<&SwapCommitResult> {
+        self.last_commit_result.as_ref()
+    }
+
+    fn drain_file_changes(&mut self) {
+        loop {
+            match self.file_change_rx.try_recv() {
+                Ok(change) => {
+                    self.pending_files.insert(change.path);
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn maybe_dispatch_compile_request(&mut self) {
+        if self.in_flight_compile.is_some()
+            || self.in_flight_commit.is_some()
+            || self.pending_files.is_empty()
+        {
+            return;
+        }
+
+        let request_id = RequestId(self.next_request_id);
+        self.next_request_id += 1;
+
+        let changed_files: Vec<PathBuf> = self.pending_files.iter().cloned().collect();
+        self.pending_files.clear();
+
+        let request = CompileRequest::new(request_id, changed_files, TargetMode::JitDev);
+        let _ = self
+            .compiler_tx
+            .send(CompilerThreadMessage::Compile(request));
+        self.in_flight_compile = Some(request_id);
+    }
+
+    fn drain_compile_results(&mut self) {
+        loop {
+            match self.compile_result_rx.try_recv() {
+                Ok(result) => {
+                    self.last_compile_result = Some(result.clone());
+                    if self.in_flight_compile == Some(result.request_id) {
+                        self.in_flight_compile = None;
+                        if result.status == CompileStatus::Success {
+                            self.enqueue_commit_request(
+                                result.request_id,
+                                result.layout_hash,
+                                result.fn_patch_set,
+                            );
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn enqueue_commit_request(
+        &mut self,
+        request_id: RequestId,
+        layout_hash: Option<LayoutHash>,
+        fn_patch_set: Option<FunctionPatchSet>,
+    ) {
+        let Some(layout_hash) = layout_hash else {
+            return;
+        };
+        let Some(fn_patch_set) = fn_patch_set else {
+            return;
+        };
+
+        let request = SwapCommitRequest {
+            contract_version: CONTRACT_VERSION,
+            request_id,
+            layout_hash,
+            fn_patch_set,
+            hook_symbol: Some("on_code_swap".to_string()),
+        };
+        let _ = self.commit_request_tx.send(request);
+        self.in_flight_commit = Some(request_id);
+    }
+
+    fn drain_commit_results(&mut self) {
+        loop {
+            match self.commit_result_rx.try_recv() {
+                Ok(result) => {
+                    self.last_commit_result = Some(result.clone());
+                    if self.in_flight_commit == Some(result.request_id) {
+                        self.in_flight_commit = None;
+                    }
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+}
+
+impl Drop for DevHotSwapPipeline {
+    fn drop(&mut self) {
+        let _ = self.compiler_tx.send(CompilerThreadMessage::Shutdown);
+        if let Some(join_handle) = self.compiler_thread.take() {
+            let _ = join_handle.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swap::contracts::{
+        CodeGeneration, Diagnostic, DiagnosticSeverity, FileChangeKind, FnId, FunctionPatch,
+        SwapCommitResult, SwapCommitStatus, TextSource,
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn eventually(mut condition: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if condition() {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("condition not met before timeout");
+    }
+
+    fn sample_change(path: &str, revision: u64) -> FileChangeEvent {
+        FileChangeEvent::new(
+            PathBuf::from(path),
+            revision,
+            TextSource::FileWatcher,
+            FileChangeKind::Modified,
+        )
+    }
+
+    fn sample_patch_set() -> FunctionPatchSet {
+        FunctionPatchSet {
+            functions: vec![
+                FunctionPatch { fn_id: FnId(7) },
+                FunctionPatch { fn_id: FnId(11) },
+            ],
+        }
+    }
+
+    #[test]
+    fn routes_file_changes_to_compile_then_waits_for_safe_point_commit() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success(request.request_id, LayoutHash([9; 32]), sample_patch_set())
+        });
+
+        pipeline.submit_file_change(sample_change("samples/a.stasis", 1));
+        pipeline.pump_coordinator();
+
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        let compile_result = pipeline
+            .last_compile_result()
+            .expect("compile result should exist");
+        assert_eq!(compile_result.status, CompileStatus::Success);
+        assert_eq!(pipeline.last_commit_result(), None);
+
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            let swapped = request
+                .fn_patch_set
+                .functions
+                .iter()
+                .map(|f| f.fn_id)
+                .collect();
+            SwapCommitResult::success(request.request_id, swapped, CodeGeneration(2))
+        });
+        assert_eq!(processed, 1);
+
+        pipeline.pump_coordinator();
+        let commit_result = pipeline
+            .last_commit_result()
+            .expect("commit result should exist");
+        assert_eq!(commit_result.status, SwapCommitStatus::Success);
+        assert!(!pipeline.has_in_flight_work());
+    }
+
+    #[test]
+    fn compile_failure_does_not_queue_commit_request() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: "parse error".to_string(),
+                    path: Some(PathBuf::from("samples/bad.stasis")),
+                    line: Some(3),
+                    column: Some(14),
+                }],
+            )
+        });
+
+        pipeline.submit_file_change(sample_change("samples/bad.stasis", 2));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.last_compile_result().is_some()
+        });
+
+        let compile_result = pipeline
+            .last_compile_result()
+            .expect("compile result should exist");
+        assert_eq!(compile_result.status, CompileStatus::Failed);
+        assert_eq!(pipeline.pending_commit_requests(), 0);
+        assert!(pipeline.last_commit_result().is_none());
+        assert!(!pipeline.has_in_flight_work());
+    }
+
+    #[test]
+    fn coalesces_changes_and_dispatches_single_compile_request() {
+        let requests: Arc<Mutex<Vec<CompileRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let mut pipeline = DevHotSwapPipeline::new(move |request: CompileRequest| {
+            captured.lock().expect("poisoned").push(request.clone());
+            CompileResult::success(request.request_id, LayoutHash([4; 32]), sample_patch_set())
+        });
+
+        pipeline.submit_file_change(sample_change("samples/zeta_10.stasis", 1));
+        pipeline.submit_file_change(sample_change("samples/zeta_2.stasis", 2));
+        pipeline.submit_file_change(sample_change("samples/zeta_2.stasis", 3));
+        pipeline.pump_coordinator();
+
+        eventually(|| {
+            pipeline.pump_coordinator();
+            requests.lock().expect("poisoned").len() == 1
+        });
+
+        let captured_requests = requests.lock().expect("poisoned");
+        let request = captured_requests.first().expect("request should exist");
+        assert_eq!(request.changed_files.len(), 2);
+        assert_eq!(request.target_mode, TargetMode::JitDev);
+        assert_eq!(
+            request.changed_files[0],
+            PathBuf::from("samples/zeta_10.stasis")
+        );
+        assert_eq!(
+            request.changed_files[1],
+            PathBuf::from("samples/zeta_2.stasis")
+        );
+    }
+}
