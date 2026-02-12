@@ -1613,6 +1613,7 @@ function parser_parse_foreach_statement(): bool {
     if (!parser_expect(TokenKind.LParen, CompilerErrorCode.ParseExpectLParen)) {
         return false;
     }
+    parser_match(TokenKind.KwLet);
     if (!parser_expect_identifier()) {
         return false;
     }

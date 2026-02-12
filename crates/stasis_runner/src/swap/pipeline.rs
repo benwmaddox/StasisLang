@@ -233,6 +233,9 @@ impl DevHotSwapPipeline {
         let Some(fn_patch_set) = fn_patch_set else {
             return;
         };
+        if fn_patch_set.functions.is_empty() {
+            return;
+        }
 
         let request = SwapCommitRequest {
             contract_version: CONTRACT_VERSION,
@@ -533,6 +536,33 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|msg| msg.contains("contract version mismatch")));
+        assert!(!pipeline.has_in_flight_work());
+    }
+
+    #[test]
+    fn success_with_empty_patch_set_does_not_queue_commit() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success(
+                request.request_id,
+                LayoutHash([8; 32]),
+                FunctionPatchSet {
+                    functions: Vec::new(),
+                },
+            )
+        });
+
+        pipeline.submit_file_change(sample_change("samples/noop.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.last_compile_result().is_some()
+        });
+
+        let compile_result = pipeline
+            .last_compile_result()
+            .expect("compile result should exist");
+        assert_eq!(compile_result.status, CompileStatus::Success);
+        assert_eq!(pipeline.pending_commit_requests(), 0);
+        assert!(pipeline.last_commit_result().is_none());
         assert!(!pipeline.has_in_flight_work());
     }
 }

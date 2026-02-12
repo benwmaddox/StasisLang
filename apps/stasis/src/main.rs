@@ -5,7 +5,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use stasis::{
-    run_with_default_backend, scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
+    run_with_default_backend, run_with_real_backend, scenarios::brickout_revenge_v1_runner_config,
+    RunnerConfig,
 };
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -140,7 +141,14 @@ fn main() {
         == Some(&PathBuf::from(
             "samples/brickout_revenge/brickout_revenge_v1.stasis",
         ));
-    let summary = run_with_default_backend(options.runner);
+    let use_simulated = options.runner.fail_compile
+        || options.runner.hook_failure_reason.is_some()
+        || options.runner.swap_failure_reason.is_some();
+    let summary = if use_simulated {
+        run_with_default_backend(options.runner)
+    } else {
+        run_with_real_backend(options.runner)
+    };
     let exit_code = if summary.compile_failures > 0 || summary.swap_commit_failures > 0 {
         1
     } else {

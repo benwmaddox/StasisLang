@@ -304,7 +304,6 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Status: `in_progress`
 - Remaining:
-- Replace simulated compiler backend in `apps/stasis` with real compiler adapter.
 - Execute real compile -> function patch -> commit path for Brickout in watch mode.
 - Add end-to-end test that validates real swap updates from source changes (not mock `FnId(1)` patch responses).
 

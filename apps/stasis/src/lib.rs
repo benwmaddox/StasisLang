@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod compiler_backend;
 mod events;
 pub mod scenarios;
 mod watch;
@@ -7,6 +8,7 @@ mod watch;
 pub use events::RunnerEvent;
 pub use scenarios::WindowConfig;
 
+use compiler_backend::IncrementalCompilerBackend;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
     FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, SwapCommitResult,
@@ -104,6 +106,11 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
         }
     };
 
+    run_with_backend(config, backend)
+}
+
+pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
+    let backend = IncrementalCompilerBackend::new();
     run_with_backend(config, backend)
 }
 
@@ -231,7 +238,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         sleep_for_tick(config.tick_sleep_micros);
     }
 
-    for _ in 0..500 {
+    let drain_start = std::time::Instant::now();
+    while drain_start.elapsed() < Duration::from_secs(30) {
         if !pipeline.has_in_flight_work() && pipeline.pending_commit_requests() == 0 {
             break;
         }
@@ -302,7 +310,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             }
         }
         thread::yield_now();
-        sleep_for_tick(config.tick_sleep_micros);
+        thread::sleep(Duration::from_millis(1));
     }
 
     let has_in_flight_work = pipeline.has_in_flight_work();
@@ -447,6 +455,7 @@ mod tests {
     use super::*;
     use crate::scenarios::{brickout_revenge_v1_runner_config, BRICKOUT_REVENGE_V1_WINDOW};
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -791,6 +800,37 @@ mod tests {
         assert_eq!(summary.swap_indicator_armed_count, 1);
         assert_eq!(summary.window, Some(BRICKOUT_REVENGE_V1_WINDOW));
         assert!(summary.window.expect("window should exist").is_vertical());
+        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert!(!summary.has_in_flight_work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_smoke_compiles_and_commits() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("run_main_returns_7.stasis");
+        let config = RunnerConfig {
+            max_ticks: 450,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: Some(fixture),
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+        };
+
+        let summary = run_with_real_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
     }

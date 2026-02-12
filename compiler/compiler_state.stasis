@@ -1,13 +1,13 @@
-const COMPILER_MAX_SOURCE: i32 = 65536;
-const COMPILER_MAX_TOKENS: i32 = 8192;
+const COMPILER_MAX_SOURCE: i32 = 131072;
+const COMPILER_MAX_TOKENS: i32 = 32768;
 const COMPILER_MAX_ERRORS: i32 = 64;
 const COMPILER_MAX_FILES: i32 = 128;
 const COMPILER_MAX_PATH: i32 = 260;
-const COMPILER_MAX_PARSE_GUARD: i32 = 8192;
+const COMPILER_MAX_PARSE_GUARD: i32 = 32768;
 const COMPILER_MAX_PARAMS: i32 = 64;
 const COMPILER_MAX_ARGS: i32 = 256;
-const COMPILER_MAX_BODY_STMTS: i32 = 4096;
-const COMPILER_MAX_CALL_NEST: i32 = 256;
+const COMPILER_MAX_BODY_STMTS: i32 = 16384;
+const COMPILER_MAX_CALL_NEST: i32 = 1024;
 const COMPILER_MAX_TRACKED_FUNCTIONS: i32 = 512;
 
 enum CompilerErrorCode {
@@ -114,7 +114,7 @@ struct CompilerError {
 
 struct CompilerFile {
     path: ascii[260];
-    source: ascii[65536];
+    source: ascii[131072];
     source_len: i32;
     source_hash: i32;
     dirty: bool;
@@ -144,14 +144,14 @@ struct CompilerFile {
 }
 
 struct CompilerState {
-    source: ascii[65536];
+    source: ascii[131072];
     source_len: i32;
 
     files: CompilerFile[128];
     file_count: i32;
     current_file_index: i32;
 
-    tokens: CompilerToken[8192];
+    tokens: CompilerToken[32768];
     token_count: i32;
     parse_index: i32;
 
