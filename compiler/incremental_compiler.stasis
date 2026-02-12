@@ -32,6 +32,9 @@ const ERR_PARSE_BODY_GUARD_EXHAUSTED: i32 = 2015;
 const ERR_PARSE_CALL_GUARD_EXHAUSTED: i32 = 2016;
 const ERR_INCREMENTAL_FILE_OVERFLOW: i32 = 3001;
 const ERR_INCREMENTAL_FILE_PATH_EMPTY: i32 = 3002;
+const ERR_ENTRY_MISSING_MAIN: i32 = 41;
+const ERR_ENTRY_INVALID_MAIN_SIGNATURE: i32 = 42;
+const ERR_ENTRY_MULTIPLE_MAIN: i32 = 43;
 
 enum CompilerStatus {
     Idle,
@@ -85,6 +88,9 @@ struct CompilerFile {
     parsed_extern_count: i32;
     parsed_return_count: i32;
     parsed_call_count: i32;
+    parsed_main_declaration_count: i32;
+    parsed_main_valid_i32_count: i32;
+    parsed_main_invalid_signature_count: i32;
     last_error_code: i32;
     last_error_pos: i32;
     last_error_detail_a: i32;
@@ -111,6 +117,17 @@ struct CompilerState {
     parsed_extern_count: i32;
     parsed_return_count: i32;
     parsed_call_count: i32;
+    parsed_main_declaration_count: i32;
+    parsed_main_valid_i32_count: i32;
+    parsed_main_invalid_signature_count: i32;
+
+    captured_identifier_start: i32;
+    captured_identifier_len: i32;
+    current_signature_name_start: i32;
+    current_signature_name_len: i32;
+    current_signature_param_count: i32;
+    current_signature_return_type_start: i32;
+    current_signature_return_type_len: i32;
 
     incremental_scanned_files: i32;
     incremental_parsed_files: i32;
@@ -133,6 +150,16 @@ function compiler_reset_state(): void {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_main_declaration_count = 0;
+    Compiler.parsed_main_valid_i32_count = 0;
+    Compiler.parsed_main_invalid_signature_count = 0;
+    Compiler.captured_identifier_start = 0;
+    Compiler.captured_identifier_len = 0;
+    Compiler.current_signature_name_start = 0;
+    Compiler.current_signature_name_len = 0;
+    Compiler.current_signature_param_count = 0;
+    Compiler.current_signature_return_type_start = 0;
+    Compiler.current_signature_return_type_len = 0;
     Compiler.incremental_scanned_files = 0;
     Compiler.incremental_parsed_files = 0;
     Compiler.incremental_reused_files = 0;
@@ -212,6 +239,9 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     Compiler.files[new_index].parsed_extern_count = 0;
     Compiler.files[new_index].parsed_return_count = 0;
     Compiler.files[new_index].parsed_call_count = 0;
+    Compiler.files[new_index].parsed_main_declaration_count = 0;
+    Compiler.files[new_index].parsed_main_valid_i32_count = 0;
+    Compiler.files[new_index].parsed_main_invalid_signature_count = 0;
     Compiler.files[new_index].last_error_code = 0;
     Compiler.files[new_index].last_error_pos = 0;
     Compiler.files[new_index].last_error_detail_a = 0;
@@ -232,6 +262,9 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_main_declaration_count = 0;
+    Compiler.parsed_main_valid_i32_count = 0;
+    Compiler.parsed_main_invalid_signature_count = 0;
     Compiler.incremental_scanned_files = 0;
     Compiler.incremental_parsed_files = 0;
     Compiler.incremental_reused_files = 0;
@@ -266,6 +299,9 @@ function compiler_run_incremental_pipeline(): i32 {
             Compiler.parsed_extern_count = 0;
             Compiler.parsed_return_count = 0;
             Compiler.parsed_call_count = 0;
+            Compiler.parsed_main_declaration_count = 0;
+            Compiler.parsed_main_valid_i32_count = 0;
+            Compiler.parsed_main_invalid_signature_count = 0;
 
             if (!compiler_lex()) {
                 Compiler.files[i].last_status = CompilerStatus.LexError;
@@ -273,6 +309,9 @@ function compiler_run_incremental_pipeline(): i32 {
                 Compiler.files[i].parsed_extern_count = 0;
                 Compiler.files[i].parsed_return_count = 0;
                 Compiler.files[i].parsed_call_count = 0;
+                Compiler.files[i].parsed_main_declaration_count = 0;
+                Compiler.files[i].parsed_main_valid_i32_count = 0;
+                Compiler.files[i].parsed_main_invalid_signature_count = 0;
                 compiler_capture_last_error_for_file(i);
                 Compiler.files[i].dirty = false;
                 Compiler.incremental_failed_files += 1;
@@ -283,6 +322,9 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_extern_count = 0;
                     Compiler.files[i].parsed_return_count = 0;
                     Compiler.files[i].parsed_call_count = 0;
+                    Compiler.files[i].parsed_main_declaration_count = 0;
+                    Compiler.files[i].parsed_main_valid_i32_count = 0;
+                    Compiler.files[i].parsed_main_invalid_signature_count = 0;
                     compiler_capture_last_error_for_file(i);
                     Compiler.files[i].dirty = false;
                     Compiler.incremental_failed_files += 1;
@@ -291,6 +333,9 @@ function compiler_run_incremental_pipeline(): i32 {
                     Compiler.files[i].parsed_extern_count = Compiler.parsed_extern_count;
                     Compiler.files[i].parsed_return_count = Compiler.parsed_return_count;
                     Compiler.files[i].parsed_call_count = Compiler.parsed_call_count;
+                    Compiler.files[i].parsed_main_declaration_count = Compiler.parsed_main_declaration_count;
+                    Compiler.files[i].parsed_main_valid_i32_count = Compiler.parsed_main_valid_i32_count;
+                    Compiler.files[i].parsed_main_invalid_signature_count = Compiler.parsed_main_invalid_signature_count;
                     Compiler.files[i].last_error_code = 0;
                     Compiler.files[i].last_error_pos = 0;
                     Compiler.files[i].last_error_detail_a = 0;
@@ -308,6 +353,9 @@ function compiler_run_incremental_pipeline(): i32 {
     Compiler.parsed_extern_count = 0;
     Compiler.parsed_return_count = 0;
     Compiler.parsed_call_count = 0;
+    Compiler.parsed_main_declaration_count = 0;
+    Compiler.parsed_main_valid_i32_count = 0;
+    Compiler.parsed_main_invalid_signature_count = 0;
     let has_lex_error: i32 = 0;
     let has_parse_error: i32 = 0;
     for (i = 0; i < Compiler.file_count; i += 1) {
@@ -315,6 +363,9 @@ function compiler_run_incremental_pipeline(): i32 {
         Compiler.parsed_extern_count += Compiler.files[i].parsed_extern_count;
         Compiler.parsed_return_count += Compiler.files[i].parsed_return_count;
         Compiler.parsed_call_count += Compiler.files[i].parsed_call_count;
+        Compiler.parsed_main_declaration_count += Compiler.files[i].parsed_main_declaration_count;
+        Compiler.parsed_main_valid_i32_count += Compiler.files[i].parsed_main_valid_i32_count;
+        Compiler.parsed_main_invalid_signature_count += Compiler.files[i].parsed_main_invalid_signature_count;
         if (Compiler.files[i].last_status == CompilerStatus.LexError) {
             has_lex_error = 1;
         }
@@ -358,6 +409,42 @@ function compiler_get_reused_file_count(): i32 {
 
 function compiler_get_failed_file_count(): i32 {
     return Compiler.incremental_failed_files;
+}
+
+function compiler_get_main_declaration_count(): i32 {
+    return Compiler.parsed_main_declaration_count;
+}
+
+function compiler_get_main_valid_i32_count(): i32 {
+    return Compiler.parsed_main_valid_i32_count;
+}
+
+function compiler_get_main_invalid_signature_count(): i32 {
+    return Compiler.parsed_main_invalid_signature_count;
+}
+
+function compiler_validate_entry_main_i32(): i32 {
+    if (Compiler.parsed_main_declaration_count <= 0) {
+        return ERR_ENTRY_MISSING_MAIN;
+    }
+    if (Compiler.parsed_main_declaration_count > 1) {
+        return ERR_ENTRY_MULTIPLE_MAIN;
+    }
+    if (Compiler.parsed_main_valid_i32_count != 1) {
+        return ERR_ENTRY_INVALID_MAIN_SIGNATURE;
+    }
+    if (Compiler.parsed_main_invalid_signature_count > 0) {
+        return ERR_ENTRY_INVALID_MAIN_SIGNATURE;
+    }
+    return 0;
+}
+
+function run_incremental_compiler_with_main_entry(): i32 {
+    let pipeline_code: i32 = compiler_run_incremental_pipeline();
+    if (pipeline_code != 0) {
+        return pipeline_code;
+    }
+    return compiler_validate_entry_main_i32();
 }
 
 function compiler_capture_last_error_for_file(file_index: i32): void {
@@ -667,7 +754,16 @@ function parser_expect(kind: TokenKind, err_code: i32): bool {
 }
 
 function parser_expect_identifier(): bool {
+    if (parser_expect_identifier_capture()) {
+        return true;
+    }
+    return false;
+}
+
+function parser_expect_identifier_capture(): bool {
     if (parser_current_kind() == TokenKind.Identifier) {
+        Compiler.captured_identifier_start = Compiler.tokens[Compiler.parse_index].text_start;
+        Compiler.captured_identifier_len = Compiler.tokens[Compiler.parse_index].text_len;
         Compiler.parse_index += 1;
         return true;
     }
@@ -679,10 +775,43 @@ function parser_parse_type_name(): bool {
     return parser_expect_identifier();
 }
 
+function parser_identifier_text_eq(start: i32, len: i32, expected: ascii[]): bool {
+    if (start < 0 || len < 0) {
+        return false;
+    }
+    if (len != length(expected)) {
+        return false;
+    }
+    let i: i32 = 0;
+    for (i = 0; i < len; i += 1) {
+        if (Compiler.source[start + i] != expected[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function parser_record_signature_main_entry(): void {
+    if (!parser_identifier_text_eq(Compiler.current_signature_name_start, Compiler.current_signature_name_len, "main")) {
+        return;
+    }
+
+    Compiler.parsed_main_declaration_count += 1;
+    if (
+        Compiler.current_signature_param_count == 0 &&
+        parser_identifier_text_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "i32")
+    ) {
+        Compiler.parsed_main_valid_i32_count += 1;
+    } else {
+        Compiler.parsed_main_invalid_signature_count += 1;
+    }
+}
+
 function parser_parse_param_list(): bool {
     if (!parser_expect(TokenKind.LParen, ERR_PARSE_EXPECT_LPAREN)) {
         return false;
     }
+    Compiler.current_signature_param_count = 0;
     if (parser_match(TokenKind.RParen)) {
         return true;
     }
@@ -698,6 +827,7 @@ function parser_parse_param_list(): bool {
         if (!parser_parse_type_name()) {
             return false;
         }
+        Compiler.current_signature_param_count += 1;
         if (parser_match(TokenKind.Comma)) {
             // Continue with next parameter.
         } else {
@@ -712,18 +842,25 @@ function parser_parse_param_list(): bool {
     return false;
 }
 
-function parser_parse_signature(): bool {
-    if (!parser_expect_identifier()) {
+function parser_parse_signature(is_extern: bool): bool {
+    if (!parser_expect_identifier_capture()) {
         return false;
     }
+    Compiler.current_signature_name_start = Compiler.captured_identifier_start;
+    Compiler.current_signature_name_len = Compiler.captured_identifier_len;
     if (!parser_parse_param_list()) {
         return false;
     }
     if (!parser_expect(TokenKind.Colon, ERR_PARSE_EXPECT_COLON)) {
         return false;
     }
-    if (!parser_parse_type_name()) {
+    if (!parser_expect_identifier_capture()) {
         return false;
+    }
+    Compiler.current_signature_return_type_start = Compiler.captured_identifier_start;
+    Compiler.current_signature_return_type_len = Compiler.captured_identifier_len;
+    if (!is_extern) {
+        parser_record_signature_main_entry();
     }
     return true;
 }
@@ -815,7 +952,7 @@ function parser_parse_item(): bool {
         if (!parser_expect(TokenKind.KwFunction, ERR_PARSE_EXPECT_FUNCTION_AFTER_EXTERN)) {
             return false;
         }
-        if (!parser_parse_signature()) {
+        if (!parser_parse_signature(true)) {
             return false;
         }
         Compiler.parsed_extern_count += 1;
@@ -823,7 +960,7 @@ function parser_parse_item(): bool {
     }
 
     if (parser_match(TokenKind.KwFunction)) {
-        if (!parser_parse_signature()) {
+        if (!parser_parse_signature(false)) {
             return false;
         }
         Compiler.parsed_function_count += 1;

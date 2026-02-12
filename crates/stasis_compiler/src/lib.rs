@@ -70,6 +70,17 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    fn run_cranelift_helper(source: &Path) -> Output {
+        Command::new("cmd")
+            .arg("/C")
+            .arg(cranelift_run_helper_path())
+            .arg(source)
+            .current_dir(repo_root())
+            .output()
+            .expect("failed to execute cranelift run helper")
+    }
+
     #[test]
     fn crate_is_ready() {
         assert!(super::crate_ready());
@@ -172,17 +183,77 @@ mod tests {
             .join("minimal.stasis");
         assert!(source.exists(), "missing smoke file {}", source.display());
 
-        let output = Command::new("cmd")
-            .arg("/C")
-            .arg(&helper)
-            .arg(&source)
-            .current_dir(repo_root())
-            .output()
-            .expect("failed to execute cranelift run helper");
+        let output = run_cranelift_helper(&source);
 
         assert!(
             output.status.success(),
             "cranelift run helper failed for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_returns_main_status_code() {
+        let source = fixture_path("run_main_returns_7.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let code = output.status.code();
+        assert_eq!(
+            code,
+            Some(7),
+            "expected exit code 7 for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bootstrap_compiles_entry_validation_ok_fixture() {
+        let source = fixture_path("entry_validation_ok.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        assert!(
+            output.status.success(),
+            "expected compile success for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bootstrap_compiles_entry_validation_missing_main_fixture() {
+        let source = fixture_path("entry_validation_missing_main.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        assert!(
+            output.status.success(),
+            "expected compile success for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bootstrap_compiles_entry_validation_invalid_main_signature_fixture() {
+        let source = fixture_path("entry_validation_invalid_main_signature.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        assert!(
+            output.status.success(),
+            "expected compile success for {}\nstdout:\n{}\nstderr:\n{}",
             source.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)

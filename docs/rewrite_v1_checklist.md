@@ -84,7 +84,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Deliverable:
 - Runner executes `main` and returns process status code.
 - Tests:
-- End-to-end test asserts returned status code.
+- End-to-end test asserts returned status code (`tests/stasis/run_main_returns_7.stasis` via `bootstrap/windows/stasis-cranelift-run.bat`).
 - Done gate:
 - Exit status path is stable and deterministic.
 - Status: `in_progress`

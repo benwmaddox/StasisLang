@@ -23,6 +23,7 @@ bootstrap\windows\stasis-cranelift-run.bat path\to\file.stasis
 What it does:
 - Builds `tools/cranelift-aot` if needed.
 - Sets `STASIS_CRANELIFT_AOT` to the built helper binary.
+- Sets `STASIS_BOOTSTRAP_NO_PREPROCESS=1` by default to avoid temp-copy execution policy issues.
 - Adds a common local `clang.exe` path (LLVM or VS Build Tools) to `PATH` when present.
 - Runs:
   - `stasisc run <file> --backend cranelift --no-cranelift-runner`
