@@ -8,6 +8,12 @@ pub enum RunnerEvent {
         status: String,
         diagnostics: Vec<String>,
     },
+    HookResult {
+        request_id: u64,
+        symbol: String,
+        status: String,
+        error: Option<String>,
+    },
     SwapCommitResult {
         request_id: u64,
         status: String,

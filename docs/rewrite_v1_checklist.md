@@ -225,7 +225,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Hook success/failure transactional tests.
 - Done gate:
 - Hook errors abort swap with clear diagnostics.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S11 - Swap Indicator (Tick-Based)
 - Language:
@@ -266,3 +266,7 @@ Each PR must include:
 - tests for that slice set
 - docs updates for changed behavior
 - removal of obsolete paths introduced during the slice
+
+## Backlog
+
+- Add `schema_version` field to every JSONL runner event payload for strict editor/tool compatibility negotiation.

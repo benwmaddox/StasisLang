@@ -47,6 +47,17 @@ fn parse_args() -> CliOptions {
             "--fail-compile" => {
                 config.fail_compile = true;
             }
+            "--no-hook" => {
+                config.disable_on_code_swap_hook = true;
+            }
+            "--fail-hook" => {
+                config.hook_failure_reason = Some("simulated on_code_swap failure".to_string());
+            }
+            "--fail-hook-reason" => {
+                if let Some(value) = args.next() {
+                    config.hook_failure_reason = Some(value);
+                }
+            }
             "--fail-swap" => {
                 config.swap_failure_reason = Some("simulated swap failure".to_string());
             }
@@ -119,6 +130,8 @@ fn main() {
     println!("ticks_executed={}", summary.ticks_executed);
     println!("compile_successes={}", summary.compile_successes);
     println!("compile_failures={}", summary.compile_failures);
+    println!("hook_runs={}", summary.hook_runs);
+    println!("hook_failures={}", summary.hook_failures);
     println!("swap_commit_successes={}", summary.swap_commit_successes);
     println!("swap_commit_failures={}", summary.swap_commit_failures);
     println!("has_in_flight_work={}", summary.has_in_flight_work);
@@ -127,6 +140,9 @@ fn main() {
     }
     for reason in &summary.swap_failure_reasons {
         println!("swap_failure_reason={reason}");
+    }
+    for reason in &summary.hook_failure_reasons {
+        println!("hook_failure_reason={reason}");
     }
 
     std::process::exit(exit_code);
