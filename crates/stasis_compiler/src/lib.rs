@@ -76,6 +76,7 @@ mod tests {
             .arg("/C")
             .arg(cranelift_run_helper_path())
             .arg(source)
+            .env("STASIS_DISABLE_ARTIFACT_CACHE", "1")
             .current_dir(repo_root())
             .output()
             .expect("failed to execute cranelift run helper")
@@ -173,6 +174,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn bootstrap_reports_unknown_function_binding() {
+        let source = fixture_path("invalid_unknown_function_binding.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        let text = combined_output_text(&output);
+        assert!(
+            !output.status.success(),
+            "expected binding failure for {}, but compile succeeded.\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("Unknown function"),
+            "expected unknown-function diagnostic for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn cranelift_run_helper_executes_minimal_program() {
         let helper = cranelift_run_helper_path();
         assert!(helper.exists(), "missing helper script {}", helper.display());
@@ -241,6 +264,34 @@ mod tests {
         assert!(
             text.contains(":S3_PRINT_END"),
             "missing print_string suffix in output for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cranelift_run_helper_print_ascii_and_utf8_output() {
+        let source = fixture_path("run_print_ascii_utf8.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert!(
+            output.status.success(),
+            "expected success for {}\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("ASCII_MSG"),
+            "missing ASCII output for {}\n{}",
+            source.display(),
+            text
+        );
+        assert!(
+            text.contains("UTF8_MSG"),
+            "missing UTF8 output for {}\n{}",
             source.display(),
             text
         );

@@ -10,6 +10,14 @@ function print_i32(value: i32): void {
     print_int(value);
 }
 
+function print_ascii(value: ascii[]): void {
+    print_string(value);
+}
+
+function print_utf8(value: utf8[]): void {
+    print_string(value);
+}
+
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }

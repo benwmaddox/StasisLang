@@ -97,6 +97,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Scope:
 - Add stable host extern ABI for:
 - `print_i32(value: i32)` and `print_string(value: string)`.
+- Ensure console path supports `string`, `ascii[]`, and `utf8[]` call sites for `print_string`.
 - Deliverable:
 - Stasis program can print deterministic output through host boundary.
 - Tests:

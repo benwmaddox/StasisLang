@@ -553,6 +553,15 @@ extern function print_i32(value: i32): void;
 extern function print_string(value: string): void;
 ```
 
+Console output contract (Rewrite V1):
+- `print_i32(i32)` prints integer text in deterministic decimal form.
+- `print_string(string)` prints string data without implicit formatting.
+- `print_string` accepts `string`, `ascii[]`, and `utf8[]` call sites in Rewrite V1 runtime conventions.
+- For `ascii[]`/`utf8[]` call sites, argument passing is by string-view/reference semantics (no implicit full-buffer copy).
+
+Bootstrap compatibility note:
+- Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Rewrite V1 naming.
+
 ### 12.2 Future Direction: Optional Plugin Libraries
 
 Long-term direction is opt-in runtime libraries/plugins rather than one monolithic host surface.
