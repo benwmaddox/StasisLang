@@ -47,7 +47,7 @@ Core direction for Rewrite V1:
 ### 3.3 Keywords
 
 ```text
-struct enum global function extern export test return let if else for foreach in import
+struct enum global function extern test return let if else for foreach in import
 ```
 
 Additional reserved keywords may be introduced later.
@@ -70,6 +70,26 @@ u8 u16 u32 i32 f32 f64 bool void
 - `ascii[N]`
 - `string` (alias for UTF-8 string type in Rewrite V1 runtime conventions)
 - `string[N]` (alias form for compatibility)
+
+### 4.2.1 String Layout and Invariants
+
+String-like storage is fixed-layout and deterministic.
+
+`ascii[N]` layout:
+- header `byte_length: i32`
+- payload `bytes[N]`
+
+`utf8[N]` layout:
+- header `byte_length: i32`
+- header `char_length: i32`
+- payload `bytes[N]`
+
+Rules:
+- `ascii[N]` payload bytes must be valid single-byte ASCII.
+- `utf8[N]` payload bytes must be valid UTF-8.
+- For `utf8[N]`, `char_length` must match decoded character count.
+- Mutations to string payloads must keep header values synchronized with payload contents.
+- Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
 ### 4.3 Numeric Conversion Semantics
 
@@ -146,6 +166,10 @@ Logical operators are:
 - `||`
 - `!`
 
+Semantics:
+- `&&` and `||` are short-circuit operators with left-to-right evaluation.
+- `!` is unary logical negation.
+
 ### 5.3 Assignment Operators
 
 Assignment is infix:
@@ -203,7 +227,8 @@ state.enemies[1] = state.enemies[0]; // explicit struct value copy
 Rules:
 - Assignment is explicit and may perform explicit value copies.
 - `let enemy = state.enemies[0];` binds an element view/reference alias.
-- `enemy = state.enemies[1];` rebinds that alias to a different element reference (pass-through reference reassignment).
+- Assigning directly to a reference/view local or parameter binding (for example `enemy = state.enemies[1];`) is not allowed.
+- To change underlying referenced data, mutate fields/elements through the binding (for example `enemy.hp -= 1;`).
 - `state.enemies[1] = state.enemies[0];` copies source struct value into destination struct value.
 - For SoA-lowered struct arrays, struct copy assignment lowers to per-field writes at source and destination indices.
 
@@ -351,6 +376,10 @@ function name(param: Type): ReturnType {
 
 For struct/element arguments, Rewrite V1 uses reference/view passing semantics (pointer-like behavior), not implicit by-value copies.
 
+Reference/view bindings for struct/element parameters are not rebindable inside the callee:
+- assigning to fields/elements through the parameter is allowed
+- assigning a new reference target to the parameter binding is a compile-time error
+
 ### 7.2 Receiver-Scoped Resolution
 
 Function identity for receiver-scoped names is:
@@ -389,6 +418,12 @@ damage(enemy, 5);
 Arity overloading is not supported.
 If declarations share a function name, they must use the same parameter count.
 
+### 7.5 Struct and Array Returns
+
+Struct and array returns are allowed.
+
+Rewrite V1 treats these as strongly typed references/views, not implicit by-value copies.
+
 ## 8. Enums
 
 Enums are named types that lower to integer values.
@@ -405,6 +440,8 @@ Rules:
 - Members default to sequential values from `0`.
 - Enum members can be explicitly assigned integer constants.
 - Enum comparisons and assignments must be type-correct.
+- Enum underlying type is `i32`.
+- Explicit enum member values must be within `i32` range; out-of-range values are compile-time errors.
 
 ## 9. Modules and Imports
 
@@ -421,6 +458,7 @@ Rules:
 - Imported files are included once.
 - Import graphs are compilation graph edges, not textual expansion.
 - Ambiguous references across modules must produce diagnostics.
+- Detailed tie-break/qualification behavior across colliding module symbols is intentionally deferred; Rewrite V1 requires ambiguity to fail explicitly.
 
 ## 10. Testing Construct
 
@@ -436,6 +474,11 @@ Rules:
 - Tests are discoverable by tooling.
 - Tests are excluded from production builds.
 - Test execution should be deterministic.
+- Runtime test discovery modes:
+- entry-file mode: discover tests in the entry file only (no cascading import traversal)
+- directory mode: discover tests in all `.stasis` files in the target directory (including root)
+- Tests run in deterministic discovery order.
+- Tests may call extern/runtime functions.
 
 ## 11. Memory Model
 
