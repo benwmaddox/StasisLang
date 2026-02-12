@@ -449,6 +449,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cranelift_run_helper_parser_s5_receiver_and_function_calls_fixture() {
+        let source = fixture_path("run_parser_s5_receiver_and_function_calls.stasis");
+        assert!(source.exists(), "missing fixture {}", source.display());
+
+        let output = run_cranelift_helper(&source);
+        let text = combined_output_text(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "expected receiver/function call parse success for {}\n{}",
+            source.display(),
+            text
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bootstrap_compiles_entry_validation_ok_fixture() {
         let source = fixture_path("entry_validation_ok.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());

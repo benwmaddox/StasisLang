@@ -145,9 +145,11 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Conversion semantics follow spec examples.
 - Tests:
 - Overload resolution tests, conversion tests, negative diagnostics.
+- Current parser/execution coverage fixture:
+- `tests/stasis/run_parser_s5_receiver_and_function_calls.stasis` (receiver-form and function-form call parsing baseline).
 - Done gate:
 - Receiver-form preferred but both call forms behave consistently and deterministically.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S6 - Global Memory and Layout
 - Language:

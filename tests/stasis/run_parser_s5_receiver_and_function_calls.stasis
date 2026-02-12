@@ -1,0 +1,12 @@
+import "../../compiler/incremental_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+    compiler_set_source("function damage(target: i32, amount: i32): i32 { return target - amount; } function main(): i32 { let enemy: i32 = 10; enemy = enemy.damage(5); enemy = damage(enemy, 2); return enemy; }");
+
+    if (run_incremental_compiler() != 0) { return 60; }
+    if (Compiler.parsed_call_count != 2) { return 61; }
+    if (Compiler.parsed_assignment_count != 3) { return 62; }
+
+    return 0;
+}
