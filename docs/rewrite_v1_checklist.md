@@ -43,6 +43,11 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 
 ## Slice Plan
 
+### Current Snapshot (2026-02-12)
+- Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S6`, `S7`, `S8`, `S9`, `S11`.
+- Partially complete/in progress: `S5`, `S8b`, `S10`, `S12`.
+- Main integration gap: `apps/stasis` default flow still uses a simulated compile backend; full real-compiler patch generation/execution is not wired yet.
+
 ### S0 - Workspace Bootstrap
 - Language:
 - `Rust`
@@ -87,7 +92,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end test asserts returned status code (`tests/stasis/run_main_returns_7.stasis` via `bootstrap/windows/stasis-cranelift-run.bat`).
 - Done gate:
 - Exit status path is stable and deterministic.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S3 - Console Externs
 - Language:
@@ -104,7 +109,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - End-to-end golden stdout tests.
 - Done gate:
 - Output is deterministic and ABI contract is documented.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S4 - Core Statements and Expressions
 - Language:
@@ -125,7 +130,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `tests/stasis/run_parser_invalid_let_missing_init_or_type.stasis`
 - Done gate:
 - Behavior matches `docs/spec.md` operator and assignment rules.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S5 - Call Model and Conversion Semantics
 - Language:
@@ -150,6 +155,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Done gate:
 - Receiver-form preferred but both call forms behave consistently and deterministically.
 - Status: `in_progress`
+- Remaining:
+- Add explicit semantic-level regression tests for receiver-preference resolution and conversion diagnostics (beyond current parser/execution baseline).
 
 ### S6 - Global Memory and Layout
 - Language:
@@ -168,7 +175,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `tests/stasis/run_layout_hash_file_db_change_detection.stasis`
 - Done gate:
 - Layout-affecting changes are detected reliably.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S7 - Incremental Compiler V1
 - Language:
@@ -187,7 +194,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `tests/stasis/run_incremental_function_hash_metrics.stasis` (exercises per-function reused/changed/codegen hash gating counters).
 - Done gate:
 - Semantic pass always runs per changed file; backend work is correctly gated.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S8 - Function Pointer Table ABI
 - Language:
@@ -203,7 +210,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - ABI and indirect-call tests.
 - Done gate:
 - No direct raw-address calls from runtime callsites.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S8b - Cranelift AOT Production Path
 - Language:
@@ -221,6 +228,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Done gate:
 - Production pipeline uses AOT artifacts with deterministic behavior.
 - Status: `in_progress`
+- Remaining:
+- Wire a full production run path that executes AOT artifacts end-to-end (not only object emission/smoke compile).
 
 ### S9 - Two-Phase Swap Commit
 - Language:
@@ -241,7 +250,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Done gate:
 - On failure, old code/data remain active.
 - Runtime/compiler ownership boundaries enforced in code paths.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S10 - `on_code_swap` Hook
 - Language:
@@ -259,6 +268,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Done gate:
 - Hook errors abort swap with clear diagnostics.
 - Status: `in_progress`
+- Remaining:
+- Execute compiled `on_code_swap` from real generated code during commit (currently runner tests use hook-symbol contract and simulated outcomes).
 
 ### S11 - Swap Indicator (Tick-Based)
 - Language:
@@ -275,7 +286,7 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `tests/stasis/run_swap_indicator_tick_behavior.stasis` (arms `on_code_swap`, decrements `swapFlashTicks` over 180 ticks, and verifies no indicator once expired).
 - Done gate:
 - Indicator follows tick policy and does not fire on failed swap.
-- Status: `in_progress`
+- Status: `completed`
 
 ### S12 - Brickout Revenge End-to-End
 - Language:
@@ -292,6 +303,10 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Status: `in_progress`
+- Remaining:
+- Replace simulated compiler backend in `apps/stasis` with real compiler adapter.
+- Execute real compile -> function patch -> commit path for Brickout in watch mode.
+- Add end-to-end test that validates real swap updates from source changes (not mock `FnId(1)` patch responses).
 
 ## PR Sequence
 
