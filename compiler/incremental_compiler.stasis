@@ -11,32 +11,35 @@ const COMPILER_MAX_ARGS: i32 = 256;
 const COMPILER_MAX_BODY_STMTS: i32 = 4096;
 const COMPILER_MAX_CALL_NEST: i32 = 256;
 
-const ERR_LEX_UNEXPECTED_CHAR: i32 = 1001;
-const ERR_LEX_UNTERMINATED_STRING: i32 = 1002;
-const ERR_LEX_TOKEN_OVERFLOW: i32 = 1003;
-const ERR_PARSE_EXPECT_FUNCTION_OR_EXTERN: i32 = 2001;
-const ERR_PARSE_EXPECT_FUNCTION_AFTER_EXTERN: i32 = 2002;
-const ERR_PARSE_EXPECT_IDENTIFIER: i32 = 2003;
-const ERR_PARSE_EXPECT_LPAREN: i32 = 2004;
-const ERR_PARSE_EXPECT_RPAREN: i32 = 2005;
-const ERR_PARSE_EXPECT_COLON: i32 = 2006;
-const ERR_PARSE_EXPECT_SEMICOLON: i32 = 2007;
-const ERR_PARSE_EXPECT_LBRACE: i32 = 2008;
-const ERR_PARSE_EXPECT_RBRACE: i32 = 2009;
-const ERR_PARSE_EXPECT_EXPRESSION: i32 = 2010;
-const ERR_PARSE_EXPECT_RETURN_EXPR: i32 = 2011;
-const ERR_PARSE_ITEM_GUARD_EXHAUSTED: i32 = 2012;
-const ERR_PARSE_PARAM_GUARD_EXHAUSTED: i32 = 2013;
-const ERR_PARSE_ARG_GUARD_EXHAUSTED: i32 = 2014;
-const ERR_PARSE_BODY_GUARD_EXHAUSTED: i32 = 2015;
-const ERR_PARSE_CALL_GUARD_EXHAUSTED: i32 = 2016;
-const ERR_PARSE_EXPECT_ASSIGN_IN_LET: i32 = 2017;
-const ERR_PARSE_EXPECT_RBRACKET: i32 = 2018;
-const ERR_INCREMENTAL_FILE_OVERFLOW: i32 = 3001;
-const ERR_INCREMENTAL_FILE_PATH_EMPTY: i32 = 3002;
-const ERR_ENTRY_MISSING_MAIN: i32 = 41;
-const ERR_ENTRY_INVALID_MAIN_SIGNATURE: i32 = 42;
-const ERR_ENTRY_MULTIPLE_MAIN: i32 = 43;
+enum CompilerErrorCode {
+    None = 0,
+    EntryMissingMain = 41,
+    EntryInvalidMainSignature = 42,
+    EntryMultipleMain = 43,
+    LexUnexpectedChar = 1001,
+    LexUnterminatedString = 1002,
+    LexTokenOverflow = 1003,
+    ParseExpectFunctionOrExtern = 2001,
+    ParseExpectFunctionAfterExtern = 2002,
+    ParseExpectIdentifier = 2003,
+    ParseExpectLParen = 2004,
+    ParseExpectRParen = 2005,
+    ParseExpectColon = 2006,
+    ParseExpectSemicolon = 2007,
+    ParseExpectLBrace = 2008,
+    ParseExpectRBrace = 2009,
+    ParseExpectExpression = 2010,
+    ParseExpectReturnExpr = 2011,
+    ParseItemGuardExhausted = 2012,
+    ParseParamGuardExhausted = 2013,
+    ParseArgGuardExhausted = 2014,
+    ParseBodyGuardExhausted = 2015,
+    ParseCallGuardExhausted = 2016,
+    ParseExpectAssignInLet = 2017,
+    ParseExpectRBracket = 2018,
+    IncrementalFileOverflow = 3001,
+    IncrementalFilePathEmpty = 3002
+}
 
 enum CompilerStatus {
     Idle,
@@ -227,7 +230,7 @@ function compiler_find_file(path: ascii[]): i32 {
 
 function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     if (length(path) == 0) {
-        compiler_push_error(ERR_INCREMENTAL_FILE_PATH_EMPTY, 0, 0, 0);
+        compiler_push_error(CompilerErrorCode.IncrementalFilePathEmpty, 0, 0, 0);
         return false;
     }
 
@@ -249,7 +252,7 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     }
 
     if (Compiler.file_count >= COMPILER_MAX_FILES) {
-        compiler_push_error(ERR_INCREMENTAL_FILE_OVERFLOW, 0, Compiler.file_count, COMPILER_MAX_FILES);
+        compiler_push_error(CompilerErrorCode.IncrementalFileOverflow, 0, Compiler.file_count, COMPILER_MAX_FILES);
         return false;
     }
 
@@ -496,16 +499,16 @@ function compiler_get_assignment_count(): i32 {
 
 function compiler_validate_entry_main_i32(): i32 {
     if (Compiler.parsed_main_declaration_count <= 0) {
-        return ERR_ENTRY_MISSING_MAIN;
+        return CompilerErrorCode.EntryMissingMain;
     }
     if (Compiler.parsed_main_declaration_count > 1) {
-        return ERR_ENTRY_MULTIPLE_MAIN;
+        return CompilerErrorCode.EntryMultipleMain;
     }
     if (Compiler.parsed_main_valid_i32_count != 1) {
-        return ERR_ENTRY_INVALID_MAIN_SIGNATURE;
+        return CompilerErrorCode.EntryInvalidMainSignature;
     }
     if (Compiler.parsed_main_invalid_signature_count > 0) {
-        return ERR_ENTRY_INVALID_MAIN_SIGNATURE;
+        return CompilerErrorCode.EntryInvalidMainSignature;
     }
     return 0;
 }
@@ -568,7 +571,7 @@ function compiler_emit_token(
     text_len: i32
 ): bool {
     if (Compiler.token_count >= COMPILER_MAX_TOKENS) {
-        compiler_push_error(ERR_LEX_TOKEN_OVERFLOW, start, Compiler.token_count, Compiler.current_file_index);
+        compiler_push_error(CompilerErrorCode.LexTokenOverflow, start, Compiler.token_count, Compiler.current_file_index);
         return false;
     }
     let index: i32 = Compiler.token_count;
@@ -837,7 +840,7 @@ function compiler_lex(): bool {
                                 }
                             }
                             if (found_end == 0) {
-                                compiler_push_error(ERR_LEX_UNTERMINATED_STRING, start, 0, Compiler.current_file_index);
+                                compiler_push_error(CompilerErrorCode.LexUnterminatedString, start, 0, Compiler.current_file_index);
                                 return false;
                             }
                             let text_start: i32 = start + 1;
@@ -912,7 +915,7 @@ function compiler_lex(): bool {
                                     return false;
                                 }
                                 if (emitted == 0) {
-                                    compiler_push_error(ERR_LEX_UNEXPECTED_CHAR, i, u8_to_i32(b), Compiler.current_file_index);
+                                    compiler_push_error(CompilerErrorCode.LexUnexpectedChar, i, u8_to_i32(b), Compiler.current_file_index);
                                     return false;
                                 }
                             }
@@ -946,7 +949,7 @@ function parser_current_pos(): i32 {
     return 0;
 }
 
-function parser_error(code: i32): void {
+function parser_error(code: CompilerErrorCode): void {
     compiler_push_error(code, parser_current_pos(), Compiler.parse_index, Compiler.current_file_index);
 }
 
@@ -958,7 +961,7 @@ function parser_match(kind: TokenKind): bool {
     return false;
 }
 
-function parser_expect(kind: TokenKind, err_code: i32): bool {
+function parser_expect(kind: TokenKind, err_code: CompilerErrorCode): bool {
     if (parser_match(kind)) {
         return true;
     }
@@ -980,7 +983,7 @@ function parser_expect_identifier_capture(): bool {
         Compiler.parse_index += 1;
         return true;
     }
-    parser_error(ERR_PARSE_EXPECT_IDENTIFIER);
+    parser_error(CompilerErrorCode.ParseExpectIdentifier);
     return false;
 }
 
@@ -1021,7 +1024,7 @@ function parser_record_signature_main_entry(): void {
 }
 
 function parser_parse_param_list(): bool {
-    if (!parser_expect(TokenKind.LParen, ERR_PARSE_EXPECT_LPAREN)) {
+    if (!parser_expect(TokenKind.LParen, CompilerErrorCode.ParseExpectLParen)) {
         return false;
     }
     Compiler.current_signature_param_count = 0;
@@ -1034,7 +1037,7 @@ function parser_parse_param_list(): bool {
         if (!parser_expect_identifier()) {
             return false;
         }
-        if (!parser_expect(TokenKind.Colon, ERR_PARSE_EXPECT_COLON)) {
+        if (!parser_expect(TokenKind.Colon, CompilerErrorCode.ParseExpectColon)) {
             return false;
         }
         if (!parser_parse_type_name()) {
@@ -1044,14 +1047,14 @@ function parser_parse_param_list(): bool {
         if (parser_match(TokenKind.Comma)) {
             // Continue with next parameter.
         } else {
-            if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+            if (!parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen)) {
                 return false;
             }
             return true;
         }
     }
 
-    parser_error(ERR_PARSE_PARAM_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseParamGuardExhausted);
     return false;
 }
 
@@ -1064,7 +1067,7 @@ function parser_parse_signature(is_extern: bool): bool {
     if (!parser_parse_param_list()) {
         return false;
     }
-    if (!parser_expect(TokenKind.Colon, ERR_PARSE_EXPECT_COLON)) {
+    if (!parser_expect(TokenKind.Colon, CompilerErrorCode.ParseExpectColon)) {
         return false;
     }
     if (!parser_expect_identifier_capture()) {
@@ -1085,13 +1088,13 @@ function parser_parse_primary(): bool {
         if (!parser_parse_expression()) {
             return false;
         }
-        return parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN);
+        return parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen);
     }
     if (kind == TokenKind.Identifier || kind == TokenKind.IntLiteral || kind == TokenKind.StringLiteral) {
         Compiler.parse_index += 1;
         return true;
     }
-    parser_error(ERR_PARSE_EXPECT_EXPRESSION);
+    parser_error(CompilerErrorCode.ParseExpectExpression);
     return false;
 }
 
@@ -1134,7 +1137,7 @@ function parser_parse_postfix(): bool {
                         arg_guard = COMPILER_MAX_ARGS;
                     }
                 }
-                if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+                if (!parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen)) {
                     return false;
                 }
             }
@@ -1148,7 +1151,7 @@ function parser_parse_postfix(): bool {
                     if (!parser_parse_expression()) {
                         return false;
                     }
-                    if (!parser_expect(TokenKind.RBracket, ERR_PARSE_EXPECT_RBRACKET)) {
+                    if (!parser_expect(TokenKind.RBracket, CompilerErrorCode.ParseExpectRBracket)) {
                         return false;
                     }
                 } else {
@@ -1158,7 +1161,7 @@ function parser_parse_postfix(): bool {
         }
     }
 
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1198,7 +1201,7 @@ function parser_parse_multiplicative(): bool {
             return false;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1222,7 +1225,7 @@ function parser_parse_additive(): bool {
             return false;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1252,7 +1255,7 @@ function parser_parse_comparison(): bool {
             return false;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1276,7 +1279,7 @@ function parser_parse_equality(): bool {
             return false;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1294,7 +1297,7 @@ function parser_parse_logical_and(): bool {
             return true;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1312,7 +1315,7 @@ function parser_parse_logical_or(): bool {
             return true;
         }
     }
-    parser_error(ERR_PARSE_CALL_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseCallGuardExhausted);
     return false;
 }
 
@@ -1330,7 +1333,7 @@ function parser_parse_assignment(): bool {
 }
 
 function parser_parse_block(): bool {
-    if (!parser_expect(TokenKind.LBrace, ERR_PARSE_EXPECT_LBRACE)) {
+    if (!parser_expect(TokenKind.LBrace, CompilerErrorCode.ParseExpectLBrace)) {
         return false;
     }
 
@@ -1344,7 +1347,7 @@ function parser_parse_block(): bool {
         }
     }
 
-    parser_error(ERR_PARSE_BODY_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
     return false;
 }
 
@@ -1368,21 +1371,21 @@ function parser_parse_let_statement(): bool {
         }
     }
     if (has_type == 0 && has_initializer == 0) {
-        parser_error(ERR_PARSE_EXPECT_ASSIGN_IN_LET);
+        parser_error(CompilerErrorCode.ParseExpectAssignInLet);
         return false;
     }
-    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    return parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon);
 }
 
 function parser_parse_if_statement(): bool {
     Compiler.parsed_if_count += 1;
-    if (!parser_expect(TokenKind.LParen, ERR_PARSE_EXPECT_LPAREN)) {
+    if (!parser_expect(TokenKind.LParen, CompilerErrorCode.ParseExpectLParen)) {
         return false;
     }
     if (!parser_parse_expression()) {
         return false;
     }
-    if (!parser_expect(TokenKind.RParen, ERR_PARSE_EXPECT_RPAREN)) {
+    if (!parser_expect(TokenKind.RParen, CompilerErrorCode.ParseExpectRParen)) {
         return false;
     }
     if (!parser_parse_block()) {
@@ -1416,15 +1419,15 @@ function parser_parse_statement(): bool {
             return true;
         }
         if (!parser_parse_expression()) {
-            parser_error(ERR_PARSE_EXPECT_RETURN_EXPR);
+            parser_error(CompilerErrorCode.ParseExpectReturnExpr);
             return false;
         }
-        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+        return parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon);
     }
     if (!parser_parse_expression()) {
         return false;
     }
-    return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+    return parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon);
 }
 
 function parser_parse_function_body(): bool {
@@ -1433,14 +1436,14 @@ function parser_parse_function_body(): bool {
 
 function parser_parse_item(): bool {
     if (parser_match(TokenKind.KwExtern)) {
-        if (!parser_expect(TokenKind.KwFunction, ERR_PARSE_EXPECT_FUNCTION_AFTER_EXTERN)) {
+        if (!parser_expect(TokenKind.KwFunction, CompilerErrorCode.ParseExpectFunctionAfterExtern)) {
             return false;
         }
         if (!parser_parse_signature(true)) {
             return false;
         }
         Compiler.parsed_extern_count += 1;
-        return parser_expect(TokenKind.Semicolon, ERR_PARSE_EXPECT_SEMICOLON);
+        return parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon);
     }
 
     if (parser_match(TokenKind.KwFunction)) {
@@ -1451,7 +1454,7 @@ function parser_parse_item(): bool {
         return parser_parse_function_body();
     }
 
-    parser_error(ERR_PARSE_EXPECT_FUNCTION_OR_EXTERN);
+    parser_error(CompilerErrorCode.ParseExpectFunctionOrExtern);
     return false;
 }
 
@@ -1466,6 +1469,7 @@ function compiler_parse_program(): bool {
             return false;
         }
     }
-    parser_error(ERR_PARSE_ITEM_GUARD_EXHAUSTED);
+    parser_error(CompilerErrorCode.ParseItemGuardExhausted);
     return false;
 }
+

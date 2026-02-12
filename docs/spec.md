@@ -473,7 +473,12 @@ Rules:
 - Enum underlying type is `i32`.
 - Explicit enum member values must be within `i32` range; out-of-range values are compile-time errors.
 - No implicit enum <-> `i32` conversion is allowed.
-- Enum/integer conversion requires explicit conversion helpers.
+- Enum typed locals are valid and preferred for enum state:
+```stasis
+let phase: Phase = Phase.Play;
+```
+- Enum/integer conversion uses explicit built-in intrinsic conversion.
+- Planned intrinsic for Rewrite V1 compiler path: `enum_to_i32(value: EnumType): i32`.
 
 ## 9. Modules and Imports
 
