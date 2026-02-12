@@ -287,6 +287,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Real sample runs in watch/compile/swap workflow.
 - Tests:
 - End-to-end scenario test with window config assertion.
+- Current runtime coverage:
+- `crates/stasis_compiler` bootstrap smoke test now compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` via `--emit-ir`.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Status: `in_progress`

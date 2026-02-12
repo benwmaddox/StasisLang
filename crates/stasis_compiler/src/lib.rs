@@ -154,6 +154,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn bootstrap_compiles_brickout_revenge_v1_sample() {
+        let source = repo_root()
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+        assert!(source.exists(), "missing sample {}", source.display());
+
+        let output = run_bootstrap_emit_ir(&source);
+        assert!(
+            output.status.success(),
+            "expected compile success for {}\nstdout:\n{}\nstderr:\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bootstrap_compiles_parser_valid_fixture() {
         let source = fixture_path("parser_valid_main.stasis");
         assert!(source.exists(), "missing fixture {}", source.display());
