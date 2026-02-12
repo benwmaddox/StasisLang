@@ -230,6 +230,8 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - Implement background compile patch generation and between-ticks commit.
 - Implement typed boundary contracts for dev flow messages:
 - `FileChangeEvent`, `CompileRequest`, `CompileResult`, `SwapCommitRequest`, `SwapCommitResult`.
+- Current implementation:
+- `DevHotSwapPipeline` now rejects compile/commit payloads with mismatched `contract_version` and surfaces explicit failure diagnostics/errors instead of partially proceeding.
 - Deliverable:
 - Atomic swap behavior: all-or-nothing commit.
 - Tests:

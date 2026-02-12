@@ -1,6 +1,7 @@
 use crate::swap::contracts::{
-    CompileRequest, CompileResult, CompileStatus, FileChangeEvent, FunctionPatchSet, LayoutHash,
-    RequestId, SwapCommitRequest, SwapCommitResult, TargetMode, CONTRACT_VERSION,
+    CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
+    FunctionPatchSet, LayoutHash, RequestId, SwapCommitRequest, SwapCommitResult, TargetMode,
+    CONTRACT_VERSION,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use std::collections::BTreeSet;
@@ -184,6 +185,23 @@ impl DevHotSwapPipeline {
         loop {
             match self.compile_result_rx.try_recv() {
                 Ok(result) => {
+                    let result = if result.contract_version == CONTRACT_VERSION {
+                        result
+                    } else {
+                        CompileResult::failed(
+                            result.request_id,
+                            vec![Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message: format!(
+                                    "compile contract version mismatch: expected {}, got {}",
+                                    CONTRACT_VERSION, result.contract_version
+                                ),
+                                path: None,
+                                line: None,
+                                column: None,
+                            }],
+                        )
+                    };
                     self.last_compile_result = Some(result.clone());
                     if self.in_flight_compile == Some(result.request_id) {
                         self.in_flight_compile = None;
@@ -229,6 +247,17 @@ impl DevHotSwapPipeline {
         loop {
             match self.commit_result_rx.try_recv() {
                 Ok(result) => {
+                    let result = if result.contract_version == CONTRACT_VERSION {
+                        result
+                    } else {
+                        SwapCommitResult::failed(
+                            result.request_id,
+                            format!(
+                                "commit contract version mismatch: expected {}, got {}",
+                                CONTRACT_VERSION, result.contract_version
+                            ),
+                        )
+                    };
                     self.last_commit_result = Some(result.clone());
                     if self.in_flight_commit == Some(result.request_id) {
                         self.in_flight_commit = None;
@@ -411,5 +440,71 @@ mod tests {
         let captured_requests = requests.lock().expect("poisoned");
         let request = captured_requests.first().expect("request should exist");
         assert_eq!(request.target_mode, TargetMode::AotProd);
+    }
+
+    #[test]
+    fn compile_contract_version_mismatch_is_reported_and_commit_not_queued() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| CompileResult {
+            contract_version: CONTRACT_VERSION + 1,
+            request_id: request.request_id,
+            status: CompileStatus::Success,
+            diagnostics: Vec::new(),
+            layout_hash: Some(LayoutHash([1; 32])),
+            fn_patch_set: Some(sample_patch_set()),
+        });
+
+        pipeline.submit_file_change(sample_change("samples/version_mismatch.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.last_compile_result().is_some()
+        });
+
+        let compile_result = pipeline
+            .last_compile_result()
+            .expect("compile result should exist");
+        assert_eq!(compile_result.status, CompileStatus::Failed);
+        assert_eq!(pipeline.pending_commit_requests(), 0);
+        assert!(compile_result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("contract version mismatch")));
+    }
+
+    #[test]
+    fn commit_contract_version_mismatch_is_reported_as_failed_commit() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success(request.request_id, LayoutHash([2; 32]), sample_patch_set())
+        });
+
+        pipeline.submit_file_change(sample_change("samples/commit_version_mismatch.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        pipeline.process_commits_at_safe_point(|request| SwapCommitResult {
+            contract_version: CONTRACT_VERSION + 1,
+            request_id: request.request_id,
+            status: SwapCommitStatus::Success,
+            swapped_fn_ids: request
+                .fn_patch_set
+                .functions
+                .iter()
+                .map(|f| f.fn_id)
+                .collect(),
+            new_generation: Some(CodeGeneration(3)),
+            error: None,
+        });
+        pipeline.pump_coordinator();
+
+        let commit_result = pipeline
+            .last_commit_result()
+            .expect("commit result should exist");
+        assert_eq!(commit_result.status, SwapCommitStatus::Failed);
+        assert!(commit_result
+            .error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("contract version mismatch")));
+        assert!(!pipeline.has_in_flight_work());
     }
 }
