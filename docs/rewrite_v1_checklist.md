@@ -210,13 +210,16 @@ Legacy bootstrap compiler tooling remains available for smoke/reference:
 - `Rust`
 - Scope:
 - Add production AOT compilation path and artifact wiring using Cranelift AOT outputs.
+- Current implementation:
+- `DevHotSwapPipeline` now supports explicit `TargetMode` (`JitDev` or `AotProd`) dispatch.
+- `apps/stasis` runner config/CLI can request `AotProd` compile requests (`--target-mode aot` / `--aot-prod`).
 - Deliverable:
 - Production mode runs from AOT artifacts without requiring runtime JIT.
 - Tests:
 - AOT compile-and-run smoke tests for representative fixtures.
 - Done gate:
 - Production pipeline uses AOT artifacts with deterministic behavior.
-- Status: `pending`
+- Status: `in_progress`
 
 ### S9 - Two-Phase Swap Commit
 - Language:

@@ -1,5 +1,6 @@
 use crate::RunnerConfig;
 use std::path::PathBuf;
+use stasis_runner::swap::contracts::TargetMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowConfig {
@@ -27,6 +28,7 @@ pub fn brickout_revenge_v1_runner_config(max_ticks: u32) -> RunnerConfig {
             "samples/brickout_revenge/brickout_revenge_v1.stasis",
         )),
         watch_directory: None,
+        target_mode: TargetMode::JitDev,
         fail_compile: false,
         disable_on_code_swap_hook: false,
         hook_failure_reason: None,

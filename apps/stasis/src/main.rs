@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use stasis::{
     run_with_default_backend, scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
 };
+use stasis_runner::swap::contracts::TargetMode;
 
 struct CliOptions {
     runner: RunnerConfig,
@@ -45,6 +46,20 @@ fn parse_args() -> CliOptions {
                 if let Some(value) = args.next() {
                     config.watch_directory = Some(PathBuf::from(value));
                 }
+            }
+            "--target-mode" => {
+                if let Some(value) = args.next() {
+                    if value.eq_ignore_ascii_case("jit") || value.eq_ignore_ascii_case("jit-dev") {
+                        config.target_mode = TargetMode::JitDev;
+                    } else if value.eq_ignore_ascii_case("aot")
+                        || value.eq_ignore_ascii_case("aot-prod")
+                    {
+                        config.target_mode = TargetMode::AotProd;
+                    }
+                }
+            }
+            "--aot-prod" => {
+                config.target_mode = TargetMode::AotProd;
             }
             "--fail-compile" => {
                 config.fail_compile = true;

@@ -10,7 +10,7 @@ pub use scenarios::WindowConfig;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
     FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, SwapCommitResult,
-    SwapCommitStatus, TextSource,
+    SwapCommitStatus, TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use stasis_jit::FunctionPointerTable;
@@ -28,6 +28,7 @@ pub struct RunnerConfig {
     pub window: Option<WindowConfig>,
     pub inject_file_change: Option<PathBuf>,
     pub watch_directory: Option<PathBuf>,
+    pub target_mode: TargetMode,
     pub fail_compile: bool,
     pub disable_on_code_swap_hook: bool,
     pub hook_failure_reason: Option<String>,
@@ -42,6 +43,7 @@ impl Default for RunnerConfig {
             window: None,
             inject_file_change: None,
             watch_directory: None,
+            target_mode: TargetMode::JitDev,
             fail_compile: false,
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
@@ -102,7 +104,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         .and_then(|dir| WatchService::start(dir).ok());
     let window = config.window;
 
-    let mut pipeline = DevHotSwapPipeline::new(backend);
+    let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, config.target_mode);
     let mut pointer_table = FunctionPointerTable::new();
     let mut hook_runs: u32 = 0;
     let mut hook_failures: u32 = 0;
@@ -447,6 +449,7 @@ mod tests {
                 "samples/brickout_revenge/brickout_revenge_v1.stasis",
             )),
             watch_directory: None,
+            target_mode: TargetMode::JitDev,
             fail_compile: false,
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
@@ -530,6 +533,7 @@ mod tests {
             window: None,
             inject_file_change: Some(PathBuf::from("samples/invalid.stasis")),
             watch_directory: None,
+            target_mode: TargetMode::JitDev,
             fail_compile: true,
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
@@ -588,6 +592,7 @@ mod tests {
             window: None,
             inject_file_change: Some(PathBuf::from("samples/swap_fail.stasis")),
             watch_directory: None,
+            target_mode: TargetMode::JitDev,
             fail_compile: false,
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
@@ -631,6 +636,7 @@ mod tests {
             window: None,
             inject_file_change: Some(PathBuf::from("samples/hook_fail.stasis")),
             watch_directory: None,
+            target_mode: TargetMode::JitDev,
             fail_compile: false,
             disable_on_code_swap_hook: false,
             hook_failure_reason: Some("state invariant mismatch".to_string()),
@@ -693,6 +699,7 @@ mod tests {
             window: None,
             inject_file_change: None,
             watch_directory: Some(temp_root.clone()),
+            target_mode: TargetMode::JitDev,
             fail_compile: false,
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
@@ -716,6 +723,45 @@ mod tests {
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
         assert!(summary.events.len() >= 3);
+    }
+
+    #[test]
+    fn runner_dispatches_aot_target_mode_when_configured() {
+        use std::sync::{Arc, Mutex};
+
+        let seen_modes: Arc<Mutex<Vec<TargetMode>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_modes_capture = Arc::clone(&seen_modes);
+        let backend = move |request: CompileRequest| -> CompileResult {
+            seen_modes_capture
+                .lock()
+                .expect("poisoned")
+                .push(request.target_mode);
+            let patch_set = FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(1) }],
+            };
+            CompileResult::success(request.request_id, LayoutHash([2; 32]), patch_set)
+        };
+
+        let config = RunnerConfig {
+            max_ticks: 200,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: Some(PathBuf::from("samples/prod_mode.stasis")),
+            watch_directory: None,
+            target_mode: TargetMode::AotProd,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+        };
+
+        let summary = run_with_backend(config, backend);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+
+        let modes = seen_modes.lock().expect("poisoned");
+        assert_eq!(modes.as_slice(), &[TargetMode::AotProd]);
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub struct DevHotSwapPipeline {
     commit_result_tx: Sender<SwapCommitResult>,
     commit_result_rx: Receiver<SwapCommitResult>,
     pending_files: BTreeSet<PathBuf>,
+    target_mode: TargetMode,
     in_flight_compile: Option<RequestId>,
     in_flight_commit: Option<RequestId>,
     next_request_id: u64,
@@ -47,7 +48,11 @@ pub struct DevHotSwapPipeline {
 }
 
 impl DevHotSwapPipeline {
-    pub fn new<B: CompilerBackend>(mut backend: B) -> Self {
+    pub fn new<B: CompilerBackend>(backend: B) -> Self {
+        Self::with_target_mode(backend, TargetMode::JitDev)
+    }
+
+    pub fn with_target_mode<B: CompilerBackend>(mut backend: B, target_mode: TargetMode) -> Self {
         let (file_change_tx, file_change_rx) = unbounded::<FileChangeEvent>();
         let (compiler_tx, compiler_rx) = unbounded::<CompilerThreadMessage>();
         let (compile_result_tx, compile_result_rx) = unbounded::<CompileResult>();
@@ -78,6 +83,7 @@ impl DevHotSwapPipeline {
             commit_result_tx,
             commit_result_rx,
             pending_files: BTreeSet::new(),
+            target_mode,
             in_flight_compile: None,
             in_flight_commit: None,
             next_request_id: 1,
@@ -167,7 +173,7 @@ impl DevHotSwapPipeline {
         let changed_files: Vec<PathBuf> = self.pending_files.iter().cloned().collect();
         self.pending_files.clear();
 
-        let request = CompileRequest::new(request_id, changed_files, TargetMode::JitDev);
+        let request = CompileRequest::new(request_id, changed_files, self.target_mode);
         let _ = self
             .compiler_tx
             .send(CompilerThreadMessage::Compile(request));
@@ -382,5 +388,28 @@ mod tests {
             request.changed_files[1],
             PathBuf::from("samples/zeta_2.stasis")
         );
+    }
+
+    #[test]
+    fn with_target_mode_dispatches_aot_compile_request() {
+        let requests: Arc<Mutex<Vec<CompileRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let mut pipeline = DevHotSwapPipeline::with_target_mode(
+            move |request: CompileRequest| {
+                captured.lock().expect("poisoned").push(request.clone());
+                CompileResult::success(request.request_id, LayoutHash([5; 32]), sample_patch_set())
+            },
+            TargetMode::AotProd,
+        );
+
+        pipeline.submit_file_change(sample_change("samples/prod.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            requests.lock().expect("poisoned").len() == 1
+        });
+
+        let captured_requests = requests.lock().expect("poisoned");
+        let request = captured_requests.first().expect("request should exist");
+        assert_eq!(request.target_mode, TargetMode::AotProd);
     }
 }
