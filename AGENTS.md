@@ -7,7 +7,7 @@
 - `compiler/` holds compiler source written in Stasis.
 - Planned primary orchestration file is `compiler/incremental_compiler.stasis`.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
-- `crates/stasis_jit` hosts Cranelift JIT integration, function pointer table, and code generation memory management.
+- `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
 - `apps/stasis` is the single in-process graphical runner app.
 - `src/stdlib/` contains Stasis standard library modules.
@@ -15,14 +15,14 @@
 - `tests/rust/` contains host-side Rust tests. Add deterministic `.stasis` fixtures under `tests/` when needed.
 
 ## Build, Test, and Development Commands
-- Primary toolchain is Rust/Cargo.
+- Primary implementation toolchain is Rust/Cargo.
 - Use:
-- `cargo build`
-- `cargo test`
-- `cargo run -p stasis -- --entry samples/brickout_revenge/brickout_revenge_v1.stasis`
+- `bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir`
+- `bootstrap\windows\stasisc.bat test --all`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
-- Bootstrap artifacts under `bootstrap/` are reference/bootstrap tools, not the primary Rewrite V1 implementation path.
+- Before S0 is complete, bootstrap tooling is the canonical runnable path.
+- After S0, Cargo commands become canonical for build/test/run.
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
@@ -62,7 +62,8 @@
 - explicit removal of obsolete paths introduced during the slice
 
 ## Architecture & Design Notes (Rewrite V1)
-- Single OS process runtime with in-process compiler and Cranelift JIT.
+- Single OS process runtime with in-process compiler and Cranelift JIT for development.
+- Production build target uses Cranelift AOT output.
 - File-level correctness is primary; semantic analysis runs for full changed file.
 - Per-function semantic hashes gate backend work only.
 - Hot swap is a two-phase model:

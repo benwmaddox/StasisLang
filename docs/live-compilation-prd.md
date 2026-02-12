@@ -11,7 +11,7 @@ Stasis Live Compilation & Hot Swap System (File-Level, In-Process, Tick-Based)
 Enable fast, reliable, low-friction iteration on a running Stasis-based game by embedding:
 
 - the Stasis compiler
-- a Cranelift JIT backend
+- Cranelift backends (JIT for development, AOT for production)
 - a hot code swap mechanism
 
 directly inside the running game engine, avoiding disk I/O and process restarts.
@@ -33,7 +33,7 @@ This system does not aim to:
 - implement full symbol-level dependency invalidation
 - automatically infer state migrations
 - replace a full debugger
-- optimize release builds (LLVM batch builds handle that)
+- optimize production builds beyond baseline Cranelift AOT
 
 ## 2. Core Design Principles
 
@@ -66,7 +66,7 @@ Game Process
  |  |- Semantic hashing
  |  \- Swap decision logic
  |
- \- JIT Service (Cranelift)
+ \- Codegen Service (Cranelift JIT/AOT)
     |- Code generation
     |- Executable memory management
     \- Code versioning
@@ -91,7 +91,7 @@ Code generation is gated per function.
 Raw Text
  -> Lex
  -> Parse
- -> Index (imports / exports)
+ -> Index (imports / declarations)
  -> Semantic Analysis (whole file)
  -> Per-function semantic hashing
  -> Per-function codegen (gated)
@@ -156,7 +156,10 @@ let alpha: f32 = ticks_i32.to_f32();
 alpha /= 180.0;
 ```
 
-## 5. JIT & Runtime Boundary
+## 5. Codegen & Runtime Boundary
+
+Dev/runtime hot-swap mode uses Cranelift JIT.
+Production build mode uses Cranelift AOT outputs.
 
 ### 5.1 Function Pointer Table ABI
 
@@ -383,9 +386,11 @@ Phase 2:
 - Per-function codegen gating
 
 Phase 3:
-- Cranelift JIT, swap hook, swap indicator
+- Cranelift JIT (dev), swap hook, swap indicator
 
-Phase 4 (Optional):
+Phase 4:
+- Cranelift AOT (prod) artifact path
+Phase 5 (Optional):
 - LSP integration, live data inspection
 
 ## 16. Key Risks & Mitigations

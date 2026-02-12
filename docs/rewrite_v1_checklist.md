@@ -9,6 +9,9 @@ Locked decisions:
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Planned compiler orchestration file path is `compiler/incremental_compiler.stasis`.
+- Backend modes are:
+- Cranelift JIT for development/watch/hot-swap runtime
+- Cranelift AOT for production builds
 
 ## Language Ownership Legend
 
@@ -71,7 +74,7 @@ This section is temporary and should be removed once S0 establishes working Carg
 - Rust: lowering bridge to Cranelift and execution harness.
 - `.stasis`: compile pipeline decisions selecting/validating `main`.
 - Scope:
-- Wire parser output into minimal lowering and JIT execution for:
+- Wire parser output into minimal lowering and JIT execution (dev mode) for:
 - `function main(): i32 { return <int>; }`
 - Deliverable:
 - Runner executes `main` and returns process status code.
@@ -176,6 +179,19 @@ This section is temporary and should be removed once S0 establishes working Carg
 - No direct raw-address calls from runtime callsites.
 - Status: `pending`
 
+### S8b - Cranelift AOT Production Path
+- Language:
+- `Rust`
+- Scope:
+- Add production AOT compilation path and artifact wiring using Cranelift AOT outputs.
+- Deliverable:
+- Production mode runs from AOT artifacts without requiring runtime JIT.
+- Tests:
+- AOT compile-and-run smoke tests for representative fixtures.
+- Done gate:
+- Production pipeline uses AOT artifacts with deterministic behavior.
+- Status: `pending`
+
 ### S9 - Two-Phase Swap Commit
 - Language:
 - `Rust + .stasis`
@@ -238,7 +254,7 @@ This section is temporary and should be removed once S0 establishes working Carg
 1. PR-A: S0-S2
 2. PR-B: S3-S5
 3. PR-C: S6-S8
-4. PR-D: S9-S10
+4. PR-D: S8b-S10
 5. PR-E: S11-S12
 
 Each PR must include:

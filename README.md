@@ -1,6 +1,6 @@
 # Stasis Rewrite V1
 
-This branch is a ground-up rewrite focused on a single-process, tick-based, in-process Cranelift JIT runner.
+This branch is a ground-up rewrite focused on a single-process, tick-based runtime with Cranelift JIT for development and Cranelift AOT for production builds.
 
 Kept from previous repository state:
 - `docs/spec.md`
@@ -17,23 +17,21 @@ Everything else is intentionally rebuilt around a minimal Rust-first architectur
 - `crates/stasis_compiler`
   Rust substrate/binding layer used by the Stasis compiler orchestration.
 - `crates/stasis_jit`
-  Cranelift JIT generation management and function pointer table.
+  Cranelift code generation management for JIT (dev) and AOT (prod), plus function pointer table support for hot swap flows.
 - `crates/stasis_runner`
   Tick-based hot-swap core state and commit sequencing.
 - `apps/stasis`
   Single graphical in-process runner (`winit + glutin + glow`) with watch + compile + swap loop.
 - `docs/rewrite_v1_checklist.md`
   Build checklist aligned to PRD.
-- `docs/rewrite_v1_tdd.md`
-  Technical design notes for implementation details.
-
-## Build
+## Build (Current Pre-S0)
 
 ```bash
-cargo build
-cargo test
-cargo run -p stasis -- --entry samples/brickout_revenge/brickout_revenge_v1.stasis
+bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir
+bootstrap\windows\stasisc.bat test --all
 ```
+
+Cargo build/test/run commands become canonical after S0 (workspace bootstrap) is complete.
 
 ## Notes
 

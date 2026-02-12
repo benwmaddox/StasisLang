@@ -13,7 +13,8 @@ Stasis is a statically allocated language with explicit behavior.
 
 Core direction for Rewrite V1:
 - Single process runtime.
-- In-process Cranelift JIT.
+- In-process Cranelift JIT for development.
+- Cranelift AOT for production builds.
 - File-level incremental compilation.
 - Hot swap only between ticks.
 - Rust host wrapper with Stasis-owned compiler orchestration.
@@ -472,8 +473,8 @@ Rules:
 - Ambiguous references across modules must produce diagnostics.
 - Disambiguation is explicit `module.symbol` only.
 - For Rewrite V1, `module` is the imported file basename (without extension).
+- If multiple imports map to the same basename `module` name, compilation fails with a hard error.
 - When a symbol name collides across imports, unqualified use is invalid and must be rewritten as `module.symbol`.
-- Module naming rules may evolve in later revisions.
 
 ## 10. Testing Construct
 
@@ -633,7 +634,8 @@ Diagnostics should not silently skip invalid semantics.
 
 ## 17. Development Target for Rewrite V1
 
-- Primary backend: in-process Cranelift JIT.
+- Development backend: in-process Cranelift JIT.
+- Production backend: Cranelift AOT.
 - Host runtime: Rust (`winit + glutin + glow`).
 - C usage: only where unavoidable for platform bindings.
 - Compiler orchestration: implemented in `.stasis` source.
