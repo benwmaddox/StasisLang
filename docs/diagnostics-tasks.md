@@ -1,4 +1,4 @@
-﻿# Diagnostics Tasks
+# Diagnostics Tasks
 
 This file was moved from the repo root `tasks.md` during cleanup so task tracking lives under `docs/`.
 
