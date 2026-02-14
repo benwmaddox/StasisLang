@@ -30,7 +30,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          last_tag="$(git tag --list 'nightly-*' --sort=-creatordate | head -n1 || true)"
+          # Use the most recent nightly tag reachable from HEAD so dispatches
+          # on non-main refs do not force false-positive "changes detected".
+          last_tag="$(git tag --merged HEAD --list 'nightly-*' --sort=-creatordate | head -n1 || true)"
           if [ -z "${last_tag}" ]; then
             should_release="true"
           else
