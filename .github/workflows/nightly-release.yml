@@ -70,7 +70,8 @@ jobs:
             rid: win-x64
             archive: stasis-nightly-win-x64
             ext: zip
-          - os: macos-latest
+          # Keep runner architecture aligned with osx-x64 RID.
+          - os: macos-13
             rid: osx-x64
             archive: stasis-nightly-osx-x64
             ext: tar.gz
