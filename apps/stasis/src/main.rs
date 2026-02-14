@@ -26,6 +26,20 @@ struct AotCliContractArgs {
     quality_gate: bool,
 }
 
+fn apply_brickout_revenge_v1_scenario(config: &mut RunnerConfig) {
+    let previous = config.clone();
+    let mut scenario = brickout_revenge_v1_runner_config(previous.max_ticks);
+    // Keep explicit CLI/runtime policy flags stable regardless of arg order.
+    scenario.tick_sleep_micros = previous.tick_sleep_micros;
+    scenario.watch_directory = previous.watch_directory;
+    scenario.target_mode = previous.target_mode;
+    scenario.fail_compile = previous.fail_compile;
+    scenario.disable_on_code_swap_hook = previous.disable_on_code_swap_hook;
+    scenario.hook_failure_reason = previous.hook_failure_reason;
+    scenario.swap_failure_reason = previous.swap_failure_reason;
+    *config = scenario;
+}
+
 fn parse_args() -> CliOptions {
     let mut config = RunnerConfig::default();
     let mut emit_events_jsonl = false;
@@ -118,7 +132,7 @@ fn parse_args() -> CliOptions {
             "--scenario" => {
                 if let Some(value) = args.next() {
                     if value == "brickout-revenge-v1" {
-                        config = brickout_revenge_v1_runner_config(config.max_ticks);
+                        apply_brickout_revenge_v1_scenario(&mut config);
                         config.runtime_launch = true;
                     }
                 }
@@ -390,6 +404,36 @@ mod tests {
         let args = vec!["--project-dir".to_string(), "proj".to_string()];
         let error = parse_aot_cli_contract_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing required --out"));
+    }
+
+    #[test]
+    fn scenario_apply_preserves_preparsed_runtime_flags() {
+        let mut config = RunnerConfig::default();
+        config.max_ticks = 777;
+        config.tick_sleep_micros = 333;
+        config.watch_directory = Some(PathBuf::from("samples"));
+        config.target_mode = TargetMode::AotProd;
+        config.fail_compile = true;
+        config.disable_on_code_swap_hook = true;
+        config.hook_failure_reason = Some("hook failed".to_string());
+        config.swap_failure_reason = Some("swap failed".to_string());
+
+        apply_brickout_revenge_v1_scenario(&mut config);
+
+        assert_eq!(config.max_ticks, 777);
+        assert_eq!(config.tick_sleep_micros, 333);
+        assert_eq!(config.watch_directory, Some(PathBuf::from("samples")));
+        assert_eq!(config.target_mode, TargetMode::AotProd);
+        assert!(config.fail_compile);
+        assert!(config.disable_on_code_swap_hook);
+        assert_eq!(config.hook_failure_reason.as_deref(), Some("hook failed"));
+        assert_eq!(config.swap_failure_reason.as_deref(), Some("swap failed"));
+        assert_eq!(
+            config.inject_file_change,
+            Some(PathBuf::from(
+                "samples/brickout_revenge/brickout_revenge_v1.stasis"
+            ))
+        );
     }
 
     #[test]

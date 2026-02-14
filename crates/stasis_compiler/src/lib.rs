@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,23 +87,36 @@ impl IncrementalCompilerHost {
         files.dedup();
 
         let mut changed_sources: Vec<(String, String)> = Vec::new();
+        let mut deleted_paths: Vec<String> = Vec::new();
         for path in files {
-            let bytes = fs::read(&path)
-                .map_err(|error| format!("failed reading {}: {error}", path.display()))?;
-            let source = String::from_utf8_lossy(&bytes).to_string();
             let path_key = normalize_path_key(&path);
-            let source_hash = hash_text(&source);
-            let changed = self
-                .source_hash_by_path
-                .get(&path_key)
-                .is_none_or(|existing| *existing != source_hash);
-            self.source_hash_by_path.insert(path_key.clone(), source_hash);
-            if changed {
-                changed_sources.push((path_key, source));
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let source = String::from_utf8_lossy(&bytes).to_string();
+                    let source_hash = hash_text(&source);
+                    let changed = self
+                        .source_hash_by_path
+                        .get(&path_key)
+                        .is_none_or(|existing| *existing != source_hash);
+                    self.source_hash_by_path.insert(path_key.clone(), source_hash);
+                    if changed {
+                        changed_sources.push((path_key, source));
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    let removed_hash = self.source_hash_by_path.remove(&path_key).is_some();
+                    let removed_state = self.state_by_path.remove(&path_key).is_some();
+                    if removed_hash || removed_state {
+                        deleted_paths.push(path_key);
+                    }
+                }
+                Err(error) => {
+                    return Err(format!("failed reading {}: {error}", path.display()));
+                }
             }
         }
 
-        if changed_sources.is_empty() {
+        if changed_sources.is_empty() && deleted_paths.is_empty() {
             return Ok(IncrementalCompileOutput {
                 status: 0,
                 layout_hash: self.last_layout_hash_i32,
@@ -631,5 +645,30 @@ mod tests {
         let mut host = IncrementalCompilerHost::new();
         let err = host.compile_changed_files(&[]).expect_err("expected error");
         assert!(err.contains("no changed files"));
+    }
+
+    #[test]
+    fn compile_deleted_file_updates_state_without_read_error() {
+        let temp = std::env::temp_dir().join(format!(
+            "stasis_compiler_deleted_file_{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&temp);
+        let source_path = temp.join("main.stasis");
+        fs::write(&source_path, "function main(): i32 { return 0; }").expect("write source");
+
+        let mut host = IncrementalCompilerHost::new();
+        let first = host
+            .compile_changed_files(std::slice::from_ref(&source_path))
+            .expect("first compile should succeed");
+        assert_eq!(first.status, 0);
+
+        fs::remove_file(&source_path).expect("remove source");
+        let deleted = host
+            .compile_changed_files(std::slice::from_ref(&source_path))
+            .expect("deleted file should not return read error");
+        assert_eq!(deleted.status, 2);
+        assert!(deleted.errors.iter().any(|error| error.code == 41));
+        let _ = fs::remove_dir_all(&temp);
     }
 }
