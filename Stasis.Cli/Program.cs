@@ -4855,13 +4855,20 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()) &&
         DetectsTickUsage(File.ReadAllText(fullPath)))
     {
-        if (Environment.GetEnvironmentVariable("STASIS_CRANELIFT_INPROC_TICK") == "1")
+        var deprecatedInprocTick = Environment.GetEnvironmentVariable("STASIS_CRANELIFT_INPROC_TICK") == "1";
+        if (deprecatedInprocTick)
         {
             Console.Error.WriteLine("warning: STASIS_CRANELIFT_INPROC_TICK is deprecated and ignored; using Rust JIT runner watch path.");
         }
-        if (Environment.GetEnvironmentVariable("STASIS_CRANELIFT_JIT_RUNNER") == "1" && TryFindCraneliftJitRunner(out _))
+
+        var preferJitRunner = deprecatedInprocTick || Environment.GetEnvironmentVariable("STASIS_CRANELIFT_JIT_RUNNER") == "1";
+        if (preferJitRunner && TryFindCraneliftJitRunner(out _))
         {
             return WatchCraneliftTickJitSwap(fullPath, moduleName, tickHostFps, optLevel, enableGraphics, graphicsLibPath);
+        }
+        if (deprecatedInprocTick)
+        {
+            Console.Error.WriteLine("warning: STASIS_CRANELIFT_INPROC_TICK requested JIT runner watch path, but stasis-cranelift-jit-runner was not found; falling back to hot-swap runner path.");
         }
         return WatchCraneliftTickHotSwap(fullPath, moduleName, tickHostFps, optLevel, enableLto, enableGraphics, graphicsLibPath);
     }
@@ -6738,4 +6745,3 @@ sealed record TestCacheEntry(
     bool UseCraneliftRunner,
     string? CraneliftTargetTriple,
     string CompilerCacheSalt);
-
