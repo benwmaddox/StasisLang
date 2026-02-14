@@ -12,6 +12,30 @@ The implementation is a C# front-end with lowering to either LLVM or Cranelift, 
 
 Early and fast-moving. Expect breaking changes.
 
+## Start Here
+
+- If you want to try Stasis quickly: download a nightly build (below).
+- If you want to develop Stasis itself: build from source with the Quickstart steps.
+
+## Nightly Builds
+
+Nightly prereleases are published from `main` when new commits are detected since the last nightly tag.
+
+- Releases: https://github.com/benwmaddox/StasisLang/releases
+- Workflow: `.github/workflows/nightly-release.yml`
+Bundles:
+- `stasis-nightly-win-x64.zip`
+- `stasis-nightly-linux-x64.tar.gz`
+- `stasis-nightly-osx-x64.tar.gz`
+
+Quick run from a nightly bundle:
+
+```text
+stasis(.bat) run samples/basic.stasis
+```
+
+For Windows, SmartScreen may warn on unsigned nightly binaries.
+
 ## Quickstart (Windows)
 
 From a `cmd.exe` prompt in the repo root:
