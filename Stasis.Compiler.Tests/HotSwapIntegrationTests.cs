@@ -1038,6 +1038,129 @@ public sealed class HotSwapIntegrationTests
     }
 
     [HotSwapFact]
+    public async Task WatchTickInProcessSwap_ReportsGenerationRetirementTelemetry()
+    {
+        var repoRoot = FindRepoRoot();
+        var cliDll = FindCliDll(repoRoot);
+        Assert.NotNull(cliDll);
+        var clangBinDir = FindClangBinDir(repoRoot);
+        if (string.IsNullOrWhiteSpace(clangBinDir))
+        {
+            throw SkipException.ForSkip("clang not found; skipping in-process generation retirement test.");
+        }
+
+        const int retireWindow = 2;
+        var tempDir = Directory.CreateTempSubdirectory("stasis_inproc_tick_generation_retire");
+        var stasisPath = Path.Combine(tempDir.FullName, "inproc_tick_generation_retire.stasis");
+        await File.WriteAllTextAsync(stasisPath, BuildInProcessTickSource(1), System.Text.Encoding.ASCII);
+
+        Process? proc = null;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = QuoteArgs(cliDll!, "run", stasisPath, "--watch", "--backend", "cranelift", "--module", "hot", "--fps", "60"),
+                UseShellExecute = false,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            psi.EnvironmentVariables["STASIS_ASSET_ROOT"] = repoRoot;
+            psi.EnvironmentVariables["STASIS_CRANELIFT_INPROC_TICK"] = "1";
+            psi.EnvironmentVariables["STASIS_CRANELIFT_JIT_RUNNER"] = "0";
+            psi.EnvironmentVariables["STASIS_INPROC_RETIRE_WINDOW_FRAMES"] = retireWindow.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            psi.EnvironmentVariables["PATH"] = clangBinDir + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
+
+            proc = Process.Start(psi);
+            Assert.NotNull(proc);
+
+            using var outLines = new AsyncLineCollector(proc!.StandardOutput);
+            using var errLines = new AsyncLineCollector(proc.StandardError);
+
+            await WaitForAnyLineAsync(
+                proc,
+                () => outLines.AnyContains("HOTSWAP(ms):") || errLines.AnyContains("error:"),
+                timeout: TimeSpan.FromMinutes(5));
+
+            var initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+            var appliedCount = outLines.CountContains("HOTSWAP(state): applied");
+            Assert.True(initialSwapCount > 0, "watch did not report initial HOTSWAP(ms).");
+
+            var observedGenerations = new List<long>();
+            var observedPending = new List<long>();
+            var observedRetired = new List<long>();
+
+            foreach (var seed in new[] { 31, 37, 43, 47 })
+            {
+                await File.WriteAllTextAsync(stasisPath, BuildInProcessTickSource(seed), System.Text.Encoding.ASCII);
+
+                await WaitForAnyLineAsync(
+                    proc,
+                    () => outLines.CountContains("HOTSWAP(ms):") > initialSwapCount &&
+                          outLines.CountContains("HOTSWAP(state): applied") > appliedCount,
+                    timeout: TimeSpan.FromMinutes(5));
+
+                initialSwapCount = outLines.CountContains("HOTSWAP(ms):");
+                appliedCount = outLines.CountContains("HOTSWAP(state): applied");
+
+                var appliedLines = outLines.SnapshotLinesContaining("HOTSWAP(state): applied");
+                Assert.NotEmpty(appliedLines);
+                var latest = appliedLines[^1];
+
+                Assert.True(TryParseLongMetric(latest, "gen", out var generation), $"missing gen telemetry in line: {latest}");
+                Assert.True(TryParseLongMetric(latest, "retire_pending", out var pendingRetired), $"missing retire_pending telemetry in line: {latest}");
+                Assert.True(TryParseLongMetric(latest, "retired", out var retiredCount), $"missing retired telemetry in line: {latest}");
+
+                observedGenerations.Add(generation);
+                observedPending.Add(pendingRetired);
+                observedRetired.Add(retiredCount);
+            }
+
+            Assert.Equal(4, observedGenerations.Count);
+            Assert.True(observedGenerations[0] >= 2, "expected first applied generation >= 2.");
+            for (var i = 1; i < observedGenerations.Count; i++)
+            {
+                Assert.Equal(observedGenerations[i - 1] + 1, observedGenerations[i]);
+            }
+
+            var maxPending = observedPending.Count == 0 ? 0 : observedPending.Max();
+            Assert.True(
+                maxPending <= retireWindow + 1,
+                $"pending retired generations exceeded expected bound. max_pending={maxPending} retire_window={retireWindow}");
+
+            Assert.Contains(observedRetired, count => count > 0);
+            Assert.False(proc.HasExited);
+        }
+        finally
+        {
+            try
+            {
+                if (proc is not null && !proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(10_000);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            try
+            {
+                tempDir.Delete(true);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    [HotSwapFact]
     public async Task WatchTickInProcessSwap_RecoversAfterInitialBuildFailure()
     {
         var repoRoot = FindRepoRoot();
@@ -1708,6 +1831,53 @@ public sealed class HotSwapIntegrationTests
         return source.Replace(tick, replacement, StringComparison.Ordinal);
     }
 
+    private static string BuildInProcessTickSource(int seed) =>
+        $$"""
+        struct WatchState {
+            ticks: i32;
+        }
+
+        global state: WatchState;
+
+        function main(): i32 {
+            state.ticks = 0;
+            return 0;
+        }
+
+        function tick(): i32 {
+            state.ticks = state.ticks + 1;
+            return {{seed}} - {{seed}};
+        }
+        """;
+
+    private static bool TryParseLongMetric(string line, string key, out long value)
+    {
+        value = 0;
+        var needle = key + "=";
+        var idx = line.IndexOf(needle, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return false;
+        }
+
+        idx += needle.Length;
+        var end = idx;
+        if (end < line.Length && line[end] == '-')
+        {
+            end++;
+        }
+        while (end < line.Length && char.IsDigit(line[end]))
+        {
+            end++;
+        }
+        if (end <= idx)
+        {
+            return false;
+        }
+
+        return long.TryParse(line.AsSpan(idx, end - idx), out value);
+    }
+
     private static string QuoteArg(string arg)
     {
         if (arg.Length == 0)
@@ -1808,6 +1978,22 @@ public sealed class HotSwapIntegrationTests
                 }
             }
             return count;
+        }
+
+        public List<string> SnapshotLinesContaining(string needle)
+        {
+            lock (_lines)
+            {
+                var lines = new List<string>();
+                for (var i = 0; i < _lines.Count; i++)
+                {
+                    if (_lines[i].Contains(needle, StringComparison.Ordinal))
+                    {
+                        lines.Add(_lines[i]);
+                    }
+                }
+                return lines;
+            }
         }
 
         public string GetTail(int maxLines = 60)

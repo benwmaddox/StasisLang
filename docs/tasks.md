@@ -4,6 +4,10 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 
 ## Active
 
+### Language
+
+- [x] Struct initializer assignment: `target = { field = value, ... }` zero-fills unspecified fields (improves readability for "spawn/replace" patterns).
+
 ### Runtime / Host
 
 - [x] HostFrame vNext: add `version`, `flags`, `tick_index`, and optional `tick_hz` so `tick()` can be snapshot-only.

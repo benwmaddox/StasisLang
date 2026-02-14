@@ -132,6 +132,24 @@ public class SemanticTests
     }
 
     [Fact]
+    public void Rejects_struct_initializer_as_standalone_expression()
+    {
+        var source = """
+            struct S { a: i32; }
+            global state: S;
+            function f(): i32 {
+                return { a = 1 };
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        Assert.Empty(parse.Diagnostics);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Struct initializer may only appear", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Flags_receiver_form_arity_mismatch_for_receiver_scoped_callable()
     {
         var source = """
@@ -945,6 +963,40 @@ public class SemanticTests
         var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
 
         Assert.Contains(sema.Diagnostics, d => d.Message.Contains("only supported on globals", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Allows_struct_initializer_assignment_to_struct_array_element()
+    {
+        var source = """
+            struct Ball { x: i32; y: i32; active: bool; }
+            global balls: Ball[4];
+            function tick(): void {
+                balls[1] = { active = true, x = 10, y = 20 };
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        DiagnosticAsserts.AssertNoErrors(sema.Diagnostics);
+    }
+
+    [Fact]
+    public void Struct_initializer_reports_unknown_field()
+    {
+        var source = """
+            struct Ball { x: i32; y: i32; active: bool; }
+            global balls: Ball[1];
+            function tick(): void {
+                balls[0] = { nope = 1 };
+            }
+            """;
+
+        var parse = Parser.Parse(source);
+        var sema = new SemanticAnalyzer().Analyze(parse.CompilationUnit);
+
+        Assert.Contains(sema.Diagnostics, d => d.Message.Contains("Unknown field 'nope'"));
     }
 
 }
