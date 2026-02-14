@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -596,7 +597,15 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var entryName = $"{moduleName}__{entryBase}";
                     if (useCraneliftRunner)
                     {
-                        return RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
+                        return RunCachedRunnerDll(
+                            cachedOut,
+                            entryName,
+                            enableGraphics,
+                            graphicsLibPath,
+                            dataBindingPlan,
+                            entryAssetRoot,
+                            tickHostFps: hasTick ? tickHostFps : null,
+                            processTimeoutMs: mode == "test" ? GetTestExecutionTimeoutMs() : 0);
                     }
                     return RunCachedExecutable(mode, cachedOut, enableGraphics, graphicsLibPath, entryAssetRoot);
                 }
@@ -627,7 +636,15 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                     var runSw = Stopwatch.StartNew();
                     var entryBase = mode == "test" ? "run_tests" : "main";
                     var entryName = $"{moduleName}__{entryBase}";
-                    var exit = RunCachedRunnerDll(cachedOut, entryName, enableGraphics, graphicsLibPath, dataBindingPlan, entryAssetRoot, tickHostFps: hasTick ? tickHostFps : null);
+                    var exit = RunCachedRunnerDll(
+                        cachedOut,
+                        entryName,
+                        enableGraphics,
+                        graphicsLibPath,
+                        dataBindingPlan,
+                        entryAssetRoot,
+                        tickHostFps: hasTick ? tickHostFps : null,
+                        processTimeoutMs: mode == "test" ? GetTestExecutionTimeoutMs() : 0);
                     runSw.Stop();
                     if (logPhaseTiming)
                     {
@@ -824,6 +841,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
     }
 
     var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.exe");
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
@@ -857,7 +875,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
                     }
                 }
             }
-        }, assetRoot: entryAssetRoot);
+        }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     }
     finally
     {
@@ -885,6 +903,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
     }
 
     var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
         var entryBase = mode == "test" ? "run_tests" : "main";
@@ -906,7 +925,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         }
 
         var entry = entryName;
-        if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null)
+        if (UseCraneliftRunnerServer() && hotStatePlan is null && dataBindingPlan is null && processTimeoutMs <= 0)
         {
             var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
             return runner.Run(dllPath, entry, out runMs);
@@ -939,7 +958,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         {
             runnerArgs += $" --fps {tickHostFps.Value}";
         }
-        var runExit = RunProcess(runnerPath, runnerArgs, assetRoot: entryAssetRoot);
+        var runExit = RunProcess(runnerPath, runnerArgs, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         runMs = runStopwatch.ElapsedMilliseconds;
         return runExit;
     }
@@ -1371,6 +1390,7 @@ static string? FindRepoRoot()
 
 static int Execute(string mode, string llPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, string? cachedExecutablePath = null, bool keepExecutable = false)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     var cachedExecutableUsed = false;
     if (!string.IsNullOrWhiteSpace(cachedExecutablePath))
     {
@@ -1412,7 +1432,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                     }
                 }
             }
-        }, assetRoot: entryAssetRoot);
+        }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     }
 
     // lli doesn't support external libraries easily, so use clang when graphics is enabled (or sys runtime is referenced).
@@ -1461,7 +1481,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
                         }
                     }
                 }
-            }, assetRoot: entryAssetRoot);
+            }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         }
         finally
         {
@@ -1676,10 +1696,11 @@ static string BuildClangArgs(string llPath, string exePath, bool isTest, string?
 
 static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     var interpreterArguments = mode == "test"
         ? $"-entry-function=run_tests \"{llvmIrPath}\""
         : $"\"{llvmIrPath}\"";
-    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, assetRoot: entryAssetRoot);
+    var interpreterExitCode = RunProcess(llvmInterpreter, interpreterArguments, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
     if (interpreterExitCode == 0)
     {
         return 0;
@@ -1696,6 +1717,7 @@ static int ExecuteWithLlvmInterpreter(string llvmInterpreter, string mode, strin
 
 static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries, string entryAssetRoot, out int exitCode)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     if (!TryFindTool("clang", out var clangPath))
     {
         exitCode = 1;
@@ -1719,7 +1741,7 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
             return true;
         }
 
-        exitCode = RunProcess(executablePath, string.Empty, assetRoot: entryAssetRoot);
+        exitCode = RunProcess(executablePath, string.Empty, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
         return true;
     }
     finally
@@ -1875,10 +1897,10 @@ static string? FindGraphicsSharedLibrary()
     return null;
 }
 
-static (bool graphics, bool audio) GetRuntimeImportFlags(string entryPath)
+static (bool graphics, bool audio) GetRuntimeImportFlags(string entryPath, Func<string, string?>? sourceLoader = null)
 {
-    var graphics = DetectsModuleImport(entryPath, "graphics.stasis");
-    var audio = DetectsModuleImport(entryPath, "audio.stasis");
+    var graphics = DetectsModuleImport(entryPath, "graphics.stasis", sourceLoader);
+    var audio = DetectsModuleImport(entryPath, "audio.stasis", sourceLoader);
     return (graphics, audio);
 }
 
@@ -2139,14 +2161,19 @@ static IReadOnlyList<string> PrepareLinkLibraries(IReadOnlyList<string>? linkLib
     return list;
 }
 
-static bool DetectsModuleImport(string entryPath, string moduleFileName)
+static bool DetectsModuleImport(string entryPath, string moduleFileName, Func<string, string?>? sourceLoader = null)
 {
     var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var targetPath = ResolveStdlibModulePath(moduleFileName);
-    return DetectsModuleImportInner(Path.GetFullPath(entryPath), moduleFileName, targetPath, visited);
+    return DetectsModuleImportInner(Path.GetFullPath(entryPath), moduleFileName, targetPath, visited, sourceLoader);
 }
 
-static bool DetectsModuleImportInner(string path, string moduleFileName, string? targetPath, HashSet<string> visited)
+static bool DetectsModuleImportInner(
+    string path,
+    string moduleFileName,
+    string? targetPath,
+    HashSet<string> visited,
+    Func<string, string?>? sourceLoader)
 {
     if (!visited.Add(path))
     {
@@ -2156,7 +2183,7 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
     string source;
     try
     {
-        source = File.ReadAllText(path);
+        source = sourceLoader?.Invoke(path) ?? File.ReadAllText(path);
     }
     catch
     {
@@ -2178,13 +2205,14 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
         var line = source.Substring(lineStart, lineLength).TrimEnd('\r');
         if (TryParseImportLine(line, out var importPath))
         {
-            var resolved = Path.GetFullPath(Path.Combine(baseDir, importPath));
+            var resolved = ResolveImportPathWithPlatformFallback(baseDir, importPath, sourceLoader);
             if (IsTargetModule(resolved, moduleFileName, targetPath))
             {
                 return true;
             }
 
-            if (File.Exists(resolved) && DetectsModuleImportInner(resolved, moduleFileName, targetPath, visited))
+            if (PathExistsWithSourceLoader(resolved, sourceLoader) &&
+                DetectsModuleImportInner(resolved, moduleFileName, targetPath, visited, sourceLoader))
             {
                 return true;
             }
@@ -2194,6 +2222,42 @@ static bool DetectsModuleImportInner(string path, string moduleFileName, string?
     }
 
     return false;
+}
+
+static string ResolveImportPathWithPlatformFallback(string baseDir, string importPath, Func<string, string?>? sourceLoader)
+{
+    var resolvedPath = Path.GetFullPath(Path.Combine(baseDir, importPath));
+    if (PathExistsWithSourceLoader(resolvedPath, sourceLoader))
+    {
+        return resolvedPath;
+    }
+
+    if (Path.GetExtension(resolvedPath).Length == 0)
+    {
+        return resolvedPath;
+    }
+    var platform = SourceImporter.GetActivePlatformTag();
+    if (string.IsNullOrWhiteSpace(platform))
+    {
+        return resolvedPath;
+    }
+
+    var dir = Path.GetDirectoryName(resolvedPath) ?? string.Empty;
+    var baseName = Path.GetFileNameWithoutExtension(resolvedPath);
+    var platformPath = Path.Combine(dir, $"{baseName}.{platform}.stasis");
+    return PathExistsWithSourceLoader(platformPath, sourceLoader)
+        ? platformPath
+        : resolvedPath;
+}
+
+static bool PathExistsWithSourceLoader(string path, Func<string, string?>? sourceLoader)
+{
+    if (sourceLoader is not null && sourceLoader(path) is not null)
+    {
+        return true;
+    }
+
+    return File.Exists(path);
 }
 
 static bool IsTargetModule(string resolvedPath, string moduleFileName, string? targetPath)
@@ -2500,7 +2564,7 @@ static bool TryFindTool(string name, out string path)
     return false;
 }
 
-static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, string? assetRoot = null)
+static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo>? configure = null, bool suppressOutput = false, string? assetRoot = null, int timeoutMs = 0)
 {
     if (Environment.GetEnvironmentVariable("STASIS_LOG_COMMANDS") == "1")
     {
@@ -2524,17 +2588,94 @@ static int RunProcess(string fileName, string arguments, Action<ProcessStartInfo
     }
 
     using var proc = Process.Start(psi)!;
-    string? stdOut = null;
-    string? stdErr = null;
+    Task<string>? stdOutTask = null;
+    Task<string>? stdErrTask = null;
+    static string? TryReadTaskResult(Task<string>? task, int waitMs)
+    {
+        if (task is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!task.IsCompleted)
+            {
+                if (waitMs <= 0 || !task.Wait(waitMs))
+                {
+                    return null;
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return task.Status == TaskStatus.RanToCompletion
+            ? task.Result
+            : null;
+    }
+
     if (psi.RedirectStandardOutput)
     {
-        stdOut = proc.StandardOutput.ReadToEnd();
+        stdOutTask = proc.StandardOutput.ReadToEndAsync();
     }
     if (psi.RedirectStandardError)
     {
-        stdErr = proc.StandardError.ReadToEnd();
+        stdErrTask = proc.StandardError.ReadToEndAsync();
     }
-    proc.WaitForExit();
+
+    var exited = true;
+    if (timeoutMs > 0)
+    {
+        exited = proc.WaitForExit(timeoutMs);
+    }
+    else
+    {
+        proc.WaitForExit();
+    }
+
+    if (!exited)
+    {
+        try
+        {
+            proc.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        try
+        {
+            proc.WaitForExit(5000);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        // Bound output draining to avoid hanging if descendants keep inherited stdio handles open.
+        var timedOutStdOut = TryReadTaskResult(stdOutTask, waitMs: 250);
+        var timedOutStdErr = TryReadTaskResult(stdErrTask, waitMs: 250);
+
+        if (!string.IsNullOrWhiteSpace(timedOutStdOut))
+        {
+            Console.Write(timedOutStdOut);
+        }
+        if (!string.IsNullOrWhiteSpace(timedOutStdErr))
+        {
+            Console.Error.Write(timedOutStdErr);
+        }
+
+        Console.Error.WriteLine($"error: process timed out after {timeoutMs}ms: {fileName} {arguments}");
+        return 124;
+    }
+
+    var stdOut = TryReadTaskResult(stdOutTask, waitMs: 2000);
+    var stdErr = TryReadTaskResult(stdErrTask, waitMs: 2000);
+
     if (proc.ExitCode != 0)
     {
         if (!string.IsNullOrWhiteSpace(stdOut))
@@ -2902,6 +3043,56 @@ static int GetHotSwapDelayMs()
     return Math.Max(0, ms);
 }
 
+static int GetTestExecutionTimeoutMs()
+{
+    const int defaultMs = 120000;
+    var env = Environment.GetEnvironmentVariable("STASIS_TEST_TIMEOUT_MS");
+    if (string.IsNullOrWhiteSpace(env))
+    {
+        return defaultMs;
+    }
+
+    if (!int.TryParse(env, out var timeoutMs))
+    {
+        Console.Error.WriteLine($"warning: invalid STASIS_TEST_TIMEOUT_MS='{env}'. Using default {defaultMs}ms.");
+        return defaultMs;
+    }
+
+    if (timeoutMs < 0)
+    {
+        Console.Error.WriteLine($"warning: STASIS_TEST_TIMEOUT_MS must be >= 0, got {timeoutMs}. Using default {defaultMs}ms.");
+        return defaultMs;
+    }
+
+    return timeoutMs;
+}
+
+static int GetInProcessRetireWindowFrames()
+{
+    const int defaultFrames = 2;
+    var env = Environment.GetEnvironmentVariable("STASIS_INPROC_RETIRE_WINDOW_FRAMES");
+    if (string.IsNullOrWhiteSpace(env))
+    {
+        return defaultFrames;
+    }
+
+    if (!int.TryParse(env, out var frames))
+    {
+        Console.Error.WriteLine(
+            $"warning: invalid STASIS_INPROC_RETIRE_WINDOW_FRAMES='{env}'. Using default {defaultFrames}.");
+        return defaultFrames;
+    }
+
+    if (frames < 0)
+    {
+        Console.Error.WriteLine(
+            $"warning: STASIS_INPROC_RETIRE_WINDOW_FRAMES must be >= 0, got {frames}. Using default {defaultFrames}.");
+        return defaultFrames;
+    }
+
+    return frames;
+}
+
 static string? FindDataBindingJson(string sourcePath, string repoRoot)
 {
     static string? FirstJsonInDir(string dir)
@@ -3132,6 +3323,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     var baseName = Path.GetFileNameWithoutExtension(sourcePath);
     var swapExt = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".dll" : ".so";
     var pid = Environment.ProcessId;
+    var retireWindowFrames = GetInProcessRetireWindowFrames();
     var hotClifPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc.clif");
     var hotObjPath = Path.Combine(hotDir, $"{baseName}.{moduleName}.{pid}.inproc{GetObjectFileExtension()}");
     Directory.CreateDirectory(hotDir);
@@ -3142,6 +3334,19 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         e.Cancel = true;
         cts.Cancel();
     };
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange()
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+
+    if (string.Equals(Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN"), "1", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine("warning: STASIS_BUFFER_OVERLAY_STDIN is ignored in AOT runner watch mode to avoid consuming guest stdin; use JIT/in-process watch for buffer overlay swaps.");
+    }
 
     InProcessTickHost? host = null;
     var swapDllSerial = 0;
@@ -3157,6 +3362,31 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         message.Replace('\r', ' ')
             .Replace('\n', ' ')
             .Replace('"', '\'');
+
+    static string FormatGenerationTelemetry(InProcessGenerationTelemetry telemetry) =>
+        $"gen={telemetry.ActiveGeneration} retire_pending={telemetry.PendingRetiredGenerations} retire_pending_bytes={telemetry.PendingRetiredBytes} retired={telemetry.TotalRetiredGenerations} retired_bytes={telemetry.TotalRetiredBytes} retire_window={telemetry.RetireWindowFrames} tick={telemetry.TickCount}";
+
+    static string AppendDetails(string details, string more)
+    {
+        if (string.IsNullOrWhiteSpace(more))
+        {
+            return details;
+        }
+
+        return string.IsNullOrWhiteSpace(details)
+            ? more
+            : $"{details} {more}";
+    }
+
+    string CurrentGenerationDetails()
+    {
+        if (host is null)
+        {
+            return string.Empty;
+        }
+
+        return FormatGenerationTelemetry(host.GetGenerationTelemetry());
+    }
 
     void PrintSwapState(string state, string details)
     {
@@ -3359,7 +3589,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
             if (startHost)
             {
                 var hostSw = Stopwatch.StartNew();
-                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps);
+                host = InProcessTickHost.Start(hotDll, moduleName, ParseStateMapEntries(plan.MapPath), hookKind, fps, retireWindowFrames);
                 hostSw.Stop();
                 hostMs = hostSw.ElapsedMilliseconds;
                 if (host is null)
@@ -3378,7 +3608,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
 
                 var swapId = nextSwapId++;
                 compiledCount++;
-                PrintSwapState("compiled", $"id={swapId}");
+                PrintSwapState("compiled", AppendDetails($"id={swapId}", CurrentGenerationDetails()));
 
                 var stateMap = ParseStateMapEntries(plan.MapPath);
                 var swapSw = Stopwatch.StartNew();
@@ -3388,16 +3618,16 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                     swapSw.Stop();
                     hostMs = swapSw.ElapsedMilliseconds;
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={swapId} reason=\"{SanitizeSwapMessage(queued.Message)}\"");
+                    PrintSwapState("rejected", AppendDetails($"id={swapId} reason=\"{SanitizeSwapMessage(queued.Message)}\"", CurrentGenerationDetails()));
                     return 1;
                 }
 
                 queuedCount++;
-                PrintSwapState("queued", $"id={queued.SwapId}");
+                PrintSwapState("queued", AppendDetails($"id={queued.SwapId}", CurrentGenerationDetails()));
                 if (queued.SupersededSwapId != 0)
                 {
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={queued.SupersededSwapId} reason=\"superseded\"");
+                    PrintSwapState("rejected", AppendDetails($"id={queued.SupersededSwapId} reason=\"superseded\"", CurrentGenerationDetails()));
                 }
 
                 var swap = queued.CompletionTask.GetAwaiter().GetResult();
@@ -3407,13 +3637,13 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
                 if (!swap.Success)
                 {
                     rejectedCount++;
-                    PrintSwapState("rejected", $"id={queued.SwapId} reason=\"{SanitizeSwapMessage(swap.Message)}\"");
+                    PrintSwapState("rejected", AppendDetails($"id={queued.SwapId} reason=\"{SanitizeSwapMessage(swap.Message)}\"", CurrentGenerationDetails()));
                     Console.Error.WriteLine($"warning: in-process swap rejected: {swap.Message}");
                     return 1;
                 }
 
                 appliedCount++;
-                PrintSwapState("applied", $"id={queued.SwapId}");
+                PrintSwapState("applied", AppendDetails($"id={queued.SwapId}", CurrentGenerationDetails()));
             }
 
             lastAppliedFunctionProfile = functionProfile;
@@ -3494,14 +3724,7 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    var debounce = TimeSpan.FromMilliseconds(75);
-    var lastChange = DateTime.UtcNow;
-    using var changeSignal = new ManualResetEventSlim(false);
-    void OnChange(object? _, FileSystemEventArgs __)
-    {
-        lastChange = DateTime.UtcNow;
-        changeSignal.Set();
-    }
+    void OnChange(object? _, FileSystemEventArgs __) => SignalChange();
 
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -3512,7 +3735,9 @@ static int WatchCraneliftTickInProcessSwap(string sourcePath, string moduleName,
     {
         if (host is not null && !host.IsRunning)
         {
-            return host.ExitCode;
+            var exitCode = host.ExitCode;
+            host.Dispose();
+            return exitCode;
         }
 
         try
@@ -3660,6 +3885,16 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         e.Cancel = true;
         cts.Cancel();
     };
+    var debounce = TimeSpan.FromMilliseconds(75);
+    var lastChange = DateTime.UtcNow;
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange()
+    {
+        lastChange = DateTime.UtcNow;
+        changeSignal.Set();
+    }
+    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
+    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
 
     string? activeDll = null;
     Process? runner = null;
@@ -3685,12 +3920,12 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         var runnerSpawnMs = 0L;
 
         var phase = Stopwatch.StartNew();
-        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource, sourceLoader);
         readMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (importDiagnostics.Count > 0)
         {
-            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath, sourceLoader);
             return 1;
         }
 
@@ -3699,24 +3934,24 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         phase.Restart();
         if (HasErrors(parse.Diagnostics))
         {
-            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath, sourceLoader);
             return 1;
         }
         var linkLibraries = CollectLinkDirectives(parse.CompilationUnit);
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
         if (HasErrors(linkDiagnostics))
         {
-            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            PrintDiagnostics(linkDiagnostics, source, sourcePath, sourceLoader);
             return 1;
         }
-        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath, sourceLoader);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         semaMs = phase.ElapsedMilliseconds;
         phase.Restart();
         if (sema.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(sema.Diagnostics))
             {
                 return 1;
@@ -3746,7 +3981,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         phase.Restart();
         if (result.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            PrintDiagnostics(result.Diagnostics, source, sourcePath, sourceLoader);
             Console.WriteLine(result.Ir);
             return HasErrors(result.Diagnostics) ? 1 : 0;
         }
@@ -4035,14 +4270,7 @@ static int WatchCraneliftTickHotSwap(string sourcePath, string moduleName, int f
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    var debounce = TimeSpan.FromMilliseconds(75);
-    var lastChange = DateTime.UtcNow;
-    using var changeSignal = new ManualResetEventSlim(false);
-    void OnChange(object? _, FileSystemEventArgs __)
-    {
-        lastChange = DateTime.UtcNow;
-        changeSignal.Set();
-    }
+    void OnChange(object? _, FileSystemEventArgs __) => SignalChange();
 
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -4129,6 +4357,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         e.Cancel = true;
         cts.Cancel();
     };
+    using var changeSignal = new ManualResetEventSlim(false);
+    void SignalChange() => changeSignal.Set();
+    using var bufferOverlay = BufferOverlayBridge.StartIfEnabled(cts.Token, SignalChange);
+    Func<string, string?>? sourceLoader = bufferOverlay is null ? null : bufferOverlay.TryLoad;
 
     Process? runner = null;
     DataBindingPlan? dataBindingPlan = null;
@@ -4536,10 +4768,10 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         fnBuilt = 0;
         fnReused = 0;
         var sw = Stopwatch.StartNew();
-        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource);
+        var source = LoadSourceWithImports(sourcePath, out var importDiagnostics, out var importSource, sourceLoader);
         if (importDiagnostics.Count > 0)
         {
-            PrintDiagnostics(importDiagnostics, importSource, sourcePath);
+            PrintDiagnostics(importDiagnostics, importSource, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
@@ -4548,7 +4780,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var parse = Parser.Parse(source);
         if (HasErrors(parse.Diagnostics))
         {
-            PrintDiagnostics(parse.Diagnostics, source, sourcePath);
+            PrintDiagnostics(parse.Diagnostics, source, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
@@ -4558,18 +4790,18 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         var linkDiagnostics = ValidateLinkDirectives(linkLibraries, parse.CompilationUnit);
         if (HasErrors(linkDiagnostics))
         {
-            PrintDiagnostics(linkDiagnostics, source, sourcePath);
+            PrintDiagnostics(linkDiagnostics, source, sourcePath, sourceLoader);
             clif = string.Empty;
             lowerMs = 0;
             return 1;
         }
 
-        var runtimeImports = GetRuntimeImportFlags(sourcePath);
+        var runtimeImports = GetRuntimeImportFlags(sourcePath, sourceLoader);
         var usesGraphics = enableGraphics || runtimeImports.graphics || runtimeImports.audio || HasLinkDirective(linkLibraries, "stasis_graphics");
         var sema = new SemanticAnalyzer(new SemanticAnalyzerOptions(EnableGraphicsBuiltins: false, EnableAudioBuiltins: false)).Analyze(parse.CompilationUnit);
         if (sema.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(sema.Diagnostics, source, sourcePath);
+            PrintDiagnostics(sema.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(sema.Diagnostics))
             {
                 clif = string.Empty;
@@ -4654,7 +4886,7 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         lowerMs = sw.ElapsedMilliseconds;
         if (result.Diagnostics.Count > 0)
         {
-            PrintDiagnostics(result.Diagnostics, source, sourcePath);
+            PrintDiagnostics(result.Diagnostics, source, sourcePath, sourceLoader);
             if (HasErrors(result.Diagnostics))
             {
                 Console.WriteLine(result.Ir);
@@ -4711,7 +4943,6 @@ static int WatchCraneliftTickJitSwap(string sourcePath, string moduleName, int f
         NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
     };
 
-    using var changeSignal = new ManualResetEventSlim(false);
     void OnChange(object? _, FileSystemEventArgs __) => changeSignal.Set();
     watcher.Changed += OnChange;
     watcher.Created += OnChange;
@@ -5710,7 +5941,11 @@ static PrepareResult PrepareForLower(string path, bool includeTests, string modu
     }
 }
 
-static string LoadSourceWithImports(string path, out List<Diagnostic> importDiagnostics, out string sourceForDiagnostics)
+static string LoadSourceWithImports(
+    string path,
+    out List<Diagnostic> importDiagnostics,
+    out string sourceForDiagnostics,
+    Func<string, string?>? sourceLoader = null)
 {
     static string ReadAllTextShared(string p)
     {
@@ -5719,9 +5954,10 @@ static string LoadSourceWithImports(string path, out List<Diagnostic> importDiag
         return sr.ReadToEnd();
     }
 
-    var original = ReadAllTextShared(path);
+    var fullPath = Path.GetFullPath(path);
+    var original = sourceLoader?.Invoke(fullPath) ?? ReadAllTextShared(fullPath);
     var diagnostics = new List<Diagnostic>();
-    var result = SourceImporter.ExpandImports(path, original, diagnostics);
+    var result = SourceImporter.ExpandImports(fullPath, original, diagnostics, sourceLoader);
     importDiagnostics = diagnostics;
     sourceForDiagnostics = result.OriginalSource;
     return result.ExpandedSource;
@@ -5929,6 +6165,7 @@ static string? TryGetCachedRunnerDllPath(CompileResult result)
 
 static int RunCachedExecutable(string mode, string executablePath, bool enableGraphics, string? graphicsLibPath, string entryAssetRoot)
 {
+    var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     if (enableGraphics)
     {
         var exeDir = Path.GetDirectoryName(executablePath);
@@ -5951,10 +6188,10 @@ static int RunCachedExecutable(string mode, string executablePath, bool enableGr
                 }
             }
         }
-    }, assetRoot: entryAssetRoot);
+    }, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
 }
 
-static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, string entryAssetRoot, int? tickHostFps = null)
+static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraphics, string? graphicsLibPath, DataBindingPlan? dataBindingPlan, string entryAssetRoot, int? tickHostFps = null, int processTimeoutMs = 0)
 {
     if (!TryFindCraneliftRunner(out var runnerPath))
     {
@@ -5971,7 +6208,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
         }
     }
 
-    if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer())
+    if (tickHostFps is null && dataBindingPlan is null && UseCraneliftRunnerServer() && processTimeoutMs <= 0)
     {
         var runner = GetCraneliftRunnerServer(runnerPath, entryAssetRoot);
         return runner.Run(dllPath, entryName, out _);
@@ -5987,7 +6224,7 @@ static int RunCachedRunnerDll(string dllPath, string entryName, bool enableGraph
     {
         args += $" --fps {tickHostFps.Value}";
     }
-    return RunProcess(runnerPath, args, assetRoot: entryAssetRoot);
+    return RunProcess(runnerPath, args, assetRoot: entryAssetRoot, timeoutMs: processTimeoutMs);
 }
 
 static int EnsureCraneliftCachedExecutable(string clifPath, string objPath, string exePath, string moduleName, string mode, string? optLevel, bool enableLto, bool enableGraphics, string? graphicsLibPath, IReadOnlyList<string> linkLibraries)
@@ -6233,6 +6470,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
 static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? optLevel, bool enableLto, string? graphicsLibPath, string moduleName, bool useCraneliftRunner)
 {
     var testStopwatch = Stopwatch.StartNew();
+    var testProcessTimeoutMs = GetTestExecutionTimeoutMs();
     var entryAssetRoot = GetEntryAssetRoot(result.FilePath);
 
     if (result.Diagnostics.Count > 0)
@@ -6287,12 +6525,12 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                     }
                     else
                     {
-                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
+                        executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot, processTimeoutMs: testProcessTimeoutMs);
                     }
                 }
                 else
                 {
-                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot);
+                    executeExit = RunCachedRunnerDll(cachedDllPath, entryName, result.UsesGraphics, graphicsLibPath, dataBindingPlan: null, entryAssetRoot: entryAssetRoot, processTimeoutMs: testProcessTimeoutMs);
                 }
             }
             else
@@ -6392,8 +6630,16 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
     return executeExit;
 }
 
-static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source, string? filePath = null)
+static void PrintDiagnostics(
+    IEnumerable<Diagnostic> diagnostics,
+    string source,
+    string? filePath = null,
+    Func<string, string?>? sourceLoader = null)
 {
+    var rootFullPath = string.IsNullOrWhiteSpace(filePath)
+        ? null
+        : TryGetFullPathSafe(filePath);
+
     foreach (var d in diagnostics)
     {
         if (d.Severity == DiagnosticSeverity.Warning && ShouldSuppressWarnings())
@@ -6401,15 +6647,43 @@ static void PrintDiagnostics(IEnumerable<Diagnostic> diagnostics, string source,
             continue;
         }
 
-        var (line, column, lineText) = GetLineInfo(source, d.Span.Start);
+        var diagnosticFilePath = string.IsNullOrWhiteSpace(d.FilePath) ? filePath : d.FilePath;
+        var diagnosticSource = source;
+        var diagnosticFullPath = string.IsNullOrWhiteSpace(diagnosticFilePath)
+            ? null
+            : TryGetFullPathSafe(diagnosticFilePath);
+        if (diagnosticFullPath is not null &&
+            !string.Equals(diagnosticFullPath, rootFullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            var loadedSource = sourceLoader?.Invoke(diagnosticFullPath) ??
+                               (TryReadTextShared(diagnosticFullPath, out var text) ? text : null);
+            if (!string.IsNullOrEmpty(loadedSource))
+            {
+                diagnosticSource = loadedSource;
+            }
+        }
+
+        var (line, column, lineText) = GetLineInfo(diagnosticSource, d.Span.Start);
         var length = Math.Max(1, d.Span.Length);
         var markerLen = Math.Min(length, Math.Max(1, Math.Max(0, lineText.Length - (column - 1))));
         var marker = new string(' ', Math.Max(0, column - 1)) + new string('^', markerLen);
-        var location = filePath is null ? $"line {line}, column {column}" : $"{filePath}:{line}:{column}";
+        var location = diagnosticFilePath is null ? $"line {line}, column {column}" : $"{diagnosticFilePath}:{line}:{column}";
         var prefix = d.Severity == DiagnosticSeverity.Warning ? "warning" : "error";
         Console.Error.WriteLine($"{prefix}: {d.Message} ({location})");
         Console.Error.WriteLine(lineText);
         Console.Error.WriteLine(marker);
+    }
+}
+
+static string? TryGetFullPathSafe(string path)
+{
+    try
+    {
+        return Path.GetFullPath(path);
+    }
+    catch
+    {
+        return null;
     }
 }
 
@@ -6814,6 +7088,14 @@ sealed record StateMapEntry(string Name, int Size);
 
 readonly record struct InProcessSwapResult(bool Success, string Message, double LoadMs);
 readonly record struct InProcessSwapQueueResult(bool Accepted, ulong SwapId, ulong SupersededSwapId, string Message, Task<InProcessSwapResult>? CompletionTask);
+readonly record struct InProcessGenerationTelemetry(
+    ulong ActiveGeneration,
+    int PendingRetiredGenerations,
+    long PendingRetiredBytes,
+    long TotalRetiredGenerations,
+    long TotalRetiredBytes,
+    int RetireWindowFrames,
+    long TickCount);
 
 enum SwapHookKind
 {
@@ -6839,9 +7121,16 @@ sealed class InProcessTickHost : IDisposable
     private readonly object gate = new();
     private readonly CancellationTokenSource cts = new();
     private readonly int fps;
+    private readonly int retireWindowFrames;
     private Thread? tickThread;
     private LoadedModule? current;
     private PendingSwapPlan? pendingSwap;
+    private readonly Queue<RetiredGeneration> retiredGenerations = new();
+    private ulong currentGeneration;
+    private long tickCount;
+    private long pendingRetiredBytes;
+    private long totalRetiredGenerations;
+    private long totalRetiredBytes;
     private volatile bool running;
     private volatile int exitCode;
     private bool disposed;
@@ -6849,10 +7138,12 @@ sealed class InProcessTickHost : IDisposable
     public bool IsRunning => running;
     public int ExitCode => exitCode;
 
-    private InProcessTickHost(LoadedModule initial, int fps)
+    private InProcessTickHost(LoadedModule initial, int fps, int retireWindowFrames)
     {
         current = initial;
         this.fps = fps;
+        this.retireWindowFrames = Math.Max(0, retireWindowFrames);
+        currentGeneration = initial.Generation;
         running = true;
         tickThread = new Thread(TickLoop)
         {
@@ -6862,16 +7153,32 @@ sealed class InProcessTickHost : IDisposable
         tickThread.Start();
     }
 
-    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps)
+    public static InProcessTickHost? Start(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, int fps, int retireWindowFrames)
     {
-        var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, out var error);
+        var loaded = LoadedModule.TryLoad(dllPath, moduleName, stateMap, hookKind, generation: 1, out var error);
         if (loaded is null)
         {
             Console.Error.WriteLine($"error: failed to load in-process module: {error}");
             return null;
         }
 
-        return new InProcessTickHost(loaded, fps);
+        return new InProcessTickHost(loaded, fps, retireWindowFrames);
+    }
+
+    public InProcessGenerationTelemetry GetGenerationTelemetry()
+    {
+        lock (gate)
+        {
+            var activeGeneration = current?.Generation ?? currentGeneration;
+            return new InProcessGenerationTelemetry(
+                activeGeneration,
+                retiredGenerations.Count,
+                pendingRetiredBytes,
+                totalRetiredGenerations,
+                totalRetiredBytes,
+                retireWindowFrames,
+                tickCount);
+        }
     }
 
     public InProcessSwapQueueResult QueueSwap(ulong swapId, string dllPath, IReadOnlyList<StateMapEntry> newStateMap, SwapHookKind newHookKind)
@@ -6963,6 +7270,9 @@ sealed class InProcessTickHost : IDisposable
                 int tickRc;
                 lock (gate)
                 {
+                    tickCount++;
+                    RetireReadyGenerationsLocked();
+
                     if (pendingSwap is not null)
                     {
                         swapPlan = pendingSwap;
@@ -6979,6 +7289,7 @@ sealed class InProcessTickHost : IDisposable
                         return;
                     }
                     tickRc = module.Tick();
+                    RetireReadyGenerationsLocked();
                 }
 
                 if (hasSwapResult && swapPlan is not null)
@@ -7046,6 +7357,19 @@ sealed class InProcessTickHost : IDisposable
             pendingSwap = null;
             current?.Dispose();
             current = null;
+            while (retiredGenerations.Count > 0)
+            {
+                var retired = retiredGenerations.Dequeue();
+                try
+                {
+                    retired.Module.Dispose();
+                }
+                catch
+                {
+                    // Best effort.
+                }
+            }
+            pendingRetiredBytes = 0;
         }
         pending?.Completion.TrySetResult(new InProcessSwapResult(false, "host disposed before swap commit", -1));
         cts.Dispose();
@@ -7059,7 +7383,7 @@ sealed class InProcessTickHost : IDisposable
         }
 
         var loadSw = Stopwatch.StartNew();
-        var incoming = LoadedModule.TryLoad(plan.DllPath, plan.ModuleName, plan.StateMap, plan.HookKind, out var loadError);
+        var incoming = LoadedModule.TryLoad(plan.DllPath, plan.ModuleName, plan.StateMap, plan.HookKind, currentGeneration + 1, out var loadError);
         loadSw.Stop();
         var loadMs = loadSw.Elapsed.TotalMilliseconds;
         if (incoming is null)
@@ -7098,6 +7422,9 @@ sealed class InProcessTickHost : IDisposable
 
             old = current;
             current = incoming;
+            currentGeneration = incoming.Generation;
+            EnqueueRetiredGenerationLocked(old);
+            old = null;
             return new InProcessSwapResult(true, string.Empty, loadMs);
         }
         catch (Exception ex)
@@ -7108,6 +7435,38 @@ sealed class InProcessTickHost : IDisposable
         finally
         {
             old?.Dispose();
+        }
+    }
+
+    private void EnqueueRetiredGenerationLocked(LoadedModule module)
+    {
+        var retireAtTick = tickCount + retireWindowFrames;
+        retiredGenerations.Enqueue(new RetiredGeneration(module, retireAtTick));
+        pendingRetiredBytes += module.CodeBytes;
+    }
+
+    private void RetireReadyGenerationsLocked()
+    {
+        while (retiredGenerations.Count > 0 && retiredGenerations.Peek().RetireAfterTick <= tickCount)
+        {
+            var retired = retiredGenerations.Dequeue();
+            pendingRetiredBytes -= retired.Module.CodeBytes;
+            if (pendingRetiredBytes < 0)
+            {
+                pendingRetiredBytes = 0;
+            }
+
+            totalRetiredGenerations++;
+            totalRetiredBytes += retired.Module.CodeBytes;
+
+            try
+            {
+                retired.Module.Dispose();
+            }
+            catch
+            {
+                // Best effort.
+            }
         }
     }
 
@@ -7188,9 +7547,23 @@ sealed class InProcessTickHost : IDisposable
         }
     }
 
+    private sealed class RetiredGeneration
+    {
+        public LoadedModule Module { get; }
+        public long RetireAfterTick { get; }
+
+        public RetiredGeneration(LoadedModule module, long retireAfterTick)
+        {
+            Module = module;
+            RetireAfterTick = retireAfterTick;
+        }
+    }
+
     private sealed class LoadedModule : IDisposable
     {
         public string ModuleName { get; }
+        public ulong Generation { get; }
+        public long CodeBytes { get; }
         public MainDelegate Main { get; }
         public TickDelegate Tick { get; }
         public IReadOnlyDictionary<string, StateSymbol> StateSymbols => stateSymbols;
@@ -7203,6 +7576,8 @@ sealed class InProcessTickHost : IDisposable
 
         private LoadedModule(
             string moduleName,
+            ulong generation,
+            long codeBytes,
             IntPtr handle,
             MainDelegate main,
             TickDelegate tick,
@@ -7212,6 +7587,8 @@ sealed class InProcessTickHost : IDisposable
             Dictionary<string, StateSymbol> stateSymbols)
         {
             ModuleName = moduleName;
+            Generation = generation;
+            CodeBytes = codeBytes;
             this.handle = handle;
             Main = main;
             Tick = tick;
@@ -7221,12 +7598,22 @@ sealed class InProcessTickHost : IDisposable
             this.stateSymbols = stateSymbols;
         }
 
-        public static LoadedModule? TryLoad(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, out string? error)
+        public static LoadedModule? TryLoad(string dllPath, string moduleName, IReadOnlyList<StateMapEntry> stateMap, SwapHookKind hookKind, ulong generation, out string? error)
         {
             error = null;
             IntPtr handle = IntPtr.Zero;
             try
             {
+                long codeBytes = 0;
+                try
+                {
+                    codeBytes = new FileInfo(dllPath).Length;
+                }
+                catch
+                {
+                    codeBytes = 0;
+                }
+
                 handle = NativeLibrary.Load(dllPath);
                 var mainPtr = NativeLibrary.GetExport(handle, $"{moduleName}__main");
                 var tickPtr = NativeLibrary.GetExport(handle, $"{moduleName}__tick");
@@ -7255,7 +7642,7 @@ sealed class InProcessTickHost : IDisposable
                     symbols[entry.Name] = new StateSymbol(entry.Name, entry.Size, ptr);
                 }
 
-                return new LoadedModule(moduleName, handle, main, tick, hookI32, hookVoid, hookKind, symbols);
+                return new LoadedModule(moduleName, generation, codeBytes, handle, main, tick, hookI32, hookVoid, hookKind, symbols);
             }
             catch (Exception ex)
             {
@@ -7302,7 +7689,187 @@ sealed class InProcessTickHost : IDisposable
         }
     }
 
-    readonly record struct StateSymbol(string Name, int Size, IntPtr Pointer);
+readonly record struct StateSymbol(string Name, int Size, IntPtr Pointer);
+}
+
+sealed class BufferOverlayBridge : IDisposable
+{
+    private readonly ConcurrentDictionary<string, string> sourcesByPath =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource cts = new();
+    private readonly Task readerTask;
+    private readonly Action onOverlayChanged;
+
+    private BufferOverlayBridge(Action onOverlayChanged)
+    {
+        this.onOverlayChanged = onOverlayChanged;
+        readerTask = Task.Run(ReadCommandsLoop);
+    }
+
+    public static BufferOverlayBridge? StartIfEnabled(CancellationToken watchToken, Action onOverlayChanged)
+    {
+        if (!IsEnabled())
+        {
+            return null;
+        }
+
+        var bridge = new BufferOverlayBridge(onOverlayChanged);
+        watchToken.Register(bridge.Dispose);
+        return bridge;
+    }
+
+    public string? TryLoad(string path)
+    {
+        var fullPath = NormalizePath(path);
+        return sourcesByPath.TryGetValue(fullPath, out var source) ? source : null;
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            cts.Cancel();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            readerTask.Wait(250);
+        }
+        catch
+        {
+            // Best-effort shutdown.
+        }
+    }
+
+    private async Task ReadCommandsLoop()
+    {
+        StreamReader? reader = null;
+        try
+        {
+            var stdin = Console.OpenStandardInput();
+            reader = new StreamReader(stdin, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+
+            while (!cts.IsCancellationRequested)
+            {
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                TryApplyCommand(line);
+            }
+        }
+        finally
+        {
+            try
+            {
+                reader?.Dispose();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+    }
+
+    private void TryApplyCommand(string line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("kind", out var kindElement) || kindElement.ValueKind != JsonValueKind.String)
+            {
+                return;
+            }
+
+            var kind = kindElement.GetString();
+            switch (kind)
+            {
+                case "set":
+                case "overlay.set":
+                    if (!root.TryGetProperty("path", out var setPathElement) ||
+                        !root.TryGetProperty("text", out var textElement) ||
+                        setPathElement.ValueKind != JsonValueKind.String ||
+                        textElement.ValueKind != JsonValueKind.String)
+                    {
+                        return;
+                    }
+
+                    var setPath = NormalizePath(setPathElement.GetString()!);
+                    var text = textElement.GetString() ?? string.Empty;
+                    sourcesByPath[setPath] = text;
+                    onOverlayChanged();
+                    return;
+                case "clear":
+                case "overlay.clear":
+                    if (!root.TryGetProperty("path", out var clearPathElement) ||
+                        clearPathElement.ValueKind != JsonValueKind.String)
+                    {
+                        return;
+                    }
+
+                    var clearPath = NormalizePath(clearPathElement.GetString()!);
+                    _ = sourcesByPath.TryRemove(clearPath, out _);
+                    onOverlayChanged();
+                    return;
+                case "clear_all":
+                case "overlay.clear_all":
+                    sourcesByPath.Clear();
+                    onOverlayChanged();
+                    return;
+            }
+        }
+        catch
+        {
+            // Ignore malformed overlay messages.
+        }
+    }
+
+    private static string NormalizePath(string rawPath)
+    {
+        if (rawPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase) &&
+            Uri.TryCreate(rawPath, UriKind.Absolute, out var uri) &&
+            uri.IsFile)
+        {
+            return Path.GetFullPath(uri.LocalPath);
+        }
+
+        return Path.GetFullPath(rawPath);
+    }
+
+    private static bool IsEnabled()
+    {
+        var env = Environment.GetEnvironmentVariable("STASIS_BUFFER_OVERLAY_STDIN");
+        if (string.Equals(env, "1", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        return false;
+    }
 }
 
 sealed record CompileResult(

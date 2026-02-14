@@ -89,6 +89,39 @@ This is the first implementation slice toward the in-process architecture target
   - old code/data remain active on rejection
 - Runner watch path now tracks pending patches with build IDs and emits transition telemetry for queued/applied/rejected outcomes.
 
+### Generation-based code memory retirement (#158)
+
+- In-process tick host now assigns a monotonic generation ID to each loaded module.
+- On successful swap:
+  - active generation increments
+  - previous module is moved to a retired-generation queue (not freed immediately)
+- Retired generations are disposed in bulk after a bounded safe window (`STASIS_INPROC_RETIRE_WINDOW_FRAMES`, default `2`).
+- Added generation telemetry to in-process swap state output:
+  - `gen=...`
+  - `retire_pending=... retire_pending_bytes=...`
+  - `retired=... retired_bytes=...`
+  - `retire_window=... tick=...`
+- Added integration coverage (`WatchTickInProcessSwap_ReportsGenerationRetirementTelemetry`) to validate:
+  - generation increases monotonically across swaps
+  - pending retired generations remain bounded
+  - retired-generation counters advance over repeated swaps
+
+### Swap-time buffer overlay input for watch mode (#159, incremental)
+
+- Added a built-in source overlay bridge in `Stasis.Cli` watch mode (`BufferOverlayBridge`):
+  - enabled explicitly with `STASIS_BUFFER_OVERLAY_STDIN=1`
+  - reads JSON line commands from stdin (`set` / `clear` / `clear_all`)
+  - overlays source text by absolute path (supports `file://` URIs)
+- Wired overlay source loading through JIT and in-process watch swap paths:
+  - `WatchCraneliftTickJitSwap`
+  - `WatchCraneliftTickInProcessSwap`
+- AOT runner watch mode (`WatchCraneliftTickHotSwap`) intentionally ignores overlay stdin to avoid consuming guest program stdin.
+- Import expansion and runtime-import detection now honor overlay sources for imported files.
+- Diagnostic printing in watch mode now resolves line/column from the overlay text for imported files when available.
+- Added coverage:
+  - `SourceImporterTests.ExpandImports_UsesSourceLoaderForImportedFiles`
+  - `SourceImporterTests.ExpandImports_UsesOverlayPlatformSpecificFile`
+
 ## Already present before this branch
 
 - File watch + debounce + rebuild loop.
@@ -100,13 +133,10 @@ This is the first implementation slice toward the in-process architecture target
 ## Not implemented yet (planned)
 
 - In-process JIT service replacing external runner process.
-- Explicit two-phase commit object model (`pending patch` + atomic commit step).
-- Generation-based code memory retirement inside host process.
-- VS Code buffer-native compilation input path (LSP push, no disk dependency).
+- Direct VS Code LSP push transport for swap status/diagnostics (currently stdin overlay protocol is available as the ingestion path).
 
 ## Next concrete step
 
-Implement issue #158: generation-based code memory retirement.
-- Add explicit code generation/version tracking per successful swap.
-- Keep old generations alive for a bounded safe window.
-- Retire/free old generations in bulk with deterministic policy and diagnostics.
+Complete issue #159 end-to-end editor integration.
+- Wire the VS Code extension/LSP host to emit stdin overlay commands automatically for unsaved buffers.
+- Add structured swap outcome events back to editor surfaces (status + diagnostics mapping).

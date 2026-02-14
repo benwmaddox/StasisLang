@@ -229,6 +229,26 @@ public class ParserTests
     }
 
     [Fact]
+    public void Parses_struct_initializer_assignment()
+    {
+        var source = """
+            struct Ball { x: i32; y: i32; active: bool; }
+            global balls: Ball[2];
+            function tick(): void {
+                balls[0] = { active = true, x = 1, y = 2 };
+            }
+            """;
+
+        var result = Parser.Parse(source);
+
+        Assert.Empty(result.Diagnostics);
+        var func = Assert.IsType<FunctionDeclarationSyntax>(result.CompilationUnit.Declarations[2]);
+        var stmt = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(func.Body!.Statements));
+        var assign = Assert.IsType<AssignmentExpressionSyntax>(stmt.Expression);
+        Assert.IsType<StructInitializerExpressionSyntax>(assign.Right);
+    }
+
+    [Fact]
     public void Respects_operator_precedence()
     {
         var source = """

@@ -1,0 +1,177 @@
+name: Nightly Release
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.meta.outputs.should_release }}
+      nightly_tag: ${{ steps.meta.outputs.nightly_tag }}
+      last_tag: ${{ steps.meta.outputs.last_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine if nightly release is needed
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          last_tag="$(git tag --list 'nightly-*' --sort=-creatordate | head -n1 || true)"
+          if [ -z "${last_tag}" ]; then
+            should_release="true"
+          else
+            commit_count="$(git rev-list "${last_tag}..HEAD" --count)"
+            if [ "${commit_count}" -gt 0 ]; then
+              should_release="true"
+            else
+              should_release="false"
+            fi
+          fi
+
+          date_tag="$(date -u +'%Y%m%d')"
+          nightly_tag="nightly-${date_tag}-${GITHUB_RUN_NUMBER}"
+
+          echo "last_tag=${last_tag}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
+          echo "nightly_tag=${nightly_tag}" >> "$GITHUB_OUTPUT"
+
+          echo "last nightly tag: ${last_tag:-<none>}"
+          echo "should release: ${should_release}"
+          echo "new nightly tag: ${nightly_tag}"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: stasis-nightly-linux-x64
+            ext: tar.gz
+          - os: windows-latest
+            rid: win-x64
+            archive: stasis-nightly-win-x64
+            ext: zip
+          - os: macos-latest
+            rid: osx-x64
+            archive: stasis-nightly-osx-x64
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_NOLOGO: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Cranelift AOT helper
+        run: cargo build -p stasis-cranelift-aot --release
+        working-directory: tools/cranelift-aot
+
+      - name: Build Cranelift JIT runner
+        run: cargo build -p stasis-cranelift-jit-runner --release
+        working-directory: tools/cranelift-jit-runner
+
+      - name: Publish Stasis CLI (self-contained)
+        run: >
+          dotnet publish Stasis.Cli/Stasis.Cli.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          -p:SelfContained=true
+          -p:PublishSingleFile=true
+          -p:PublishReadyToRun=true
+          -o dist/cli
+
+      - name: Assemble bundle (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/${{ matrix.archive }}"
+          mkdir -p "${out}/bin"
+          cp -R dist/cli/. "${out}/"
+          cp tools/cranelift-aot/target/release/stasis-cranelift-aot "${out}/bin/"
+          cp tools/cranelift-jit-runner/target/release/stasis-cranelift-jit-runner "${out}/bin/"
+          cp README.md "${out}/"
+          tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
+
+      - name: Assemble bundle (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = "dist/${{ matrix.archive }}"
+          New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
+          Copy-Item dist/cli/* $out -Recurse -Force
+          Copy-Item tools/cranelift-aot/target/release/stasis-cranelift-aot.exe "$out/bin/" -Force
+          Copy-Item tools/cranelift-jit-runner/target/release/stasis-cranelift-jit-runner.exe "$out/bin/" -Force
+          Copy-Item README.md "$out/" -Force
+          Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}.${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIGHTLY_TAG: ${{ needs.detect.outputs.nightly_tag }}
+          LAST_TAG: ${{ needs.detect.outputs.last_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="Automated nightly build."
+          if [ -n "${LAST_TAG}" ]; then
+            notes="${notes}\n\nChanges since ${LAST_TAG}: https://github.com/${GITHUB_REPOSITORY}/compare/${LAST_TAG}...${GITHUB_SHA}"
+          else
+            notes="${notes}\n\nFirst nightly tag in this repository."
+          fi
+
+          gh release create "${NIGHTLY_TAG}" dist/* \
+            --title "Nightly ${NIGHTLY_TAG}" \
+            --notes "${notes}" \
+            --prerelease
+
+  no_changes:
+    needs: detect
+    if: needs.detect.outputs.should_release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip release
+        run: |
+          echo "No code changes detected since last nightly tag: ${{ needs.detect.outputs.last_tag }}"
+          echo "Skipping nightly release."

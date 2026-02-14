@@ -1,0 +1,350 @@
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/game_input.stasis";
+import "../src/stdlib/game_draw.stasis";
+import "../src/stdlib/sdl_scancodes.stasis";
+
+// Bucket Catcher - minimal instructional sample.
+//
+// Goals:
+// - Show a simple game loop (init -> tick -> draw).
+// - Demonstrate keyboard + pointer input.
+// - Keep state in explicit globals (no hidden allocation).
+// - Keep most tuning data in JSON so learners can edit without recompiling.
+// - Use PNG sprites for the bucket/ball to show asset binding.
+//
+// Config binding:
+// - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
+// - The runtime runner binds matching keys into the global state (see --data-bind).
+// - We require JSON binding; json_loaded must be true.
+// - json_loaded stays false unless the JSON file explicitly sets it to true.
+
+const MAX_BALLS: i32 = 24;
+
+struct Ball {
+    x: i32;
+    y: i32;
+    vy: i32;
+    active: bool;
+}
+
+// Tunable parameters (data-bound from JSON in samples/bucket_catcher/data/config.json).
+struct BucketConfig {
+    json_loaded: bool;
+    screen_width: i32;
+    screen_height: i32;
+    font_path: utf8[256];
+    font_size_pixels: i32;
+    bucket_sprite_path: utf8[256];
+    ball_sprite_path: utf8[256];
+    // Sprite colors come from the SVG assets.
+    bucket_width: i32;
+    bucket_height: i32;
+    bucket_bottom_padding: i32;
+    // Per-tick movement tuning (not per-second).
+    // - bucket_speed: how fast the target moves from keyboard input (pixels per tick).
+    // - bucket_turn_rate: max pixels per tick bucket_x can move towards the target.
+    bucket_speed: i32;
+    bucket_turn_rate: i32;
+    ball_radius: i32;
+    // Per-tick fall speed (pixels per tick).
+    ball_fall_speed: i32;
+    // Spawn cadence in ticks.
+    ball_spawn_ticks: i32;
+    background_red: f32;
+    background_green: f32;
+    background_blue: f32;
+    ui_red: f32;
+    ui_green: f32;
+    ui_blue: f32;
+}
+
+struct GameState {
+    config: BucketConfig;
+    bucket_x: i32;
+    bucket_target_x: i32;
+    catches: i32;
+    misses: i32;
+
+    // Keep this in sync with MAX_BALLS.
+    balls: Ball[24];
+    spawn_timer_ticks: i32;
+
+    ui_font: i32;
+    bucket_sprite: i32;
+    ball_sprite: i32;
+    ui_ascii: ascii[64];
+    ui_text: utf8[64];
+
+    rng_state: i32;
+}
+
+// Single global state block (instructional style).
+global state: GameState;
+
+function seed_rng(seed: i32): void {
+    // Park-Miller "minimal standard" RNG (31-bit, no overflow with i32 math).
+    // State is in [1, 2147483646].
+    let s: i32 = seed;
+    if (s == -2147483648) {
+        state.rng_state = 2147483646;
+        return;
+    }
+
+    if (s < 0) { s = 0 - s; }
+    s = s % 2147483646;
+    if (s <= 0) { s = s + 2147483646; }
+
+    state.rng_state = s;
+}
+
+function next_rand_u32(): i32 {
+    let hi: i32 = state.rng_state / 127773;
+    let lo: i32 = state.rng_state - hi * 127773;
+    let next: i32 = 16807 * lo - 2836 * hi;
+    if (next <= 0) { next = next + 2147483646; }
+    state.rng_state = next;
+    return next;
+}
+
+function rand_range_i32(min_v: i32, max_exclusive: i32): i32 {
+    // Returns an integer in [min_v, max_exclusive).
+    let span: i32 = max_exclusive - min_v;
+    if (span <= 1) { return min_v; }
+    return min_v + (next_rand_u32() % span);
+}
+
+function ensure_config_loaded(): void {
+    if (state.config.json_loaded) {
+        return;
+    }
+
+    print_string("error: config.json not bound; start the sample with data binding enabled.\n");
+}
+
+function clamp_i32(v: i32, lo: i32, hi: i32): i32 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+function init_game(): void {
+    ensure_config_loaded();
+    if (!state.config.json_loaded) {
+        return;
+    }
+    seed_rng(get_time_ms());
+
+    state.bucket_x = state.config.screen_width / 2;
+    state.bucket_target_x = state.bucket_x;
+    state.catches = 0;
+    state.misses = 0;
+    state.spawn_timer_ticks = 0;
+
+    foreach (let ball in state.balls) {
+        ball.active = false;
+    }
+}
+
+function ensure_window(): bool {
+    if (!state.config.json_loaded) {
+        ensure_config_loaded();
+        return false;
+    }
+    if (state.ui_font != 0) {
+        return true;
+    }
+
+    if (!init_window(state.config.screen_width, state.config.screen_height, "Bucket Catcher")) {
+        return false;
+    }
+
+    // Fonts depend on the graphics context, so load them after the window exists.
+    state.ui_font = load_font(state.config.font_path, state.config.font_size_pixels);
+    state.bucket_sprite = gfx_load_sprite(
+        state.config.bucket_sprite_path,
+        state.config.bucket_width,
+        state.config.bucket_height
+    );
+    state.ball_sprite = gfx_load_sprite(
+        state.config.ball_sprite_path,
+        state.config.ball_radius * 2,
+        state.config.ball_radius * 2
+    );
+
+    if (state.ui_font == 0) {
+        print_string("error: failed to load font: ");
+        print_string(state.config.font_path);
+        print_string("\n");
+        return false;
+    }
+    if (state.bucket_sprite == 0) {
+        print_string("error: failed to load bucket sprite: ");
+        print_string(state.config.bucket_sprite_path);
+        print_string("\n");
+        return false;
+    }
+    if (state.ball_sprite == 0) {
+        print_string("error: failed to load ball sprite: ");
+        print_string(state.config.ball_sprite_path);
+        print_string("\n");
+        return false;
+    }
+    return true;
+}
+
+function spawn_ball(): void {
+    let i: i32 = 0;
+    for (i = 0; i < MAX_BALLS; i = i + 1) {
+        if (!state.balls[i].active) {
+            state.balls[i] = {
+                active = true,
+                x = rand_range_i32(state.config.ball_radius, state.config.screen_width - state.config.ball_radius),
+                y = -state.config.ball_radius,
+                vy = state.config.ball_fall_speed,
+            };
+            return;
+        }
+    }
+}
+
+function update_input(): void {
+    // Pointer input: follow the first active pointer when it is down.
+    let count: i32 = input_pointer_count();
+    if (count > 0 && input_pointer_is_down(0)) {
+        state.bucket_target_x = f32_to_i32(input_pointer_x_px(0));
+    }
+
+    // Keyboard input: steer left/right with arrow keys.
+    let move: i32 = 0;
+    if (input_key_down(Scancode.Left)) { move = move - 1; }
+    if (input_key_down(Scancode.Right)) { move = move + 1; }
+    if (move != 0) {
+        state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed;
+    }
+
+    let half_w: i32 = state.config.bucket_width / 2;
+    state.bucket_target_x = clamp_i32(state.bucket_target_x, half_w, state.config.screen_width - half_w);
+}
+
+function update_bucket(): void {
+    // Smoothly approach the target to avoid jittery motion.
+    let half_w: i32 = state.config.bucket_width / 2;
+    let dx: i32 = state.bucket_target_x - state.bucket_x;
+    let step: i32 = clamp_i32(dx, -state.config.bucket_turn_rate, state.config.bucket_turn_rate);
+    state.bucket_x = state.bucket_x + step;
+    state.bucket_x = clamp_i32(state.bucket_x, half_w, state.config.screen_width - half_w);
+}
+
+function update_balls(): void {
+    let bucket_top: i32 = state.config.screen_height - state.config.bucket_bottom_padding - state.config.bucket_height;
+    let bucket_left: i32 = state.bucket_x - state.config.bucket_width / 2;
+    let bucket_right: i32 = state.bucket_x + state.config.bucket_width / 2;
+
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            ball.y = ball.y + ball.vy;
+
+            // Catch: circle overlaps the bucket rectangle.
+            if (ball.y + state.config.ball_radius >= bucket_top &&
+                ball.y - state.config.ball_radius <= bucket_top + state.config.bucket_height &&
+                ball.x >= bucket_left &&
+                ball.x <= bucket_right) {
+                ball.active = false;
+                state.catches = state.catches + 1;
+            } else {
+                // Miss: fell below the screen.
+                if (ball.y - state.config.ball_radius > state.config.screen_height) {
+                    ball.active = false;
+                    state.misses = state.misses + 1;
+                }
+            }
+        }
+    }
+}
+
+function update_spawns(): void {
+    state.spawn_timer_ticks = state.spawn_timer_ticks + 1;
+    if (state.spawn_timer_ticks >= state.config.ball_spawn_ticks) {
+        state.spawn_timer_ticks = 0;
+        spawn_ball();
+    }
+}
+
+function draw_bucket(): void {
+    let x0: i32 = state.bucket_x - state.config.bucket_width / 2;
+    let y0: i32 = state.config.screen_height - state.config.bucket_bottom_padding - state.config.bucket_height;
+
+    gfx_draw_sprite(
+        state.bucket_sprite,
+        x0,
+        y0,
+        state.config.bucket_width,
+        state.config.bucket_height,
+        0,
+        255
+    );
+}
+
+function draw_balls(): void {
+    foreach (let ball in state.balls) {
+        if (ball.active) {
+            gfx_draw_sprite(
+                state.ball_sprite,
+                ball.x - state.config.ball_radius,
+                ball.y - state.config.ball_radius,
+                state.config.ball_radius * 2,
+                state.config.ball_radius * 2,
+                0,
+                255
+            );
+        }
+    }
+}
+
+function draw_ui(): void {
+    if (state.ui_font == 0) { return; }
+    ascii_clear(state.ui_ascii);
+    ascii_append(state.ui_ascii, "Catches: ");
+    ascii_push_i32(state.ui_ascii, state.catches);
+    ascii_append(state.ui_ascii, "  Misses: ");
+    ascii_push_i32(state.ui_ascii, state.misses);
+    utf8_from_ascii(state.ui_text, state.ui_ascii, 64);
+
+    draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
+}
+
+function tick(): i32 {
+    if (!state.config.json_loaded || state.ui_font == 0 || state.bucket_sprite == 0 || state.ball_sprite == 0) {
+        return 1;
+    }
+
+    if (should_quit()) {
+        return 1;
+    }
+
+    update_input();
+    update_bucket();
+    update_spawns();
+    update_balls();
+
+    begin_frame();
+    clear(state.config.background_red, state.config.background_green, state.config.background_blue, 1.0);
+    draw_balls();
+    draw_bucket();
+    draw_ui();
+    end_frame();
+
+    return 0;
+}
+
+function main(): i32 {
+    init_game();
+    if (!state.config.json_loaded) {
+        return 1;
+    }
+    if (!ensure_window()) {
+        return 1;
+    }
+    return 0;
+}
