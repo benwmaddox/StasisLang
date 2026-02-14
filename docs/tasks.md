@@ -50,4 +50,5 @@ This file is a lightweight, persistent checklist of remaining work. It complemen
 ### Tooling / DX
 
 - [x] Support compiling Markdown code blocks: allow `stasis build/test` on `.md` by extracting ```stasis fenced blocks so docs stay valid.
+- [x] Repository hygiene: remove low-value, unreferenced samples and move duplicate root task tracker to `docs/diagnostics-tasks.md`.
 - [ ] Maintenance: regularly scan open PRs for conflicts and keep them mergeable (merge `main` into branches or rebase).
