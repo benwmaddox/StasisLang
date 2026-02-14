@@ -1,4 +1,6 @@
-# Tasks
+﻿# Diagnostics Tasks
+
+This file was moved from the repo root `tasks.md` during cleanup so task tracking lives under `docs/`.
 
 ## Diagnostics (Elm-like)
 
@@ -68,4 +70,5 @@
 ### Follow-ups / cleanup
 - Fix encoding in `docs/error-messages.md` (currently contains non-ASCII mojibake); keep docs ASCII.
 - Reference the diagnostic style doc from `docs/spec.md` and keep examples in sync.
+
 
