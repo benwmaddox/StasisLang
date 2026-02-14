@@ -30,8 +30,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use the most recent nightly tag reachable from HEAD so dispatches
-          # on non-main refs do not force false-positive "changes detected".
+          # Use the most recent nightly tag reachable from HEAD.
+          # This avoids false-positive "changes detected" when dispatching
+          # from refs that do not contain the newest global nightly tag.
           last_tag="$(git tag --merged HEAD --list 'nightly-*' --sort=-creatordate | head -n1 || true)"
           if [ -z "${last_tag}" ]; then
             should_release="true"
@@ -64,15 +65,17 @@ jobs:
         include:
           - os: ubuntu-latest
             rid: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
             archive: stasis-nightly-linux-x64
             ext: tar.gz
           - os: windows-latest
             rid: win-x64
+            rust_target: x86_64-pc-windows-msvc
             archive: stasis-nightly-win-x64
             ext: zip
-          # Keep runner architecture aligned with osx-x64 RID.
-          - os: macos-13
+          - os: macos-14
             rid: osx-x64
+            rust_target: x86_64-apple-darwin
             archive: stasis-nightly-osx-x64
             ext: tar.gz
     runs-on: ${{ matrix.os }}
@@ -88,13 +91,15 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: Build Cranelift AOT helper
-        run: cargo build -p stasis-cranelift-aot --release
+        run: cargo build -p stasis-cranelift-aot --release --target ${{ matrix.rust_target }}
         working-directory: tools/cranelift-aot
 
       - name: Build Cranelift JIT runner
-        run: cargo build -p stasis-cranelift-jit-runner --release
+        run: cargo build -p stasis-cranelift-jit-runner --release --target ${{ matrix.rust_target }}
         working-directory: tools/cranelift-jit-runner
 
       - name: Publish Stasis CLI (self-contained)
@@ -115,8 +120,8 @@ jobs:
           out="dist/${{ matrix.archive }}"
           mkdir -p "${out}/bin"
           cp -R dist/cli/. "${out}/"
-          cp tools/cranelift-aot/target/release/stasis-cranelift-aot "${out}/bin/"
-          cp tools/cranelift-jit-runner/target/release/stasis-cranelift-jit-runner "${out}/bin/"
+          cp tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot "${out}/bin/"
+          cp tools/cranelift-jit-runner/target/${{ matrix.rust_target }}/release/stasis-cranelift-jit-runner "${out}/bin/"
           cp README.md "${out}/"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
 
@@ -127,8 +132,8 @@ jobs:
           $out = "dist/${{ matrix.archive }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
           Copy-Item dist/cli/* $out -Recurse -Force
-          Copy-Item tools/cranelift-aot/target/release/stasis-cranelift-aot.exe "$out/bin/" -Force
-          Copy-Item tools/cranelift-jit-runner/target/release/stasis-cranelift-jit-runner.exe "$out/bin/" -Force
+          Copy-Item tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot.exe "$out/bin/" -Force
+          Copy-Item tools/cranelift-jit-runner/target/${{ matrix.rust_target }}/release/stasis-cranelift-jit-runner.exe "$out/bin/" -Force
           Copy-Item README.md "$out/" -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
 
@@ -144,6 +149,10 @@ jobs:
     if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -165,6 +174,7 @@ jobs:
           fi
 
           gh release create "${NIGHTLY_TAG}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "Nightly ${NIGHTLY_TAG}" \
             --notes "${notes}" \
             --prerelease
