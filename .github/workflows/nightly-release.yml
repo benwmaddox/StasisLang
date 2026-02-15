@@ -166,11 +166,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notes="Automated nightly build."
+          notes="$(printf 'Automated nightly build.')"
           if [ -n "${LAST_TAG}" ]; then
-            notes="${notes}\n\nChanges since ${LAST_TAG}: https://github.com/${GITHUB_REPOSITORY}/compare/${LAST_TAG}...${GITHUB_SHA}"
+            notes="$(printf 'Automated nightly build.\n\nChanges since %s: https://github.com/%s/compare/%s...%s' "${LAST_TAG}" "${GITHUB_REPOSITORY}" "${LAST_TAG}" "${GITHUB_SHA}")"
           else
-            notes="${notes}\n\nFirst nightly tag in this repository."
+            notes="$(printf 'Automated nightly build.\n\nFirst nightly tag in this repository.')"
           fi
 
           gh release create "${NIGHTLY_TAG}" dist/* \
