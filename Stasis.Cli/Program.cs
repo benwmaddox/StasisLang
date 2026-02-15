@@ -5550,6 +5550,13 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var childArgs = Environment.GetCommandLineArgs()
         .Skip(1)
         .Where(arg => !string.Equals(arg, "--watch", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+    // Watch child must always execute a single run; otherwise default run behavior re-enters watch mode.
+    if (mode == "run" && !childArgs.Any(arg => string.Equals(arg, "--no-watch", StringComparison.OrdinalIgnoreCase)))
+    {
+        childArgs.Add("--no-watch");
+    }
+    var quotedChildArgs = childArgs
         .Select(QuoteArg)
         .ToArray();
 
@@ -5560,7 +5567,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         return 1;
     }
     if (Path.GetFileNameWithoutExtension(exePath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
-        childArgs.Length > 0 && childArgs[0].Equals("run", StringComparison.OrdinalIgnoreCase))
+        childArgs.Count > 0 && childArgs[0].Equals("run", StringComparison.OrdinalIgnoreCase))
     {
         Console.Error.WriteLine("error: --watch requires running the built CLI (not `dotnet run`).");
         return 1;
@@ -5569,7 +5576,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     Process? child = null;
     if (mode == "run")
     {
-        child = StartWatchChild(exePath, childArgs);
+        child = StartWatchChild(exePath, quotedChildArgs);
     }
     else
     {
@@ -5628,7 +5635,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
                         child.Kill(entireProcessTree: true);
                         child.WaitForExit();
                     }
-                    child = StartWatchChild(exePath, childArgs);
+                    child = StartWatchChild(exePath, quotedChildArgs);
                 }
             }
             else
@@ -5639,7 +5646,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
 
         if (mode == "run" && enableHotState && pendingRestart && (child is null || child.HasExited))
         {
-            child = StartWatchChild(exePath, childArgs);
+            child = StartWatchChild(exePath, quotedChildArgs);
             pendingRestart = false;
             if (restartRequestedAt != DateTime.MinValue)
             {
