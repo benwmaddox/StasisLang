@@ -3111,7 +3111,7 @@ static int GetHotSwapDelayMs()
 
 static int GetTestExecutionTimeoutMs()
 {
-    const int defaultMs = 120000;
+    const int defaultMs = 30000;
     var env = Environment.GetEnvironmentVariable("STASIS_TEST_TIMEOUT_MS");
     if (string.IsNullOrWhiteSpace(env))
     {
@@ -5781,6 +5781,7 @@ static void PrintUsage(bool advanced = false)
     Console.WriteLine("  llvm: --llvm-target <triple>");
     Console.WriteLine("  test: --all --watch");
     Console.WriteLine("Cranelift: run/test uses native runner when available; set STASIS_CRANELIFT_RUNNER_EXE to override.");
+    Console.WriteLine("Tests: default execution timeout is 30000ms; set STASIS_TEST_TIMEOUT_MS to override.");
     Console.WriteLine("Tick watch (experimental): STASIS_CRANELIFT_INPROC_TICK=1 for headless in-process tick hot-swap.");
     Console.WriteLine("Cache: STASIS_DISABLE_ARTIFACT_CACHE=1 disables binary caching for Cranelift run/test.");
 }

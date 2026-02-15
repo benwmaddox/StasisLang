@@ -2,4 +2,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-"${SCRIPT_DIR}/stasis.sh" run --watch --backend cranelift --graphics "$@"
+"${SCRIPT_DIR}/stasis.sh" run --backend cranelift --graphics "$@"
