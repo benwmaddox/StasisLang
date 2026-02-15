@@ -19,9 +19,18 @@ using Stasis.Compiler.Syntax;
 using Stasis.Cli;
 
 var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
-if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
+if (cliArgs.Count > 0 && string.Equals(cliArgs.Peek(), "bridge", StringComparison.OrdinalIgnoreCase))
 {
-    PrintUsage();
+    cliArgs.Dequeue();
+    var bridgeExit = RunBridgeMode(cliArgs);
+    Environment.Exit(bridgeExit);
+    return;
+}
+
+var showAdvancedHelp = cliArgs.Contains("--help-advanced");
+if (cliArgs.Count == 0 || cliArgs.Contains("--help") || showAdvancedHelp)
+{
+    PrintUsage(showAdvancedHelp);
     return;
 }
 
@@ -161,6 +170,9 @@ while (cliArgs.Count > 0)
             break;
         case "--help":
             PrintUsage();
+            return;
+        case "--help-advanced":
+            PrintUsage(advanced: true);
             return;
         default:
             if (path is null)
@@ -5739,7 +5751,7 @@ static void WriteIrOutput(string ir, string? outputPath)
     }
 }
 
-static void PrintUsage()
+static void PrintUsage(bool advanced = false)
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  stasisc run [<file>] [--watch|--no-watch]");
@@ -5754,16 +5766,23 @@ static void PrintUsage()
     Console.WriteLine("  format=> with no path, format all .stasis files under working dir");
     Console.WriteLine();
     Console.WriteLine("Compatibility: 'stasisc release <file>' remains available as a build alias.");
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). Build/release require clang in PATH.");
-    Console.WriteLine("Run: omit <file> to pick interactively (breadth-first listing) and optionally enable --watch.");
-    Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
-    Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
-    Console.WriteLine("Graphics: enabled automatically when graphics APIs are used; use --graphics to force it on. Use --graphics-lib to override library path.");
-    Console.WriteLine("Backend: use --backend to select code generation backend. Defaults to 'cranelift' for run/test/build (when available) and 'llvm' for release; Cranelift is experimental.");
-    Console.WriteLine("LLVM: pass --llvm-target <triple> to set the LLVM module target triple (useful for cross-compiling emitted IR).");
-    Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
-    Console.WriteLine("Tick watch (experimental): set STASIS_CRANELIFT_INPROC_TICK=1 to run headless tick hot-swap in-process (no stasis-cranelift-jit-runner process).");
-    Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Build/release require clang in PATH.");
+    Console.WriteLine("Use --help-advanced to see backend/graphics/target flags and experimental options.");
+    if (!advanced)
+    {
+        return;
+    }
+    Console.WriteLine();
+    Console.WriteLine("Advanced options:");
+    Console.WriteLine("  run/test/build: --backend <llvm|cranelift> --module <name> --emit-ir --out <path>");
+    Console.WriteLine("  run/test: --fps <1..240> --hot-state --cranelift-runner --no-cranelift-runner");
+    Console.WriteLine("  build/release: --opt-level <0|1|2|3|s|z> --lto|--no-lto");
+    Console.WriteLine("  graphics: --graphics --graphics-lib <path>");
+    Console.WriteLine("  llvm: --llvm-target <triple>");
+    Console.WriteLine("  test: --all --watch");
+    Console.WriteLine("Cranelift: run/test uses native runner when available; set STASIS_CRANELIFT_RUNNER_EXE to override.");
+    Console.WriteLine("Tick watch (experimental): STASIS_CRANELIFT_INPROC_TICK=1 for headless in-process tick hot-swap.");
+    Console.WriteLine("Cache: STASIS_DISABLE_ARTIFACT_CACHE=1 disables binary caching for Cranelift run/test.");
 }
 
 static int RunBridgeMode(Queue<string> args)

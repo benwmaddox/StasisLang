@@ -79,10 +79,12 @@ Use `.\stasis.bat` (Windows) / `./stasis.sh` (Unix) from the repo root.
 
 Common commands:
 
+- `.\stasis.bat run .\samples\basic.stasis` (default dev watch loop)
+- `.\stasis.bat run .\samples\basic.stasis --no-watch` (single run)
+- `.\stasis.bat build .\samples\basic.stasis --out .\artifacts\basic.exe` (optimized by default)
 - `.\stasis.bat run .\samples\asteroids.stasis --backend llvm --graphics`
 - `.\stasis.bat test --all --backend cranelift`
 - `.\stasis.bat run .\samples\basic.stasis --emit-ir > out.ll`
-- `.\stasis.bat run .\samples\basic.stasis --watch` (opt-in dev loop)
 - Capture screenshots of windowed demos (writes to `artifacts/screenshots/` and opens the folder): `powershell -ExecutionPolicy Bypass -File .\scripts\capture_sample_screenshots.ps1`
 
 Backends:
