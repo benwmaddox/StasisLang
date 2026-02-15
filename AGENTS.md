@@ -29,6 +29,7 @@
 - Use short, imperative commit subjects; Conventional Commit prefixes (`feat:`, `fix:`, `docs:`) are encouraged for clarity.
 - Reference the spec section you touched when relevant (e.g., “align lowering with docs/spec.md §6.3”).
 - PRs should summarize intent, list user-visible changes, and call out spec updates or new commands; link issues and include reproduction or screenshots when UI/UX is involved.
+- Do not use escaped newline literals (`\n`) in user-facing text (PR bodies, release notes, comments). Use real newlines via body files, heredocs, or here-strings.
 
 ## Architecture & Design Notes
 - Core principles (per `docs/spec.md`): static global memory only; AoS syntax lowered to SoA storage; deterministic layouts; operator-method arithmetic/comparison (infix allowed) with infix assignment; compilation targets LLVM/WASM.
