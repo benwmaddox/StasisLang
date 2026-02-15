@@ -290,6 +290,29 @@ public class CliSnapshotTests
     }
 
     [Fact]
+    public void Help_Basic_HidesAdvancedOptions()
+    {
+        var (exitCode, stdout, stderr) = RunCli("--help");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("stasisc run [<file>] [--watch|--no-watch]", stdout, StringComparison.Ordinal);
+        Assert.Contains("Use --help-advanced", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("Advanced options:", stdout, StringComparison.Ordinal);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), $"Unexpected stderr: {stderr}");
+    }
+
+    [Fact]
+    public void Help_Advanced_ShowsAdvancedOptions()
+    {
+        var (exitCode, stdout, stderr) = RunCli("--help-advanced");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Advanced options:", stdout, StringComparison.Ordinal);
+        Assert.Contains("--backend <llvm|cranelift>", stdout, StringComparison.Ordinal);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), $"Unexpected stderr: {stderr}");
+    }
+
+    [Fact]
     public Task CraneliftRunner_UsesGraphicsImportLib()
     {
         if (!OperatingSystem.IsWindows())
