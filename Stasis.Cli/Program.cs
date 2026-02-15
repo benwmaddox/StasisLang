@@ -41,6 +41,7 @@ var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
 var watch = false;
+var watchConfiguredByUser = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
@@ -69,9 +70,14 @@ while (cliArgs.Count > 0)
         case "dev":
             // Back-compat alias for the run dev workflow.
             mode = "run";
+            watch = true;
+            watchConfiguredByUser = true;
             break;
         case "build":
             mode = arg;
+            // Go-like default: build emits optimized artifacts.
+            optLevel ??= "3";
+            enableLto = true;
             break;
         case "release":
             mode = arg;
@@ -103,6 +109,11 @@ while (cliArgs.Count > 0)
             break;
         case "--watch":
             watch = true;
+            watchConfiguredByUser = true;
+            break;
+        case "--no-watch":
+            watch = false;
+            watchConfiguredByUser = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -189,7 +200,12 @@ if (path is null)
         if (pickedWatch.HasValue)
         {
             watch = pickedWatch.Value;
+            watchConfiguredByUser = true;
         }
+    }
+    else if (mode == "format")
+    {
+        path = Directory.GetCurrentDirectory();
     }
     else
     {
@@ -202,6 +218,11 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
 {
     Console.Error.WriteLine($"error: invalid --opt-level '{optLevel}'. Use 0,1,2,3,s,z.");
     Environment.Exit(1);
+}
+
+if (mode == "run" && !watchConfiguredByUser)
+{
+    watch = true;
 }
 
 devMode = mode == "run";
@@ -312,11 +333,44 @@ static void AddHostAbiDataExports(LayoutPlan layout, List<string> exports)
 
 if (mode == "format")
 {
-    var input = File.ReadAllText(path);
-    var formatted = Stasis.Cli.StasisFormatter.Format(input);
-    if (!string.Equals(input, formatted, StringComparison.Ordinal))
+    if (Directory.Exists(path))
     {
-        File.WriteAllText(path, formatted);
+        var files = Directory.GetFiles(path, "*.stasis", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToArray();
+        if (files.Length == 0)
+        {
+            Console.Error.WriteLine($"error: no .stasis files found under {path}");
+            Environment.Exit(1);
+        }
+
+        var changed = 0;
+        foreach (var file in files)
+        {
+            var input = File.ReadAllText(file);
+            var formatted = Stasis.Cli.StasisFormatter.Format(input);
+            if (!string.Equals(input, formatted, StringComparison.Ordinal))
+            {
+                File.WriteAllText(file, formatted);
+                changed++;
+            }
+        }
+
+        Console.WriteLine($"formatted {files.Length} file(s), changed {changed}.");
+    }
+    else
+    {
+        var input = File.ReadAllText(path);
+        var formatted = Stasis.Cli.StasisFormatter.Format(input);
+        if (!string.Equals(input, formatted, StringComparison.Ordinal))
+        {
+            File.WriteAllText(path, formatted);
+            Console.WriteLine($"formatted {path}.");
+        }
+        else
+        {
+            Console.WriteLine($"already formatted: {path}.");
+        }
     }
 
     return;
@@ -5711,15 +5765,19 @@ static void WriteIrOutput(string ir, string? outputPath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run [<file>] [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
-    Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
+    Console.WriteLine("  stasisc run [<file>] [--watch|--no-watch]");
+    Console.WriteLine("  stasisc build <file> [--out <path>]");
+    Console.WriteLine("  stasisc test [<file>|--all]");
+    Console.WriteLine("  stasisc format [<file-or-dir>]");
     Console.WriteLine();
-    Console.WriteLine("Other commands:");
-    Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc format <file>");
+    Console.WriteLine("Integrated defaults:");
+    Console.WriteLine("  run   => dev watch loop by default (use --no-watch to run once)");
+    Console.WriteLine("  build => optimized output by default (-O3 + LTO)");
+    Console.WriteLine("  test  => with no path (or --all), run all tests under working dir");
+    Console.WriteLine("  format=> with no path, format all .stasis files under working dir");
     Console.WriteLine();
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Compatibility: 'stasisc release <file>' remains available as a build alias.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). Build/release require clang in PATH.");
     Console.WriteLine("Run: omit <file> to pick interactively (breadth-first listing) and optionally enable --watch.");
     Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
@@ -5849,7 +5907,7 @@ static int RunBridgeMode(Queue<string> args)
             tickHostFps,
             llvmTargetTriple: null,
             useLowerLock: true,
-            useCraneliftRunner: false,
+            useCraneliftRunner: true,
             enableHotState: false);
         Console.WriteLine($"BRIDGE_END {requestId} {exit}");
     }
