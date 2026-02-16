@@ -37,6 +37,18 @@ cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge --events
 cargo run -p stasis -- --scenario brickout-revenge-v1 --ticks 300
 ```
 
+Local-only Windows release source ZIP validation (auto-detects Cargo workspace or legacy build/test scripts):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/windows/verify-latest-release-source-zip.ps1
+```
+
+Local-only Windows release CLI bundle validation (smoke checks `stasis run/build/test` directly from the downloaded release zip):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/windows/verify-latest-release-cli.ps1
+```
+
 Structured event stream options:
 - `--events-jsonl` prints JSONL events to stdout (compile/swap/summary).
 - `--events-jsonl-file path\to\events.jsonl` writes JSONL events to a file.
