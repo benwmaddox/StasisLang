@@ -7,9 +7,15 @@ license.workspace = true
 [dependencies]
 stasis_runner = { path = "../../crates/stasis_runner" }
 stasis_jit = { path = "../../crates/stasis_jit" }
+stasis_compiler = { path = "../../crates/stasis_compiler" }
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+object = "0.36"
+stasis_dynload = { path = "../../crates/stasis_dynload" }
 
 [lib]
 path = "src/lib.rs"

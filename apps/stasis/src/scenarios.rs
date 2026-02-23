@@ -33,5 +33,7 @@ pub fn brickout_revenge_v1_runner_config(max_ticks: u32) -> RunnerConfig {
         disable_on_code_swap_hook: false,
         hook_failure_reason: None,
         swap_failure_reason: None,
+        runtime_launch: false,
+        aot_probe_loadability: false,
     }
 }

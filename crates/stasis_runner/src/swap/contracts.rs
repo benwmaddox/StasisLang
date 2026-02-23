@@ -66,6 +66,10 @@ pub struct CompileRequest {
     pub request_id: RequestId,
     pub changed_files: Vec<PathBuf>,
     pub target_mode: TargetMode,
+    #[serde(default)]
+    pub host_set_id: Option<String>,
+    #[serde(default)]
+    pub host_set_hash: Option<[u8; 32]>,
 }
 
 impl CompileRequest {
@@ -79,6 +83,8 @@ impl CompileRequest {
             request_id,
             changed_files,
             target_mode,
+            host_set_id: None,
+            host_set_hash: None,
         }
     }
 }
@@ -110,6 +116,12 @@ pub struct FunctionPatchSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotFunctionSymbol {
+    pub fn_id: FnId,
+    pub symbol: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileStatus {
     Success,
     Failed,
@@ -124,6 +136,20 @@ pub struct CompileResult {
     pub layout_hash: Option<LayoutHash>,
     pub fn_patch_set: Option<FunctionPatchSet>,
     pub hook_symbol: Option<String>,
+    #[serde(default)]
+    pub host_set_id: Option<String>,
+    #[serde(default)]
+    pub host_set_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub hook_fn_id: Option<FnId>,
+    #[serde(default)]
+    pub aot_linked_image_path: Option<PathBuf>,
+    #[serde(default)]
+    pub aot_linked_image_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub aot_linked_image_sha256: Option<String>,
+    #[serde(default)]
+    pub aot_function_symbols: Option<Vec<AotFunctionSymbol>>,
 }
 
 impl CompileResult {
@@ -141,6 +167,35 @@ impl CompileResult {
         fn_patch_set: FunctionPatchSet,
         hook_symbol: Option<String>,
     ) -> Self {
+        Self::success_with_host_set_metadata(
+            request_id,
+            layout_hash,
+            fn_patch_set,
+            None,
+            None,
+            hook_symbol,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn success_with_host_set_metadata(
+        request_id: RequestId,
+        layout_hash: LayoutHash,
+        fn_patch_set: FunctionPatchSet,
+        host_set_id: Option<String>,
+        host_set_hash: Option<[u8; 32]>,
+        hook_symbol: Option<String>,
+        hook_fn_id: Option<FnId>,
+        aot_linked_image_path: Option<PathBuf>,
+        aot_linked_image_size_bytes: Option<u64>,
+        aot_linked_image_sha256: Option<String>,
+        aot_function_symbols: Option<Vec<AotFunctionSymbol>>,
+    ) -> Self {
         Self {
             contract_version: CONTRACT_VERSION,
             request_id,
@@ -149,6 +204,13 @@ impl CompileResult {
             layout_hash: Some(layout_hash),
             fn_patch_set: Some(fn_patch_set),
             hook_symbol,
+            host_set_id,
+            host_set_hash,
+            hook_fn_id,
+            aot_linked_image_path,
+            aot_linked_image_size_bytes,
+            aot_linked_image_sha256,
+            aot_function_symbols,
         }
     }
 
@@ -161,6 +223,13 @@ impl CompileResult {
             layout_hash: None,
             fn_patch_set: None,
             hook_symbol: None,
+            host_set_id: None,
+            host_set_hash: None,
+            hook_fn_id: None,
+            aot_linked_image_path: None,
+            aot_linked_image_size_bytes: None,
+            aot_linked_image_sha256: None,
+            aot_function_symbols: None,
         }
     }
 }
@@ -258,6 +327,13 @@ mod tests {
         assert_eq!(result.layout_hash, Some(layout_hash));
         assert_eq!(result.fn_patch_set, Some(patches));
         assert_eq!(result.hook_symbol, None);
+        assert_eq!(result.host_set_id, None);
+        assert_eq!(result.host_set_hash, None);
+        assert_eq!(result.hook_fn_id, None);
+        assert_eq!(result.aot_linked_image_path, None);
+        assert_eq!(result.aot_linked_image_size_bytes, None);
+        assert_eq!(result.aot_linked_image_sha256, None);
+        assert_eq!(result.aot_function_symbols, None);
     }
 
     #[test]
@@ -272,6 +348,47 @@ mod tests {
         );
         assert_eq!(result.status, CompileStatus::Success);
         assert_eq!(result.hook_symbol.as_deref(), Some("on_code_swap"));
+        assert_eq!(result.host_set_id, None);
+        assert_eq!(result.host_set_hash, None);
+    }
+
+    #[test]
+    fn compile_success_can_include_host_set_and_aot_metadata() {
+        let result = CompileResult::success_with_host_set_metadata(
+            RequestId(80),
+            LayoutHash([4; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(55) }],
+            },
+            Some("editor-host".to_string()),
+            Some([7; 32]),
+            Some("on_code_swap".to_string()),
+            Some(FnId(55)),
+            Some(PathBuf::from("bundle.dll")),
+            Some(1234),
+            Some("deadbeef".to_string()),
+            Some(vec![AotFunctionSymbol {
+                fn_id: FnId(55),
+                symbol: "fn_55".to_string(),
+            }]),
+        );
+
+        assert_eq!(result.host_set_id.as_deref(), Some("editor-host"));
+        assert_eq!(result.host_set_hash, Some([7; 32]));
+        assert_eq!(result.hook_fn_id, Some(FnId(55)));
+        assert_eq!(
+            result.aot_linked_image_path,
+            Some(PathBuf::from("bundle.dll"))
+        );
+        assert_eq!(result.aot_linked_image_size_bytes, Some(1234));
+        assert_eq!(result.aot_linked_image_sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(
+            result.aot_function_symbols,
+            Some(vec![AotFunctionSymbol {
+                fn_id: FnId(55),
+                symbol: "fn_55".to_string(),
+            }])
+        );
     }
 
     #[test]
@@ -292,6 +409,13 @@ mod tests {
         assert!(result.layout_hash.is_none());
         assert!(result.fn_patch_set.is_none());
         assert!(result.hook_symbol.is_none());
+        assert!(result.host_set_id.is_none());
+        assert!(result.host_set_hash.is_none());
+        assert!(result.hook_fn_id.is_none());
+        assert!(result.aot_linked_image_path.is_none());
+        assert!(result.aot_linked_image_size_bytes.is_none());
+        assert!(result.aot_linked_image_sha256.is_none());
+        assert!(result.aot_function_symbols.is_none());
     }
 
     #[test]

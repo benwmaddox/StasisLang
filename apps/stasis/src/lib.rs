@@ -3,10 +3,17 @@
 mod compiler_backend;
 mod events;
 pub mod scenarios;
+mod self_host_runtime_bridge;
 mod watch;
 
 pub use events::RunnerEvent;
+pub use self_host_runtime_bridge::{
+    publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
+    restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
+    stasis_process_env_lock,
+};
 pub use scenarios::WindowConfig;
+pub use compiler_backend::run_self_host_aot_cli;
 
 use compiler_backend::IncrementalCompilerBackend;
 use stasis_jit::FunctionPointerTable;
@@ -35,6 +42,8 @@ pub struct RunnerConfig {
     pub disable_on_code_swap_hook: bool,
     pub hook_failure_reason: Option<String>,
     pub swap_failure_reason: Option<String>,
+    pub runtime_launch: bool,
+    pub aot_probe_loadability: bool,
 }
 
 impl Default for RunnerConfig {
@@ -50,6 +59,8 @@ impl Default for RunnerConfig {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: true,
+            aot_probe_loadability: false,
         }
     }
 }
@@ -75,6 +86,14 @@ pub struct RunnerSummary {
     pub last_swap_status: Option<SwapCommitStatus>,
     pub has_in_flight_work: bool,
     pub events: Vec<RunnerEvent>,
+    pub runtime_launches: u32,
+    pub runtime_launch_failures: u32,
+    pub runtime_launch_failure_reasons: Vec<String>,
+    pub aot_linked_image_activations: u32,
+    pub active_aot_linked_image_path: Option<PathBuf>,
+    pub active_aot_linked_image_size_bytes: Option<u64>,
+    pub active_aot_linked_image_generation: Option<u64>,
+    pub retired_aot_linked_images: u32,
 }
 
 pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
@@ -358,6 +377,14 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         last_swap_status,
         has_in_flight_work,
         events,
+        runtime_launches: 0,
+        runtime_launch_failures: 0,
+        runtime_launch_failure_reasons: Vec::new(),
+        aot_linked_image_activations: 0,
+        active_aot_linked_image_path: None,
+        active_aot_linked_image_size_bytes: None,
+        active_aot_linked_image_generation: None,
+        retired_aot_linked_images: 0,
     }
 }
 
@@ -497,6 +524,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_default_backend(config);
@@ -584,6 +613,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_default_backend(config);
@@ -645,6 +676,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: Some("simulated swap rejection: layout mismatch".to_string()),
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_default_backend(config);
@@ -690,6 +723,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: Some("state invariant mismatch".to_string()),
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_default_backend(config);
@@ -753,6 +788,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_default_backend(config);
@@ -802,6 +839,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_backend(config, backend);
@@ -855,6 +894,8 @@ mod tests {
             disable_on_code_swap_hook: false,
             hook_failure_reason: None,
             swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
         };
 
         let summary = run_with_real_backend(config);

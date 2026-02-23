@@ -501,14 +501,15 @@ mod tests {
 
     #[test]
     fn compile_contract_version_mismatch_is_reported_and_commit_not_queued() {
-        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| CompileResult {
-            contract_version: CONTRACT_VERSION + 1,
-            request_id: request.request_id,
-            status: CompileStatus::Success,
-            diagnostics: Vec::new(),
-            layout_hash: Some(LayoutHash([1; 32])),
-            fn_patch_set: Some(sample_patch_set()),
-            hook_symbol: Some("on_code_swap".to_string()),
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            let mut result = CompileResult::success_with_hook_symbol(
+                request.request_id,
+                LayoutHash([1; 32]),
+                sample_patch_set(),
+                Some("on_code_swap".to_string()),
+            );
+            result.contract_version = CONTRACT_VERSION + 1;
+            result
         });
 
         pipeline.submit_file_change(sample_change("samples/version_mismatch.stasis", 1));

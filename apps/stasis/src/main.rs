@@ -37,6 +37,8 @@ fn apply_brickout_revenge_v1_scenario(config: &mut RunnerConfig) {
     scenario.disable_on_code_swap_hook = previous.disable_on_code_swap_hook;
     scenario.hook_failure_reason = previous.hook_failure_reason;
     scenario.swap_failure_reason = previous.swap_failure_reason;
+    scenario.runtime_launch = previous.runtime_launch;
+    scenario.aot_probe_loadability = previous.aot_probe_loadability;
     *config = scenario;
 }
 

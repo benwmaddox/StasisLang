@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "apps/stasis",
   "crates/stasis_compiler",
+  "crates/stasis_dynload",
   "crates/stasis_jit",
   "crates/stasis_runner",
 ]

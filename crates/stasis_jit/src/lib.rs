@@ -36,6 +36,21 @@ impl Default for AotCompileConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AotLinkConfig {
+    pub linker_path: Option<PathBuf>,
+}
+
+impl Default for AotLinkConfig {
+    fn default() -> Self {
+        let linker_path = std::env::var("STASIS_AOT_LINKER")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        Self { linker_path }
+    }
+}
+
 /// Dev/runtime-facing indirection table (`FnId -> code_ptr`) with simple
 /// generation retirement bookkeeping.
 pub struct FunctionPointerTable {
@@ -107,6 +122,102 @@ impl Default for FunctionPointerTable {
 
 fn make_code_ptr(generation: CodeGeneration, fn_id: FnId) -> CodePtr {
     CodePtr((generation.0 << 32) | u64::from(fn_id.0))
+}
+
+pub fn link_objects_to_dynamic_library(
+    object_paths: &[PathBuf],
+    output_library: &Path,
+    export_symbols: &[String],
+    config: &AotLinkConfig,
+) -> Result<(), String> {
+    if object_paths.is_empty() {
+        return Err("cannot link dynamic library: object list is empty".to_string());
+    }
+
+    if let Some(parent) = output_library.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create dynamic library output directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let linker = resolve_linker_path(config);
+    let mut command = Command::new(&linker);
+    if cfg!(windows) {
+        command.arg("/NOLOGO");
+        command.arg("/DLL");
+        command.arg(format!("/OUT:{}", output_library.display()));
+        for symbol in export_symbols {
+            command.arg(format!("/EXPORT:{symbol}"));
+        }
+    } else {
+        command.arg("-shared");
+        command.arg("-o");
+        command.arg(output_library);
+    }
+    for object_path in object_paths {
+        command.arg(object_path);
+    }
+
+    run_link_command(&mut command, "dynamic library link", &linker)?;
+    if !output_library.exists() {
+        return Err(format!(
+            "link step reported success but did not produce {}",
+            output_library.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn link_objects_to_executable(
+    object_paths: &[PathBuf],
+    output_executable: &Path,
+    entry_symbol: &str,
+    config: &AotLinkConfig,
+) -> Result<(), String> {
+    if object_paths.is_empty() {
+        return Err("cannot link executable: object list is empty".to_string());
+    }
+    if entry_symbol.is_empty() {
+        return Err("cannot link executable: entry symbol is empty".to_string());
+    }
+
+    if let Some(parent) = output_executable.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create executable output directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let linker = resolve_linker_path(config);
+    let mut command = Command::new(&linker);
+    if cfg!(windows) {
+        command.arg("/NOLOGO");
+        command.arg(format!("/OUT:{}", output_executable.display()));
+        command.arg(format!("/ENTRY:{entry_symbol}"));
+        command.arg("/SUBSYSTEM:CONSOLE");
+        command.arg("kernel32.lib");
+    } else {
+        command.arg("-o");
+        command.arg(output_executable);
+        command.arg(format!("-Wl,-e,{entry_symbol}"));
+    }
+    for object_path in object_paths {
+        command.arg(object_path);
+    }
+
+    run_link_command(&mut command, "executable link", &linker)?;
+    if !output_executable.exists() {
+        return Err(format!(
+            "link step reported success but did not produce {}",
+            output_executable.display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn compile_clif_to_object(
@@ -198,6 +309,32 @@ fn resolve_aot_helper_path(config: &AotCompileConfig) -> Result<PathBuf, String>
         .join("target")
         .join("debug")
         .join(default_aot_exe_name()))
+}
+
+fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
+    if let Some(path) = config.linker_path.as_ref() {
+        return path.clone();
+    }
+    if cfg!(windows) {
+        PathBuf::from("lld-link.exe")
+    } else {
+        PathBuf::from("cc")
+    }
+}
+
+fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to execute {mode} linker {}: {error}", linker.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{mode} failed (status {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 fn default_target_triple() -> String {
@@ -296,6 +433,86 @@ mod tests {
         };
         let resolved = resolve_aot_helper_path(&config).expect("resolution should succeed");
         assert!(resolved.ends_with(Path::new("custom").join("helper.exe")));
+    }
+
+    #[test]
+    fn aot_linker_can_be_driven_by_configured_fake_linker() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("stasis_aot_link_fake_{stamp}"));
+        fs::create_dir_all(&temp_dir).expect("create fake link temp dir");
+
+        let fake_linker = if cfg!(windows) {
+            let path = temp_dir.join("fake-link.cmd");
+            let script = r#"@echo off
+setlocal EnableDelayedExpansion
+set OUT=
+for %%A in (%*) do (
+  set ARG=%%~A
+  echo !ARG! | findstr /B /C:"/OUT:" >nul
+  if !errorlevel! == 0 (
+    set OUT=!ARG:~5!
+  )
+)
+if "%OUT%"=="" exit /b 2
+echo fake-dll>"%OUT%"
+exit /b 0
+"#;
+            fs::write(&path, script).expect("write fake windows linker");
+            path
+        } else {
+            let path = temp_dir.join("fake-link.sh");
+            let script = r#"#!/usr/bin/env sh
+OUT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      OUT="$2"
+      shift
+      ;;
+  esac
+  shift
+done
+if [ -z "$OUT" ]; then
+  exit 2
+fi
+echo "fake-shared" > "$OUT"
+"#;
+            fs::write(&path, script).expect("write fake unix linker");
+            let status = Command::new("chmod")
+                .arg("+x")
+                .arg(&path)
+                .status()
+                .expect("chmod fake linker");
+            assert!(status.success(), "chmod fake linker should succeed");
+            path
+        };
+
+        let dummy_object = temp_dir.join("dummy.obj");
+        fs::write(&dummy_object, "not-an-object").expect("write dummy object");
+        let output_library = if cfg!(windows) {
+            temp_dir.join("bundle.dll")
+        } else if cfg!(target_os = "macos") {
+            temp_dir.join("bundle.dylib")
+        } else {
+            temp_dir.join("bundle.so")
+        };
+
+        let config = AotLinkConfig {
+            linker_path: Some(fake_linker),
+        };
+        link_objects_to_dynamic_library(
+            &[dummy_object],
+            &output_library,
+            &["fn_1".to_string()],
+            &config,
+        )
+        .expect("fake linker should succeed");
+        assert!(output_library.exists(), "fake linker should create output");
+
+        fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[cfg(windows)]
