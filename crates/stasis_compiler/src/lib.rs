@@ -40,6 +40,7 @@ pub struct FunctionMetric {
     pub simple_void_print_i32_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_add_delta: Option<i32>,
+    pub clif_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +110,7 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
+    clif_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -120,12 +122,6 @@ struct AnalysisResult {
     main_invalid_count: i32,
     errors: Vec<ErrorMetric>,
 }
-
-const SIMPLE_ONE_ARG_FIRST_PARAM_SENTINEL: i32 = -2_147_483_647;
-const SIMPLE_ONE_ARG_FIRST_SECOND_PARAM_SENTINEL: i32 = -2_147_483_646;
-const SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_PARAM_SENTINEL: i32 = -2_147_483_645;
-const SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_FOURTH_PARAM_SENTINEL: i32 = -2_147_483_644;
-const SIMPLE_ONE_ARG_LITERAL_FIRST_SECOND_PARAM_SENTINEL: i32 = -2_147_483_643;
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
@@ -333,6 +329,7 @@ impl IncrementalCompilerHost {
                             .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
                         simple_void_print_i32_call_add_delta: parsed
                             .simple_void_print_i32_call_add_delta,
+                        clif_text: parsed.clif_text.clone(),
                     });
                 }
             }
@@ -472,8 +469,9 @@ fn repo_root_path() -> Result<PathBuf, String> {
 fn build_stasis_analysis_harness(source: &str) -> String {
     let mut out = String::new();
     out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
-    out.push_str("import \"../../../compiler/incremental_compiler.stasis\";\n");
+    out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
     out.push_str("global src_buf: ascii[262144];\n");
+    out.push_str("global clif_buf: ascii[8192];\n");
     out.push_str("function load_source(): void {\n");
     out.push_str("    ascii_clear(src_buf);\n");
     for byte in source.as_bytes() {
@@ -517,29 +515,24 @@ fn build_stasis_analysis_harness(source: &str) -> String {
     out.push_str(
         "        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n",
     );
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_add_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_add_deltas[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_i32_literals[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_arg_call_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_left_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_right_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_op_codes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_literals[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_one_arg_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_one_arg_arg_call_target_id_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_add_has[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_add_deltas[fi]); print_string(\";\");\n");
+    out.push_str(
+        "        print_i32(Compiler.function_simple_i32_return_literal_flags[fi]); print_string(\",\");\n",
+    );
+    out.push_str(
+        "        print_i32(Compiler.function_simple_i32_return_literals[fi]); print_string(\";\");\n",
+    );
+    out.push_str("        compiler_emit_function_clif_for_index(fi, clif_buf);\n");
+    out.push_str("        print_string(\"clif=\"); print_string(clif_buf); print_string(\";\");\n");
     out.push_str("    }\n");
     out.push_str("    print_string(\"__SC_END;\");\n");
     out.push_str("}\n");
     out.push_str("function main(): i32 {\n");
     out.push_str("    compiler_reset_state();\n");
+    if cfg!(windows) {
+        out.push_str("    Compiler.clif_call_conv_code = 1;\n");
+    } else {
+        out.push_str("    Compiler.clif_call_conv_code = 2;\n");
+    }
     out.push_str("    load_source();\n");
     out.push_str("    compiler_set_source(src_buf);\n");
     out.push_str("    let status: i32 = run_incremental_compiler();\n");
@@ -612,7 +605,7 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
         }
         if let Some(value) = token.strip_prefix("fn=") {
             let parts: Vec<&str> = value.split(',').collect();
-            if parts.len() == 25 {
+            if parts.len() >= 7 {
                 let return_type = match parse_i32(parts[4]) {
                     1 => "i32".to_string(),
                     2 => "void".to_string(),
@@ -620,45 +613,21 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                 };
                 let param_count = parse_i32(parts[5]);
                 let first_param_type_code = parse_i32(parts[6]);
-                let call_target_hash = parse_i32(parts[7]);
-                let simple_i32_call_add_has = parse_i32(parts[8]);
-                let simple_i32_call_add_delta = parse_i32(parts[9]);
-                let simple_i32_call_one_arg_has = parse_i32(parts[10]);
-                let simple_i32_call_one_arg_target_hash = parse_i32(parts[11]);
-                let simple_i32_call_one_arg_literal = parse_i32(parts[12]);
-                let simple_i32_call_one_arg_arg_call_target_hash = parse_i32(parts[13]);
-                let simple_i32_call_one_arg_uses_first_param =
-                    simple_i32_call_one_arg_arg_call_target_hash
-                        == SIMPLE_ONE_ARG_FIRST_PARAM_SENTINEL;
-                let simple_i32_call_one_arg_uses_first_second_param =
-                    simple_i32_call_one_arg_arg_call_target_hash
-                        == SIMPLE_ONE_ARG_FIRST_SECOND_PARAM_SENTINEL;
-                let simple_i32_call_one_arg_uses_first_second_third_param =
-                    simple_i32_call_one_arg_arg_call_target_hash
-                        == SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_PARAM_SENTINEL;
-                let simple_i32_call_one_arg_uses_first_second_third_fourth_param =
-                    simple_i32_call_one_arg_arg_call_target_hash
-                        == SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_FOURTH_PARAM_SENTINEL;
-                let simple_i32_call_one_arg_uses_literal_first_second_param =
-                    simple_i32_call_one_arg_arg_call_target_hash
-                        == SIMPLE_ONE_ARG_LITERAL_FIRST_SECOND_PARAM_SENTINEL;
-                let simple_i32_two_call_has = parse_i32(parts[14]);
-                let simple_i32_two_call_left_hash = parse_i32(parts[15]);
-                let simple_i32_two_call_right_hash = parse_i32(parts[16]);
-                let simple_i32_two_call_op_code = parse_i32(parts[17]);
-                let simple_void_print_i32_has = parse_i32(parts[18]);
-                let simple_void_print_i32_literal = parse_i32(parts[19]);
-                let simple_void_print_i32_call_target_hash = parse_i32(parts[20]);
-                let simple_void_print_i32_call_one_arg_has = parse_i32(parts[21]);
-                let simple_void_print_i32_call_one_arg_arg_call_target_hash = parse_i32(parts[22]);
-                let simple_void_print_i32_call_add_has = parse_i32(parts[23]);
-                let simple_void_print_i32_call_add_delta = parse_i32(parts[24]);
-                let simple_void_print_i32_call_target_id_hash =
-                    if simple_void_print_i32_call_target_hash != 0 {
-                        Some(simple_void_print_i32_call_target_hash)
-                    } else {
-                        None
-                    };
+                let simple_i32_return_literal_flag = if parts.len() >= 8 {
+                    parse_i32(parts[7])
+                } else {
+                    0
+                };
+                let simple_i32_return_literal_value = if parts.len() >= 9 {
+                    parse_i32(parts[8])
+                } else {
+                    0
+                };
+                let simple_i32_return_expr = if simple_i32_return_literal_flag != 0 {
+                    Some(SimpleI32ReturnExpr::Literal(simple_i32_return_literal_value))
+                } else {
+                    None
+                };
                 functions.push(ParsedFunction {
                     ordinal: parse_usize(parts[0]),
                     id_hash: parse_i32(parts[1]),
@@ -667,96 +636,29 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                     return_type,
                     param_count,
                     first_param_type_code,
-                    simple_i32_return_expr: None,
-                    simple_i32_return_call_target_id_hash: if call_target_hash != 0 {
-                        Some(call_target_hash)
-                    } else {
-                        None
-                    },
-                    simple_i32_return_call_add_delta: if simple_i32_call_add_has == 1 {
-                        Some(simple_i32_call_add_delta)
-                    } else {
-                        None
-                    },
-                    simple_i32_return_call_one_arg_target_id_hash: if simple_i32_call_one_arg_has
-                        == 1
-                    {
-                        Some(simple_i32_call_one_arg_target_hash)
-                    } else {
-                        None
-                    },
-                    simple_i32_return_call_one_arg_i32_literal: if simple_i32_call_one_arg_has == 1
-                    {
-                        if simple_i32_call_one_arg_arg_call_target_hash == 0
-                            || simple_i32_call_one_arg_uses_literal_first_second_param
-                        {
-                            Some(simple_i32_call_one_arg_literal)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    },
-                    simple_i32_return_call_one_arg_arg_call_target_id_hash:
-                        if simple_i32_call_one_arg_has == 1
-                            && simple_i32_call_one_arg_arg_call_target_hash != 0
-                            && !simple_i32_call_one_arg_uses_first_param
-                            && !simple_i32_call_one_arg_uses_first_second_param
-                            && !simple_i32_call_one_arg_uses_first_second_third_param
-                            && !simple_i32_call_one_arg_uses_first_second_third_fourth_param
-                            && !simple_i32_call_one_arg_uses_literal_first_second_param
-                        {
-                            Some(simple_i32_call_one_arg_arg_call_target_hash)
-                        } else {
-                            None
-                        },
-                    simple_i32_return_two_call_left_target_id_hash: if simple_i32_two_call_has == 1
-                    {
-                        Some(simple_i32_two_call_left_hash)
-                    } else {
-                        None
-                    },
-                    simple_i32_return_two_call_right_target_id_hash: if simple_i32_two_call_has == 1
-                    {
-                        Some(simple_i32_two_call_right_hash)
-                    } else {
-                        None
-                    },
-                    simple_i32_return_two_call_op_code: if simple_i32_two_call_has == 1 {
-                        Some(simple_i32_two_call_op_code)
-                    } else {
-                        None
-                    },
-                    simple_void_print_i32_literal: if simple_void_print_i32_has == 1 {
-                        if (simple_void_print_i32_call_target_id_hash.is_none()
-                            && simple_i32_two_call_has == 0)
-                            || (simple_void_print_i32_call_one_arg_has == 1
-                                && simple_void_print_i32_call_one_arg_arg_call_target_hash == 0)
-                        {
-                            Some(simple_void_print_i32_literal)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    },
-                    simple_void_print_i32_call_target_id_hash,
-                    simple_void_print_i32_call_one_arg_arg_call_target_id_hash:
-                        if simple_void_print_i32_call_one_arg_has == 1
-                            && simple_void_print_i32_call_one_arg_arg_call_target_hash != 0
-                        {
-                            Some(simple_void_print_i32_call_one_arg_arg_call_target_hash)
-                        } else {
-                            None
-                        },
-                    simple_void_print_i32_call_add_delta: if simple_void_print_i32_call_add_has == 1
-                    {
-                        Some(simple_void_print_i32_call_add_delta)
-                    } else {
-                        None
-                    },
+                    simple_i32_return_expr,
+                    simple_i32_return_call_target_id_hash: None,
+                    simple_i32_return_call_add_delta: None,
+                    simple_i32_return_call_one_arg_target_id_hash: None,
+                    simple_i32_return_call_one_arg_i32_literal: None,
+                    simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+                    simple_i32_return_two_call_left_target_id_hash: None,
+                    simple_i32_return_two_call_right_target_id_hash: None,
+                    simple_i32_return_two_call_op_code: None,
+                    simple_void_print_i32_literal: None,
+                    simple_void_print_i32_call_target_id_hash: None,
+                    simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
+                    simple_void_print_i32_call_add_delta: None,
+                    clif_text: String::new(),
                 });
             }
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("clif=") {
+            if let Some(function) = functions.last_mut() {
+                function.clif_text = value.to_string();
+            }
+            continue;
         }
     }
     if status != 0 && errors.is_empty() {
@@ -912,10 +814,21 @@ mod tests {
         assert_eq!(compile.functions.len(), 2);
         assert!(compile.functions.iter().any(|f| f.return_type == "i32"));
         assert!(compile.functions.iter().any(|f| f.return_type == "void"));
-        assert!(compile
+        let main = compile
             .functions
             .iter()
-            .all(|f| f.simple_i32_return_expr.is_none()));
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(
+            main.simple_i32_return_expr,
+            Some(SimpleI32ReturnExpr::Literal(0))
+        );
+        assert_eq!(hook.simple_i32_return_expr, None);
         assert!(compile
             .functions
             .iter()
@@ -2833,7 +2746,11 @@ mod tests {
         assert_eq!(second.status, 0);
         assert_eq!(second.hook_symbol.as_deref(), Some("on_code_swap"));
         assert_eq!(second.functions.len(), 1);
-        assert!(second.functions[0].simple_i32_return_expr.is_none());
+        assert_eq!(
+            second.functions[0].simple_i32_return_expr,
+            Some(SimpleI32ReturnExpr::Literal(1))
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 }
+

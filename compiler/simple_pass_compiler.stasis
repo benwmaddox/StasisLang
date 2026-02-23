@@ -22,6 +22,10 @@ function compiler_reset_current_parse_metrics(): void {
     Compiler.current_signature_first_param_type_code = 0;
     Compiler.current_signature_return_type_start = 0;
     Compiler.current_signature_return_type_len = 0;
+    Compiler.current_simple_i32_return_literal_flag = 0;
+    Compiler.current_simple_i32_return_literal_value = 0;
+    Compiler.clif_call_conv_code = 1;
+    ascii_clear(Compiler.clif_symbol_buffer);
 }
 
 function compiler_reset_run_counters(): void {
@@ -102,7 +106,9 @@ function compiler_record_current_function(
     body_hash: i32,
     return_type_code: i32,
     param_count: i32,
-    first_param_type_code: i32
+    first_param_type_code: i32,
+    simple_i32_return_literal_flag: i32,
+    simple_i32_return_literal_value: i32
 ): void {
     if (Compiler.tracked_function_count >= COMPILER_MAX_TRACKED_FUNCTIONS) {
         return;
@@ -116,6 +122,8 @@ function compiler_record_current_function(
     Compiler.function_return_type_codes[index] = return_type_code;
     Compiler.function_param_counts[index] = param_count;
     Compiler.function_first_param_type_codes[index] = first_param_type_code;
+    Compiler.function_simple_i32_return_literal_flags[index] = simple_i32_return_literal_flag;
+    Compiler.function_simple_i32_return_literals[index] = simple_i32_return_literal_value;
 }
 
 function compiler_find_current_function_index(id_hash: i32): i32 {
@@ -154,6 +162,8 @@ function compiler_store_current_functions_to_file(file_index: i32): void {
         Compiler.files[file_index].function_return_type_codes[i] = Compiler.function_return_type_codes[i];
         Compiler.files[file_index].function_param_counts[i] = Compiler.function_param_counts[i];
         Compiler.files[file_index].function_first_param_type_codes[i] = Compiler.function_first_param_type_codes[i];
+        Compiler.files[file_index].function_simple_i32_return_literal_flags[i] = Compiler.function_simple_i32_return_literal_flags[i];
+        Compiler.files[file_index].function_simple_i32_return_literals[i] = Compiler.function_simple_i32_return_literals[i];
     }
 
     Compiler.files[file_index].layout_hash = Compiler.layout_hash;
@@ -1048,15 +1058,94 @@ function parser_record_function_fingerprint(
         Compiler.tokens[body_end_token].end - Compiler.tokens[body_start_token].start
     );
     let final_body_hash: i32 = compiler_hash_mix(body_hash, id_hash);
+    let return_type_code: i32 = parser_return_type_code();
+
+    Compiler.current_simple_i32_return_literal_flag = 0;
+    Compiler.current_simple_i32_return_literal_value = 0;
+    if (
+        return_type_code == 1 &&
+        body_end_token - body_start_token == 4 &&
+        Compiler.tokens[body_start_token].kind == TokenKind.LBrace &&
+        Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
+        Compiler.tokens[body_start_token + 2].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 3].kind == TokenKind.Semicolon &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.RBrace
+    ) {
+        Compiler.current_simple_i32_return_literal_flag = 1;
+        Compiler.current_simple_i32_return_literal_value = Compiler.tokens[body_start_token + 2].int_value;
+    }
 
     compiler_record_current_function(
         id_hash,
         final_signature_hash,
         final_body_hash,
-        parser_return_type_code(),
+        return_type_code,
         Compiler.current_signature_param_count,
-        Compiler.current_signature_first_param_type_code
+        Compiler.current_signature_first_param_type_code,
+        Compiler.current_simple_i32_return_literal_flag,
+        Compiler.current_simple_i32_return_literal_value
     );
+}
+
+function compiler_abs_i32(value: i32): i32 {
+    if (value < 0) {
+        if (value == -2147483648) {
+            return 2147483647;
+        }
+        return 0 - value;
+    }
+    return value;
+}
+
+function compiler_emit_symbol_name_for_index(index: i32, out: ascii[]): void {
+    ascii_clear(out);
+    ascii_append(out, "fn_");
+    ascii_push_i32(out, compiler_abs_i32(Compiler.function_id_hashes[index]));
+    ascii_push(out, 95);
+    ascii_push_i32(out, compiler_abs_i32(Compiler.function_sig_hashes[index]));
+    ascii_push(out, 95);
+    ascii_push_i32(out, index);
+}
+
+function compiler_emit_clif_call_conv(out: ascii[]): void {
+    if (Compiler.clif_call_conv_code == 2) {
+        ascii_append(out, "system_v");
+        return;
+    }
+    ascii_append(out, "windows_fastcall");
+}
+
+function compiler_emit_function_clif_for_index(index: i32, out: ascii[]): void {
+    ascii_clear(out);
+    if (index < 0 || index >= Compiler.tracked_function_count) {
+        return;
+    }
+
+    compiler_emit_symbol_name_for_index(index, Compiler.clif_symbol_buffer);
+    let return_type_code: i32 = Compiler.function_return_type_codes[index];
+
+    ascii_append(out, "function %");
+    ascii_append(out, Compiler.clif_symbol_buffer);
+    if (return_type_code == 2) {
+        ascii_append(out, "() ");
+    } else {
+        ascii_append(out, "() -> i32 ");
+    }
+    compiler_emit_clif_call_conv(out);
+    ascii_append(out, " {\nblock0:\n");
+
+    if (return_type_code == 2) {
+        ascii_append(out, "return\n}\n");
+        return;
+    }
+
+    let value: i32 = Compiler.function_body_hashes[index];
+    if (Compiler.function_simple_i32_return_literal_flags[index] == 1) {
+        value = Compiler.function_simple_i32_return_literals[index];
+    }
+    ascii_append(out, "v0 = iconst.i32 ");
+    ascii_push_i32(out, value);
+    ascii_append(out, "\nreturn v0\n}\n");
 }
 
 function parser_parse_extern_declaration(): bool {

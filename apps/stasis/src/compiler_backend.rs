@@ -636,36 +636,13 @@ impl IncrementalCompilerBackend {
                 "req{}_f{}_{}.o",
                 request_id, metric.file_index, metric.ordinal
             ));
-            let clif = build_aot_stub_clif_for_metric(
-                &function_name,
-                &metric.return_type,
-                metric.simple_i32_return_expr.as_ref(),
-                metric.body_hash,
-                resolved_simple_call_target.as_deref(),
-                metric.simple_i32_return_call_add_delta,
-                resolved_simple_one_arg_call_target.as_deref(),
-                metric.simple_i32_return_call_one_arg_i32_literal,
-                resolved_simple_one_arg_arg_call_target.as_deref(),
-                resolved_simple_two_arg_passthrough_call_target,
-                resolved_simple_three_arg_passthrough_call_target,
-                resolved_simple_four_arg_passthrough_call_target,
-                resolved_simple_two_arg_literal_first_second_passthrough_call_target,
-                metric.param_count,
-                metric.first_param_type_code,
-                simple_i32_one_arg_uses_first_param_passthrough,
-                simple_i32_two_arg_uses_first_second_param_passthrough,
-                simple_i32_three_arg_uses_first_second_third_param_passthrough,
-                simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough,
-                simple_i32_two_arg_uses_literal_first_second_param_passthrough,
-                resolved_simple_two_call_left_target.as_deref(),
-                resolved_simple_two_call_right_target.as_deref(),
-                metric.simple_i32_return_two_call_op_code,
-                metric.simple_void_print_i32_literal,
-                resolved_simple_void_print_call_target.as_deref(),
-                resolved_simple_void_print_one_arg_arg_call_target.as_deref(),
-                metric.simple_void_print_i32_call_add_delta,
-            );
-            compile_clif_to_object(&clif, &object_path, &self.aot_compile_config)?;
+            if metric.clif_text.is_empty() {
+                return Err(format!(
+                    "missing stasis-emitted clif text for emitted function {} (id_hash={})",
+                    function_name, metric.id_hash
+                ));
+            }
+            compile_clif_to_object(&metric.clif_text, &object_path, &self.aot_compile_config)?;
             artifact_paths.push(object_path.display().to_string());
         }
         if self.enable_aot_link_step {
@@ -2576,6 +2553,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
             file_index: 0,
@@ -2599,6 +2577,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee.clone()];
         let resolved = resolve_unique_i32_call_target_symbol_by_hash(
@@ -2633,6 +2612,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
             file_index: 0,
@@ -2656,6 +2636,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];
         let resolved =
@@ -3638,6 +3619,63 @@ mod tests {
     }
 
     #[test]
+    fn aot_compile_min_main_emits_cranelift_ir_and_no_fallback_stub() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_min_main_ir_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(&source, "function main(): i32 { return 7; }\n").expect("write source");
+        let captured_clif = temp_root.join("captured_main.clif");
+        let helper = write_recording_fake_aot_helper(&temp_root, &captured_clif);
+
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+        let result = backend.compile(CompileRequest::new(
+            RequestId(109),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let clif = fs::read_to_string(&captured_clif).expect("read captured clif");
+        assert!(
+            clif.contains("function %fn_") && clif.contains("() -> i32"),
+            "expected emitted i32 function signature in clif:\n{clif}"
+        );
+        assert!(
+            clif.contains("iconst.i32 7"),
+            "expected literal return in clif:\n{clif}"
+        );
+        assert!(
+            clif.contains("return v0"),
+            "expected value return in clif:\n{clif}"
+        );
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(manifest_path.exists(), "manifest should be written");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            manifest.fallback_stub_symbols.is_empty(),
+            "minimal main should not use fallback stubs"
+        );
+        assert!(
+            manifest.fallback_stub_details.is_empty(),
+            "minimal main should not report fallback details"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn aot_compile_can_link_bundle_and_record_linked_image_in_manifest() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4366,6 +4404,73 @@ echo "fake-object" > "$OUT"
         }
     }
 
+    fn write_recording_fake_aot_helper(temp_root: &Path, captured_clif: &Path) -> PathBuf {
+        if cfg!(windows) {
+            let helper = temp_root.join("fake-aot-record.cmd");
+            let script = format!(
+                r#"@echo off
+setlocal EnableDelayedExpansion
+set IN=
+set OUT=
+:loop
+if "%~1"=="" goto done
+if "%~1"=="--input" (
+  set IN=%~2
+  shift
+)
+if "%~1"=="--output" (
+  set OUT=%~2
+  shift
+)
+shift
+goto loop
+:done
+if "%OUT%"=="" exit /b 2
+if not "%IN%"=="" copy /Y "%IN%" "{}" >nul
+echo fake-object>"%OUT%"
+exit /b 0
+"#,
+                captured_clif.display()
+            );
+            fs::write(&helper, script).expect("write recording fake helper script");
+            helper
+        } else {
+            let helper = temp_root.join("fake-aot-record.sh");
+            let script = format!(
+                r#"#!/usr/bin/env sh
+IN=""
+OUT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--input" ]; then
+    IN="$2"
+    shift
+  elif [ "$1" = "--output" ]; then
+    OUT="$2"
+    shift
+  fi
+  shift
+done
+if [ -z "$OUT" ]; then
+  exit 2
+fi
+if [ -n "$IN" ]; then
+  cp "$IN" "{}"
+fi
+echo "fake-object" > "$OUT"
+"#,
+                captured_clif.display()
+            );
+            fs::write(&helper, script).expect("write recording fake helper script");
+            let status = Command::new("chmod")
+                .arg("+x")
+                .arg(&helper)
+                .status()
+                .expect("chmod recording fake helper");
+            assert!(status.success(), "chmod recording fake helper should succeed");
+            helper
+        }
+    }
+
     fn write_fake_linker(temp_root: &Path) -> PathBuf {
         if cfg!(windows) {
             let linker = temp_root.join("fake-link.cmd");
@@ -4458,8 +4563,8 @@ echo "signed" > "$1.signed"
         )
         .expect("copy stasis_aot_cli_core");
         fs::copy(
-            repo_root.join("compiler").join("incremental_compiler.stasis"),
-            subset_root.join("compiler").join("incremental_compiler.stasis"),
+            repo_root.join("compiler").join("simple_pass_compiler.stasis"),
+            subset_root.join("compiler").join("simple_pass_compiler.stasis"),
         )
         .expect("copy incremental_compiler");
         fs::copy(
@@ -8255,3 +8360,4 @@ mod self_host_file_selection_tests {
         fs::remove_dir_all(&root).ok();
     }
 }
+

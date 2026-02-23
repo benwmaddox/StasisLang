@@ -37,6 +37,9 @@ enum CompilerErrorCode {
     ParseExpectAssignInLet = 2017,
     ParseExpectRBracket = 2018,
     ParseExpectIn = 2019,
+    ParseExpectFunctionAfterExport = 2020,
+    ParseExpectAssignInConst = 2021,
+    ParseExpectStringLiteral = 2022,
     SemanticFromConversionExpression = 4001,
     IncrementalFileOverflow = 3001,
     IncrementalFilePathEmpty = 3002
@@ -56,6 +59,11 @@ enum TokenKind {
     StringLiteral,
     KwFunction,
     KwExtern,
+    KwImport,
+    KwConst,
+    KwStruct,
+    KwEnum,
+    KwExport,
     KwReturn,
     KwLet,
     KwIf,
@@ -94,6 +102,7 @@ enum TokenKind {
     AndAnd,
     OrOr,
     Bang,
+    At,
     Eof
 }
 
@@ -128,6 +137,8 @@ struct CompilerFile {
     function_return_type_codes: i32[512];
     function_param_counts: i32[512];
     function_first_param_type_codes: i32[512];
+    function_simple_i32_return_literal_flags: i32[512];
+    function_simple_i32_return_literals: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -161,6 +172,8 @@ struct CompilerState {
     function_return_type_codes: i32[512];
     function_param_counts: i32[512];
     function_first_param_type_codes: i32[512];
+    function_simple_i32_return_literal_flags: i32[512];
+    function_simple_i32_return_literals: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -173,6 +186,10 @@ struct CompilerState {
     current_signature_first_param_type_code: i32;
     current_signature_return_type_start: i32;
     current_signature_return_type_len: i32;
+    current_simple_i32_return_literal_flag: i32;
+    current_simple_i32_return_literal_value: i32;
+    clif_call_conv_code: i32;
+    clif_symbol_buffer: ascii[128];
 
     incremental_scanned_files: i32;
     incremental_parsed_files: i32;
