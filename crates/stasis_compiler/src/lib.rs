@@ -1381,6 +1381,94 @@ mod tests {
     }
 
     #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_expression_first_second_param_passthrough_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_lit_expr_first_second_param_passthrough_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(out_value: ascii[]): i32 { return host_cli_arg_value(1 + 2, out_value); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 1);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_cli_arg_value"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, Some(3));
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(forward.simple_i32_return_call_add_delta, None);
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_expression_first_second_param_passthrough_add_delta_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_lit_expr_first_second_param_passthrough_add_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(out_value: ascii[]): i32 { return host_cli_arg_value(1 + 2, out_value) - 4; }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 1);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_cli_arg_value"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, Some(3));
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(forward.simple_i32_return_call_add_delta, Some(-4));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn compile_records_simple_i32_return_call_one_arg_literal_add_delta() {
         let mut host = IncrementalCompilerHost::new();
         let stamp = SystemTime::now()
