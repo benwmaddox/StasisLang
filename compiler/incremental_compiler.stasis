@@ -1478,6 +1478,36 @@ function parser_fold_literal_binary_arg(
     return lhs_literal + rhs_literal;
 }
 
+function parser_match_literal_binary_expression_at(
+    lhs_token_index: i32
+): bool {
+    if (Compiler.tokens[lhs_token_index + 0].kind != TokenKind.IntLiteral) {
+        return false;
+    }
+    if (
+        !parser_is_literal_binary_foldable_arg_op(
+            Compiler.tokens[lhs_token_index + 1].kind,
+            Compiler.tokens[lhs_token_index + 2].int_value
+        )
+    ) {
+        return false;
+    }
+    if (Compiler.tokens[lhs_token_index + 2].kind != TokenKind.IntLiteral) {
+        return false;
+    }
+    return true;
+}
+
+function parser_fold_literal_binary_expression_at(
+    lhs_token_index: i32
+): i32 {
+    return parser_fold_literal_binary_arg(
+        Compiler.tokens[lhs_token_index + 0].int_value,
+        Compiler.tokens[lhs_token_index + 1].kind,
+        Compiler.tokens[lhs_token_index + 2].int_value
+    );
+}
+
 function parser_detect_simple_i32_return_call_add_has(
     body_start_token: i32,
     body_end_token: i32,
@@ -1773,12 +1803,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
         Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 5].kind,
-            Compiler.tokens[body_start_token + 6].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 4) &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.Semicolon &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RBrace
@@ -1792,12 +1817,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
         Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 5].kind,
-            Compiler.tokens[body_start_token + 6].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 4) &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 8].kind == TokenKind.Plus ||
@@ -2043,19 +2063,10 @@ function parser_detect_simple_i32_return_call_one_arg_i32_literal(
             body_end_token - body_start_token == 9 ||
             body_end_token - body_start_token == 11
         ) &&
-        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 5].kind,
-            Compiler.tokens[body_start_token + 6].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 4) &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen
     ) {
-        return parser_fold_literal_binary_arg(
-            Compiler.tokens[body_start_token + 4].int_value,
-            Compiler.tokens[body_start_token + 5].kind,
-            Compiler.tokens[body_start_token + 6].int_value
-        );
+        return parser_fold_literal_binary_expression_at(body_start_token + 4);
     }
     if (
         body_end_token - body_start_token == 7 ||
@@ -2368,12 +2379,7 @@ function parser_detect_simple_void_print_i32_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
@@ -2391,12 +2397,7 @@ function parser_detect_simple_void_print_i32_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
@@ -2412,12 +2413,7 @@ function parser_detect_simple_void_print_i32_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -2440,12 +2436,7 @@ function parser_detect_simple_void_print_i32_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -2739,31 +2730,17 @@ function parser_detect_simple_void_print_i32_literal(
         (body_end_token - body_start_token == 13 || body_end_token - body_start_token == 11) &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen
     ) {
-        return parser_fold_literal_binary_arg(
-            Compiler.tokens[body_start_token + 5].int_value,
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        );
+        return parser_fold_literal_binary_expression_at(body_start_token + 5);
     }
     if (
         (body_end_token - body_start_token == 15 || body_end_token - body_start_token == 13) &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -2772,11 +2749,7 @@ function parser_detect_simple_void_print_i32_literal(
         Compiler.tokens[body_start_token + 10].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 11].kind == TokenKind.RParen
     ) {
-        return parser_fold_literal_binary_arg(
-            Compiler.tokens[body_start_token + 5].int_value,
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        );
+        return parser_fold_literal_binary_expression_at(body_start_token + 5);
     }
     if (
         (body_end_token - body_start_token == 11 || body_end_token - body_start_token == 9) &&
@@ -2981,12 +2954,7 @@ function parser_detect_simple_void_print_i32_call_target_id_hash(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
@@ -3008,12 +2976,7 @@ function parser_detect_simple_void_print_i32_call_target_id_hash(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
@@ -3033,12 +2996,7 @@ function parser_detect_simple_void_print_i32_call_target_id_hash(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -3065,12 +3023,7 @@ function parser_detect_simple_void_print_i32_call_target_id_hash(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -3251,12 +3204,7 @@ function parser_detect_simple_void_print_i32_call_add_has(
             ) ||
             (
                 body_end_token - body_start_token == 13 &&
-                Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-                parser_is_literal_binary_foldable_arg_op(
-                    Compiler.tokens[body_start_token + 6].kind,
-                    Compiler.tokens[body_start_token + 7].int_value
-                ) &&
-                Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+                parser_match_literal_binary_expression_at(body_start_token + 5) &&
                 Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen
             )
         ) {
@@ -3315,12 +3263,7 @@ function parser_detect_simple_void_print_i32_call_one_arg_has(
     if (
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RParen
     ) {
@@ -3343,12 +3286,7 @@ function parser_detect_simple_void_print_i32_call_one_arg_has(
     if (
         Compiler.tokens[body_start_token + 3].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
-        Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-        parser_is_literal_binary_foldable_arg_op(
-            Compiler.tokens[body_start_token + 6].kind,
-            Compiler.tokens[body_start_token + 7].int_value
-        ) &&
-        Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
         (
             Compiler.tokens[body_start_token + 9].kind == TokenKind.Plus ||
@@ -3529,12 +3467,7 @@ function parser_detect_simple_void_print_i32_call_add_delta(
             ) ||
             (
                 body_end_token - body_start_token == 13 &&
-                Compiler.tokens[body_start_token + 5].kind == TokenKind.IntLiteral &&
-                parser_is_literal_binary_foldable_arg_op(
-                    Compiler.tokens[body_start_token + 6].kind,
-                    Compiler.tokens[body_start_token + 7].int_value
-                ) &&
-                Compiler.tokens[body_start_token + 7].kind == TokenKind.IntLiteral &&
+                parser_match_literal_binary_expression_at(body_start_token + 5) &&
                 Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen
             )
         ) {
