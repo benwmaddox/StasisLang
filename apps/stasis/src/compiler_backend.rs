@@ -5715,9 +5715,10 @@ echo "signed" > "$1.signed"
                 let status = Command::new(&summary.linked_image_path)
                     .status()
                     .expect("run compiled executable");
-                assert!(
-                    status.code().is_some(),
-                    "compiled executable should return a status code"
+                assert_eq!(
+                    status.code(),
+                    Some(7),
+                    "compiled executable should return exit code 7 for conditional addition main"
                 );
             }
             Err(message)

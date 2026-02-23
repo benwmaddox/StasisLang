@@ -1,0 +1,73 @@
+import "../../compiler/simple_pass_compiler.stasis";
+
+global TestClifBuffer: ascii[8192];
+global TestExpectedBuffer: ascii[128];
+
+function test_find_function_index_by_name(name: ascii[]): i32 {
+    let target_hash: i32 = compiler_hash_ascii(name);
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        if (Compiler.function_id_hashes[i] == target_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function test_emit_main_clif_for_source(src: ascii[]): i32 {
+    compiler_reset_state();
+    compiler_set_source(src);
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return 1;
+    }
+
+    let main_index: i32 = test_find_function_index_by_name("main");
+    if (main_index < 0) {
+        return 2;
+    }
+
+    ascii_clear(TestClifBuffer);
+    compiler_emit_function_clif_for_index(main_index, TestClifBuffer);
+    if (!ascii_contains(TestClifBuffer, "function %fn_")) {
+        return 3;
+    }
+    if (!ascii_contains(TestClifBuffer, "return v0")) {
+        return 4;
+    }
+    return 0;
+}
+
+function test_clif_contains_iconst(value: i32): bool {
+    ascii_clear(TestExpectedBuffer);
+    ascii_append(TestExpectedBuffer, "iconst.i32 ");
+    ascii_push_i32(TestExpectedBuffer, value);
+    return ascii_contains(TestClifBuffer, TestExpectedBuffer);
+}
+
+test `simple pass literal main emits iconst`(): bool {
+    let status: i32 = test_emit_main_clif_for_source(
+        "function main(): i32 { return 7; }\n"
+    );
+    return status == 0 && test_clif_contains_iconst(7);
+}
+
+test `simple pass conditional addition main emits iconst`(): bool {
+    let status: i32 = test_emit_main_clif_for_source(
+        "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction main(): i32 { let total: i32 = add_pair(2, 3); if (total > 4) { return total + 2; } return 0; }\n"
+    );
+    return status == 0 && test_clif_contains_iconst(7);
+}
+
+test `simple pass assignment if main emits iconst`(): bool {
+    let status: i32 = test_emit_main_clif_for_source(
+        "function main(): i32 { let value: i32 = 2; value += 5; if (value == 7) { value = value + 1; } return value; }\n"
+    );
+    return status == 0 && test_clif_contains_iconst(8);
+}
+
+test `simple pass nested call main emits iconst`(): bool {
+    let status: i32 = test_emit_main_clif_for_source(
+        "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction bump(value: i32): i32 { return value + 4; }\nfunction main(): i32 { return bump(add_pair(2, 3)); }\n"
+    );
+    return status == 0 && test_clif_contains_iconst(9);
+}

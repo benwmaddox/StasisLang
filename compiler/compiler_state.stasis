@@ -9,6 +9,10 @@ const COMPILER_MAX_ARGS: i32 = 256;
 const COMPILER_MAX_BODY_STMTS: i32 = 16384;
 const COMPILER_MAX_CALL_NEST: i32 = 1024;
 const COMPILER_MAX_TRACKED_FUNCTIONS: i32 = 512;
+const COMPILER_MAX_TRACKED_PARAM_HASHES: i32 = 4;
+const COMPILER_MAX_EVAL_BINDINGS: i32 = 256;
+const COMPILER_MAX_EVAL_CALL_DEPTH: i32 = 16;
+const COMPILER_MAX_EVAL_CALL_ARGS: i32 = 4;
 
 enum CompilerErrorCode {
     None = 0,
@@ -169,6 +173,9 @@ struct CompilerState {
     function_id_hashes: i32[512];
     function_sig_hashes: i32[512];
     function_body_hashes: i32[512];
+    function_body_start_tokens: i32[512];
+    function_body_end_tokens: i32[512];
+    function_param_name_hashes: i32[2048];
     function_return_type_codes: i32[512];
     function_param_counts: i32[512];
     function_first_param_type_codes: i32[512];
@@ -184,12 +191,23 @@ struct CompilerState {
     current_signature_name_len: i32;
     current_signature_param_count: i32;
     current_signature_first_param_type_code: i32;
+    current_signature_param_name_hashes: i32[4];
     current_signature_return_type_start: i32;
     current_signature_return_type_len: i32;
     current_simple_i32_return_literal_flag: i32;
     current_simple_i32_return_literal_value: i32;
     clif_call_conv_code: i32;
     clif_symbol_buffer: ascii[128];
+
+    eval_binding_count: i32;
+    eval_binding_name_hashes: i32[256];
+    eval_binding_values: i32[256];
+    eval_call_depth: i32;
+    eval_call_stack_id_hashes: i32[16];
+    eval_cursor: i32;
+    eval_last_i32: i32;
+    eval_returned: bool;
+    eval_return_value: i32;
 
     incremental_scanned_files: i32;
     incremental_parsed_files: i32;
