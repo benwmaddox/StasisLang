@@ -1,0 +1,7 @@
+function main(): i32 {
+    let sum: i32 = 0;
+    for (let i: i32 = 0; i < 4; i += 1) {
+        sum += i;
+    }
+    return sum;
+}

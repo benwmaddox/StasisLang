@@ -14,27 +14,31 @@ function test_find_function_index_by_name(name: ascii[]): i32 {
     return -1;
 }
 
-function test_emit_main_clif_for_source(src: ascii[]): i32 {
+function test_emit_function_clif_for_source(src: ascii[], function_name: ascii[]): i32 {
     compiler_reset_state();
     compiler_set_source(src);
     if (run_incremental_compiler_with_main_entry() != 0) {
         return 1;
     }
 
-    let main_index: i32 = test_find_function_index_by_name("main");
-    if (main_index < 0) {
+    let function_index: i32 = test_find_function_index_by_name(function_name);
+    if (function_index < 0) {
         return 2;
     }
 
     ascii_clear(TestClifBuffer);
-    compiler_emit_function_clif_for_index(main_index, TestClifBuffer);
+    compiler_emit_function_clif_for_index(function_index, TestClifBuffer);
     if (!ascii_contains(TestClifBuffer, "function %fn_")) {
         return 3;
     }
-    if (!ascii_contains(TestClifBuffer, "return v0")) {
+    if (!ascii_contains(TestClifBuffer, "return v")) {
         return 4;
     }
     return 0;
+}
+
+function test_emit_main_clif_for_source(src: ascii[]): i32 {
+    return test_emit_function_clif_for_source(src, "main");
 }
 
 function test_clif_contains_iconst(value: i32): bool {
@@ -70,6 +74,32 @@ test `simple pass nested call main emits iconst`(): bool {
         "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction bump(value: i32): i32 { return value + 4; }\nfunction main(): i32 { return bump(add_pair(2, 3)); }\n"
     );
     return status == 0 && test_clif_contains_iconst(9);
+}
+
+test `simple pass add pair emits param iadd`(): bool {
+    let status: i32 = test_emit_function_clif_for_source(
+        "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction main(): i32 { return add_pair(2, 3); }\n",
+        "add_pair"
+    );
+    return (
+        status == 0 &&
+        ascii_contains(TestClifBuffer, "(i32, i32) -> i32") &&
+        ascii_contains(TestClifBuffer, "iadd v0, v1") &&
+        ascii_contains(TestClifBuffer, "return v2")
+    );
+}
+
+test `simple pass add pair parenthesized emits param iadd`(): bool {
+    let status: i32 = test_emit_function_clif_for_source(
+        "function add_pair(left: i32, right: i32): i32 { return (left + right); }\nfunction main(): i32 { return add_pair(2, 3); }\n",
+        "add_pair"
+    );
+    return (
+        status == 0 &&
+        ascii_contains(TestClifBuffer, "(i32, i32) -> i32") &&
+        ascii_contains(TestClifBuffer, "iadd v0, v1") &&
+        ascii_contains(TestClifBuffer, "return v2")
+    );
 }
 
 test `simple pass bool literal condition emits iconst`(): bool {

@@ -1149,6 +1149,291 @@ function compiler_emit_clif_call_conv(out: ascii[]): void {
     ascii_append(out, "windows_fastcall");
 }
 
+function compiler_emit_clif_i32_param_list(out: ascii[], param_count: i32): bool {
+    if (param_count < 0 || param_count > COMPILER_MAX_TRACKED_PARAM_HASHES) {
+        return false;
+    }
+    ascii_append(out, "(");
+    let i: i32 = 0;
+    for (i = 0; i < param_count; i += 1) {
+        if (i > 0) {
+            ascii_append(out, ", ");
+        }
+        ascii_append(out, "i32");
+    }
+    ascii_append(out, ")");
+    return true;
+}
+
+function compiler_find_param_index_for_identifier_hash(function_index: i32, identifier_hash: i32): i32 {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return -1;
+    }
+    let param_count: i32 = Compiler.function_param_counts[function_index];
+    if (param_count < 0) {
+        return -1;
+    }
+    if (param_count > COMPILER_MAX_TRACKED_PARAM_HASHES) {
+        param_count = COMPILER_MAX_TRACKED_PARAM_HASHES;
+    }
+
+    let param_base: i32 = function_index * COMPILER_MAX_TRACKED_PARAM_HASHES;
+    let i: i32 = 0;
+    for (i = 0; i < param_count; i += 1) {
+        if (Compiler.function_param_name_hashes[param_base + i] == identifier_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_emit_simple_operand_register(
+    function_index: i32,
+    token_index: i32,
+    literal_slot: i32,
+    out: ascii[]
+): i32 {
+    if (token_index < 0 || token_index >= Compiler.token_count) {
+        return -1;
+    }
+    let kind: TokenKind = Compiler.tokens[token_index].kind;
+    if (kind == TokenKind.Identifier) {
+        return compiler_find_param_index_for_identifier_hash(
+            function_index,
+            compiler_eval_identifier_hash_at(token_index)
+        );
+    }
+    if (kind == TokenKind.IntLiteral) {
+        ascii_append(out, "v");
+        ascii_push_i32(out, literal_slot);
+        ascii_append(out, " = iconst.i32 ");
+        ascii_push_i32(out, Compiler.tokens[token_index].int_value);
+        ascii_append(out, "\n");
+        return literal_slot;
+    }
+    return -1;
+}
+
+function compiler_emit_simple_binary_instruction(
+    op: TokenKind,
+    result_reg: i32,
+    left_reg: i32,
+    right_reg: i32,
+    out: ascii[]
+): bool {
+    ascii_append(out, "v");
+    ascii_push_i32(out, result_reg);
+    ascii_append(out, " = ");
+
+    if (op == TokenKind.Plus) {
+        ascii_append(out, "iadd");
+    } else {
+        if (op == TokenKind.Minus) {
+            ascii_append(out, "isub");
+        } else {
+            if (op == TokenKind.Star) {
+                ascii_append(out, "imul");
+            } else {
+                if (op == TokenKind.Slash) {
+                    ascii_append(out, "sdiv");
+                } else {
+                    if (op == TokenKind.Percent) {
+                        ascii_append(out, "srem");
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    ascii_append(out, " v");
+    ascii_push_i32(out, left_reg);
+    ascii_append(out, ", v");
+    ascii_push_i32(out, right_reg);
+    ascii_append(out, "\n");
+    return true;
+}
+
+function compiler_emit_simple_i32_param_return_body(function_index: i32, out: ascii[]): bool {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return false;
+    }
+    let param_count: i32 = Compiler.function_param_counts[function_index];
+    if (param_count <= 0 || param_count > COMPILER_MAX_TRACKED_PARAM_HASHES) {
+        return false;
+    }
+    if (Compiler.function_first_param_type_codes[function_index] != 1) {
+        return false;
+    }
+    if (Compiler.function_return_type_codes[function_index] != 1) {
+        return false;
+    }
+
+    let body_start: i32 = Compiler.function_body_start_tokens[function_index];
+    let body_end: i32 = Compiler.function_body_end_tokens[function_index];
+    if (
+        body_start < 0 ||
+        body_end <= body_start ||
+        Compiler.tokens[body_start].kind != TokenKind.LBrace ||
+        Compiler.tokens[body_end].kind != TokenKind.RBrace
+    ) {
+        return false;
+    }
+    if (Compiler.tokens[body_start + 1].kind != TokenKind.KwReturn) {
+        return false;
+    }
+    if (Compiler.tokens[body_end - 1].kind != TokenKind.Semicolon) {
+        return false;
+    }
+
+    let expr_start: i32 = body_start + 2;
+    let expr_end: i32 = body_end - 2;
+    if (expr_start > expr_end) {
+        return false;
+    }
+
+    let has_outer_parens: bool = false;
+    if (
+        Compiler.tokens[expr_start].kind == TokenKind.LParen &&
+        Compiler.tokens[expr_end].kind == TokenKind.RParen
+    ) {
+        has_outer_parens = true;
+        expr_start += 1;
+        expr_end -= 1;
+        if (expr_start > expr_end) {
+            return false;
+        }
+    }
+
+    let return_reg: i32 = -1;
+    if (expr_start == expr_end) {
+        return_reg = compiler_emit_simple_operand_register(
+            function_index,
+            expr_start,
+            param_count,
+            out
+        );
+        if (return_reg < 0) {
+            return false;
+        }
+    } else {
+        if (expr_end - expr_start == 2) {
+            let left_is_literal: bool = Compiler.tokens[expr_start].kind == TokenKind.IntLiteral;
+            let right_is_literal: bool = Compiler.tokens[expr_start + 2].kind == TokenKind.IntLiteral;
+
+            let left_slot: i32 = param_count;
+            let right_slot: i32 = param_count;
+            if (left_is_literal) {
+                right_slot = param_count + 1;
+            }
+
+            let left_reg: i32 = compiler_emit_simple_operand_register(
+                function_index,
+                expr_start,
+                left_slot,
+                out
+            );
+            if (left_reg < 0) {
+                return false;
+            }
+            let right_reg: i32 = compiler_emit_simple_operand_register(
+                function_index,
+                expr_start + 2,
+                right_slot,
+                out
+            );
+            if (right_reg < 0) {
+                return false;
+            }
+
+            let temp_count: i32 = 0;
+            if (left_is_literal) {
+                temp_count += 1;
+            }
+            if (right_is_literal) {
+                temp_count += 1;
+            }
+
+            return_reg = param_count + temp_count;
+            if (
+                !compiler_emit_simple_binary_instruction(
+                    Compiler.tokens[expr_start + 1].kind,
+                    return_reg,
+                    left_reg,
+                    right_reg,
+                    out
+                )
+            ) {
+                return false;
+            }
+        } else {
+            if (
+                has_outer_parens &&
+                expr_end - expr_start == 4 &&
+                Compiler.tokens[expr_start].kind == TokenKind.LParen &&
+                Compiler.tokens[expr_end].kind == TokenKind.RParen
+            ) {
+                let left_is_literal_nested: bool = Compiler.tokens[expr_start + 1].kind == TokenKind.IntLiteral;
+                let right_is_literal_nested: bool = Compiler.tokens[expr_start + 3].kind == TokenKind.IntLiteral;
+
+                let left_slot_nested: i32 = param_count;
+                let right_slot_nested: i32 = param_count;
+                if (left_is_literal_nested) {
+                    right_slot_nested = param_count + 1;
+                }
+
+                let left_reg_nested: i32 = compiler_emit_simple_operand_register(
+                    function_index,
+                    expr_start + 1,
+                    left_slot_nested,
+                    out
+                );
+                if (left_reg_nested < 0) {
+                    return false;
+                }
+                let right_reg_nested: i32 = compiler_emit_simple_operand_register(
+                    function_index,
+                    expr_start + 3,
+                    right_slot_nested,
+                    out
+                );
+                if (right_reg_nested < 0) {
+                    return false;
+                }
+
+                let temp_count_nested: i32 = 0;
+                if (left_is_literal_nested) {
+                    temp_count_nested += 1;
+                }
+                if (right_is_literal_nested) {
+                    temp_count_nested += 1;
+                }
+
+                return_reg = param_count + temp_count_nested;
+                if (
+                    !compiler_emit_simple_binary_instruction(
+                        Compiler.tokens[expr_start + 2].kind,
+                        return_reg,
+                        left_reg_nested,
+                        right_reg_nested,
+                        out
+                    )
+                ) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    ascii_append(out, "return v");
+    ascii_push_i32(out, return_reg);
+    ascii_append(out, "\n}\n");
+    return true;
+}
+
 function compiler_eval_current_kind(): TokenKind {
     if (Compiler.eval_cursor < 0 || Compiler.eval_cursor >= Compiler.token_count) {
         return TokenKind.Eof;
@@ -2248,19 +2533,41 @@ function compiler_emit_function_clif_for_index(index: i32, out: ascii[]): void {
 
     compiler_emit_symbol_name_for_index(index, Compiler.clif_symbol_buffer);
     let return_type_code: i32 = Compiler.function_return_type_codes[index];
+    let param_count: i32 = Compiler.function_param_counts[index];
+    let emit_i32_param_signature: bool = (
+        param_count > 0 &&
+        param_count <= COMPILER_MAX_TRACKED_PARAM_HASHES &&
+        Compiler.function_first_param_type_codes[index] == 1
+    );
 
     ascii_append(out, "function %");
     ascii_append(out, Compiler.clif_symbol_buffer);
-    if (return_type_code == 2) {
-        ascii_append(out, "() ");
+    if (emit_i32_param_signature) {
+        if (!compiler_emit_clif_i32_param_list(out, param_count)) {
+            ascii_clear(out);
+            return;
+        }
+        if (return_type_code != 2) {
+            ascii_append(out, " -> i32 ");
+        } else {
+            ascii_append(out, " ");
+        }
     } else {
-        ascii_append(out, "() -> i32 ");
+        if (return_type_code == 2) {
+            ascii_append(out, "() ");
+        } else {
+            ascii_append(out, "() -> i32 ");
+        }
     }
     compiler_emit_clif_call_conv(out);
     ascii_append(out, " {\nblock0:\n");
 
     if (return_type_code == 2) {
         ascii_append(out, "return\n}\n");
+        return;
+    }
+
+    if (compiler_emit_simple_i32_param_return_body(index, out)) {
         return;
     }
 
@@ -2273,9 +2580,17 @@ function compiler_emit_function_clif_for_index(index: i32, out: ascii[]): void {
             value = Compiler.function_simple_i32_return_literals[index];
         }
     }
-    ascii_append(out, "v0 = iconst.i32 ");
+    let value_reg: i32 = 0;
+    if (emit_i32_param_signature) {
+        value_reg = param_count;
+    }
+    ascii_append(out, "v");
+    ascii_push_i32(out, value_reg);
+    ascii_append(out, " = iconst.i32 ");
     ascii_push_i32(out, value);
-    ascii_append(out, "\nreturn v0\n}\n");
+    ascii_append(out, "\nreturn v");
+    ascii_push_i32(out, value_reg);
+    ascii_append(out, "\n}\n");
 }
 
 function parser_parse_extern_declaration(): bool {
