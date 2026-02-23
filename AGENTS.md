@@ -1,11 +1,11 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## Project Structure & Module Organization
 - `docs/spec.md` is the canonical language spec for Rewrite V1.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
 - `docs/rewrite_v1_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
 - `compiler/` holds compiler source written in Stasis.
-- Planned primary orchestration file is `compiler/incremental_compiler.stasis`.
+- Planned primary orchestration file is `compiler/simple_pass_compiler.stasis`.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
 - `Stasis.Compiler/` and `Stasis.Cli/` are bootstrap compiler sources imported from `main` for branch compatibility.
 - Treat `Stasis.Compiler/` + `Stasis.Cli/` as bootstrap-only (not the long-term Rewrite V1 self-hosted compiler target).
@@ -89,17 +89,36 @@
 - Use C only when unavoidable for platform-level bindings.
 
 ## Compiler Slice Process (Active)
-- Add and use a small declarative token-pattern helper layer in `.stasis` for high-churn detector paths first; do not do broad parser rewrites in one pass.
-- When adding a new token-shape variant, route related detector paths (`*_has`, `*_add_has`, literal fold extraction, sentinel selection) through shared helper functions in the same slice, and derive trailing token offsets from matched anchor indexes (avoid duplicating hard-coded offset sets per variant).
-- Keep a deterministic fallback-pattern inventory test that groups fallback stubs by shape; use it to choose the next lowering slice by highest residual fallback impact.
-- For each lowering slice, add both a `crates/stasis_compiler` metric test and an `apps/stasis` fallback/direct-call test before considering the slice complete.
-- Keep commits narrow and slice-scoped: avoid mixing parser-shape expansion with unrelated backend/runtime work in the same commit.
-- End each slice with a cruft pass on touched files (remove duplicated token-offset checks introduced by the slice, or fold them into helpers).
+- Keep the frontend parser hardcoded with explicit precedence handling and shared matcher helpers; avoid adding new ad-hoc token offset chains.
+- Prefer one-pass compiler flow by default (`parse/check/lower` in one forward path per function); only allow explicit exceptions for required pre-scan metadata and jump backpatch resolution.
+- Treat function/struct reachability pruning as the primary dead-code mechanism for this phase.
+- Reachability roots are `main`, `tick`, and `on_code_swap` when present, plus host-required exported entry symbols.
+- Build and maintain a simple call graph and type-reference graph; lower only reachable functions and reachable struct metadata.
+- Do not add new parser-shape fallback detectors; replace/delete detector-driven paths instead of expanding them.
+- Keep lowering state compact and validated: assert invariants at statement/function boundaries (`value stack`, `block depth`, `pending jumps`) and fail deterministically on violations.
+- Use explicit jump-list backpatching with bounded limits and overflow diagnostics for control-flow emission.
+- Add only a tiny local post-emit cleanup pass before Cranelift handoff (no broad optimizer track in this phase).
+- Deduplicate constants with a simple semantic cache and keep scoped symbol lookup in hashed stacks; do not introduce packed type/state encodings at this stage.
+- Keep diagnostic/instrumented behavior on the same pipeline (extra checks/tracing only), not a second compilation path.
+- Keep commits narrow and slice-scoped: avoid mixing reachability/lowering changes with unrelated backend/runtime work in the same commit.
+- End each slice with a cruft pass on touched files and aggressively remove code paths that no longer conform to the active reachability-first approach.
 - Keep test runs bounded and deterministic: each command must stay within 60 seconds, and lingering test/compiler processes must be checked/cleaned after each step.
+- Compiler feature-slice completion gate: each slice must include at least one representative sample program that goes end-to-end through the compiler pipeline to Cranelift IR, is built into an executable, is run, and has its behavior verified by test assertions.
+- If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
+- After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
 
 ## Self-Reflection Loop (Required)
 - At the end of each compiler slice, record one `Good`, one `Bad`, and one `Adjustment` entry in the work summary, then update this file if a process rule should change.
 - Current reflection (2026-02-23):
 - Good: narrow slice commits plus bounded targeted tests kept changes stable and debuggable.
-- Bad: shape overlap can hide coverage gaps when a new variant is similar to one already supported.
-- Adjustment: before editing detectors, write a short shape matrix (form, anchor token, expected span, sentinel path) and ensure each new row gets one metric test and one backend fallback/direct-call test.
+- Bad: detector-heavy metadata extraction grew faster than its maintainability payoff and slowed direct progress to simple Cranelift lowering.
+- Adjustment: prioritize reachability-first pruning and delete detector/fallback branches as soon as equivalent lowered behavior is covered.
+- Current reflection (2026-02-23, cleanup slice):
+- Good: deleting detector blocks immediately reduced compiler complexity and made ownership boundaries clearer.
+- Bad: temporary compatibility channels (`simple_*` metrics) still exist and can hide stale host expectations.
+- Adjustment: remove compatibility metric channels quickly after reachability contracts are wired to avoid long-lived dead interfaces.
+- Current reflection (2026-02-23, simple-pass restart slice):
+- Good: replacing the copied orchestration file with a fresh single-pass parser immediately clarified scope and ownership.
+- Bad: initial rewrite used unsupported control-flow keywords (`break`/`continue`), causing avoidable bootstrap failures.
+- Adjustment: after the first parser chunk, run one bootstrap fixture immediately to validate language-surface assumptions before adding more code.
+

@@ -1455,11 +1455,27 @@ function compiler_eval_parse_primary(
         }
 
         let binding_index: i32 = compiler_eval_find_binding_index(identifier_hash);
-        if (binding_index < 0) {
-            return false;
+        if (binding_index >= 0) {
+            Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+            return true;
         }
-        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
-        return true;
+        if (compiler_span_eq(
+            Compiler.tokens[token_index].text_start,
+            Compiler.tokens[token_index].text_len,
+            "true"
+        )) {
+            Compiler.eval_last_i32 = 1;
+            return true;
+        }
+        if (compiler_span_eq(
+            Compiler.tokens[token_index].text_start,
+            Compiler.tokens[token_index].text_len,
+            "false"
+        )) {
+            Compiler.eval_last_i32 = 0;
+            return true;
+        }
+        return false;
     }
 
     if (kind == TokenKind.LParen) {
@@ -1510,6 +1526,114 @@ function compiler_eval_parse_unary(
     return compiler_eval_parse_primary(stop_a, stop_b, stop_c);
 }
 
+function compiler_eval_skip_primary(
+    stop_a: TokenKind,
+    stop_b: TokenKind,
+    stop_c: TokenKind
+): bool {
+    let kind: TokenKind = compiler_eval_current_kind();
+    if (compiler_eval_is_stop(kind, stop_a, stop_b, stop_c)) {
+        return false;
+    }
+
+    if (kind == TokenKind.IntLiteral || kind == TokenKind.Identifier) {
+        let was_identifier: bool = kind == TokenKind.Identifier;
+        Compiler.eval_cursor += 1;
+
+        if (was_identifier && compiler_eval_current_kind() == TokenKind.LParen) {
+            Compiler.eval_cursor += 1;
+            if (compiler_eval_current_kind() != TokenKind.RParen) {
+                let done: i32 = 0;
+                let arg_guard: i32 = 0;
+                for (arg_guard = 0; arg_guard < COMPILER_MAX_ARGS && done == 0; arg_guard += 1) {
+                    if (!compiler_eval_skip_expression_precedence(
+                        TokenKind.Comma,
+                        TokenKind.RParen,
+                        TokenKind.Invalid,
+                        1
+                    )) {
+                        return false;
+                    }
+                    if (compiler_eval_current_kind() == TokenKind.Comma) {
+                        Compiler.eval_cursor += 1;
+                    } else {
+                        done = 1;
+                    }
+                }
+                if (done == 0) {
+                    return false;
+                }
+            }
+            if (compiler_eval_current_kind() != TokenKind.RParen) {
+                return false;
+            }
+            Compiler.eval_cursor += 1;
+        }
+        return true;
+    }
+
+    if (kind == TokenKind.LParen) {
+        Compiler.eval_cursor += 1;
+        if (!compiler_eval_skip_expression_precedence(
+            TokenKind.RParen,
+            TokenKind.Invalid,
+            TokenKind.Invalid,
+            1
+        )) {
+            return false;
+        }
+        if (compiler_eval_current_kind() != TokenKind.RParen) {
+            return false;
+        }
+        Compiler.eval_cursor += 1;
+        return true;
+    }
+
+    return false;
+}
+
+function compiler_eval_skip_unary(
+    stop_a: TokenKind,
+    stop_b: TokenKind,
+    stop_c: TokenKind
+): bool {
+    let kind: TokenKind = compiler_eval_current_kind();
+    if (kind == TokenKind.Bang || kind == TokenKind.Minus || kind == TokenKind.Plus) {
+        Compiler.eval_cursor += 1;
+        return compiler_eval_skip_unary(stop_a, stop_b, stop_c);
+    }
+    return compiler_eval_skip_primary(stop_a, stop_b, stop_c);
+}
+
+function compiler_eval_skip_expression_precedence(
+    stop_a: TokenKind,
+    stop_b: TokenKind,
+    stop_c: TokenKind,
+    min_prec: i32
+): bool {
+    if (!compiler_eval_skip_unary(stop_a, stop_b, stop_c)) {
+        return false;
+    }
+
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_PARSE_GUARD; guard += 1) {
+        let op: TokenKind = compiler_eval_current_kind();
+        if (compiler_eval_is_stop(op, stop_a, stop_b, stop_c)) {
+            return true;
+        }
+        let prec: i32 = compiler_eval_binary_precedence(op);
+        if (prec < min_prec) {
+            return true;
+        }
+
+        Compiler.eval_cursor += 1;
+        if (!compiler_eval_skip_expression_precedence(stop_a, stop_b, stop_c, prec + 1)) {
+            return false;
+        }
+    }
+    return false;
+}
+
 function compiler_eval_parse_expression_precedence(
     stop_a: TokenKind,
     stop_b: TokenKind,
@@ -1535,13 +1659,34 @@ function compiler_eval_parse_expression_precedence(
         }
 
         Compiler.eval_cursor += 1;
-        if (!compiler_eval_parse_expression_precedence(stop_a, stop_b, stop_c, prec + 1)) {
-            return false;
+        let skipped_rhs: i32 = 0;
+        if (op == TokenKind.AndAnd && left == 0) {
+            if (!compiler_eval_skip_expression_precedence(stop_a, stop_b, stop_c, prec + 1)) {
+                return false;
+            }
+            Compiler.eval_last_i32 = 0;
+            left = 0;
+            skipped_rhs = 1;
         }
-        if (!compiler_eval_apply_binary(op, left, Compiler.eval_last_i32)) {
-            return false;
+        if (skipped_rhs == 0) {
+            if (op == TokenKind.OrOr && left != 0) {
+                if (!compiler_eval_skip_expression_precedence(stop_a, stop_b, stop_c, prec + 1)) {
+                    return false;
+                }
+                Compiler.eval_last_i32 = 1;
+                left = 1;
+                skipped_rhs = 1;
+            }
         }
-        left = Compiler.eval_last_i32;
+        if (skipped_rhs == 0) {
+            if (!compiler_eval_parse_expression_precedence(stop_a, stop_b, stop_c, prec + 1)) {
+                return false;
+            }
+            if (!compiler_eval_apply_binary(op, left, Compiler.eval_last_i32)) {
+                return false;
+            }
+            left = Compiler.eval_last_i32;
+        }
     }
     return false;
 }
@@ -1719,7 +1864,54 @@ function compiler_eval_execute_let_statement(): bool {
     return compiler_eval_set_binding(name_hash, value);
 }
 
-function compiler_eval_execute_assignment_statement(): bool {
+function compiler_eval_apply_assignment_op(name_hash: i32, op: TokenKind, rhs: i32): bool {
+    let binding_index: i32 = compiler_eval_find_binding_index(name_hash);
+    if (binding_index < 0) {
+        return false;
+    }
+    let current_value: i32 = Compiler.eval_binding_values[binding_index];
+    let next_value: i32 = rhs;
+
+    if (op == TokenKind.Assign) {
+        Compiler.eval_binding_values[binding_index] = next_value;
+        Compiler.eval_last_i32 = next_value;
+        return true;
+    }
+    if (op == TokenKind.PlusEq) {
+        Compiler.eval_binding_values[binding_index] = current_value + next_value;
+        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+        return true;
+    }
+    if (op == TokenKind.MinusEq) {
+        Compiler.eval_binding_values[binding_index] = current_value - next_value;
+        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+        return true;
+    }
+    if (op == TokenKind.StarEq) {
+        Compiler.eval_binding_values[binding_index] = current_value * next_value;
+        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+        return true;
+    }
+    if (op == TokenKind.SlashEq) {
+        if (next_value == 0) {
+            return false;
+        }
+        Compiler.eval_binding_values[binding_index] = current_value / next_value;
+        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+        return true;
+    }
+    if (op == TokenKind.PercentEq) {
+        if (next_value == 0) {
+            return false;
+        }
+        Compiler.eval_binding_values[binding_index] = current_value % next_value;
+        Compiler.eval_last_i32 = Compiler.eval_binding_values[binding_index];
+        return true;
+    }
+    return false;
+}
+
+function compiler_eval_eval_assignment_until(stop_kind: TokenKind): bool {
     if (compiler_eval_current_kind() != TokenKind.Identifier) {
         return false;
     }
@@ -1730,53 +1922,157 @@ function compiler_eval_execute_assignment_statement(): bool {
         return false;
     }
     Compiler.eval_cursor += 1;
-    if (!compiler_eval_parse_expression_until(TokenKind.Semicolon, TokenKind.Invalid, TokenKind.Invalid)) {
+    if (!compiler_eval_parse_expression_until(stop_kind, TokenKind.Invalid, TokenKind.Invalid)) {
         return false;
     }
-    let rhs: i32 = Compiler.eval_last_i32;
-    if (compiler_eval_current_kind() != TokenKind.Semicolon) {
+    return compiler_eval_apply_assignment_op(name_hash, op, Compiler.eval_last_i32);
+}
+
+function compiler_eval_eval_expression_or_assignment_until(stop_kind: TokenKind): bool {
+    if (
+        compiler_eval_current_kind() == TokenKind.Identifier &&
+        parser_is_assignment_op(compiler_eval_kind_at(Compiler.eval_cursor + 1))
+    ) {
+        return compiler_eval_eval_assignment_until(stop_kind);
+    }
+    return compiler_eval_parse_expression_until(stop_kind, TokenKind.Invalid, TokenKind.Invalid);
+}
+
+function compiler_eval_find_clause_end(start: i32, stop_kind: TokenKind): i32 {
+    if (start < 0 || start >= Compiler.token_count) {
+        return -1;
+    }
+    let paren_depth: i32 = 0;
+    let bracket_depth: i32 = 0;
+    let i: i32 = 0;
+    for (i = start; i < Compiler.token_count; i += 1) {
+        let kind: TokenKind = Compiler.tokens[i].kind;
+        if (kind == stop_kind && paren_depth == 0 && bracket_depth == 0) {
+            return i;
+        }
+        if (kind == TokenKind.LParen) {
+            paren_depth += 1;
+        } else {
+            if (kind == TokenKind.RParen && paren_depth > 0) {
+                paren_depth -= 1;
+            }
+        }
+        if (kind == TokenKind.LBracket) {
+            bracket_depth += 1;
+        } else {
+            if (kind == TokenKind.RBracket && bracket_depth > 0) {
+                bracket_depth -= 1;
+            }
+        }
+    }
+    return -1;
+}
+
+function compiler_eval_execute_for_statement(): bool {
+    Compiler.eval_cursor += 1;
+    if (compiler_eval_current_kind() != TokenKind.LParen) {
         return false;
     }
     Compiler.eval_cursor += 1;
 
-    let binding_index: i32 = compiler_eval_find_binding_index(name_hash);
-    if (binding_index < 0) {
+    let for_scope_start: i32 = Compiler.eval_binding_count;
+    let for_init_is_let: i32 = 0;
+    if (compiler_eval_current_kind() == TokenKind.KwLet) {
+        for_init_is_let = 1;
+        if (!compiler_eval_execute_let_statement()) {
+            return false;
+        }
+    } else {
+        if (!compiler_eval_eval_expression_or_assignment_until(TokenKind.Semicolon)) {
+            return false;
+        }
+        if (compiler_eval_current_kind() != TokenKind.Semicolon) {
+            return false;
+        }
+        Compiler.eval_cursor += 1;
+    }
+
+    let condition_start: i32 = Compiler.eval_cursor;
+    let condition_end: i32 = compiler_eval_find_clause_end(condition_start, TokenKind.Semicolon);
+    if (condition_end < 0) {
         return false;
     }
-    let current_value: i32 = Compiler.eval_binding_values[binding_index];
-    let next_value: i32 = rhs;
+    Compiler.eval_cursor = condition_end + 1;
 
-    if (op == TokenKind.Assign) {
-        Compiler.eval_binding_values[binding_index] = next_value;
-        return true;
+    let step_start: i32 = Compiler.eval_cursor;
+    let step_end: i32 = compiler_eval_find_clause_end(step_start, TokenKind.RParen);
+    if (step_end < 0) {
+        return false;
     }
-    if (op == TokenKind.PlusEq) {
-        Compiler.eval_binding_values[binding_index] = current_value + next_value;
-        return true;
+    Compiler.eval_cursor = step_end + 1;
+
+    let body_start: i32 = Compiler.eval_cursor;
+    if (!compiler_eval_skip_statement()) {
+        return false;
     }
-    if (op == TokenKind.MinusEq) {
-        Compiler.eval_binding_values[binding_index] = current_value - next_value;
-        return true;
-    }
-    if (op == TokenKind.StarEq) {
-        Compiler.eval_binding_values[binding_index] = current_value * next_value;
-        return true;
-    }
-    if (op == TokenKind.SlashEq) {
-        if (next_value == 0) {
-            return false;
+    let body_after: i32 = Compiler.eval_cursor;
+
+    let done: i32 = 0;
+    let ok: i32 = 1;
+    let loop_guard: i32 = 0;
+    for (loop_guard = 0; loop_guard < COMPILER_MAX_BODY_STMTS && done == 0; loop_guard += 1) {
+        Compiler.eval_cursor = condition_start;
+        if (!compiler_eval_eval_expression_or_assignment_until(TokenKind.Semicolon)) {
+            ok = 0;
+            done = 1;
+        } else {
+            if (compiler_eval_current_kind() != TokenKind.Semicolon || Compiler.eval_cursor != condition_end) {
+                ok = 0;
+                done = 1;
+            } else {
+                if (Compiler.eval_last_i32 == 0) {
+                    done = 1;
+                } else {
+                    Compiler.eval_cursor = body_start;
+                    if (!compiler_eval_execute_statement()) {
+                        ok = 0;
+                        done = 1;
+                    } else {
+                        if (Compiler.eval_returned) {
+                            done = 1;
+                        } else {
+                            Compiler.eval_cursor = step_start;
+                            if (!compiler_eval_eval_expression_or_assignment_until(TokenKind.RParen)) {
+                                ok = 0;
+                                done = 1;
+                            } else {
+                                if (compiler_eval_current_kind() != TokenKind.RParen || Compiler.eval_cursor != step_end) {
+                                    ok = 0;
+                                    done = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        Compiler.eval_binding_values[binding_index] = current_value / next_value;
-        return true;
     }
-    if (op == TokenKind.PercentEq) {
-        if (next_value == 0) {
-            return false;
-        }
-        Compiler.eval_binding_values[binding_index] = current_value % next_value;
-        return true;
+
+    if (done == 0) {
+        ok = 0;
     }
-    return false;
+
+    Compiler.eval_cursor = body_after;
+    if (for_init_is_let == 1) {
+        Compiler.eval_binding_count = for_scope_start;
+    }
+    return ok == 1;
+}
+
+function compiler_eval_execute_assignment_statement(): bool {
+    if (!compiler_eval_eval_assignment_until(TokenKind.Semicolon)) {
+        return false;
+    }
+    if (compiler_eval_current_kind() != TokenKind.Semicolon) {
+        return false;
+    }
+    Compiler.eval_cursor += 1;
+    return true;
 }
 
 function compiler_eval_execute_statement(): bool {
@@ -1799,6 +2095,9 @@ function compiler_eval_execute_statement(): bool {
     }
     if (kind == TokenKind.KwIf) {
         return compiler_eval_execute_if_statement();
+    }
+    if (kind == TokenKind.KwFor) {
+        return compiler_eval_execute_for_statement();
     }
     if (kind == TokenKind.LBrace) {
         let block_end: i32 = compiler_eval_find_matching_rbrace(Compiler.eval_cursor);

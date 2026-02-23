@@ -1,4 +1,4 @@
-# Stasis Rewrite V1
+﻿# Stasis Rewrite V1
 
 This branch is a ground-up rewrite focused on a single-process, tick-based runtime with Cranelift JIT for development and Cranelift AOT for production builds.
 
@@ -12,7 +12,7 @@ Everything else is intentionally rebuilt around a minimal Rust-first architectur
 
 - `compiler/`
   Compiler source written in Stasis.
-- `compiler/incremental_compiler.stasis` (planned primary entrypoint)
+- `compiler/simple_pass_compiler.stasis` (canonical compiler entrypoint)
   Compiler pipeline script. Core pass orchestration lives in `.stasis`.
 - `crates/stasis_compiler`
   Rust substrate/binding layer used by the Stasis compiler orchestration.
@@ -63,3 +63,4 @@ bootstrap\windows\stasisc.bat test --all
 ## Notes
 
 This is V1 foundation work. It is intentionally minimal and deterministic, with strict emphasis on avoiding legacy cruft.
+

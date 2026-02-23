@@ -81,9 +81,11 @@ Disk I/O is not part of the hot path.
 - Invalidation unit: file
 - Correctness unit: file
 - Emission unit: function
+- Dead-code pruning unit: function + struct metadata (reachability-based)
 
 Semantic analysis always runs for the entire file.
 Code generation is gated per function.
+Pruning is symbol-level and happens before Cranelift emission.
 
 ### 4.2 File-Level Pipeline
 
@@ -93,9 +95,19 @@ Raw Text
  -> Parse
  -> Index (imports / declarations)
  -> Semantic Analysis (whole file)
+ -> Reachability Mark (functions + structs)
+ -> Prune Unreachable Symbols
  -> Per-function semantic hashing
  -> Per-function codegen (gated)
 ```
+
+Reachability roots for Rewrite V1:
+- `main`
+- `tick` (when present)
+- `on_code_swap` (when present)
+- host-required exported entry symbols
+
+This is intentionally simple: no broad optimizer layer in Stasis and no instruction-level DCE requirement before Cranelift.
 
 ### 4.3 Semantic Hashing
 

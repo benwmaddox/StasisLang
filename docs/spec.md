@@ -16,6 +16,8 @@ Core direction for Rewrite V1:
 - In-process Cranelift JIT for development.
 - Cranelift AOT for production builds.
 - File-level incremental compilation.
+- Symbol-level reachability pruning before lowering (functions + struct metadata).
+- Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
 - Hot swap only between ticks.
 - Rust host wrapper with Stasis-owned compiler orchestration.
 
