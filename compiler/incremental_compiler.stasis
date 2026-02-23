@@ -1611,6 +1611,26 @@ function parser_detect_return_callee_literal_expression_first_second_param_passt
     ) {
         return body_start_token + 4;
     }
+    expected_span = 13;
+    if (has_add_delta) {
+        expected_span = 15;
+    }
+    if (
+        Compiler.current_signature_param_count == 1 &&
+        body_end_token - body_start_token == expected_span &&
+        Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
+        Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
+        Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
+        Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.LParen &&
+        parser_match_literal_binary_expression_at(body_start_token + 5) &&
+        Compiler.tokens[body_start_token + 8].kind == TokenKind.RParen &&
+        Compiler.tokens[body_start_token + 9].kind == TokenKind.Comma &&
+        parser_identifier_token_matches_first_param(body_start_token + 10) &&
+        Compiler.tokens[body_start_token + 11].kind == TokenKind.RParen
+    ) {
+        return body_start_token + 5;
+    }
     return -1;
 }
 
@@ -1629,16 +1649,24 @@ function parser_match_return_callee_literal_expression_first_second_param_passth
         return false;
     }
     if (has_add_delta) {
+        let add_op_token: i32 = body_start_token + 10;
+        if (literal_expression_start == body_start_token + 5) {
+            add_op_token = body_start_token + 12;
+        }
         return (
-            parser_is_add_or_sub_kind(Compiler.tokens[body_start_token + 10].kind) &&
-            Compiler.tokens[body_start_token + 11].kind == TokenKind.IntLiteral &&
-            Compiler.tokens[body_start_token + 12].kind == TokenKind.Semicolon &&
-            Compiler.tokens[body_start_token + 13].kind == TokenKind.RBrace
+            parser_is_add_or_sub_kind(Compiler.tokens[add_op_token].kind) &&
+            Compiler.tokens[add_op_token + 1].kind == TokenKind.IntLiteral &&
+            Compiler.tokens[add_op_token + 2].kind == TokenKind.Semicolon &&
+            Compiler.tokens[add_op_token + 3].kind == TokenKind.RBrace
         );
     }
+    let semicolon_token: i32 = body_start_token + 10;
+    if (literal_expression_start == body_start_token + 5) {
+        semicolon_token = body_start_token + 12;
+    }
     return (
-        Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
-        Compiler.tokens[body_start_token + 11].kind == TokenKind.RBrace
+        Compiler.tokens[semicolon_token].kind == TokenKind.Semicolon &&
+        Compiler.tokens[semicolon_token + 1].kind == TokenKind.RBrace
     );
 }
 
@@ -1843,6 +1871,7 @@ function parser_detect_simple_i32_return_call_add_has(
         return 1;
     }
     // { return callee(<int_literal> (+|-|*|/|%) <int_literal>, param0) +/- <int_literal>; }
+    // { return callee((<int_literal> (+|-|*|/|%) <int_literal>), param0) +/- <int_literal>; }
     if (parser_match_return_callee_literal_expression_first_second_param_passthrough(
         body_start_token,
         body_end_token,
@@ -2034,6 +2063,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         return 1;
     }
     // { return callee(<int_literal> (+|-|*|/|%) <int_literal>, param0); }
+    // { return callee((<int_literal> (+|-|*|/|%) <int_literal>), param0); }
     if (parser_match_return_callee_literal_expression_first_second_param_passthrough(
         body_start_token,
         body_end_token,
@@ -2060,6 +2090,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         return 1;
     }
     // { return callee(<int_literal> (+|-|*|/|%) <int_literal>, param0) +/- <int_literal>; }
+    // { return callee((<int_literal> (+|-|*|/|%) <int_literal>), param0) +/- <int_literal>; }
     if (parser_match_return_callee_literal_expression_first_second_param_passthrough(
         body_start_token,
         body_end_token,
