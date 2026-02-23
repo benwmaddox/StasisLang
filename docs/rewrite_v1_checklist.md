@@ -9,13 +9,14 @@ Locked decisions:
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Planned compiler orchestration file path is `compiler/incremental_compiler.stasis`.
+- Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
 
 ## Language Ownership Legend
 
-- `Rust`: Host app/runtime boundary, platform integration, Cranelift integration, process/watch plumbing.
+- `Rust`: Host app/runtime boundary, platform integration, Cranelift integration, process/watch plumbing, and host-set/phase enforcement.
 - `.stasis`: Compiler pipeline orchestration and language-level compile logic (lexer/parser/semantics/incremental policy source of truth).
 - `Rust + .stasis`: Rust provides execution/binding substrate; `.stasis` defines compiler behavior/policies.
 
@@ -30,6 +31,8 @@ Boundary rule:
 4. Remove dead code and temporary paths before slice completion.
 5. Update docs in the same PR when behavior changes.
 6. Preserve deterministic tick-based behavior.
+7. No ambient host API paths; each new host interaction must ship with explicit host-set contract docs/tests.
+8. Test command budget is strict: no single test command should exceed 60 seconds; split/shard test runs if needed and treat overruns as stability issues.
 
 ## Tooling Note
 
@@ -42,10 +45,15 @@ It is not part of the steady-state incremental JIT update loop.
 
 ## Slice Plan
 
-### Current Snapshot (2026-02-13)
+### Current Snapshot (2026-02-23)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
 - New self-host track started: `S10b` (minimal `.stasis` AOT CLI core orchestration).
+- Decision update (2026-02-23): host-set sandbox architecture is now locked (`deny-by-default` host access via explicit extern symbols in selected host set).
+- Host-set contract selection has been cut over to profile-only (`--host-set-profile` + optional registry mapping); legacy direct contract flags (`--host-set-id`, `--host-set-hash`) are rejected.
+- Compile-success helper paths in `stasis_runner` now leave host-set metadata unset by default so pipeline-selected host-set contracts remain authoritative unless explicitly overridden.
+- Planned host-set hardening slices (`S13`-`S16`) are scheduled after current self-host priority work unless they directly unblock `S10b`.
+- Self-host argument-bearing direct-call wrapper lowering now supports known host passthrough wrappers for 1/2/3/4-parameter `i32` return-call forms; remaining lowering work is now focused on non-wrapper argument-bearing patterns and fallback-surface reduction.
 - Priority override (2026-02-13):
 - Single top priority is `S10b` (`SH1 -> SH2 -> SH3`) until `.stasis` self-host AOT CLI core is running end-to-end.
 - All other in-progress tracks (`S8b`, `S10`, and remaining `R*`/`H*` slices) are lower priority and should only be touched if they directly unblock `S10b`.
@@ -108,6 +116,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Add stable host extern ABI for:
 - `print_i32(value: i32)` and `print_string(value: string)`.
 - Ensure console path supports `string`, `ascii[]`, and `utf8[]` call sites for `print_string`.
+- Treat these externs as symbols exported by the selected host set in runtime boundary contracts (full deny-by-default enforcement tracked in `S13+`).
 - Deliverable:
 - Stasis program can print deterministic output through host boundary.
 - Tests:
@@ -500,7 +509,27 @@ It is not part of the steady-state incremental JIT update loop.
 - Verified self-host `.stasis` compile path advances through Brickout `_v1` parsing/incremental analysis and now fails at host linker invocation stage when linker tooling is unavailable (`link.exe`/`STASIS_AOT_LINKER`), indicating parser-side `_v1` compatibility blockers are removed for this slice.
 - With `STASIS_AOT_LINKER` set to `lld-link.exe`, Brickout `_v1` self-host compile advances past linker discovery and currently fails on runtime-bridge object unresolved runtime symbols (`core::panicking::*`, `memset`) during final executable link, making runtime-bridge/object-link contract the active blocker.
 - Runtime bridge executable-link fallback now retries with CLIF bridge object when rustc-emitted bridge object fails to link on Windows toolchains (e.g., `lld-link` unresolved runtime symbols), unblocking self-host AOT executable emission for Brickout `_v1`.
+- Linker spawn failures now emit deterministic self-host guidance with `STASIS_AOT_LINKER` override instructions (including missing default `link.exe`/`cc` toolchain hints) and regression coverage in `crates/stasis_jit`.
+- Compiler host bootstrap harness invocation now forces single-shot mode (`stasisc run --no-watch`) so self-host compile analysis does not trip watch-mode `dotnet` guards in bootstrap CLI.
+- Self-host compiler source staging buffer contract was raised to `262144` bytes (`compiler_state`, `.stasis` AOT CLI core temp source buffer, host analysis harness buffer, runtime bridge source-load buffer) so current `compiler/incremental_compiler.stasis` size no longer hard-fails lexing during stage analysis.
+- Added opt-in real-toolchain compiler-subset build smoke (`STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE=1`) that compiles the self-host compiler entry import-closure subset (entry/core/incremental/state/stdlib) via `--entry-file`, asserting 5-file staged contract build viability.
+- Added opt-in real-toolchain stage1 executable parity probe (`STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE=1`) that publishes argv/source/staged-bridge env contracts and executes compiled stage1 compiler subset binary for stage2 summary generation; probe now completes with exit `0` and stage2 summary parity via runtime-bridge CLI-entry host extern routing.
+- AOT patch manifests now include fallback stub detail hints (`symbol`, `id_hash`, `sig_hash`, `body_hash`, `ordinal`) so stage1 executable parity failures can map exit-code body hashes back to concrete fallback symbols/functions deterministically during diagnostics.
+- `compiler/stasis_aot_cli_entry.stasis` now lowers `compiler_cli_parse_from_argv` as a direct no-arg host extern call (`host_run_self_host_aot_cli_from_env`), and runtime bridge exports this symbol in both rustc and CLIF fallback objects so default stage1 executable path no longer depends on parse-bridge lowering.
+- Temporary parse-bridge shim scaffolding and parse-bridge-specific quality/reject gates were removed; unlowerable entry functions now surface through normal fallback-stub manifest diagnostics and strict/quality fallback gates.
+- Direct-call lowering now recognizes known host no-arg `i32` extern targets (`host_cli_arg_count`, `host_run_self_host_aot_cli_from_env`) when resolving call-target symbols, so this path no longer hard-fails unresolved-target gating for AOT stub emission.
+- No-arg direct-call target resolution now enforces zero-parameter callee signature (`param_count == 0`) so signature-mismatched candidates (for example one-arg callees) are rejected deterministically instead of being lowered as no-arg calls.
+- Incremental compiler host harness now uses a fast bootstrap invocation path (`STASIS_BOOTSTRAP_NO_PREPROCESS=1`) with automatic fallback to the legacy preprocess/copy wrapper path on malformed or failed harness output, reducing self-host analysis latency while preserving compatibility.
+- Windows rustc runtime bridge now uses env-backed staged AOT extern bindings for `host_emit_ir_from_compiler_state`, `host_run_cranelift_aot`, `host_link_executable_from_objects`, and `host_write_aot_cli_summary` (`STASIS_SELF_HOST_IR_BUNDLE_PATH`, `STASIS_SELF_HOST_OBJECT_BUNDLE_PATH`, `STASIS_SELF_HOST_LINK_TEMPLATE_EXE`, `STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE`) instead of hardcoded return-1 stubs; host-side env publish/restore helpers live in `apps/stasis/src/self_host_runtime_bridge.rs`.
+- Added opt-in real-toolchain staged extern smoke (`STASIS_RUN_REAL_RUNTIME_BRIDGE_STAGED_EXTERN_SMOKE=1`) that links and executes a runtime-bridge driver executable, asserting live `host_emit_ir_from_compiler_state`/`host_run_cranelift_aot`/`host_link_executable_from_objects`/`host_write_aot_cli_summary` behavior via env-backed contracts.
+- CLIF fallback runtime bridge now mirrors env-backed staged AOT extern behavior for `host_emit_ir_from_compiler_state`, `host_run_cranelift_aot`, `host_link_executable_from_objects`, and `host_write_aot_cli_summary` (using Win32 `GetEnvironmentVariableA`/`SetEnvironmentVariableA`/`CopyFileA`), with opt-in real-toolchain fallback coverage (`STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_STAGED_EXTERN_SMOKE=1`).
+- CLIF fallback runtime bridge now also uses env-backed CLI/source extern behavior for `host_cli_arg_count`, `host_cli_arg_value`, `host_source_file_count`, and `host_load_source_file` (indexed env-key selection with deterministic key tables), with opt-in real-toolchain fallback coverage (`STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_ARG_SOURCE_SMOKE=1`).
 - Added host regression coverage for entry-file CLI parsing and project-local import closure selection (`apps/stasis::tests::parse_aot_cli_contract_args_accepts_entry_file_flag`, `apps/stasis::compiler_backend::self_host_file_selection_tests::self_host_project_entry_selects_project_local_import_closure`).
+- Strengthened ownership guard coverage for `.stasis` orchestration boundaries: `apps/stasis::tests::aot_cli_host_glue_stays_out_of_compile_orchestration` now also rejects staged bridge/incremental orchestration calls in host CLI glue, `apps/stasis::tests::aot_cli_orchestration_contract_is_declared_in_stasis_sources` validates `.stasis` contract ownership, and `crates/stasis_compiler::tests::self_host_cli_orchestration_contract_stays_in_stasis_files` enforces the same boundary from compiler crate tests.
+- Added process-env serialization coverage for opt-in real-toolchain self-host/runtime-bridge smokes (`apps/stasis::compiler_backend::tests::*if_real_toolchain_available`) by taking the shared `stasis_process_env_lock`, reducing CI/load variance from concurrent `STASIS_*` env mutation.
+- Incremental parser + AOT lowering now support one-arg first-parameter passthrough return-call wrappers (`return callee(param0);`, including additive-offset form) and resolve known host single-arg `i32` extern targets (`host_set_summary_file`, `host_source_file_count`) for this shape; coverage: `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_first_param_passthrough_metadata`, `apps/stasis::compiler_backend::tests::aot_stub_uses_direct_call_with_first_param_passthrough_when_metadata_is_resolved`, `apps/stasis::compiler_backend::tests::resolve_simple_i32_return_one_arg_target_symbol_supports_known_host_single_arg_extern`, `apps/stasis::compiler_backend::tests::aot_compile_accepts_known_host_one_arg_passthrough_direct_call_target`.
+- Incremental parser + AOT lowering now support first/second, first/second/third, and first/second/third/fourth parameter passthrough wrappers for `i32` return-call shapes (including additive-offset form) and resolve known host argument-bearing extern targets for these wrappers (`host_cli_arg_value`, `host_write_aot_cli_summary`, `host_load_source_file`); coverage: `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_first_second_param_passthrough_metadata`, `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_first_second_third_param_passthrough_metadata`, `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_first_second_third_fourth_param_passthrough_metadata`, `apps/stasis::compiler_backend::tests::aot_stub_uses_direct_call_with_first_second_param_passthrough_when_metadata_is_resolved`, `apps/stasis::compiler_backend::tests::aot_stub_uses_direct_call_with_first_second_third_param_passthrough_when_metadata_is_resolved`, `apps/stasis::compiler_backend::tests::aot_stub_uses_direct_call_with_first_second_third_fourth_param_passthrough_when_metadata_is_resolved`, `apps/stasis::compiler_backend::tests::resolve_simple_i32_return_two_arg_passthrough_target_symbol_supports_known_host_extern`, `apps/stasis::compiler_backend::tests::resolve_simple_i32_return_three_arg_passthrough_target_symbol_supports_known_host_extern`, `apps/stasis::compiler_backend::tests::resolve_simple_i32_return_four_arg_passthrough_target_symbol_supports_known_host_extern`, `apps/stasis::compiler_backend::tests::aot_compile_accepts_known_host_two_arg_passthrough_direct_call_target`, `apps/stasis::compiler_backend::tests::aot_compile_accepts_known_host_three_arg_passthrough_direct_call_target`, `apps/stasis::compiler_backend::tests::aot_compile_accepts_known_host_four_arg_passthrough_direct_call_target`.
+- Incremental parser + AOT lowering now also support mixed literal+passthrough wrapper shape for argument-bearing host externs (`return callee(<i32_literal>, param0);`, including additive-offset form) and resolve known host target `host_cli_arg_value` for this pattern; coverage: `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_literal_first_second_param_passthrough_metadata`, `crates/stasis_compiler::tests::compile_records_simple_i32_return_call_one_arg_literal_first_second_param_passthrough_add_delta_metadata`, `apps/stasis::compiler_backend::tests::aot_stub_uses_direct_call_with_literal_first_second_param_passthrough_when_metadata_is_resolved`, `apps/stasis::compiler_backend::tests::resolve_simple_i32_return_two_arg_literal_first_second_param_passthrough_target_symbol_supports_known_host_extern`, `apps/stasis::compiler_backend::tests::aot_compile_accepts_known_host_two_arg_literal_first_second_param_passthrough_direct_call_target`.
 - Deliverable:
 - `.stasis`-owned core compile CLI orchestration exists and is test-covered independently of runtime watch loop.
 - Tests:
@@ -509,6 +538,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Core compile orchestration policy remains in `.stasis`; Rust bridge contains no compile-policy branching.
 - Status: `in_progress`
 - Remaining:
+- Immediate remaining (current focus):
+- Current narrowing: known host passthrough wrapper lowering is covered for 1/2/3/4-parameter `i32` return-call forms; remaining lowering work is non-wrapper argument-bearing call shapes that still contribute to fallback-stub surface.
+- Keep full `apps/stasis` test suite stable under CI/load timing variance (watch/AOT failure-path regressions) while preserving deterministic assertions.
+- Enforce the 60-second per-command test budget by running bounded targeted groups; if a command exceeds budget, treat it as a regression signal and split/optimize before continuing slices.
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
 - Slice SH2a: Replace monolithic `.stasis` host bridge declaration with staged AOT extern contract (`emit_ir`, `run_cranelift_aot`, `link_executable`) while preserving `.stasis` orchestration ownership. (completed 2026-02-13)
 - Slice SH2b: Wire host bridge implementations for staged AOT extern calls and route CLI execution through them end-to-end. (completed 2026-02-13; current host `aot-cli` path executes staged bridge sequence)
@@ -526,18 +559,18 @@ It is not part of the steady-state incremental JIT update loop.
 - Slice SH3b2e2b1b: Add host-boundary guard coverage in `apps/stasis` CLI path to keep host responsibilities limited to argv/env glue + self-host entry delegation (no direct compile orchestration in `main.rs`). (completed 2026-02-13)
 - Slice SH3b2e2b2: Replace runtime bridge stubs with live process-backed extern implementations and validate stage1 executable argv-driven compile flow.
 - Slice SH3b2e2b2a: Add `aot-cli --entry-file` contract path and project-local import-closure source selection so self-host AOT can target one program in multi-sample directories without multi-main rejection. (completed 2026-02-13)
-- Slice SH3b2e2b2b: Add deterministic linker discovery/fallback guidance + coverage for self-host AOT CLI executable link step on Windows dev environments lacking `link.exe` on `PATH` (use `STASIS_AOT_LINKER` override contract and document expected toolchain paths).
+- Slice SH3b2e2b2b: Add deterministic linker discovery/fallback guidance + coverage for self-host AOT CLI executable link step on Windows dev environments lacking `link.exe` on `PATH` (use `STASIS_AOT_LINKER` override contract and document expected toolchain paths). (completed 2026-02-23)
 - Slice SH3b2e2b2a: Add process-backed runtime bridge function implementations (`host_cli_arg_count`, `host_cli_arg_value`, `host_set_summary_file` semantics) in host module with unit coverage, ready to bind into emitted runtime extern bridge. (completed 2026-02-13)
-- Slice SH3b2e2b2b: Bind emitted runtime bridge extern symbols to process-backed implementations (replace CLIF stubs) and validate compiled stage1 executable argument-driven behavior.
+- Slice SH3b2e2b2b: Bind emitted runtime bridge extern symbols to process-backed implementations (replace CLIF stubs) and validate compiled stage1 executable argument-driven behavior. (in progress: rustc + CLIF fallback bridge externs are env-backed as of 2026-02-23; CLI-entry runtime host extern route (`host_run_self_host_aot_cli_from_env`) is wired and lowerable; known passthrough wrapper lowering now covers 1/2/3/4-arg forms, and remaining work is broader non-wrapper argument-bearing lowering so fallback-stub dependence can be reduced)
 - Slice SH3b2e2b2b1: Emit Windows runtime bridge object via live `no_std` rustc object with process-backed extern semantics for CLI arg/env bridge, with explicit mode marker and fallback path to CLIF stubs. (completed 2026-02-13)
 - Slice SH3b2e2b2b1a: Add opt-in real-toolchain runtime-bridge executable smoke (`STASIS_RUN_REAL_RUNTIME_BRIDGE_ARGC_SMOKE=1`) verifying compiled executable observes `STASIS_SELF_HOST_ARG_COUNT` via live `host_cli_arg_count` binding. (completed 2026-02-13)
 - Slice SH3b2e2b2b1b: Extend live runtime bridge extern coverage for source staging env contract (`host_source_file_count`/`host_load_source_file`) and add opt-in executable smoke for `STASIS_SELF_HOST_SOURCE_FILE_COUNT` binding. (completed 2026-02-13)
-- Slice SH3b2e2b2b2: Execute compiled stage1 executable through argv path and verify stage2 summary parity using live runtime bridge extern binding.
+- Slice SH3b2e2b2b2: Execute compiled stage1 executable through argv path and verify stage2 summary parity using live runtime bridge extern binding. (in progress: real-toolchain probe wired via `STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE=1`; current path verifies stage2 summary parity through the runtime-entry host extern route, passthrough wrapper lowering coverage now includes 1/2/3/4-arg forms, and remaining work is broader non-wrapper lowering so fallback-stub surface shrinks)
 - Slice SH3q1: Add consolidated `aot-cli` end-to-end quality harness (stage contract parity + invalid-program diagnostic coverage + per-run time-budget assertions), gated as opt-in (`STASIS_RUN_E2E_SELF_HOST_QUALITY=1`) until bootstrap harness/env interactions are fully isolated. (completed 2026-02-13)
 - Slice SH3b2a: Add opt-in real-toolchain runnable-exe smoke hook for self-host AOT CLI output (`STASIS_RUN_REAL_AOT_EXE_SMOKE=1`) to exercise executable startup path while startup ABI hardening is in progress. (completed 2026-02-13)
 - Slice SH3b2b: Add stage parity harness using `aot-cli --summary-file` outputs so stage1/stage2 compiler executions can be compared via stable machine-readable contract outputs once stage1 executable invocation is wired.
 - Slice SH3b2b1: Add CLI summary-parity integration test for repeated `aot-cli --summary-file` runs on identical source, asserting stable `source_file_count`, `entry_symbol`, and `object_file_names` contract fields. (completed 2026-02-13)
-- Slice SH3b2b2: Execute the same summary-parity harness through stage1 compiled self-host executable invocation once true stage1->stage2 execution is wired.
+- Slice SH3b2b2: Execute the same summary-parity harness through stage1 compiled self-host executable invocation once true stage1->stage2 execution is wired. (in progress: executable-path parity harness now runs stage1 subset binary with published argv/source/bridge env contracts and validates summary parity via runtime-entry host extern routing; passthrough wrapper lowering now covers 1/2/3/4-arg forms; remaining work is removing residual fallback-only behavior)
 - Slice SH3b2d: Add strict self-host lowering gate option (`STASIS_AOT_STRICT_SELF_HOST=1`) that rejects `aot-cli` outputs when emitted `i32` functions rely on stub fallback codegen (temporary bypass via `STASIS_AOT_ALLOW_STUB_FALLBACK=1`). (completed 2026-02-13)
 - Slice SH3b2c: Add signed self-host AOT artifact flow (post-link signing hook + signer/policy validation checklist) so Windows security policy allows stage1/stage2 executable invocation in default dev environments.
 - Slice SH3b2c1: Add optional post-link signing hook (`STASIS_AOT_SIGN_TOOL`) in self-host AOT CLI bridge and deterministic fake-signer test coverage for signer invocation contract. (completed 2026-02-13)
@@ -583,6 +616,87 @@ It is not part of the steady-state incremental JIT update loop.
 - Real compile -> function patch -> commit path updates patch identity on source edit.
 - Status: `completed`
 
+### S13 - Host-Set Contract Surface (Sandbox Baseline)
+- Language:
+- `Rust + .stasis`
+- Rust: contract transport fields and runtime validation hooks.
+- `.stasis`: required host-set declaration extraction and diagnostics policy.
+- Scope:
+- Add host-set payloads to compile/commit contracts (`host_set_id`, `host_set_hash`).
+- Keep phase classes in host-set contract metadata (`tick_safe`, `commit_only`, `effect_queued`).
+- Reject unresolved/missing host-set requirements before swap.
+- Deliverable:
+- Pending patch always carries a host-set contract and runtime validates it before hook/pointer swap.
+- Tests:
+- Host-set hash determinism tests.
+- Missing host-set mapping rejection tests.
+- Host-set hash/phase mismatch rejection tests.
+- Done gate:
+- No swap can commit without host-set contract validation.
+- Current progress:
+- Compile/commit contracts now carry `host_set_id` and `host_set_hash`.
+- Runtime commit path rejects host-set contract mismatch before hook/pointer swap.
+- Status: `in_progress (post-S10b: .stasis required-host extraction/diagnostics still pending)`
+
+### S14 - Host-Set Registry and Profile Selection
+- Language:
+- `Rust`
+- Scope:
+- Implement runtime host-set registry keyed by stable `host_set_id` + `host_set_hash`.
+- Add explicit host-set selection by mode/profile (`dev`, `test`, `prod`).
+- Remove/guard ambient host call paths that bypass host-set checks.
+- Deliverable:
+- Runtime extern dispatch is routed exclusively through selected host-set exports.
+- Tests:
+- Host-set registry lookup determinism tests.
+- Profile host-set selection tests.
+- Missing/unselected host-set dispatch rejection tests.
+- Done gate:
+- Host access is deny-by-default across runtime dispatch paths and requires selected host set.
+- Current progress:
+- Development runtime now uses profile-only host-set selection (`--host-set-profile` with optional `--host-set-registry-file`) and rejects legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
+- Host-set profile resolution is strict: unknown profiles and invalid/missing registry entries fail fast instead of silently falling back.
+- Development runtime still infers host-set profile from target mode when no explicit host-set profile is configured (`JitDev -> dev`, `AotProd -> prod`).
+- Host-set profile-to-contract mapping now lives in dedicated runtime registry module (`apps/stasis/src/host_set_registry.rs`) shared by runner resolution and CLI profile normalization.
+- Development runtime supports optional profile->contract manifest overrides (`STASIS_HOST_SET_REGISTRY_FILE` / `--host-set-registry-file`) for deterministic host-set table configuration in different environments.
+- Runner diagnostics/events include host-set metadata for compile/swap outcomes.
+- Status: `in_progress (post-S10b: full registry/profile mapping still pending)`
+
+### S15 - Phase-Gated Effects and Tick Determinism
+- Language:
+- `Rust + .stasis`
+- Rust: deterministic effect queue + commit-boundary flush path.
+- `.stasis`: phase-usage diagnostics and policy checks.
+- Scope:
+- Enforce host-set phase rules for extern invocation on tick and commit paths.
+- Route nondeterministic host effects through queued requests or host-fed deterministic snapshots.
+- Restrict `on_code_swap` extern calls to host-set commit-safe classes.
+- Deliverable:
+- Host-set extern calls preserve deterministic tick semantics.
+- Tests:
+- Tick-phase host-set policy violation rejection tests.
+- Effect-queue ordering/replay determinism tests.
+- `on_code_swap` phase-policy rejection + rollback tests.
+- Done gate:
+- Nondeterministic host effects cannot bypass queued/snapshotted paths.
+- Status: `planned (post-S10b)`
+
+### S16 - Host-Set Budgets and Failure Containment
+- Language:
+- `Rust`
+- Scope:
+- Add per-host-set/per-tick budgets (call count/time/bytes).
+- Define deterministic policy for budget violations (reject patch or fail tick without partial commit).
+- Emit host-set budget diagnostics/telemetry through runner events.
+- Deliverable:
+- Host-set call overuse is bounded and failure behavior is explicit.
+- Tests:
+- Budget-threshold enforcement tests.
+- Budget-overrun rollback/preservation tests.
+- Done gate:
+- Host-set misuse cannot produce partial state mutation or silent nondeterminism.
+- Status: `planned (post-S10b)`
+
 ## PR Sequence
 
 1. PR-A: S0-S2
@@ -590,6 +704,8 @@ It is not part of the steady-state incremental JIT update loop.
 3. PR-C: S6-S8
 4. PR-D: S8b-S10
 5. PR-E: S11-S12
+6. PR-F: S13-S14
+7. PR-G: S15-S16
 
 Each PR must include:
 - tests for that slice set
@@ -598,4 +714,4 @@ Each PR must include:
 
 ## Backlog
 
-- (none currently tracked for compiler ownership migration)
+- Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.

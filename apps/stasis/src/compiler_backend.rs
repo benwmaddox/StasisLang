@@ -35,6 +35,15 @@ pub struct SelfHostedAotCliSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct AotFallbackStubDetail {
+    symbol: String,
+    id_hash: i32,
+    sig_hash: i32,
+    body_hash: i32,
+    ordinal: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AotPatchManifest {
     request_id: u64,
     artifact_paths: Vec<String>,
@@ -43,6 +52,8 @@ struct AotPatchManifest {
     linked_image_sha256: Option<String>,
     #[serde(default)]
     fallback_stub_symbols: Vec<String>,
+    #[serde(default)]
+    fallback_stub_details: Vec<AotFallbackStubDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +67,31 @@ struct SelfHostIrBundle {
 struct SelfHostObjectBundle {
     entry_symbol: String,
     object_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SelfHostCliEnvSnapshot {
+    strict_self_host: bool,
+    allow_stub_fallback: bool,
+    quality_gate: bool,
+    summary_file_path: Option<PathBuf>,
+}
+
+fn capture_self_host_cli_env_snapshot() -> SelfHostCliEnvSnapshot {
+    SelfHostCliEnvSnapshot {
+        strict_self_host: std::env::var("STASIS_AOT_STRICT_SELF_HOST")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+        allow_stub_fallback: std::env::var("STASIS_AOT_ALLOW_STUB_FALLBACK")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+        quality_gate: std::env::var("STASIS_AOT_QUALITY_GATE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+        summary_file_path: std::env::var_os("STASIS_AOT_SUMMARY_FILE")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+    }
 }
 
 impl IncrementalCompilerBackend {
@@ -289,10 +325,12 @@ impl CompilerBackend for IncrementalCompilerBackend {
         }
 
         let layout_hash = expand_layout_hash(parsed.layout_hash);
-        CompileResult::success_with_hook_metadata(
+        CompileResult::success_with_host_set_metadata(
             request.request_id,
             layout_hash,
             FunctionPatchSet { functions },
+            request.host_set_id.clone(),
+            request.host_set_hash,
             parsed.hook_symbol,
             hook_fn_id,
             aot_linked_image_path.map(std::path::PathBuf::from),
@@ -319,6 +357,7 @@ impl IncrementalCompilerBackend {
         let mut artifact_paths = Vec::new();
         let mut export_symbols = Vec::new();
         let mut fallback_stub_symbols = Vec::new();
+        let mut fallback_stub_details = Vec::new();
         let mut linked_image_path: Option<String> = None;
         let mut linked_image_size_bytes: Option<u64> = None;
         let mut linked_image_sha256: Option<String> = None;
@@ -330,6 +369,7 @@ impl IncrementalCompilerBackend {
                 linked_image_size_bytes,
                 linked_image_sha256.as_deref(),
                 &fallback_stub_symbols,
+                &fallback_stub_details,
             )?;
             return Ok(linked_image_path);
         }
@@ -344,8 +384,16 @@ impl IncrementalCompilerBackend {
         for metric in metrics {
             let function_name = aot_symbol_name(metric);
             export_symbols.push(function_name.clone());
-            if metric_uses_stub_fallback(metric) {
+            let uses_stub_fallback = metric_uses_stub_fallback(metric);
+            if uses_stub_fallback {
                 fallback_stub_symbols.push(function_name.clone());
+                fallback_stub_details.push(AotFallbackStubDetail {
+                    symbol: function_name.clone(),
+                    id_hash: metric.id_hash,
+                    sig_hash: metric.sig_hash,
+                    body_hash: metric.body_hash,
+                    ordinal: metric.ordinal,
+                });
             }
             let resolved_simple_call_target = resolve_unique_i32_call_target_symbol_by_hash(
                 metric.simple_i32_return_call_target_id_hash,
@@ -359,18 +407,132 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let resolved_simple_one_arg_call_target =
-                resolve_unique_i32_single_i32_arg_call_target_symbol_by_hash(
+            let simple_i32_one_arg_uses_first_param_passthrough = metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
+                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
+                && metric
+                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
+                    .is_none()
+                && metric.param_count == 1;
+            let simple_i32_two_arg_uses_first_second_param_passthrough = metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
+                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
+                && metric
+                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
+                    .is_none()
+                && metric.param_count == 2;
+            let simple_i32_three_arg_uses_first_second_third_param_passthrough = metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
+                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
+                && metric
+                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
+                    .is_none()
+                && metric.param_count == 3;
+            let simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough = metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
+                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
+                && metric
+                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
+                    .is_none()
+                && metric.param_count == 4;
+            let simple_i32_two_arg_uses_literal_first_second_param_passthrough = metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
+                && metric.simple_i32_return_call_one_arg_i32_literal.is_some()
+                && metric
+                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
+                    .is_none()
+                && metric.param_count == 1;
+            let resolved_simple_two_arg_passthrough_call_target = if simple_i32_two_arg_uses_first_second_param_passthrough {
+                resolve_known_host_two_arg_i32_extern_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metric.first_param_type_code,
+                )
+            } else {
+                None
+            };
+            let resolved_simple_three_arg_passthrough_call_target = if simple_i32_three_arg_uses_first_second_third_param_passthrough {
+                resolve_known_host_three_arg_i32_extern_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metric.first_param_type_code,
+                )
+            } else {
+                None
+            };
+            let resolved_simple_four_arg_passthrough_call_target = if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
+                resolve_known_host_four_arg_i32_extern_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metric.first_param_type_code,
+                )
+            } else {
+                None
+            };
+            let resolved_simple_two_arg_literal_first_second_passthrough_call_target = if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
+                resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metric.first_param_type_code,
+                )
+            } else {
+                None
+            };
+            let resolved_simple_one_arg_call_target = if simple_i32_two_arg_uses_first_second_param_passthrough
+                || simple_i32_three_arg_uses_first_second_third_param_passthrough
+                || simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough
+                || simple_i32_two_arg_uses_literal_first_second_param_passthrough
+            {
+                None
+            } else {
+                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
                     metric.simple_i32_return_call_one_arg_target_id_hash,
                     metrics,
-                );
-            if metric.simple_i32_return_call_one_arg_target_id_hash.is_some()
-                && resolved_simple_one_arg_call_target.is_none()
-            {
-                return Err(format!(
-                    "unresolved one-arg direct call target for emitted function {} (id_hash={})",
-                    function_name, metric.id_hash
-                ));
+                    if simple_i32_one_arg_uses_first_param_passthrough {
+                        metric.first_param_type_code
+                    } else {
+                        1
+                    },
+                )
+            };
+            if metric.simple_i32_return_call_one_arg_target_id_hash.is_some() {
+                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
+                    if resolved_simple_four_arg_passthrough_call_target.is_none() {
+                        return Err(format!(
+                            "unresolved four-arg passthrough direct call target for emitted function {} (id_hash={})",
+                            function_name, metric.id_hash
+                        ));
+                    }
+                } else if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
+                    if resolved_simple_two_arg_literal_first_second_passthrough_call_target
+                        .is_none()
+                    {
+                        return Err(format!(
+                            "unresolved two-arg literal+param passthrough direct call target for emitted function {} (id_hash={})",
+                            function_name, metric.id_hash
+                        ));
+                    }
+                } else if simple_i32_three_arg_uses_first_second_third_param_passthrough {
+                    if resolved_simple_three_arg_passthrough_call_target.is_none() {
+                        return Err(format!(
+                            "unresolved three-arg passthrough direct call target for emitted function {} (id_hash={})",
+                            function_name, metric.id_hash
+                        ));
+                    }
+                } else if simple_i32_two_arg_uses_first_second_param_passthrough {
+                    if resolved_simple_two_arg_passthrough_call_target.is_none() {
+                        return Err(format!(
+                            "unresolved two-arg passthrough direct call target for emitted function {} (id_hash={})",
+                            function_name, metric.id_hash
+                        ));
+                    }
+                } else if resolved_simple_one_arg_call_target.is_none() {
+                    return Err(format!(
+                        "unresolved one-arg direct call target for emitted function {} (id_hash={})",
+                        function_name, metric.id_hash
+                    ));
+                }
             }
             let resolved_simple_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
@@ -406,17 +568,19 @@ impl IncrementalCompilerBackend {
                 ));
             }
             let resolved_simple_void_print_call_target = if simple_void_print_is_one_arg {
-                resolve_unique_i32_single_i32_arg_call_target_symbol_by_hash(
+                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
                     metric.simple_void_print_i32_call_target_id_hash,
                     metrics,
+                    1,
                 )
             } else if metric
                 .simple_void_print_i32_call_one_arg_arg_call_target_id_hash
                 .is_some()
             {
-                resolve_unique_i32_single_i32_arg_call_target_symbol_by_hash(
+                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
                     metric.simple_void_print_i32_call_target_id_hash,
                     metrics,
+                    1,
                 )
             } else {
                 resolve_unique_i32_call_target_symbol_by_hash(
@@ -448,7 +612,9 @@ impl IncrementalCompilerBackend {
                     metric.simple_i32_return_two_call_right_target_id_hash,
                     metrics,
                 );
-            if metric.simple_i32_return_two_call_left_target_id_hash.is_some()
+            if metric
+                .simple_i32_return_two_call_left_target_id_hash
+                .is_some()
                 && resolved_simple_two_call_left_target.is_none()
             {
                 return Err(format!(
@@ -456,7 +622,9 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            if metric.simple_i32_return_two_call_right_target_id_hash.is_some()
+            if metric
+                .simple_i32_return_two_call_right_target_id_hash
+                .is_some()
                 && resolved_simple_two_call_right_target.is_none()
             {
                 return Err(format!(
@@ -468,7 +636,7 @@ impl IncrementalCompilerBackend {
                 "req{}_f{}_{}.o",
                 request_id, metric.file_index, metric.ordinal
             ));
-            let clif = build_aot_stub_clif(
+            let clif = build_aot_stub_clif_for_metric(
                 &function_name,
                 &metric.return_type,
                 metric.simple_i32_return_expr.as_ref(),
@@ -478,6 +646,17 @@ impl IncrementalCompilerBackend {
                 resolved_simple_one_arg_call_target.as_deref(),
                 metric.simple_i32_return_call_one_arg_i32_literal,
                 resolved_simple_one_arg_arg_call_target.as_deref(),
+                resolved_simple_two_arg_passthrough_call_target,
+                resolved_simple_three_arg_passthrough_call_target,
+                resolved_simple_four_arg_passthrough_call_target,
+                resolved_simple_two_arg_literal_first_second_passthrough_call_target,
+                metric.param_count,
+                metric.first_param_type_code,
+                simple_i32_one_arg_uses_first_param_passthrough,
+                simple_i32_two_arg_uses_first_second_param_passthrough,
+                simple_i32_three_arg_uses_first_second_third_param_passthrough,
+                simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough,
+                simple_i32_two_arg_uses_literal_first_second_param_passthrough,
                 resolved_simple_two_call_left_target.as_deref(),
                 resolved_simple_two_call_right_target.as_deref(),
                 metric.simple_i32_return_two_call_op_code,
@@ -530,6 +709,7 @@ impl IncrementalCompilerBackend {
             linked_image_size_bytes,
             linked_image_sha256.as_deref(),
             &fallback_stub_symbols,
+            &fallback_stub_details,
         )?;
 
         Ok(linked_image_path)
@@ -543,6 +723,7 @@ impl IncrementalCompilerBackend {
         linked_image_size_bytes: Option<u64>,
         linked_image_sha256: Option<&str>,
         fallback_stub_symbols: &[String],
+        fallback_stub_details: &[AotFallbackStubDetail],
     ) -> Result<(), String> {
         let manifest_path = self.aot_artifact_root.join("last_patch_manifest.json");
         let manifest = AotPatchManifest {
@@ -552,6 +733,7 @@ impl IncrementalCompilerBackend {
             linked_image_size_bytes,
             linked_image_sha256: linked_image_sha256.map(str::to_string),
             fallback_stub_symbols: fallback_stub_symbols.to_vec(),
+            fallback_stub_details: fallback_stub_details.to_vec(),
         };
         let payload = serde_json::to_string_pretty(&manifest)
             .map_err(|error| format!("failed to serialize AOT manifest: {error}"))?;
@@ -624,6 +806,7 @@ fn hash_identifier(name: &str) -> i32 {
     hash
 }
 
+#[cfg(test)]
 fn build_aot_stub_clif(
     function_name: &str,
     return_type: &str,
@@ -634,6 +817,74 @@ fn build_aot_stub_clif(
     simple_call_one_arg_target_symbol: Option<&str>,
     simple_call_one_arg_i32_literal: Option<i32>,
     simple_call_one_arg_arg_call_target_symbol: Option<&str>,
+    simple_two_call_left_target_symbol: Option<&str>,
+    simple_two_call_right_target_symbol: Option<&str>,
+    simple_i32_return_two_call_op_code: Option<i32>,
+    simple_void_print_i32_literal: Option<i32>,
+    simple_void_print_i32_call_target_symbol: Option<&str>,
+    simple_void_print_i32_call_one_arg_arg_call_target_symbol: Option<&str>,
+    simple_void_print_i32_call_add_delta: Option<i32>,
+) -> String {
+    build_aot_stub_clif_for_metric(
+        function_name,
+        return_type,
+        simple_expr,
+        fallback_return_value,
+        simple_call_target_symbol,
+        simple_i32_return_call_add_delta,
+        simple_call_one_arg_target_symbol,
+        simple_call_one_arg_i32_literal,
+        simple_call_one_arg_arg_call_target_symbol,
+        None,
+        None,
+        None,
+        None,
+        0,
+        0,
+        false,
+        false,
+        false,
+        false,
+        false,
+        simple_two_call_left_target_symbol,
+        simple_two_call_right_target_symbol,
+        simple_i32_return_two_call_op_code,
+        simple_void_print_i32_literal,
+        simple_void_print_i32_call_target_symbol,
+        simple_void_print_i32_call_one_arg_arg_call_target_symbol,
+        simple_void_print_i32_call_add_delta,
+    )
+}
+
+fn clif_type_for_stasis_param_code(type_code: i32) -> &'static str {
+    if type_code == 1 {
+        "i32"
+    } else {
+        "i64"
+    }
+}
+
+fn build_aot_stub_clif_for_metric(
+    function_name: &str,
+    return_type: &str,
+    simple_expr: Option<&SimpleI32ReturnExpr>,
+    fallback_return_value: i32,
+    simple_call_target_symbol: Option<&str>,
+    simple_i32_return_call_add_delta: Option<i32>,
+    simple_call_one_arg_target_symbol: Option<&str>,
+    simple_call_one_arg_i32_literal: Option<i32>,
+    simple_call_one_arg_arg_call_target_symbol: Option<&str>,
+    simple_call_two_arg_target_symbol: Option<&str>,
+    simple_call_three_arg_target_symbol: Option<&str>,
+    simple_call_four_arg_target_symbol: Option<&str>,
+    simple_call_two_arg_literal_first_second_param_target_symbol: Option<&str>,
+    function_param_count: i32,
+    function_first_param_type_code: i32,
+    simple_call_one_arg_uses_first_param_passthrough: bool,
+    simple_call_two_arg_uses_first_second_param_passthrough: bool,
+    simple_call_three_arg_uses_first_second_third_param_passthrough: bool,
+    simple_call_four_arg_uses_first_second_third_fourth_param_passthrough: bool,
+    simple_call_two_arg_uses_literal_first_second_param_passthrough: bool,
     simple_two_call_left_target_symbol: Option<&str>,
     simple_two_call_right_target_symbol: Option<&str>,
     simple_i32_return_two_call_op_code: Option<i32>,
@@ -658,9 +909,10 @@ fn build_aot_stub_clif(
             );
         }
         if let Some(call_target_symbol) = simple_void_print_i32_call_target_symbol {
-            if let (Some(arg_literal), Some(delta)) =
-                (simple_void_print_i32_literal, simple_void_print_i32_call_add_delta)
-            {
+            if let (Some(arg_literal), Some(delta)) = (
+                simple_void_print_i32_literal,
+                simple_void_print_i32_call_add_delta,
+            ) {
                 let abs_delta = delta.abs();
                 let op = if delta < 0 { "isub" } else { "iadd" };
                 return format!(
@@ -670,7 +922,9 @@ fn build_aot_stub_clif(
                     aot_call_conv()
                 );
             }
-            if let Some(arg_call_target_symbol) = simple_void_print_i32_call_one_arg_arg_call_target_symbol {
+            if let Some(arg_call_target_symbol) =
+                simple_void_print_i32_call_one_arg_arg_call_target_symbol
+            {
                 if let Some(delta) = simple_void_print_i32_call_add_delta {
                     let abs_delta = delta.abs();
                     let op = if delta < 0 { "isub" } else { "iadd" };
@@ -742,6 +996,120 @@ fn build_aot_stub_clif(
             aot_call_conv(),
             aot_call_conv()
         );
+    }
+    if simple_call_four_arg_uses_first_second_third_fourth_param_passthrough {
+        if let Some(call_target_symbol) = simple_call_four_arg_target_symbol {
+            if function_param_count == 4 {
+                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let second_arg_type = "i32";
+                let third_arg_type = "i64";
+                let fourth_arg_type = "i64";
+                if let Some(delta) = simple_i32_return_call_add_delta {
+                    let abs_delta = delta.abs();
+                    let op = if delta < 0 { "isub" } else { "iadd" };
+                    return format!(
+                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {} {{\nblock0:\nv4 = call %{call_target_symbol}(v0, v1, v2, v3)\nv5 = iconst.i32 {abs_delta}\nv6 = {op} v4, v5\nreturn v6\n}}\n",
+                        aot_call_conv(),
+                        aot_call_conv()
+                    );
+                }
+                return format!(
+                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {} {{\nblock0:\nv4 = call %{call_target_symbol}(v0, v1, v2, v3)\nreturn v4\n}}\n",
+                    aot_call_conv(),
+                    aot_call_conv()
+                );
+            }
+        }
+    }
+    if simple_call_three_arg_uses_first_second_third_param_passthrough {
+        if let Some(call_target_symbol) = simple_call_three_arg_target_symbol {
+            if function_param_count == 3 {
+                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let second_arg_type = "i64";
+                let third_arg_type = "i64";
+                if let Some(delta) = simple_i32_return_call_add_delta {
+                    let abs_delta = delta.abs();
+                    let op = if delta < 0 { "isub" } else { "iadd" };
+                    return format!(
+                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {} {{\nblock0:\nv3 = call %{call_target_symbol}(v0, v1, v2)\nv4 = iconst.i32 {abs_delta}\nv5 = {op} v3, v4\nreturn v5\n}}\n",
+                        aot_call_conv(),
+                        aot_call_conv()
+                    );
+                }
+                return format!(
+                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {} {{\nblock0:\nv3 = call %{call_target_symbol}(v0, v1, v2)\nreturn v3\n}}\n",
+                    aot_call_conv(),
+                    aot_call_conv()
+                );
+            }
+        }
+    }
+    if simple_call_two_arg_uses_first_second_param_passthrough {
+        if let Some(call_target_symbol) = simple_call_two_arg_target_symbol {
+            if function_param_count == 2 {
+                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let second_arg_type = "i64";
+                if let Some(delta) = simple_i32_return_call_add_delta {
+                    let abs_delta = delta.abs();
+                    let op = if delta < 0 { "isub" } else { "iadd" };
+                    return format!(
+                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}) -> i32 {} {{\nblock0:\nv2 = call %{call_target_symbol}(v0, v1)\nv3 = iconst.i32 {abs_delta}\nv4 = {op} v2, v3\nreturn v4\n}}\n",
+                        aot_call_conv(),
+                        aot_call_conv()
+                    );
+                }
+                return format!(
+                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}) -> i32 {} {{\nblock0:\nv2 = call %{call_target_symbol}(v0, v1)\nreturn v2\n}}\n",
+                    aot_call_conv(),
+                    aot_call_conv()
+                );
+            }
+        }
+    }
+    if simple_call_two_arg_uses_literal_first_second_param_passthrough {
+        if let (Some(call_target_symbol), Some(arg_literal)) = (
+            simple_call_two_arg_literal_first_second_param_target_symbol,
+            simple_call_one_arg_i32_literal,
+        ) {
+            if function_param_count == 1 {
+                let second_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                if let Some(delta) = simple_i32_return_call_add_delta {
+                    let abs_delta = delta.abs();
+                    let op = if delta < 0 { "isub" } else { "iadd" };
+                    return format!(
+                        "external {call_target_symbol}(i32, {second_arg_type}) -> i32 {}\nfunction %{function_name}({second_arg_type}) -> i32 {} {{\nblock0:\nv1 = iconst.i32 {arg_literal}\nv2 = call %{call_target_symbol}(v1, v0)\nv3 = iconst.i32 {abs_delta}\nv4 = {op} v2, v3\nreturn v4\n}}\n",
+                        aot_call_conv(),
+                        aot_call_conv()
+                    );
+                }
+                return format!(
+                    "external {call_target_symbol}(i32, {second_arg_type}) -> i32 {}\nfunction %{function_name}({second_arg_type}) -> i32 {} {{\nblock0:\nv1 = iconst.i32 {arg_literal}\nv2 = call %{call_target_symbol}(v1, v0)\nreturn v2\n}}\n",
+                    aot_call_conv(),
+                    aot_call_conv()
+                );
+            }
+        }
+    }
+    if simple_call_one_arg_uses_first_param_passthrough {
+        if let Some(call_target_symbol) = simple_call_one_arg_target_symbol {
+            if function_param_count == 1 {
+                let arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                if let Some(delta) = simple_i32_return_call_add_delta {
+                    let abs_delta = delta.abs();
+                    let op = if delta < 0 { "isub" } else { "iadd" };
+                    return format!(
+                        "external {call_target_symbol}({arg_type}) -> i32 {}\nfunction %{function_name}({arg_type}) -> i32 {} {{\nblock0:\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\nreturn v3\n}}\n",
+                        aot_call_conv(),
+                        aot_call_conv()
+                    );
+                }
+                return format!(
+                    "external {call_target_symbol}({arg_type}) -> i32 {}\nfunction %{function_name}({arg_type}) -> i32 {} {{\nblock0:\nv1 = call %{call_target_symbol}(v0)\nreturn v1\n}}\n",
+                    aot_call_conv(),
+                    aot_call_conv()
+                );
+            }
+        }
     }
     if let (Some(call_target_symbol), Some(arg_literal)) = (
         simple_call_one_arg_target_symbol,
@@ -842,32 +1210,111 @@ fn resolve_unique_i32_call_target_symbol_by_hash(
     metrics: &[stasis_compiler::FunctionMetric],
 ) -> Option<String> {
     let target_id_hash = maybe_target_id_hash?;
-    let mut matches = metrics
-        .iter()
-        .filter(|candidate| candidate.id_hash == target_id_hash && candidate.return_type == "i32");
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        return None;
+    let mut matches = metrics.iter().filter(|candidate| {
+        candidate.id_hash == target_id_hash
+            && candidate.return_type == "i32"
+            && candidate.param_count == 0
+    });
+    if let Some(first) = matches.next() {
+        if matches.next().is_some() {
+            return None;
+        }
+        return Some(aot_symbol_name(first));
     }
-    Some(aot_symbol_name(first))
+    resolve_known_host_noarg_i32_extern_symbol_by_hash(target_id_hash).map(str::to_string)
 }
 
-fn resolve_unique_i32_single_i32_arg_call_target_symbol_by_hash(
+fn resolve_unique_i32_single_arg_call_target_symbol_by_hash(
     maybe_target_id_hash: Option<i32>,
     metrics: &[stasis_compiler::FunctionMetric],
+    first_param_type_code: i32,
 ) -> Option<String> {
     let target_id_hash = maybe_target_id_hash?;
     let mut matches = metrics.iter().filter(|candidate| {
         candidate.id_hash == target_id_hash
             && candidate.return_type == "i32"
             && candidate.param_count == 1
-            && candidate.first_param_type_code == 1
+            && candidate.first_param_type_code == first_param_type_code
     });
-    let first = matches.next()?;
-    if matches.next().is_some() {
+    if let Some(first) = matches.next() {
+        if matches.next().is_some() {
+            return None;
+        }
+        return Some(aot_symbol_name(first));
+    }
+    resolve_known_host_single_arg_i32_extern_symbol_by_hash(target_id_hash, first_param_type_code)
+        .map(str::to_string)
+}
+
+fn resolve_known_host_noarg_i32_extern_symbol_by_hash(target_id_hash: i32) -> Option<&'static str> {
+    if target_id_hash == hash_identifier("host_cli_arg_count") {
+        return Some("host_cli_arg_count");
+    }
+    if target_id_hash == hash_identifier("host_run_self_host_aot_cli_from_env") {
+        return Some("host_run_self_host_aot_cli_from_env");
+    }
+    None
+}
+
+fn resolve_known_host_single_arg_i32_extern_symbol_by_hash(
+    target_id_hash: i32,
+    first_param_type_code: i32,
+) -> Option<&'static str> {
+    if first_param_type_code != 0 {
         return None;
     }
-    Some(aot_symbol_name(first))
+    if target_id_hash == hash_identifier("host_source_file_count") {
+        return Some("host_source_file_count");
+    }
+    if target_id_hash == hash_identifier("host_set_summary_file") {
+        return Some("host_set_summary_file");
+    }
+    None
+}
+
+fn resolve_known_host_two_arg_i32_extern_symbol_by_hash(
+    maybe_target_id_hash: Option<i32>,
+    first_param_type_code: i32,
+) -> Option<&'static str> {
+    let target_id_hash = maybe_target_id_hash?;
+    if target_id_hash == hash_identifier("host_cli_arg_value") && first_param_type_code == 1 {
+        return Some("host_cli_arg_value");
+    }
+    None
+}
+
+fn resolve_known_host_three_arg_i32_extern_symbol_by_hash(
+    maybe_target_id_hash: Option<i32>,
+    first_param_type_code: i32,
+) -> Option<&'static str> {
+    let target_id_hash = maybe_target_id_hash?;
+    if target_id_hash == hash_identifier("host_write_aot_cli_summary") && first_param_type_code == 0
+    {
+        return Some("host_write_aot_cli_summary");
+    }
+    None
+}
+
+fn resolve_known_host_four_arg_i32_extern_symbol_by_hash(
+    maybe_target_id_hash: Option<i32>,
+    first_param_type_code: i32,
+) -> Option<&'static str> {
+    let target_id_hash = maybe_target_id_hash?;
+    if target_id_hash == hash_identifier("host_load_source_file") && first_param_type_code == 0 {
+        return Some("host_load_source_file");
+    }
+    None
+}
+
+fn resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
+    maybe_target_id_hash: Option<i32>,
+    first_param_type_code: i32,
+) -> Option<&'static str> {
+    let target_id_hash = maybe_target_id_hash?;
+    if target_id_hash == hash_identifier("host_cli_arg_value") && first_param_type_code == 0 {
+        return Some("host_cli_arg_value");
+    }
+    None
 }
 
 fn emit_clif_for_simple_expr(
@@ -1145,6 +1592,11 @@ fn aot_call_conv() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::self_host_runtime_bridge::{
+        publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
+        restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
+        stasis_process_env_lock,
+    };
     use object::Object;
     #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
@@ -1158,6 +1610,7 @@ mod tests {
     static SIGN_ENV_LOCK: Mutex<()> = Mutex::new(());
     static STUB_FALLBACK_ENV_LOCK: Mutex<()> = Mutex::new(());
     static SUMMARY_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENTRY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn identifier_hash_matches_incremental_function() {
@@ -1439,8 +1892,7 @@ mod tests {
     }
 
     #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_i32_arg_call_target_for_simple_void_metadata()
-    {
+    fn aot_stub_uses_print_i32_call_with_direct_one_i32_arg_call_target_for_simple_void_metadata() {
         let clif = build_aot_stub_clif(
             "on_code_swap",
             "void",
@@ -1468,8 +1920,8 @@ mod tests {
     }
 
     #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_call_arg_call_target_for_simple_void_metadata(
-    ) {
+    fn aot_stub_uses_print_i32_call_with_direct_one_call_arg_call_target_for_simple_void_metadata()
+    {
         let clif = build_aot_stub_clif(
             "on_code_swap",
             "void",
@@ -1720,6 +2172,251 @@ mod tests {
     }
 
     #[test]
+    fn aot_stub_uses_direct_call_with_first_param_passthrough_when_metadata_is_resolved() {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward",
+            "i32",
+            None,
+            123,
+            None,
+            None,
+            Some("host_set_summary_file"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            0,
+            true,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains("external host_set_summary_file(i64) -> i32"));
+        assert!(clif.contains("function %forward(i64) -> i32"));
+        assert!(clif.contains("v1 = call %host_set_summary_file(v0)"));
+        assert!(clif.contains("return v1"));
+        assert!(!clif.contains("iconst.i32 123"));
+    }
+
+    #[test]
+    fn aot_stub_uses_direct_call_with_first_second_param_passthrough_when_metadata_is_resolved() {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward2",
+            "i32",
+            None,
+            123,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host_cli_arg_value"),
+            None,
+            None,
+            None,
+            2,
+            1,
+            false,
+            true,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains("external host_cli_arg_value(i32, i64) -> i32"));
+        assert!(clif.contains("function %forward2(i32, i64) -> i32"));
+        assert!(clif.contains("v2 = call %host_cli_arg_value(v0, v1)"));
+        assert!(clif.contains("return v2"));
+        assert!(!clif.contains("iconst.i32 123"));
+    }
+
+    #[test]
+    fn aot_stub_uses_direct_call_with_first_second_third_param_passthrough_when_metadata_is_resolved(
+    ) {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward3",
+            "i32",
+            None,
+            123,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host_write_aot_cli_summary"),
+            None,
+            None,
+            3,
+            0,
+            false,
+            false,
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains(
+            "external host_write_aot_cli_summary(i64, i64, i64) -> i32"
+        ));
+        assert!(clif.contains("function %forward3(i64, i64, i64) -> i32"));
+        assert!(clif.contains(
+            "v3 = call %host_write_aot_cli_summary(v0, v1, v2)"
+        ));
+        assert!(clif.contains("return v3"));
+        assert!(!clif.contains("iconst.i32 123"));
+    }
+
+    #[test]
+    fn aot_stub_uses_direct_call_with_first_second_third_fourth_param_passthrough_when_metadata_is_resolved(
+    ) {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward4",
+            "i32",
+            None,
+            123,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host_load_source_file"),
+            None,
+            4,
+            0,
+            false,
+            false,
+            false,
+            true,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains(
+            "external host_load_source_file(i64, i32, i64, i64) -> i32"
+        ));
+        assert!(clif.contains("function %forward4(i64, i32, i64, i64) -> i32"));
+        assert!(clif.contains(
+            "v4 = call %host_load_source_file(v0, v1, v2, v3)"
+        ));
+        assert!(clif.contains("return v4"));
+        assert!(!clif.contains("iconst.i32 123"));
+    }
+
+    #[test]
+    fn aot_stub_uses_direct_call_with_first_second_third_fourth_param_passthrough_add_delta_when_metadata_is_resolved(
+    ) {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward4_add",
+            "i32",
+            None,
+            123,
+            None,
+            Some(-2),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host_load_source_file"),
+            None,
+            4,
+            0,
+            false,
+            false,
+            false,
+            true,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains(
+            "external host_load_source_file(i64, i32, i64, i64) -> i32"
+        ));
+        assert!(clif.contains("function %forward4_add(i64, i32, i64, i64) -> i32"));
+        assert!(clif.contains(
+            "v4 = call %host_load_source_file(v0, v1, v2, v3)"
+        ));
+        assert!(clif.contains("iconst.i32 2"));
+        assert!(clif.contains("isub v4, v5"));
+        assert!(clif.contains("return v6"));
+    }
+
+    #[test]
+    fn aot_stub_uses_direct_call_with_literal_first_second_param_passthrough_when_metadata_is_resolved(
+    ) {
+        let clif = build_aot_stub_clif_for_metric(
+            "forward_lit",
+            "i32",
+            None,
+            123,
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+            Some("host_cli_arg_value"),
+            1,
+            0,
+            false,
+            false,
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(clif.contains("external host_cli_arg_value(i32, i64) -> i32"));
+        assert!(clif.contains("function %forward_lit(i64) -> i32"));
+        assert!(clif.contains("v1 = iconst.i32 1"));
+        assert!(clif.contains("v2 = call %host_cli_arg_value(v1, v0)"));
+        assert!(clif.contains("return v2"));
+    }
+
+    #[test]
     fn aot_stub_uses_direct_call_with_one_i32_arg_and_add_delta_when_metadata_is_resolved() {
         let clif = build_aot_stub_clif(
             "main",
@@ -1913,6 +2610,141 @@ mod tests {
     }
 
     #[test]
+    fn resolve_simple_i32_return_call_target_symbol_rejects_one_arg_candidate_for_noarg_call() {
+        let caller = stasis_compiler::FunctionMetric {
+            file_index: 0,
+            ordinal: 0,
+            id_hash: hash_identifier("main"),
+            sig_hash: 11,
+            body_hash: 12,
+            return_type: "i32".to_string(),
+            param_count: 0,
+            first_param_type_code: 0,
+            simple_i32_return_expr: None,
+            simple_i32_return_call_target_id_hash: Some(hash_identifier("callee")),
+            simple_i32_return_call_add_delta: None,
+            simple_i32_return_call_one_arg_target_id_hash: None,
+            simple_i32_return_call_one_arg_i32_literal: None,
+            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_return_two_call_left_target_id_hash: None,
+            simple_i32_return_two_call_right_target_id_hash: None,
+            simple_i32_return_two_call_op_code: None,
+            simple_void_print_i32_literal: None,
+            simple_void_print_i32_call_target_id_hash: None,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
+            simple_void_print_i32_call_add_delta: None,
+        };
+        let callee = stasis_compiler::FunctionMetric {
+            file_index: 0,
+            ordinal: 1,
+            id_hash: hash_identifier("callee"),
+            sig_hash: 21,
+            body_hash: 22,
+            return_type: "i32".to_string(),
+            param_count: 1,
+            first_param_type_code: 1,
+            simple_i32_return_expr: None,
+            simple_i32_return_call_target_id_hash: None,
+            simple_i32_return_call_add_delta: None,
+            simple_i32_return_call_one_arg_target_id_hash: None,
+            simple_i32_return_call_one_arg_i32_literal: None,
+            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_return_two_call_left_target_id_hash: None,
+            simple_i32_return_two_call_right_target_id_hash: None,
+            simple_i32_return_two_call_op_code: None,
+            simple_void_print_i32_literal: None,
+            simple_void_print_i32_call_target_id_hash: None,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
+            simple_void_print_i32_call_add_delta: None,
+        };
+        let metrics = vec![caller.clone(), callee];
+        let resolved =
+            resolve_unique_i32_call_target_symbol_by_hash(caller.simple_i32_return_call_target_id_hash, &metrics);
+        assert!(
+            resolved.is_none(),
+            "no-arg call resolution should reject one-arg candidate signature"
+        );
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_call_target_symbol_supports_known_host_noarg_extern() {
+        let resolved = resolve_unique_i32_call_target_symbol_by_hash(
+            Some(hash_identifier("host_cli_arg_count")),
+            &[],
+        )
+        .expect("known host extern should resolve");
+        assert_eq!(resolved, "host_cli_arg_count");
+        let resolved_runtime_entry = resolve_unique_i32_call_target_symbol_by_hash(
+            Some(hash_identifier("host_run_self_host_aot_cli_from_env")),
+            &[],
+        )
+        .expect("known host runtime entry extern should resolve");
+        assert_eq!(
+            resolved_runtime_entry,
+            "host_run_self_host_aot_cli_from_env"
+        );
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_one_arg_target_symbol_supports_known_host_single_arg_extern() {
+        let summary = resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+            Some(hash_identifier("host_set_summary_file")),
+            &[],
+            0,
+        )
+        .expect("known host summary extern should resolve");
+        assert_eq!(summary, "host_set_summary_file");
+        let source_count = resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+            Some(hash_identifier("host_source_file_count")),
+            &[],
+            0,
+        )
+        .expect("known host source-count extern should resolve");
+        assert_eq!(source_count, "host_source_file_count");
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_two_arg_passthrough_target_symbol_supports_known_host_extern() {
+        let resolved = resolve_known_host_two_arg_i32_extern_symbol_by_hash(
+            Some(hash_identifier("host_cli_arg_value")),
+            1,
+        )
+        .expect("known host cli arg-value extern should resolve");
+        assert_eq!(resolved, "host_cli_arg_value");
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_three_arg_passthrough_target_symbol_supports_known_host_extern() {
+        let resolved = resolve_known_host_three_arg_i32_extern_symbol_by_hash(
+            Some(hash_identifier("host_write_aot_cli_summary")),
+            0,
+        )
+        .expect("known host aot summary extern should resolve");
+        assert_eq!(resolved, "host_write_aot_cli_summary");
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_four_arg_passthrough_target_symbol_supports_known_host_extern() {
+        let resolved = resolve_known_host_four_arg_i32_extern_symbol_by_hash(
+            Some(hash_identifier("host_load_source_file")),
+            0,
+        )
+        .expect("known host source-loader extern should resolve");
+        assert_eq!(resolved, "host_load_source_file");
+    }
+
+    #[test]
+    fn resolve_simple_i32_return_two_arg_literal_first_second_param_passthrough_target_symbol_supports_known_host_extern(
+    ) {
+        let resolved = resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
+            Some(hash_identifier("host_cli_arg_value")),
+            0,
+        )
+        .expect("known host cli arg-value literal+param extern should resolve");
+        assert_eq!(resolved, "host_cli_arg_value");
+    }
+
+    #[test]
     fn compute_file_sha256_hex_matches_known_value() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1996,6 +2828,356 @@ mod tests {
     }
 
     #[test]
+    fn aot_compile_rejects_direct_call_target_with_signature_mismatch() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_signature_mismatch_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(); }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(137),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("unresolved direct call target for emitted function")
+            }),
+            "expected unresolved direct call target diagnostic on signature mismatch"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_noarg_extern_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_known_host_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_cli_arg_count(): i32;\nfunction main(): i32 { return host_cli_arg_count() + 10; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(136),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            manifest.fallback_stub_symbols.is_empty(),
+            "known host extern direct-call lowering should not fall back to stubs"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_one_arg_passthrough_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_known_host_one_arg_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_set_summary_file(summary_file: ascii[]): i32;\nfunction forward(summary_file: ascii[]): i32 { return host_set_summary_file(summary_file); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(139),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("forward")),
+            "known host one-arg passthrough direct-call lowering should not fall back for forward()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_two_arg_passthrough_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_known_host_two_arg_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(index: i32, out_value: ascii[]): i32 { return host_cli_arg_value(index, out_value); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(140),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("forward")),
+            "known host two-arg passthrough direct-call lowering should not fall back for forward()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_three_arg_passthrough_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_known_host_three_arg_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_write_aot_cli_summary(output_exe: ascii[], ir_bundle_path: ascii[], object_bundle_path: ascii[]): i32;\nfunction forward(output_exe: ascii[], ir_bundle_path: ascii[], object_bundle_path: ascii[]): i32 { return host_write_aot_cli_summary(output_exe, ir_bundle_path, object_bundle_path); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(141),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("forward")),
+            "known host three-arg passthrough direct-call lowering should not fall back for forward()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_four_arg_passthrough_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_known_host_four_arg_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_load_source_file(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32;\nfunction forward(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32 { return host_load_source_file(project_dir, file_index, out_path, out_source); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(142),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("forward")),
+            "known host four-arg passthrough direct-call lowering should not fall back for forward()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_host_two_arg_literal_first_second_param_passthrough_direct_call_target(
+    ) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_known_host_two_arg_lit_param_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(out_value: ascii[]): i32 { return host_cli_arg_value(1, out_value); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(143),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("forward")),
+            "known host two-arg literal+param passthrough direct-call lowering should not fall back for forward()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_known_runtime_entry_host_extern_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_known_runtime_entry_host_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "extern function host_run_self_host_aot_cli_from_env(): i32;\nfunction main(): i32 { return host_run_self_host_aot_cli_from_env(); }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(138),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            manifest.fallback_stub_symbols.is_empty(),
+            "known runtime entry host extern direct-call lowering should not fall back to stubs"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn aot_compile_rejects_unresolved_one_arg_direct_call_target() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2005,8 +3187,7 @@ mod tests {
             std::env::temp_dir().join(format!("stasis_aot_unresolved_one_arg_call_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
-        fs::write(&source, "function main(): i32 { return missing(7); }\n")
-            .expect("write source");
+        fs::write(&source, "function main(): i32 { return missing(7); }\n").expect("write source");
 
         let mut backend = IncrementalCompilerBackend::new();
         let result = backend.compile(CompileRequest::new(
@@ -2051,9 +3232,9 @@ mod tests {
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message.contains(
-                    "unresolved one-arg direct call argument target for emitted function",
-                )
+                diagnostic
+                    .message
+                    .contains("unresolved one-arg direct call argument target for emitted function")
             }),
             "expected unresolved one-arg direct call argument target diagnostic"
         );
@@ -2222,6 +3403,157 @@ mod tests {
             result.aot_linked_image_sha256.as_deref(),
             manifest.linked_image_sha256.as_deref()
         );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_manifest_records_stub_fallback_details_with_body_hash_hints() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_fallback_manifest_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 7; return value; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+        let result = backend.compile(CompileRequest::new(
+            RequestId(131),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(!manifest.fallback_stub_symbols.is_empty());
+        assert!(!manifest.fallback_stub_details.is_empty());
+        assert_eq!(
+            manifest.fallback_stub_symbols.len(),
+            manifest.fallback_stub_details.len(),
+            "fallback detail hints should track each fallback symbol"
+        );
+        for detail in &manifest.fallback_stub_details {
+            assert!(
+                manifest.fallback_stub_symbols.contains(&detail.symbol),
+                "fallback detail symbol should be present in fallback symbols list"
+            );
+        }
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_manifest_records_fallback_stub_for_unlowerable_entry_parse_function() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_entry_fallback_manifest_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let compiler_dir = temp_root.join("compiler");
+        fs::create_dir_all(&compiler_dir).expect("create compiler dir");
+        let source = compiler_dir.join("stasis_aot_cli_entry.stasis");
+        fs::write(
+            &source,
+            "function compiler_cli_parse_from_argv(): i32 { let value: i32 = 0; return value; }\nfunction main(): i32 { return compiler_cli_parse_from_argv(); }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+        let result = backend.compile(CompileRequest::new(
+            RequestId(132),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest.fallback_stub_symbols.is_empty(),
+            "unlowerable entry parse function should now be tracked as fallback stub"
+        );
+        assert!(
+            !manifest.fallback_stub_details.is_empty(),
+            "fallback detail hints should be present for unlowerable entry parse function"
+        );
+        assert_eq!(
+            manifest.fallback_stub_symbols.len(),
+            manifest.fallback_stub_details.len(),
+            "fallback details should align with fallback symbols"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_manifest_has_no_fallback_for_lowerable_entry_function() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_lowerable_entry_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let compiler_dir = temp_root.join("compiler");
+        fs::create_dir_all(&compiler_dir).expect("create compiler dir");
+        let source = compiler_dir.join("stasis_aot_cli_entry.stasis");
+        fs::write(
+            &source,
+            "extern function host_run_self_host_aot_cli_from_env(): i32;\nfunction compiler_cli_parse_from_argv(): i32 { return host_run_self_host_aot_cli_from_env(); }\nfunction main(): i32 { return compiler_cli_parse_from_argv(); }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+        let result = backend.compile(CompileRequest::new(
+            RequestId(139),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            manifest.fallback_stub_symbols.is_empty(),
+            "lowerable entry path should not require fallback stubs"
+        );
+        assert!(
+            manifest.fallback_stub_details.is_empty(),
+            "lowerable entry path should not emit fallback detail hints"
+        );
+
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2827,6 +4159,106 @@ echo "signed" > "$1.signed"
         }
     }
 
+    fn copy_self_host_compiler_subset(repo_root: &Path, subset_root: &Path) {
+        fs::create_dir_all(subset_root.join("compiler")).expect("create subset compiler dir");
+        fs::create_dir_all(subset_root.join("src").join("stdlib"))
+            .expect("create subset stdlib dir");
+        fs::copy(
+            repo_root.join("compiler").join("stasis_aot_cli_entry.stasis"),
+            subset_root.join("compiler").join("stasis_aot_cli_entry.stasis"),
+        )
+        .expect("copy stasis_aot_cli_entry");
+        fs::copy(
+            repo_root.join("compiler").join("stasis_aot_cli_core.stasis"),
+            subset_root.join("compiler").join("stasis_aot_cli_core.stasis"),
+        )
+        .expect("copy stasis_aot_cli_core");
+        fs::copy(
+            repo_root.join("compiler").join("incremental_compiler.stasis"),
+            subset_root.join("compiler").join("incremental_compiler.stasis"),
+        )
+        .expect("copy incremental_compiler");
+        fs::copy(
+            repo_root.join("compiler").join("compiler_state.stasis"),
+            subset_root.join("compiler").join("compiler_state.stasis"),
+        )
+        .expect("copy compiler_state");
+        fs::copy(
+            repo_root.join("src").join("stdlib").join("stdlib.stasis"),
+            subset_root.join("src").join("stdlib").join("stdlib.stasis"),
+        )
+        .expect("copy stdlib");
+    }
+
+    fn collect_runtime_bridge_source_payload(project_root: &Path) -> Vec<(String, String)> {
+        collect_stasis_files_for_self_host_project(project_root)
+            .expect("collect source files")
+            .into_iter()
+            .map(|path| {
+                let source =
+                    fs::read_to_string(&path).expect("read source for runtime bridge payload");
+                let normalized_path = path.to_string_lossy().replace('\\', "/");
+                (normalized_path, source)
+            })
+            .collect()
+    }
+
+    fn parse_declared_function_name(line: &str) -> Option<&str> {
+        let trimmed = line.trim_start();
+        let mut rest = trimmed.strip_prefix("function ")?;
+        rest = rest.trim_start();
+        if let Some(after_inline) = rest.strip_prefix("@inline") {
+            rest = after_inline.trim_start();
+        }
+        let mut end = 0usize;
+        for ch in rest.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            return None;
+        }
+        Some(&rest[..end])
+    }
+
+    fn collect_function_name_candidates_by_unsigned_id_hash(
+        project_root: &Path,
+    ) -> BTreeMap<u32, Vec<String>> {
+        let mut by_hash: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        let paths = collect_stasis_files_for_self_host_project(project_root)
+            .expect("collect source files for name-hash candidates");
+        for path in paths {
+            let source = fs::read_to_string(&path).expect("read source for name-hash candidates");
+            for line in source.lines() {
+                let Some(function_name) = parse_declared_function_name(line) else {
+                    continue;
+                };
+                let unsigned_id_hash = hash_identifier(function_name).unsigned_abs();
+                by_hash.entry(unsigned_id_hash).or_default().push(format!(
+                    "{}:{}",
+                    path.display(),
+                    function_name
+                ));
+            }
+        }
+        by_hash
+    }
+
+    fn parse_aot_symbol_unsigned_id_hash(symbol: &str) -> Option<u32> {
+        let mut parts = symbol.split('_');
+        let tag = parts.next()?;
+        if tag != "fn" {
+            return None;
+        }
+        let id_hash = parts.next()?.parse::<u32>().ok()?;
+        let _sig_hash = parts.next()?;
+        let _ordinal = parts.next()?;
+        Some(id_hash)
+    }
+
     #[test]
     fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
         let stamp = SystemTime::now()
@@ -2862,16 +4294,17 @@ echo "signed" > "$1.signed"
             temp_root.join("program.out")
         };
 
-        let summary = match run_self_host_aot_cli_with_backend(&mut backend, &project_dir, &output_exe) {
-            Ok(value) => value,
-            Err(message)
-                if message.contains("Application Control policy has blocked this file") =>
-            {
-                fs::remove_dir_all(&temp_root).ok();
-                return;
-            }
-            Err(message) => panic!("self-host aot cli should succeed: {message}"),
-        };
+        let summary =
+            match run_self_host_aot_cli_with_backend(&mut backend, &project_dir, &output_exe) {
+                Ok(value) => value,
+                Err(message)
+                    if message.contains("Application Control policy has blocked this file") =>
+                {
+                    fs::remove_dir_all(&temp_root).ok();
+                    return;
+                }
+                Err(message) => panic!("self-host aot cli should succeed: {message}"),
+            };
         assert_eq!(summary.source_file_count, 1);
         assert!(!summary.entry_symbol.is_empty());
         assert_eq!(summary.linked_image_path, output_exe);
@@ -2892,6 +4325,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_invokes_signer_when_configured() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2952,7 +4386,9 @@ echo "signed" > "$1.signed"
                     signed_marker.display()
                 );
             }
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 return;
             }
@@ -3000,14 +4436,20 @@ echo "signed" > "$1.signed"
         let result = run_self_host_aot_cli_with_backend(&mut backend, &project_dir, &output_exe);
         let summary = match result {
             Ok(value) => value,
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 return;
             }
             Err(message) => panic!("self-host summary sidecar run should succeed: {message}"),
         };
         let sidecar_path = default_aot_cli_summary_sidecar_path(&output_exe);
-        assert!(sidecar_path.exists(), "expected sidecar {}", sidecar_path.display());
+        assert!(
+            sidecar_path.exists(),
+            "expected sidecar {}",
+            sidecar_path.display()
+        );
         let sidecar_text = fs::read_to_string(&sidecar_path).expect("read sidecar");
         let sidecar_summary: SelfHostedAotCliSummary =
             serde_json::from_str(&sidecar_text).expect("parse sidecar summary");
@@ -3020,6 +4462,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_summary_to_configured_path() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SUMMARY_ENV_LOCK.lock().expect("lock summary env");
         let old_summary = std::env::var("STASIS_AOT_SUMMARY_FILE").ok();
         let stamp = SystemTime::now()
@@ -3065,14 +4508,22 @@ echo "signed" > "$1.signed"
         }
         let summary = match result {
             Ok(value) => value,
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 return;
             }
-            Err(message) => panic!("self-host summary configured-path run should succeed: {message}"),
+            Err(message) => {
+                panic!("self-host summary configured-path run should succeed: {message}")
+            }
         };
-        assert!(configured_summary.exists(), "expected configured summary path");
-        let sidecar_text = fs::read_to_string(&configured_summary).expect("read configured summary");
+        assert!(
+            configured_summary.exists(),
+            "expected configured summary path"
+        );
+        let sidecar_text =
+            fs::read_to_string(&configured_summary).expect("read configured summary");
         let sidecar_summary: SelfHostedAotCliSummary =
             serde_json::from_str(&sidecar_text).expect("parse configured summary");
         assert_eq!(sidecar_summary.source_file_count, summary.source_file_count);
@@ -3085,6 +4536,7 @@ echo "signed" > "$1.signed"
     #[cfg(windows)]
     #[test]
     fn self_host_runtime_bridge_prefers_rustc_live_backend_when_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -3123,7 +4575,9 @@ echo "signed" > "$1.signed"
                 let mode = fs::read_to_string(&mode_path).expect("read mode marker");
                 assert_eq!(mode.trim(), "rustc");
             }
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 return;
             }
@@ -3133,8 +4587,205 @@ echo "signed" > "$1.signed"
         fs::remove_dir_all(&temp_root).ok();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn self_host_runtime_bridge_rustc_source_uses_env_backed_staged_host_functions() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_runtime_bridge_source_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let object_path = temp_root.join("self_host_runtime_bridge.obj");
+        emit_self_host_runtime_bridge_object_windows_rustc(&object_path)
+            .expect("emit runtime bridge object should succeed");
+        let source_path = object_path.with_extension("rs");
+        let source_text = fs::read_to_string(&source_path).expect("read runtime bridge source");
+        assert!(
+            source_text.contains("STASIS_SELF_HOST_IR_BUNDLE_PATH"),
+            "expected IR bundle env contract constant"
+        );
+        assert!(
+            source_text.contains("STASIS_SELF_HOST_OBJECT_BUNDLE_PATH"),
+            "expected object bundle env contract constant"
+        );
+        assert!(
+            source_text.contains("STASIS_SELF_HOST_LINK_TEMPLATE_EXE"),
+            "expected link template env contract constant"
+        );
+        assert!(
+            source_text.contains("STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE"),
+            "expected summary template env contract constant"
+        );
+        assert!(
+            !source_text.contains(
+                "fn host_emit_ir_from_compiler_state(_project_dir: *const u8, _out_ir_bundle: *mut u8) -> i32 { 1 }"
+            ),
+            "host_emit_ir_from_compiler_state should not be a hardcoded stub"
+        );
+        assert!(
+            !source_text.contains(
+                "fn host_run_cranelift_aot(_ir_bundle: *const u8, _out_object_bundle: *mut u8) -> i32 { 1 }"
+            ),
+            "host_run_cranelift_aot should not be a hardcoded stub"
+        );
+        assert!(
+            !source_text.contains(
+                "fn host_link_executable_from_objects(_object_bundle: *const u8, _output_exe: *const u8) -> i32 { 1 }"
+            ),
+            "host_link_executable_from_objects should not be a hardcoded stub"
+        );
+        assert!(
+            !source_text.contains(
+                "fn host_write_aot_cli_summary(_output_exe: *const u8, _ir_bundle: *const u8, _object_bundle: *const u8) -> i32 { 1 }"
+            ),
+            "host_write_aot_cli_summary should not be a hardcoded stub"
+        );
+        assert!(
+            source_text.contains("fn host_run_self_host_aot_cli_from_env() -> i32"),
+            "expected runtime entry bridge host function in rustc runtime bridge source"
+        );
+        assert!(
+            source_text.contains("read_env_ascii(&source_key, out_source, 262144)"),
+            "expected runtime bridge source-load buffer to match expanded source budget"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn self_host_runtime_bridge_clif_source_uses_env_backed_host_functions() {
+        let source_text = build_self_host_runtime_bridge_clif(aot_call_conv());
+        assert!(
+            source_text.contains("global k_arg_count_key"),
+            "expected arg-count env contract global"
+        );
+        assert!(
+            source_text.contains("global k_source_count_key"),
+            "expected source-count env contract global"
+        );
+        assert!(
+            source_text.contains("global k_arg_key_0"),
+            "expected indexed arg env contract globals"
+        );
+        assert!(
+            source_text.contains("global k_source_path_key_0"),
+            "expected indexed source path env contract globals"
+        );
+        assert!(
+            source_text.contains("global k_source_text_key_0"),
+            "expected indexed source text env contract globals"
+        );
+        assert!(
+            source_text.contains("global k_ir_bundle_key"),
+            "expected IR bundle env contract global"
+        );
+        assert!(
+            source_text.contains("global k_object_bundle_key"),
+            "expected object bundle env contract global"
+        );
+        assert!(
+            source_text.contains("global k_link_template_exe_key"),
+            "expected link template env contract global"
+        );
+        assert!(
+            source_text.contains("global k_summary_template_key"),
+            "expected summary template env contract global"
+        );
+        assert!(
+            source_text.contains("external GetEnvironmentVariableA"),
+            "expected environment variable bridge binding"
+        );
+        assert!(
+            source_text.contains("external CopyFileA"),
+            "expected file copy bridge binding"
+        );
+        assert!(
+            source_text.contains("function %read_env_count_i32(i64) -> i32"),
+            "expected env-backed count reader helper"
+        );
+        assert!(
+            source_text.contains("function %select_arg_key(i32) -> i64"),
+            "expected arg key selector helper"
+        );
+        assert!(
+            source_text.contains("function %select_source_path_key(i32) -> i64"),
+            "expected source path key selector helper"
+        );
+        assert!(
+            source_text.contains("function %select_source_text_key(i32) -> i64"),
+            "expected source text key selector helper"
+        );
+        assert!(
+            source_text.contains("function %host_cli_arg_count() -> i32"),
+            "expected live cli arg-count bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_cli_arg_value(i32, i64) -> i32"),
+            "expected live cli arg-value bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_source_file_count(i64) -> i32"),
+            "expected live source-count bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_load_source_file(i64, i32, i64, i64) -> i32"),
+            "expected live source-load bridge function"
+        );
+        assert!(
+            source_text.contains("iconst.i32 262144"),
+            "expected clif runtime bridge source-load buffer to match expanded source budget"
+        );
+        assert!(
+            source_text.contains("function %host_emit_ir_from_compiler_state(i64, i64) -> i32"),
+            "expected staged ir bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_run_cranelift_aot(i64, i64) -> i32"),
+            "expected staged object bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_link_executable_from_objects(i64, i64) -> i32"),
+            "expected staged link bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_write_aot_cli_summary(i64, i64, i64) -> i32"),
+            "expected staged summary bridge function"
+        );
+        assert!(
+            source_text.contains("function %host_run_self_host_aot_cli_from_env() -> i32"),
+            "expected runtime entry bridge function"
+        );
+        assert!(
+            source_text.contains("global_value k_ir_bundle_key"),
+            "expected staged ir bridge to read env-backed key"
+        );
+        assert!(
+            !source_text
+                .contains("function %host_cli_arg_count() -> i32 {cc} {\nblock0:\nv0 = iconst.i32 0\nreturn v0\n}"),
+            "host_cli_arg_count should not be hardcoded zero"
+        );
+        assert!(
+            !source_text
+                .contains("function %host_cli_arg_value(i32, i64) -> i32 {cc} {\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}"),
+            "host_cli_arg_value should not be hardcoded failure"
+        );
+        assert!(
+            !source_text
+                .contains("function %host_source_file_count(i64) -> i32 {cc} {\nblock0:\nv0 = iconst.i32 0\nreturn v0\n}"),
+            "host_source_file_count should not be hardcoded zero"
+        );
+        assert!(
+            !source_text
+                .contains("function %host_load_source_file(i64, i32, i64, i64) -> i32 {cc} {\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}"),
+            "host_load_source_file should not be hardcoded failure"
+        );
+    }
+
     #[test]
     fn self_host_aot_cli_rejects_stub_fallback_by_default() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = STUB_FALLBACK_ENV_LOCK
             .lock()
             .expect("lock stub fallback env");
@@ -3199,6 +4850,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_can_allow_stub_fallback_temporarily() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = STUB_FALLBACK_ENV_LOCK
             .lock()
             .expect("lock stub fallback env");
@@ -3259,7 +4911,9 @@ echo "signed" > "$1.signed"
                 assert_eq!(summary.source_file_count, 1);
                 assert!(summary.linked_image_path.exists());
             }
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 return;
             }
@@ -3271,11 +4925,15 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_signer = std::env::var("STASIS_AOT_SIGN_TOOL").ok();
+        std::env::remove_var("STASIS_AOT_SIGN_TOOL");
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_aot_determinism_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_aot_determinism_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let project_dir = temp_root.join("project");
         fs::create_dir_all(&project_dir).expect("create project dir");
@@ -3308,20 +4966,23 @@ echo "signed" > "$1.signed"
             temp_root.join("program.out")
         };
 
-        let first = match run_self_host_aot_cli_with_backend(
-            &mut backend_first,
-            &project_dir,
-            &output_exe,
-        ) {
-            Ok(value) => value,
-            Err(message)
-                if message.contains("Application Control policy has blocked this file") =>
+        let first =
+            match run_self_host_aot_cli_with_backend(&mut backend_first, &project_dir, &output_exe)
             {
-                fs::remove_dir_all(&temp_root).ok();
-                return;
-            }
-            Err(message) => panic!("first run should succeed: {message}"),
-        };
+                Ok(value) => value,
+                Err(message)
+                    if message.contains("Application Control policy has blocked this file") =>
+                {
+                    fs::remove_dir_all(&temp_root).ok();
+                    if let Some(value) = &old_signer {
+                        std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+                    } else {
+                        std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+                    }
+                    return;
+                }
+                Err(message) => panic!("first run should succeed: {message}"),
+            };
         let mut backend_second = IncrementalCompilerBackend::with_aot_compile_and_link_config(
             AotCompileConfig {
                 helper_path: backend_first.aot_compile_config.helper_path.clone(),
@@ -3333,12 +4994,9 @@ echo "signed" > "$1.signed"
             artifact_root.clone(),
             false,
         );
-        let second = run_self_host_aot_cli_with_backend(
-            &mut backend_second,
-            &project_dir,
-            &output_exe,
-        )
-        .expect("second run should succeed");
+        let second =
+            run_self_host_aot_cli_with_backend(&mut backend_second, &project_dir, &output_exe)
+                .expect("second run should succeed");
 
         assert_eq!(first.source_file_count, second.source_file_count);
         assert_eq!(first.entry_symbol, second.entry_symbol);
@@ -3347,13 +5005,21 @@ echo "signed" > "$1.signed"
 
         let ir_bundle_path = artifact_root.join("self_host_ir_bundle.json");
         let object_bundle_path = artifact_root.join("self_host_object_bundle.json");
-        assert!(ir_bundle_path.exists(), "expected staged ir bundle metadata");
+        assert!(
+            ir_bundle_path.exists(),
+            "expected staged ir bundle metadata"
+        );
         assert!(
             object_bundle_path.exists(),
             "expected staged object bundle metadata"
         );
 
         fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = &old_signer {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
     }
 
     #[test]
@@ -3393,18 +5059,20 @@ echo "signed" > "$1.signed"
         } else {
             temp_root.join("stage1.out")
         };
-        let summary_stage1 =
-            match run_self_host_aot_cli_with_backend(&mut backend_stage1, &project_dir, &output_stage1)
+        let summary_stage1 = match run_self_host_aot_cli_with_backend(
+            &mut backend_stage1,
+            &project_dir,
+            &output_stage1,
+        ) {
+            Ok(value) => value,
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
             {
-                Ok(value) => value,
-                Err(message)
-                    if message.contains("Application Control policy has blocked this file") =>
-                {
-                    fs::remove_dir_all(&temp_root).ok();
-                    return;
-                }
-                Err(message) => panic!("stage1 build should succeed: {message}"),
-            };
+                fs::remove_dir_all(&temp_root).ok();
+                return;
+            }
+            Err(message) => panic!("stage1 build should succeed: {message}"),
+        };
 
         let ir_stage1: SelfHostIrBundle = serde_json::from_str(
             &fs::read_to_string(artifact_root_stage1.join("self_host_ir_bundle.json"))
@@ -3434,12 +5102,9 @@ echo "signed" > "$1.signed"
         } else {
             temp_root.join("stage2.out")
         };
-        let summary_stage2 = run_self_host_aot_cli_with_backend(
-            &mut backend_stage2,
-            &project_dir,
-            &output_stage2,
-        )
-        .expect("stage2 build should succeed");
+        let summary_stage2 =
+            run_self_host_aot_cli_with_backend(&mut backend_stage2, &project_dir, &output_stage2)
+                .expect("stage2 build should succeed");
 
         let ir_stage2: SelfHostIrBundle = serde_json::from_str(
             &fs::read_to_string(artifact_root_stage2.join("self_host_ir_bundle.json"))
@@ -3475,9 +5140,15 @@ echo "signed" > "$1.signed"
             })
             .collect();
 
-        assert_eq!(summary_stage1.source_file_count, summary_stage2.source_file_count);
+        assert_eq!(
+            summary_stage1.source_file_count,
+            summary_stage2.source_file_count
+        );
         assert_eq!(summary_stage1.entry_symbol, summary_stage2.entry_symbol);
-        assert_eq!(summary_stage1.object_file_names, summary_stage2.object_file_names);
+        assert_eq!(
+            summary_stage1.object_file_names,
+            summary_stage2.object_file_names
+        );
         assert_eq!(ir_stage1.source_file_count, ir_stage2.source_file_count);
         assert_eq!(ir_stage1.entry_symbol, ir_stage2.entry_symbol);
         assert_eq!(obj_stage1.entry_symbol, obj_stage2.entry_symbol);
@@ -3490,6 +5161,7 @@ echo "signed" > "$1.signed"
     #[cfg(windows)]
     #[test]
     fn self_host_aot_cli_emits_runnable_executable_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let run_real_exe_smoke = std::env::var("STASIS_RUN_REAL_AOT_EXE_SMOKE")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -3554,7 +5226,9 @@ echo "signed" > "$1.signed"
                     "compiled executable should return exit code 7"
                 );
             }
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 if let Some(value) = old_helper {
                     std::env::set_var("STASIS_CRANELIFT_AOT", value);
@@ -3568,7 +5242,9 @@ echo "signed" > "$1.signed"
                 }
                 return;
             }
-            Err(message) => panic!("real toolchain self-host aot-cli run should succeed: {message}"),
+            Err(message) => {
+                panic!("real toolchain self-host aot-cli run should succeed: {message}")
+            }
         }
 
         fs::remove_dir_all(&temp_root).ok();
@@ -3586,7 +5262,399 @@ echo "signed" > "$1.signed"
 
     #[cfg(windows)]
     #[test]
+    fn self_host_aot_cli_compiler_subset_builds_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_smoke = std::env::var("STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_smoke {
+            return;
+        }
+
+        let _guard = ENTRY_ENV_LOCK.lock().expect("lock entry env");
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let old_helper = std::env::var("STASIS_CRANELIFT_AOT").ok();
+        let old_linker = std::env::var("STASIS_AOT_LINKER").ok();
+        let old_entry = std::env::var("STASIS_AOT_ENTRY_FILE").ok();
+
+        std::env::set_var("STASIS_CRANELIFT_AOT", &helper_path);
+        std::env::set_var("STASIS_AOT_LINKER", &linker_path);
+        std::env::set_var("STASIS_AOT_ENTRY_FILE", "compiler/stasis_aot_cli_entry.stasis");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_subset_build_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let subset_root = temp_root.join("subset");
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        copy_self_host_compiler_subset(&repo_root, &subset_root);
+
+        let output_exe = temp_root.join("stage1_compiler.exe");
+        let result = run_self_host_aot_cli(&subset_root, &output_exe);
+        match result {
+            Ok(summary) => {
+                assert_eq!(
+                    summary.source_file_count, 5,
+                    "expected subset closure to include exactly 5 files"
+                );
+                assert!(summary.linked_image_path.exists());
+                assert_eq!(summary.linked_image_path, output_exe);
+            }
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
+                fs::remove_dir_all(&temp_root).ok();
+                if let Some(value) = old_helper {
+                    std::env::set_var("STASIS_CRANELIFT_AOT", value);
+                } else {
+                    std::env::remove_var("STASIS_CRANELIFT_AOT");
+                }
+                if let Some(value) = old_linker {
+                    std::env::set_var("STASIS_AOT_LINKER", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_LINKER");
+                }
+                if let Some(value) = old_entry {
+                    std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_ENTRY_FILE");
+                }
+                return;
+            }
+            Err(message) => panic!("self-host compiler subset build should succeed: {message}"),
+        }
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_helper {
+            std::env::set_var("STASIS_CRANELIFT_AOT", value);
+        } else {
+            std::env::remove_var("STASIS_CRANELIFT_AOT");
+        }
+        if let Some(value) = old_linker {
+            std::env::set_var("STASIS_AOT_LINKER", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_LINKER");
+        }
+        if let Some(value) = old_entry {
+            std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_ENTRY_FILE");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn self_host_aot_cli_stage1_executable_drives_stage2_summary_parity_if_real_toolchain_available(
+    ) {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_smoke = std::env::var("STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_smoke {
+            return;
+        }
+
+        let _guard = ENTRY_ENV_LOCK.lock().expect("lock entry env");
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let old_helper = std::env::var("STASIS_CRANELIFT_AOT").ok();
+        let old_linker = std::env::var("STASIS_AOT_LINKER").ok();
+        let old_entry = std::env::var("STASIS_AOT_ENTRY_FILE").ok();
+        let old_summary = std::env::var("STASIS_AOT_SUMMARY_FILE").ok();
+
+        std::env::set_var("STASIS_CRANELIFT_AOT", &helper_path);
+        std::env::set_var("STASIS_AOT_LINKER", &linker_path);
+        std::env::set_var("STASIS_AOT_ENTRY_FILE", "compiler/stasis_aot_cli_entry.stasis");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_stage1_exec_parity_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let subset_root = temp_root.join("subset");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        copy_self_host_compiler_subset(&repo_root, &subset_root);
+
+        let stage1_output = temp_root.join("stage1_compiler.exe");
+        let stage1_summary_path = temp_root.join("stage1_summary.json");
+        std::env::set_var("STASIS_AOT_SUMMARY_FILE", &stage1_summary_path);
+        let stage1_result = run_self_host_aot_cli(&subset_root, &stage1_output);
+        if let Some(value) = &old_summary {
+            std::env::set_var("STASIS_AOT_SUMMARY_FILE", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
+        }
+        let stage1_summary = match stage1_result {
+            Ok(summary) => summary,
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
+                fs::remove_dir_all(&temp_root).ok();
+                if let Some(value) = old_helper {
+                    std::env::set_var("STASIS_CRANELIFT_AOT", value);
+                } else {
+                    std::env::remove_var("STASIS_CRANELIFT_AOT");
+                }
+                if let Some(value) = old_linker {
+                    std::env::set_var("STASIS_AOT_LINKER", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_LINKER");
+                }
+                if let Some(value) = old_entry {
+                    std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_ENTRY_FILE");
+                }
+                if let Some(value) = old_summary {
+                    std::env::set_var("STASIS_AOT_SUMMARY_FILE", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
+                }
+                return;
+            }
+            Err(message) => panic!("stage1 compiler subset build should succeed: {message}"),
+        };
+
+        assert!(stage1_summary.linked_image_path.exists());
+        assert!(
+            stage1_summary.ir_bundle_path.exists(),
+            "stage1 ir bundle path should exist"
+        );
+        assert!(
+            stage1_summary.object_bundle_path.exists(),
+            "stage1 object bundle path should exist"
+        );
+        assert!(
+            stage1_summary_path.exists(),
+            "stage1 summary sidecar path should exist"
+        );
+
+        let stage1_summary_sidecar: SelfHostedAotCliSummary = serde_json::from_str(
+            &fs::read_to_string(&stage1_summary_path).expect("read stage1 summary sidecar"),
+        )
+        .expect("parse stage1 summary sidecar");
+        let stage1_manifest_path = stage1_summary
+            .ir_bundle_path
+            .with_file_name("last_patch_manifest.json");
+        let stage1_fallback_stub_symbols: Vec<String> = fs::read_to_string(&stage1_manifest_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<AotPatchManifest>(&text).ok())
+            .map(|manifest| manifest.fallback_stub_symbols)
+            .unwrap_or_default();
+        let stage1_fallback_stub_details: Vec<AotFallbackStubDetail> =
+            fs::read_to_string(&stage1_manifest_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<AotPatchManifest>(&text).ok())
+                .map(|manifest| manifest.fallback_stub_details)
+                .unwrap_or_default();
+        let stage1_fallback_preview = stage1_fallback_stub_symbols
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let stage1_fallback_body_hash_preview = stage1_fallback_stub_details
+            .iter()
+            .take(6)
+            .map(|detail| format!("{}:{}", detail.symbol, detail.body_hash))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let function_name_candidates_by_hash =
+            collect_function_name_candidates_by_unsigned_id_hash(&subset_root);
+
+        let stage2_output_exe = temp_root.join("stage2_compiler.exe");
+        let stage2_summary_path = temp_root.join("stage2_summary.json");
+        let stage2_args = vec![
+            "--project-dir".to_string(),
+            subset_root.display().to_string(),
+            "--out".to_string(),
+            stage2_output_exe.display().to_string(),
+            "--summary-file".to_string(),
+            stage2_summary_path.display().to_string(),
+        ];
+        let source_payload = collect_runtime_bridge_source_payload(&subset_root);
+        let cli_snapshot = publish_cli_args_to_env(&stage2_args, Some(stage2_summary_path.as_path()));
+        let source_snapshot = publish_source_files_to_env(&source_payload);
+        let staged_snapshot = publish_staged_bridge_paths_to_env(
+            &stage1_summary.ir_bundle_path,
+            &stage1_summary.object_bundle_path,
+            &stage1_summary.linked_image_path,
+            Some(&stage1_summary_path),
+        );
+        let stage2_run = Command::new(&stage1_summary.linked_image_path)
+            .current_dir(&subset_root)
+            .output();
+        restore_staged_bridge_paths_env(staged_snapshot);
+        restore_source_files_env(source_snapshot);
+        restore_cli_args_env(cli_snapshot);
+
+        match stage2_run {
+            Ok(value) => {
+                let exit_code = value.status.code();
+                let exit_fallback_symbol_hint = exit_code.and_then(|code| {
+                    stage1_fallback_stub_details
+                        .iter()
+                        .find(|detail| detail.body_hash == code)
+                        .map(|detail| detail.symbol.clone())
+                });
+                let exit_fallback_name_hint = exit_fallback_symbol_hint.as_ref().and_then(|symbol| {
+                    let unsigned_id_hash = parse_aot_symbol_unsigned_id_hash(symbol)?;
+                    function_name_candidates_by_hash
+                        .get(&unsigned_id_hash)
+                        .map(|entries| entries.join(", "))
+                });
+                assert_eq!(
+                    exit_code,
+                    Some(0),
+                    "compiled stage1 executable should complete stage2 invocation successfully (exit={:?})\nstdout:\n{}\nstderr:\n{}\nstage1_fallback_stub_count={}\nstage1_fallback_stub_preview={}\nstage1_fallback_stub_body_hash_preview={}\nexit_fallback_symbol_hint={}\nexit_fallback_name_hint={}",
+                    exit_code,
+                    String::from_utf8_lossy(&value.stdout),
+                    String::from_utf8_lossy(&value.stderr),
+                    stage1_fallback_stub_symbols.len(),
+                    stage1_fallback_preview,
+                    stage1_fallback_body_hash_preview,
+                    exit_fallback_symbol_hint.unwrap_or_else(|| "none".to_string()),
+                    exit_fallback_name_hint.unwrap_or_else(|| "none".to_string())
+                );
+            }
+            Err(error) if error.to_string().contains("blocked this file") => {
+                fs::remove_dir_all(&temp_root).ok();
+                if let Some(value) = old_helper {
+                    std::env::set_var("STASIS_CRANELIFT_AOT", value);
+                } else {
+                    std::env::remove_var("STASIS_CRANELIFT_AOT");
+                }
+                if let Some(value) = old_linker {
+                    std::env::set_var("STASIS_AOT_LINKER", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_LINKER");
+                }
+                if let Some(value) = old_entry {
+                    std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_ENTRY_FILE");
+                }
+                if let Some(value) = old_summary {
+                    std::env::set_var("STASIS_AOT_SUMMARY_FILE", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
+                }
+                return;
+            }
+            Err(error) => panic!("failed to run stage1 compiler executable: {error}"),
+        }
+
+        assert!(
+            stage2_output_exe.exists(),
+            "stage2 output executable should be produced by stage1 run"
+        );
+        assert!(
+            stage2_summary_path.exists(),
+            "stage2 summary path should be produced by stage1 run"
+        );
+
+        let stage2_summary: SelfHostedAotCliSummary = serde_json::from_str(
+            &fs::read_to_string(&stage2_summary_path).expect("read stage2 summary"),
+        )
+        .expect("parse stage2 summary");
+        assert_eq!(
+            stage1_summary_sidecar.source_file_count,
+            stage2_summary.source_file_count
+        );
+        assert_eq!(stage1_summary_sidecar.entry_symbol, stage2_summary.entry_symbol);
+        assert_eq!(
+            stage1_summary_sidecar.object_file_names,
+            stage2_summary.object_file_names
+        );
+        assert_eq!(
+            fs::read(&stage2_output_exe).expect("read stage2 output executable"),
+            fs::read(&stage1_summary.linked_image_path).expect("read stage1 output executable"),
+            "stage2 executable should match staged runtime bridge link template executable"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_helper {
+            std::env::set_var("STASIS_CRANELIFT_AOT", value);
+        } else {
+            std::env::remove_var("STASIS_CRANELIFT_AOT");
+        }
+        if let Some(value) = old_linker {
+            std::env::set_var("STASIS_AOT_LINKER", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_LINKER");
+        }
+        if let Some(value) = old_entry {
+            std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_ENTRY_FILE");
+        }
+        if let Some(value) = old_summary {
+            std::env::set_var("STASIS_AOT_SUMMARY_FILE", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn self_host_aot_cli_signed_executable_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let run_signed_smoke = std::env::var("STASIS_RUN_SIGNED_SELF_HOST_SMOKE")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -3674,6 +5742,7 @@ echo "signed" > "$1.signed"
     #[cfg(windows)]
     #[test]
     fn self_host_runtime_bridge_live_argc_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let run_smoke = std::env::var("STASIS_RUN_REAL_RUNTIME_BRIDGE_ARGC_SMOKE")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -3732,7 +5801,9 @@ echo "signed" > "$1.signed"
         let result = run_self_host_aot_cli(&project_dir, &output_exe);
         let summary = match result {
             Ok(value) => value,
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 if let Some(value) = old_helper {
                     std::env::set_var("STASIS_CRANELIFT_AOT", value);
@@ -3793,6 +5864,7 @@ echo "signed" > "$1.signed"
     #[cfg(windows)]
     #[test]
     fn self_host_runtime_bridge_live_source_count_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let run_smoke = std::env::var("STASIS_RUN_REAL_RUNTIME_BRIDGE_SOURCE_COUNT_SMOKE")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -3851,7 +5923,9 @@ echo "signed" > "$1.signed"
         let result = run_self_host_aot_cli(&project_dir, &output_exe);
         let summary = match result {
             Ok(value) => value,
-            Err(message) if message.contains("Application Control policy has blocked this file") => {
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
                 fs::remove_dir_all(&temp_root).ok();
                 if let Some(value) = old_helper {
                     std::env::set_var("STASIS_CRANELIFT_AOT", value);
@@ -3865,7 +5939,9 @@ echo "signed" > "$1.signed"
                 }
                 return;
             }
-            Err(message) => panic!("runtime bridge live source-count build should succeed: {message}"),
+            Err(message) => {
+                panic!("runtime bridge live source-count build should succeed: {message}")
+            }
         };
 
         let status = Command::new(&summary.linked_image_path)
@@ -3908,6 +5984,601 @@ echo "signed" > "$1.signed"
             std::env::remove_var("STASIS_AOT_LINKER");
         }
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn self_host_runtime_bridge_live_staged_externs_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_smoke = std::env::var("STASIS_RUN_REAL_RUNTIME_BRIDGE_STAGED_EXTERN_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_smoke {
+            return;
+        }
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_runtime_bridge_staged_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let template_ir = temp_root.join("i");
+        let template_object = temp_root.join("j");
+        let template_exe = temp_root.join("t");
+        let template_summary = temp_root.join("u");
+        fs::write(&template_ir, "{\"entry\":\"main\"}\n").expect("write template ir bundle");
+        fs::write(&template_object, "{\"entry\":\"main\"}\n")
+            .expect("write template object bundle");
+        fs::write(&template_exe, "template-exe").expect("write template exe");
+        fs::write(&template_summary, "{\"source_file_count\":1}\n")
+            .expect("write template summary");
+
+        let bridge_object = temp_root.join("self_host_runtime_bridge.obj");
+        emit_self_host_runtime_bridge_object_windows_rustc(&bridge_object)
+            .expect("emit runtime bridge object");
+
+        let call_conv = aot_call_conv();
+        let driver_clif = format!(
+            "external host_set_summary_file(i64) -> i32 {cc}\n\
+external host_emit_ir_from_compiler_state(i64, i64) -> i32 {cc}\n\
+external host_run_cranelift_aot(i64, i64) -> i32 {cc}\n\
+external host_link_executable_from_objects(i64, i64) -> i32 {cc}\n\
+external host_write_aot_cli_summary(i64, i64, i64) -> i32 {cc}\n\
+function %bridge_stage_main() -> i32 {cc} {{\n\
+block0:\n\
+v0 = iconst.i64 0\n\
+v1 = iconst.i64 1\n\
+v2 = iconst.i8 0\n\
+v3 = iconst.i8 111\n\
+v4 = iconst.i8 115\n\
+v5 = iconst.i32 0\n\
+v6 = iconst.i32 10\n\
+v7 = iconst.i32 20\n\
+v8 = iconst.i32 30\n\
+v9 = iconst.i32 40\n\
+v10 = stack_slot.i64\n\
+v11 = iadd v10, v1\n\
+store v3, v10\n\
+store v2, v11\n\
+v12 = stack_slot.i64\n\
+v13 = iadd v12, v1\n\
+store v4, v12\n\
+store v2, v13\n\
+v14 = call %host_set_summary_file(v12)\n\
+v15 = icmp eq v14, v5\n\
+brif v15, block1, block_fail_set_summary\n\
+block_fail_set_summary:\n\
+return v6\n\
+block1:\n\
+v16 = stack_slot.i64\n\
+v17 = call %host_emit_ir_from_compiler_state(v0, v16)\n\
+v18 = icmp eq v17, v5\n\
+brif v18, block2, block_fail_emit\n\
+block_fail_emit:\n\
+return v7\n\
+block2:\n\
+v19 = stack_slot.i64\n\
+v20 = call %host_run_cranelift_aot(v16, v19)\n\
+v21 = icmp eq v20, v5\n\
+brif v21, block3, block_fail_run\n\
+block_fail_run:\n\
+return v8\n\
+block3:\n\
+v22 = call %host_link_executable_from_objects(v19, v10)\n\
+v23 = icmp eq v22, v5\n\
+brif v23, block4, block_fail_link\n\
+block_fail_link:\n\
+return v9\n\
+block4:\n\
+v24 = call %host_write_aot_cli_summary(v10, v16, v19)\n\
+return v24\n\
+}}\n",
+            cc = call_conv
+        );
+        let compile_config = AotCompileConfig {
+            helper_path: Some(helper_path.clone()),
+            ..AotCompileConfig::default()
+        };
+        let driver_object = temp_root.join("bridge_stage_driver.obj");
+        compile_clif_to_object(&driver_clif, &driver_object, &compile_config)
+            .expect("compile bridge driver object");
+
+        let shim_clif = format!(
+            "external bridge_stage_main() -> i32 {cc}\n\
+external ExitProcess(i32) {cc}\n\
+function %stasis_entry_shim() {cc} {{\n\
+block0:\n\
+v0 = call %bridge_stage_main()\n\
+call %ExitProcess(v0)\n\
+return\n\
+}}\n",
+            cc = call_conv
+        );
+        let shim_object = temp_root.join("bridge_stage_shim.obj");
+        compile_clif_to_object(&shim_clif, &shim_object, &compile_config)
+            .expect("compile bridge shim object");
+
+        let driver_exe = temp_root.join("bridge_stage_driver.exe");
+        let link_config = AotLinkConfig {
+            linker_path: Some(linker_path),
+        };
+        link_objects_to_executable(
+            &[driver_object, bridge_object, shim_object],
+            &driver_exe,
+            "stasis_entry_shim",
+            &link_config,
+        )
+        .expect("link bridge driver executable");
+
+        let status = Command::new(&driver_exe)
+            .current_dir(&temp_root)
+            .env("STASIS_SELF_HOST_IR_BUNDLE_PATH", "i")
+            .env("STASIS_SELF_HOST_OBJECT_BUNDLE_PATH", "j")
+            .env("STASIS_SELF_HOST_LINK_TEMPLATE_EXE", "t")
+            .env("STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE", "u")
+            .status();
+        match status {
+            Ok(value) => {
+                assert_eq!(
+                    value.code(),
+                    Some(0),
+                    "staged runtime bridge host extern calls should all succeed"
+                );
+            }
+            Err(error) if error.to_string().contains("blocked this file") => {
+                fs::remove_dir_all(&temp_root).ok();
+                return;
+            }
+            Err(error) => panic!("failed to run staged runtime bridge driver: {error}"),
+        }
+
+        let linked_output = temp_root.join("o");
+        let summary_output = temp_root.join("s");
+        assert!(
+            linked_output.exists(),
+            "expected linked output copied by runtime bridge host_link_executable_from_objects"
+        );
+        assert!(
+            summary_output.exists(),
+            "expected summary output copied by runtime bridge host_write_aot_cli_summary"
+        );
+        assert_eq!(
+            fs::read(&linked_output).expect("read linked output"),
+            fs::read(&template_exe).expect("read template exe"),
+            "linked output should match configured template executable"
+        );
+        assert_eq!(
+            fs::read_to_string(&summary_output).expect("read summary output"),
+            fs::read_to_string(&template_summary).expect("read template summary"),
+            "summary output should match configured template summary"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn self_host_runtime_bridge_clif_staged_externs_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_smoke = std::env::var("STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_STAGED_EXTERN_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_smoke {
+            return;
+        }
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_runtime_bridge_clif_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let template_ir = temp_root.join("i");
+        let template_object = temp_root.join("j");
+        let template_exe = temp_root.join("t");
+        let template_summary = temp_root.join("u");
+        fs::write(&template_ir, "{\"entry\":\"main\"}\n").expect("write template ir bundle");
+        fs::write(&template_object, "{\"entry\":\"main\"}\n")
+            .expect("write template object bundle");
+        fs::write(&template_exe, "template-exe").expect("write template exe");
+        fs::write(&template_summary, "{\"source_file_count\":1}\n")
+            .expect("write template summary");
+
+        let compile_config = AotCompileConfig {
+            helper_path: Some(helper_path),
+            ..AotCompileConfig::default()
+        };
+        let backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            compile_config.clone(),
+            AotLinkConfig {
+                linker_path: Some(linker_path.clone()),
+            },
+            temp_root.join("artifacts"),
+            false,
+        );
+        let bridge_object = temp_root.join("self_host_runtime_bridge_clif.obj");
+        emit_self_host_runtime_bridge_object_clif(&backend, &bridge_object)
+            .expect("emit clif runtime bridge object");
+
+        let call_conv = aot_call_conv();
+        let driver_clif = format!(
+            "external host_set_summary_file(i64) -> i32 {cc}\n\
+external host_emit_ir_from_compiler_state(i64, i64) -> i32 {cc}\n\
+external host_run_cranelift_aot(i64, i64) -> i32 {cc}\n\
+external host_link_executable_from_objects(i64, i64) -> i32 {cc}\n\
+external host_write_aot_cli_summary(i64, i64, i64) -> i32 {cc}\n\
+function %bridge_stage_main() -> i32 {cc} {{\n\
+block0:\n\
+v0 = iconst.i64 0\n\
+v1 = iconst.i64 1\n\
+v2 = iconst.i8 0\n\
+v3 = iconst.i8 111\n\
+v4 = iconst.i8 115\n\
+v5 = iconst.i32 0\n\
+v6 = iconst.i32 10\n\
+v7 = iconst.i32 20\n\
+v8 = iconst.i32 30\n\
+v9 = iconst.i32 40\n\
+v10 = stack_slot.i64\n\
+v11 = iadd v10, v1\n\
+store v3, v10\n\
+store v2, v11\n\
+v12 = stack_slot.i64\n\
+v13 = iadd v12, v1\n\
+store v4, v12\n\
+store v2, v13\n\
+v14 = call %host_set_summary_file(v12)\n\
+v15 = icmp eq v14, v5\n\
+brif v15, block1, block_fail_set_summary\n\
+block_fail_set_summary:\n\
+return v6\n\
+block1:\n\
+v16 = stack_slot.i64\n\
+v17 = call %host_emit_ir_from_compiler_state(v0, v16)\n\
+v18 = icmp eq v17, v5\n\
+brif v18, block2, block_fail_emit\n\
+block_fail_emit:\n\
+return v7\n\
+block2:\n\
+v19 = stack_slot.i64\n\
+v20 = call %host_run_cranelift_aot(v16, v19)\n\
+v21 = icmp eq v20, v5\n\
+brif v21, block3, block_fail_run\n\
+block_fail_run:\n\
+return v8\n\
+block3:\n\
+v22 = call %host_link_executable_from_objects(v19, v10)\n\
+v23 = icmp eq v22, v5\n\
+brif v23, block4, block_fail_link\n\
+block_fail_link:\n\
+return v9\n\
+block4:\n\
+v24 = call %host_write_aot_cli_summary(v10, v16, v19)\n\
+return v24\n\
+}}\n",
+            cc = call_conv
+        );
+        let driver_object = temp_root.join("bridge_stage_driver_clif.obj");
+        compile_clif_to_object(&driver_clif, &driver_object, &compile_config)
+            .expect("compile bridge driver object");
+
+        let shim_clif = format!(
+            "external bridge_stage_main() -> i32 {cc}\n\
+external ExitProcess(i32) {cc}\n\
+function %stasis_entry_shim() {cc} {{\n\
+block0:\n\
+v0 = call %bridge_stage_main()\n\
+call %ExitProcess(v0)\n\
+return\n\
+}}\n",
+            cc = call_conv
+        );
+        let shim_object = temp_root.join("bridge_stage_shim_clif.obj");
+        compile_clif_to_object(&shim_clif, &shim_object, &compile_config)
+            .expect("compile bridge shim object");
+
+        let driver_exe = temp_root.join("bridge_stage_driver_clif.exe");
+        let link_config = AotLinkConfig {
+            linker_path: Some(linker_path),
+        };
+        link_objects_to_executable(
+            &[driver_object, bridge_object, shim_object],
+            &driver_exe,
+            "stasis_entry_shim",
+            &link_config,
+        )
+        .expect("link bridge driver executable");
+
+        let status = Command::new(&driver_exe)
+            .current_dir(&temp_root)
+            .env("STASIS_SELF_HOST_IR_BUNDLE_PATH", "i")
+            .env("STASIS_SELF_HOST_OBJECT_BUNDLE_PATH", "j")
+            .env("STASIS_SELF_HOST_LINK_TEMPLATE_EXE", "t")
+            .env("STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE", "u")
+            .status();
+        match status {
+            Ok(value) => {
+                assert_eq!(
+                    value.code(),
+                    Some(0),
+                    "clif fallback staged runtime bridge host extern calls should all succeed"
+                );
+            }
+            Err(error) if error.to_string().contains("blocked this file") => {
+                fs::remove_dir_all(&temp_root).ok();
+                return;
+            }
+            Err(error) => panic!("failed to run clif staged runtime bridge driver: {error}"),
+        }
+
+        let linked_output = temp_root.join("o");
+        let summary_output = temp_root.join("s");
+        assert!(
+            linked_output.exists(),
+            "expected linked output copied by clif runtime bridge host_link_executable_from_objects"
+        );
+        assert!(
+            summary_output.exists(),
+            "expected summary output copied by clif runtime bridge host_write_aot_cli_summary"
+        );
+        assert_eq!(
+            fs::read(&linked_output).expect("read linked output"),
+            fs::read(&template_exe).expect("read template exe"),
+            "linked output should match configured template executable"
+        );
+        assert_eq!(
+            fs::read_to_string(&summary_output).expect("read summary output"),
+            fs::read_to_string(&template_summary).expect("read template summary"),
+            "summary output should match configured template summary"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn self_host_runtime_bridge_clif_arg_and_source_externs_smoke_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_smoke = std::env::var("STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_ARG_SOURCE_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_smoke {
+            return;
+        }
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_self_host_runtime_bridge_clif_arg_source_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let compile_config = AotCompileConfig {
+            helper_path: Some(helper_path),
+            ..AotCompileConfig::default()
+        };
+        let backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            compile_config.clone(),
+            AotLinkConfig {
+                linker_path: Some(linker_path.clone()),
+            },
+            temp_root.join("artifacts"),
+            false,
+        );
+        let bridge_object = temp_root.join("self_host_runtime_bridge_clif.obj");
+        emit_self_host_runtime_bridge_object_clif(&backend, &bridge_object)
+            .expect("emit clif runtime bridge object");
+
+        let call_conv = aot_call_conv();
+        let driver_clif = format!(
+            "external host_cli_arg_count() -> i32 {cc}\n\
+external host_cli_arg_value(i32, i64) -> i32 {cc}\n\
+external host_source_file_count(i64) -> i32 {cc}\n\
+external host_load_source_file(i64, i32, i64, i64) -> i32 {cc}\n\
+function %bridge_arg_source_main() -> i32 {cc} {{\n\
+block0:\n\
+v0 = iconst.i32 0\n\
+v1 = iconst.i32 1\n\
+v2 = iconst.i32 10\n\
+v3 = iconst.i32 20\n\
+v4 = iconst.i32 30\n\
+v5 = iconst.i32 40\n\
+v6 = iconst.i32 50\n\
+v7 = iconst.i32 60\n\
+v8 = iconst.i32 112\n\
+v9 = iconst.i32 113\n\
+v10 = iconst.i32 114\n\
+v11 = iconst.i64 0\n\
+v12 = call %host_cli_arg_count()\n\
+v13 = icmp eq v12, v1\n\
+brif v13, block1, block_fail_arg_count\n\
+block_fail_arg_count:\n\
+return v2\n\
+block1:\n\
+v14 = stack_slot.i64\n\
+v15 = call %host_cli_arg_value(v0, v14)\n\
+v16 = icmp eq v15, v0\n\
+brif v16, block2, block_fail_arg_value\n\
+block_fail_arg_value:\n\
+return v3\n\
+block2:\n\
+v17 = load.i8 v14\n\
+v18 = uextend.i32 v17\n\
+v19 = icmp eq v18, v8\n\
+brif v19, block3, block_fail_arg_data\n\
+block_fail_arg_data:\n\
+return v4\n\
+block3:\n\
+v20 = call %host_source_file_count(v11)\n\
+v21 = icmp eq v20, v1\n\
+brif v21, block4, block_fail_source_count\n\
+block_fail_source_count:\n\
+return v5\n\
+block4:\n\
+v22 = stack_slot.i64\n\
+v23 = stack_slot.i64\n\
+v24 = call %host_load_source_file(v11, v0, v22, v23)\n\
+v25 = icmp eq v24, v0\n\
+brif v25, block5, block_fail_source_load\n\
+block_fail_source_load:\n\
+return v6\n\
+block5:\n\
+v26 = load.i8 v22\n\
+v27 = uextend.i32 v26\n\
+v28 = icmp eq v27, v9\n\
+brif v28, block6, block_fail_source_path\n\
+block_fail_source_path:\n\
+return v7\n\
+block6:\n\
+v29 = load.i8 v23\n\
+v30 = uextend.i32 v29\n\
+v31 = icmp eq v30, v10\n\
+brif v31, block_ok, block_fail_source_text\n\
+block_fail_source_text:\n\
+return v7\n\
+block_ok:\n\
+return v0\n\
+}}\n",
+            cc = call_conv
+        );
+        let driver_object = temp_root.join("bridge_arg_source_driver_clif.obj");
+        compile_clif_to_object(&driver_clif, &driver_object, &compile_config)
+            .expect("compile bridge arg/source driver object");
+
+        let shim_clif = format!(
+            "external bridge_arg_source_main() -> i32 {cc}\n\
+external ExitProcess(i32) {cc}\n\
+function %stasis_entry_shim() {cc} {{\n\
+block0:\n\
+v0 = call %bridge_arg_source_main()\n\
+call %ExitProcess(v0)\n\
+return\n\
+}}\n",
+            cc = call_conv
+        );
+        let shim_object = temp_root.join("bridge_arg_source_shim_clif.obj");
+        compile_clif_to_object(&shim_clif, &shim_object, &compile_config)
+            .expect("compile bridge arg/source shim object");
+
+        let driver_exe = temp_root.join("bridge_arg_source_driver_clif.exe");
+        let link_config = AotLinkConfig {
+            linker_path: Some(linker_path),
+        };
+        link_objects_to_executable(
+            &[driver_object, bridge_object, shim_object],
+            &driver_exe,
+            "stasis_entry_shim",
+            &link_config,
+        )
+        .expect("link bridge arg/source driver executable");
+
+        let status = Command::new(&driver_exe)
+            .env("STASIS_SELF_HOST_ARG_COUNT", "1")
+            .env("STASIS_SELF_HOST_ARG_0", "p")
+            .env("STASIS_SELF_HOST_SOURCE_FILE_COUNT", "1")
+            .env("STASIS_SELF_HOST_SOURCE_PATH_0", "q")
+            .env("STASIS_SELF_HOST_SOURCE_TEXT_0", "r")
+            .status();
+        match status {
+            Ok(value) => {
+                assert_eq!(
+                    value.code(),
+                    Some(0),
+                    "clif fallback runtime bridge arg/source extern calls should all succeed"
+                );
+            }
+            Err(error) if error.to_string().contains("blocked this file") => {
+                fs::remove_dir_all(&temp_root).ok();
+                return;
+            }
+            Err(error) => panic!("failed to run clif arg/source bridge driver: {error}"),
+        }
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
 }
 
 fn collect_stasis_files_recursive(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -3916,7 +6587,10 @@ fn collect_stasis_files_recursive(root: &Path) -> Result<Vec<PathBuf>, String> {
             .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|error| {
-                format!("failed to read directory entry in {}: {error}", dir.display())
+                format!(
+                    "failed to read directory entry in {}: {error}",
+                    dir.display()
+                )
             })?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
@@ -4061,7 +6735,10 @@ fn format_compile_diagnostics(diagnostics: &[Diagnostic]) -> String {
                 .unwrap_or_else(|| "<unknown>".to_string());
             let line = diag.line.unwrap_or(0);
             let column = diag.column.unwrap_or(0);
-            format!("{:?}: {} ({path}:{line}:{column})", diag.severity, diag.message)
+            format!(
+                "{:?}: {} ({path}:{line}:{column})",
+                diag.severity, diag.message
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -4070,6 +6747,7 @@ fn format_compile_diagnostics(diagnostics: &[Diagnostic]) -> String {
 fn host_emit_ir_from_compiler_state_with_backend(
     backend: &mut IncrementalCompilerBackend,
     project_dir: &Path,
+    env_snapshot: &SelfHostCliEnvSnapshot,
 ) -> Result<PathBuf, String> {
     let changed_files = collect_stasis_files_for_self_host_project(project_dir)?;
     if changed_files.is_empty() {
@@ -4084,10 +6762,10 @@ fn host_emit_ir_from_compiler_state_with_backend(
         let entry_override_missing = std::env::var("STASIS_AOT_ENTRY_FILE")
             .ok()
             .is_none_or(|value| value.trim().is_empty());
-        let multiple_main_error = result.diagnostics.iter().any(|diag| {
-            diag.message
-                .contains("multiple main declarations (code=43")
-        });
+        let multiple_main_error = result
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message.contains("multiple main declarations (code=43"));
         if entry_override_missing && multiple_main_error {
             return Err(format!(
                 "{}\nHint: this project has multiple main() files; rerun with --entry-file <relative/path/to_entry.stasis>",
@@ -4123,13 +6801,10 @@ fn host_emit_ir_from_compiler_state_with_backend(
             manifest_path.display()
         )
     })?;
-    let strict_self_host = std::env::var("STASIS_AOT_STRICT_SELF_HOST")
-        .ok()
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    let allow_stub_fallback = std::env::var("STASIS_AOT_ALLOW_STUB_FALLBACK")
-        .ok()
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    if strict_self_host && !allow_stub_fallback && !manifest.fallback_stub_symbols.is_empty() {
+    if env_snapshot.strict_self_host
+        && !env_snapshot.allow_stub_fallback
+        && !manifest.fallback_stub_symbols.is_empty()
+    {
         let preview = manifest
             .fallback_stub_symbols
             .iter()
@@ -4141,10 +6816,12 @@ fn host_emit_ir_from_compiler_state_with_backend(
             "self-host aot-cli strict mode rejected stub fallback lowering for i32 functions: {preview}; set STASIS_AOT_ALLOW_STUB_FALLBACK=1 to bypass temporarily"
         ));
     }
-    let quality_gate = std::env::var("STASIS_AOT_QUALITY_GATE")
-        .ok()
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    if quality_gate && manifest.fallback_stub_symbols.iter().any(|symbol| symbol == &entry_symbol) {
+    if env_snapshot.quality_gate
+        && manifest
+            .fallback_stub_symbols
+            .iter()
+            .any(|symbol| symbol == &entry_symbol)
+    {
         return Err(format!(
             "quality gate rejected output: entry symbol {entry_symbol} still uses fallback stub lowering; add lowering coverage for selected entry path before producing game executable"
         ));
@@ -4167,8 +6844,12 @@ fn host_emit_ir_from_compiler_state_with_backend(
 }
 
 fn host_run_cranelift_aot_from_ir_bundle(ir_bundle_path: &Path) -> Result<PathBuf, String> {
-    let ir_text = std::fs::read_to_string(ir_bundle_path)
-        .map_err(|error| format!("failed to read ir bundle {}: {error}", ir_bundle_path.display()))?;
+    let ir_text = std::fs::read_to_string(ir_bundle_path).map_err(|error| {
+        format!(
+            "failed to read ir bundle {}: {error}",
+            ir_bundle_path.display()
+        )
+    })?;
     let ir_bundle: SelfHostIrBundle = serde_json::from_str(&ir_text).map_err(|error| {
         format!(
             "failed to parse ir bundle {}: {error}",
@@ -4226,13 +6907,12 @@ fn host_link_executable_from_object_bundle_with_backend(
         .iter()
         .map(PathBuf::from)
         .collect();
-    let (runtime_bridge_object, runtime_bridge_mode) = emit_self_host_runtime_bridge_object(backend)?;
+    let (runtime_bridge_object, runtime_bridge_mode) =
+        emit_self_host_runtime_bridge_object(backend)?;
     object_paths.push(runtime_bridge_object);
     let mut executable_entry_symbol = object_bundle.entry_symbol.clone();
     if cfg!(windows) {
-        let shim_object = backend
-            .aot_artifact_root
-            .join("self_host_entry_shim.obj");
+        let shim_object = backend.aot_artifact_root.join("self_host_entry_shim.obj");
         let shim_clif = format!(
             "external {entry_symbol}() -> i32 {cc}\nexternal ExitProcess(i32) {cc}\nfunction %stasis_entry_shim() {cc} {{\nblock0:\nv0 = call %{entry_symbol}()\ncall %ExitProcess(v0)\nreturn\n}}\n",
             entry_symbol = object_bundle.entry_symbol,
@@ -4250,7 +6930,9 @@ fn host_link_executable_from_object_bundle_with_backend(
     );
     if let Err(initial_error) = initial_link {
         if cfg!(windows) && runtime_bridge_mode == "rustc" {
-            let bridge_object = backend.aot_artifact_root.join("self_host_runtime_bridge.obj");
+            let bridge_object = backend
+                .aot_artifact_root
+                .join("self_host_runtime_bridge.obj");
             emit_self_host_runtime_bridge_object_clif(backend, &bridge_object)?;
             link_objects_to_executable(
                 &object_paths,
@@ -4289,7 +6971,9 @@ fn host_link_executable_from_object_bundle_with_backend(
 fn emit_self_host_runtime_bridge_object(
     backend: &IncrementalCompilerBackend,
 ) -> Result<(PathBuf, &'static str), String> {
-    let bridge_object = backend.aot_artifact_root.join("self_host_runtime_bridge.obj");
+    let bridge_object = backend
+        .aot_artifact_root
+        .join("self_host_runtime_bridge.obj");
     if cfg!(windows) {
         if let Ok(()) = emit_self_host_runtime_bridge_object_windows_rustc(&bridge_object) {
             write_runtime_bridge_mode_marker(backend, "rustc").ok();
@@ -4305,31 +6989,453 @@ fn emit_self_host_runtime_bridge_object_clif(
     bridge_object: &Path,
 ) -> Result<(), String> {
     let cc = aot_call_conv();
-    // Runtime extern bridge stubs for self-host AOT executable linkage.
-    // Real dispatch wiring will replace these stubs as lowering coverage expands.
-    let bridge_clif = format!(
-        "function %print_i32(i32) {cc} {{\nblock0:\nreturn\n}}\n\
-function %print_string(i64) {cc} {{\nblock0:\nreturn\n}}\n\
-function %host_cli_arg_count() -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 0\nreturn v0\n}}\n\
-function %host_cli_arg_value(i32, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n\
-function %host_set_summary_file(i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 0\nreturn v0\n}}\n\
-function %host_source_file_count(i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 0\nreturn v0\n}}\n\
-function %host_load_source_file(i64, i32, i64, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n\
-function %host_emit_ir_from_compiler_state(i64, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n\
-function %host_run_cranelift_aot(i64, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n\
-function %host_link_executable_from_objects(i64, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n\
-function %host_write_aot_cli_summary(i64, i64, i64) -> i32 {cc} {{\nblock0:\nv0 = iconst.i32 1\nreturn v0\n}}\n"
-    );
+    let bridge_clif = build_self_host_runtime_bridge_clif(cc);
     compile_clif_to_object(&bridge_clif, bridge_object, &backend.aot_compile_config)?;
     write_runtime_bridge_mode_marker(backend, "clif").ok();
     Ok(())
+}
+
+const CLIF_RUNTIME_BRIDGE_MAX_INDEXED_KEYS: usize = 128;
+
+fn build_self_host_runtime_bridge_key_selector(
+    fn_name: &str,
+    global_prefix: &str,
+    max_indexed_keys: usize,
+    cc: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("function %{fn_name}(i32) -> i64 {cc} {{\n"));
+    out.push_str("block0:\n");
+    out.push_str("v1 = iconst.i32 0\n");
+    out.push_str("v2 = iconst.i64 0\n");
+    out.push_str("v3 = icmp slt v0, v1\n");
+    if max_indexed_keys == 0 {
+        out.push_str("brif v3, block_fail, block_fail\n");
+    } else {
+        out.push_str("brif v3, block_fail, block_check_0\n");
+    }
+
+    for index in 0..max_indexed_keys {
+        let iconst_id = 10 + index * 3;
+        let eq_id = iconst_id + 1;
+        let key_id = iconst_id + 2;
+        let next_block = if index + 1 < max_indexed_keys {
+            format!("block_check_{}", index + 1)
+        } else {
+            "block_fail".to_string()
+        };
+        out.push_str(&format!("block_check_{index}:\n"));
+        out.push_str(&format!("v{iconst_id} = iconst.i32 {index}\n"));
+        out.push_str(&format!("v{eq_id} = icmp eq v0, v{iconst_id}\n"));
+        out.push_str(&format!(
+            "brif v{eq_id}, block_return_{index}, {next_block}\n"
+        ));
+        out.push_str(&format!("block_return_{index}:\n"));
+        out.push_str(&format!("v{key_id} = global_value {global_prefix}{index}\n"));
+        out.push_str(&format!("return v{key_id}\n"));
+    }
+
+    out.push_str("block_fail:\n");
+    out.push_str("return v2\n");
+    out.push_str("}\n");
+    out
+}
+
+fn build_self_host_runtime_bridge_clif(cc: &str) -> String {
+    // CLIF fallback runtime bridge for environments where rustc object emission fails.
+    // Keep all host bridge externs process/env-backed so fallback remains executable-path compatible.
+    let mut source = String::new();
+    source.push_str("global k_arg_count_key: i8 ; \"STASIS_SELF_HOST_ARG_COUNT\"\n");
+    source.push_str("global k_source_count_key: i8 ; \"STASIS_SELF_HOST_SOURCE_FILE_COUNT\"\n");
+    source.push_str("global k_summary_key: i8 ; \"STASIS_AOT_SUMMARY_FILE\"\n");
+    source.push_str("global k_ir_bundle_key: i8 ; \"STASIS_SELF_HOST_IR_BUNDLE_PATH\"\n");
+    source.push_str("global k_object_bundle_key: i8 ; \"STASIS_SELF_HOST_OBJECT_BUNDLE_PATH\"\n");
+    source.push_str("global k_link_template_exe_key: i8 ; \"STASIS_SELF_HOST_LINK_TEMPLATE_EXE\"\n");
+    source.push_str(
+        "global k_summary_template_key: i8 ; \"STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE\"\n",
+    );
+    source.push_str("global k_tmp_count_buf: i8[8]\n");
+    source.push_str("global k_tmp_path_buf0: i8[1024]\n");
+    source.push_str("global k_tmp_path_buf1: i8[1024]\n");
+    source.push_str("global k_cli_project_dir: i8[1024]\n");
+    source.push_str("global k_cli_output_exe: i8[1024]\n");
+    source.push_str("global k_cli_summary_path: i8[1024]\n");
+    source.push_str("global k_cli_ir_bundle: i8[1024]\n");
+    source.push_str("global k_cli_object_bundle: i8[1024]\n");
+
+    for index in 0..CLIF_RUNTIME_BRIDGE_MAX_INDEXED_KEYS {
+        source.push_str(&format!(
+            "global k_arg_key_{index}: i8 ; \"STASIS_SELF_HOST_ARG_{index}\"\n"
+        ));
+        source.push_str(&format!(
+            "global k_source_path_key_{index}: i8 ; \"STASIS_SELF_HOST_SOURCE_PATH_{index}\"\n"
+        ));
+        source.push_str(&format!(
+            "global k_source_text_key_{index}: i8 ; \"STASIS_SELF_HOST_SOURCE_TEXT_{index}\"\n"
+        ));
+    }
+
+    source.push_str(
+        &r#"external GetEnvironmentVariableA(i64, i64, i32) -> i32 {cc}
+external SetEnvironmentVariableA(i64, i64) -> i32 {cc}
+external CopyFileA(i64, i64, i32) -> i32 {cc}
+function %print_i32(i32) {cc} {
+block0:
+return
+}
+function %print_string(i64) {cc} {
+block0:
+return
+}
+function %parse_u32_ascii_from_buffer(i64) -> i32 {cc} {
+block0:
+v1 = stack_slot.i64
+v2 = stack_slot.i64
+v3 = iconst.i32 0
+store v3, v1
+store v3, v2
+jump block_loop
+block_loop:
+v4 = load.i32 v1
+v5 = sextend.i64 v4
+v6 = iadd v0, v5
+v7 = load.i8 v6
+v8 = uextend.i32 v7
+v9 = icmp eq v8, v3
+brif v9, block_done, block_check_digit
+block_check_digit:
+v10 = iconst.i32 48
+v11 = iconst.i32 57
+v12 = icmp ult v8, v10
+v13 = icmp ugt v8, v11
+v14 = bor v12, v13
+brif v14, block_fail, block_update
+block_update:
+v15 = load.i32 v2
+v16 = iconst.i32 10
+v17 = imul v15, v16
+v18 = isub v8, v10
+v19 = iadd v17, v18
+store v19, v2
+v20 = iconst.i32 1
+v21 = iadd v4, v20
+store v21, v1
+jump block_loop
+block_done:
+v22 = load.i32 v2
+return v22
+block_fail:
+return v3
+}
+function %read_env_count_i32(i64) -> i32 {cc} {
+block0:
+v1 = global_value k_tmp_count_buf
+v2 = iconst.i32 8
+v3 = call %GetEnvironmentVariableA(v0, v1, v2)
+v4 = iconst.i32 0
+v5 = icmp eq v3, v4
+v6 = icmp uge v3, v2
+v7 = bor v5, v6
+brif v7, block_fail, block_parse
+block_parse:
+v8 = call %parse_u32_ascii_from_buffer(v1)
+return v8
+block_fail:
+return v4
+}
+function %read_env_ascii_to_out(i64, i64, i32) -> i32 {cc} {
+block0:
+v3 = iconst.i32 0
+v4 = iconst.i32 1
+v5 = iconst.i64 0
+v6 = icmp eq v1, v5
+brif v6, block_fail, block_read
+block_read:
+v7 = call %GetEnvironmentVariableA(v0, v1, v2)
+v8 = icmp eq v7, v3
+v9 = icmp uge v7, v2
+v10 = bor v8, v9
+brif v10, block_fail, block_ok
+block_fail:
+return v4
+block_ok:
+return v3
+}
+function %copy_file_ascii(i64, i64) -> i32 {cc} {
+block0:
+v2 = iconst.i32 0
+v3 = iconst.i32 1
+v4 = iconst.i64 0
+v5 = icmp eq v0, v4
+v6 = icmp eq v1, v4
+v7 = bor v5, v6
+brif v7, block_fail, block_copy
+block_copy:
+v8 = call %CopyFileA(v0, v1, v2)
+v9 = icmp eq v8, v2
+brif v9, block_fail, block_ok
+block_fail:
+return v3
+block_ok:
+return v2
+}
+"#
+        .replace("{cc}", cc),
+    );
+
+    source.push_str(&build_self_host_runtime_bridge_key_selector(
+        "select_arg_key",
+        "k_arg_key_",
+        CLIF_RUNTIME_BRIDGE_MAX_INDEXED_KEYS,
+        cc,
+    ));
+    source.push_str(&build_self_host_runtime_bridge_key_selector(
+        "select_source_path_key",
+        "k_source_path_key_",
+        CLIF_RUNTIME_BRIDGE_MAX_INDEXED_KEYS,
+        cc,
+    ));
+    source.push_str(&build_self_host_runtime_bridge_key_selector(
+        "select_source_text_key",
+        "k_source_text_key_",
+        CLIF_RUNTIME_BRIDGE_MAX_INDEXED_KEYS,
+        cc,
+    ));
+
+    source.push_str(
+        &r#"function %host_cli_arg_count() -> i32 {cc} {
+block0:
+v1 = global_value k_arg_count_key
+v2 = call %read_env_count_i32(v1)
+return v2
+}
+function %host_cli_arg_value(i32, i64) -> i32 {cc} {
+block0:
+v2 = iconst.i32 0
+v3 = iconst.i32 1
+v4 = iconst.i64 0
+v5 = icmp slt v0, v2
+v6 = icmp eq v1, v4
+v7 = bor v5, v6
+brif v7, block_fail, block_select
+block_select:
+v8 = call %select_arg_key(v0)
+v9 = icmp eq v8, v4
+brif v9, block_fail, block_read
+block_read:
+v10 = iconst.i32 1024
+v11 = call %read_env_ascii_to_out(v8, v1, v10)
+v12 = icmp eq v11, v2
+brif v12, block_ok, block_fail
+block_fail:
+return v3
+block_ok:
+return v2
+}
+function %host_set_summary_file(i64) -> i32 {cc} {
+block0:
+v10 = global_value k_summary_key
+v11 = iconst.i32 0
+v12 = call %SetEnvironmentVariableA(v10, v0)
+v13 = icmp eq v12, v11
+brif v13, block_fail, block_ok
+block_fail:
+v14 = iconst.i32 1
+return v14
+block_ok:
+return v11
+}
+function %host_source_file_count(i64) -> i32 {cc} {
+block0:
+v1 = global_value k_source_count_key
+v2 = call %read_env_count_i32(v1)
+return v2
+}
+function %host_load_source_file(i64, i32, i64, i64) -> i32 {cc} {
+block0:
+v10 = iconst.i32 0
+v11 = iconst.i32 1
+v12 = iconst.i64 0
+v13 = icmp slt v1, v10
+v14 = icmp eq v2, v12
+v15 = icmp eq v3, v12
+v16 = bor v13, v14
+v17 = bor v16, v15
+brif v17, block_fail, block_keys
+block_keys:
+v18 = call %select_source_path_key(v1)
+v19 = call %select_source_text_key(v1)
+v20 = icmp eq v18, v12
+v21 = icmp eq v19, v12
+v22 = bor v20, v21
+brif v22, block_fail, block_read_path
+block_read_path:
+v23 = iconst.i32 1024
+v24 = call %read_env_ascii_to_out(v18, v2, v23)
+v25 = icmp eq v24, v10
+brif v25, block_read_source, block_fail
+block_read_source:
+v26 = iconst.i32 262144
+v27 = call %read_env_ascii_to_out(v19, v3, v26)
+v28 = icmp eq v27, v10
+brif v28, block_ok, block_fail
+block_fail:
+return v11
+block_ok:
+return v10
+}
+function %host_emit_ir_from_compiler_state(i64, i64) -> i32 {cc} {
+block0:
+v10 = global_value k_ir_bundle_key
+v11 = iconst.i32 1024
+v12 = call %read_env_ascii_to_out(v10, v1, v11)
+return v12
+}
+function %host_run_cranelift_aot(i64, i64) -> i32 {cc} {
+block0:
+v10 = global_value k_object_bundle_key
+v11 = iconst.i32 1024
+v12 = call %read_env_ascii_to_out(v10, v1, v11)
+return v12
+}
+function %host_link_executable_from_objects(i64, i64) -> i32 {cc} {
+block0:
+v10 = iconst.i32 0
+v11 = iconst.i32 1
+v12 = global_value k_tmp_path_buf0
+v13 = global_value k_link_template_exe_key
+v14 = iconst.i32 1024
+v15 = call %read_env_ascii_to_out(v13, v12, v14)
+v16 = icmp eq v15, v10
+brif v16, block_copy, block_fail
+block_copy:
+v17 = call %copy_file_ascii(v12, v1)
+return v17
+block_fail:
+return v11
+}
+function %host_write_aot_cli_summary(i64, i64, i64) -> i32 {cc} {
+block0:
+v10 = iconst.i32 1024
+v11 = iconst.i32 0
+v12 = iconst.i32 1
+v13 = global_value k_tmp_path_buf0
+v14 = global_value k_summary_key
+v15 = call %GetEnvironmentVariableA(v14, v13, v10)
+v16 = icmp eq v15, v11
+brif v16, block_none, block_have_summary
+block_none:
+return v11
+block_have_summary:
+v17 = icmp uge v15, v10
+brif v17, block_fail, block_read_template
+block_read_template:
+v18 = global_value k_tmp_path_buf1
+v19 = global_value k_summary_template_key
+v20 = call %read_env_ascii_to_out(v19, v18, v10)
+v21 = icmp eq v20, v11
+brif v21, block_copy, block_fail
+block_copy:
+v22 = call %copy_file_ascii(v18, v13)
+return v22
+block_fail:
+return v12
+}
+function %host_run_self_host_aot_cli_from_env() -> i32 {cc} {
+block0:
+v0 = iconst.i32 0
+v1 = iconst.i32 4
+v2 = iconst.i32 6
+v3 = iconst.i32 1
+v4 = iconst.i32 3
+v5 = iconst.i32 5
+v6 = iconst.i32 20
+v7 = iconst.i32 21
+v8 = iconst.i32 22
+v9 = iconst.i32 23
+v10 = iconst.i32 24
+v11 = iconst.i32 25
+v12 = iconst.i32 26
+v13 = iconst.i32 27
+v14 = iconst.i32 28
+v15 = call %host_cli_arg_count()
+v16 = icmp slt v15, v1
+brif v16, block_fail_argc, block_load_project
+block_fail_argc:
+return v6
+block_load_project:
+v17 = global_value k_cli_project_dir
+v18 = call %host_cli_arg_value(v3, v17)
+v19 = icmp eq v18, v0
+brif v19, block_load_output, block_fail_project
+block_fail_project:
+return v7
+block_load_output:
+v20 = global_value k_cli_output_exe
+v21 = call %host_cli_arg_value(v4, v20)
+v22 = icmp eq v21, v0
+brif v22, block_summary_check, block_fail_output
+block_fail_output:
+return v8
+block_summary_check:
+v23 = icmp slt v15, v2
+brif v23, block_emit_ir, block_load_summary
+block_load_summary:
+v24 = global_value k_cli_summary_path
+v25 = call %host_cli_arg_value(v5, v24)
+v26 = icmp eq v25, v0
+brif v26, block_set_summary, block_fail_summary_read
+block_fail_summary_read:
+return v9
+block_set_summary:
+v27 = call %host_set_summary_file(v24)
+v28 = icmp eq v27, v0
+brif v28, block_emit_ir, block_fail_summary_set
+block_fail_summary_set:
+return v10
+block_emit_ir:
+v29 = global_value k_cli_ir_bundle
+v30 = call %host_emit_ir_from_compiler_state(v17, v29)
+v31 = icmp eq v30, v0
+brif v31, block_run_aot, block_fail_emit_ir
+block_fail_emit_ir:
+return v11
+block_run_aot:
+v32 = global_value k_cli_object_bundle
+v33 = call %host_run_cranelift_aot(v29, v32)
+v34 = icmp eq v33, v0
+brif v34, block_link, block_fail_run_aot
+block_fail_run_aot:
+return v12
+block_link:
+v35 = call %host_link_executable_from_objects(v32, v20)
+v36 = icmp eq v35, v0
+brif v36, block_write_summary, block_fail_link
+block_fail_link:
+return v13
+block_write_summary:
+v37 = call %host_write_aot_cli_summary(v20, v29, v32)
+v38 = icmp eq v37, v0
+brif v38, block_ok, block_fail_summary_write
+block_fail_summary_write:
+return v14
+block_ok:
+return v0
+}
+"#
+        .replace("{cc}", cc),
+    );
+
+    source
 }
 
 fn write_runtime_bridge_mode_marker(
     backend: &IncrementalCompilerBackend,
     mode: &str,
 ) -> Result<(), String> {
-    let marker_path = backend.aot_artifact_root.join("self_host_runtime_bridge.mode");
+    let marker_path = backend
+        .aot_artifact_root
+        .join("self_host_runtime_bridge.mode");
     std::fs::write(&marker_path, mode).map_err(|error| {
         format!(
             "failed to write runtime bridge mode marker {}: {error}",
@@ -4360,11 +7466,16 @@ const SUMMARY_KEY: &[u8] = b"STASIS_AOT_SUMMARY_FILE\0";
 const SOURCE_COUNT_KEY: &[u8] = b"STASIS_SELF_HOST_SOURCE_FILE_COUNT\0";
 const SOURCE_PATH_PREFIX: &[u8] = b"STASIS_SELF_HOST_SOURCE_PATH_\0";
 const SOURCE_TEXT_PREFIX: &[u8] = b"STASIS_SELF_HOST_SOURCE_TEXT_\0";
+const IR_BUNDLE_PATH_KEY: &[u8] = b"STASIS_SELF_HOST_IR_BUNDLE_PATH\0";
+const OBJECT_BUNDLE_PATH_KEY: &[u8] = b"STASIS_SELF_HOST_OBJECT_BUNDLE_PATH\0";
+const LINK_TEMPLATE_EXE_KEY: &[u8] = b"STASIS_SELF_HOST_LINK_TEMPLATE_EXE\0";
+const SUMMARY_TEMPLATE_FILE_KEY: &[u8] = b"STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE\0";
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetEnvironmentVariableA(lpName: *const c_char, lpBuffer: *mut c_char, nSize: u32) -> u32;
     fn SetEnvironmentVariableA(lpName: *const c_char, lpValue: *const c_char) -> i32;
+    fn CopyFileA(lpExistingFileName: *const c_char, lpNewFileName: *const c_char, bFailIfExists: i32) -> i32;
 }
 
 #[panic_handler]
@@ -4391,6 +7502,25 @@ fn parse_u32_ascii(buf: &[u8]) -> i32 {
 
 fn read_env_ascii(key: &[u8], out_ptr: *mut u8, out_len: u32) -> u32 {
     unsafe { GetEnvironmentVariableA(key.as_ptr() as *const c_char, out_ptr as *mut c_char, out_len) }
+}
+
+fn read_env_ascii_to_out(key: &[u8], out_ptr: *mut u8, out_len: u32) -> i32 {
+    if out_ptr.is_null() || out_len == 0 {
+        return 1;
+    }
+    let written = read_env_ascii(key, out_ptr, out_len);
+    if written == 0 || written >= out_len {
+        return 1;
+    }
+    0
+}
+
+fn copy_file_ascii(src: *const u8, dst: *const u8) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return 1;
+    }
+    let copied = unsafe { CopyFileA(src as *const c_char, dst as *const c_char, 0) };
+    if copied == 0 { 1 } else { 0 }
 }
 
 fn write_indexed_key(prefix: &[u8], index: i32, out: &mut [u8]) -> bool {
@@ -4505,20 +7635,96 @@ pub extern "system" fn host_load_source_file(
     if path_written == 0 {
         return 1;
     }
-    let source_written = read_env_ascii(&source_key, out_source, 131072);
+    let source_written = read_env_ascii(&source_key, out_source, 262144);
     if source_written == 0 {
         return 1;
     }
     0
 }
+pub extern "system" fn host_emit_ir_from_compiler_state(_project_dir: *const u8, out_ir_bundle: *mut u8) -> i32 {
+    read_env_ascii_to_out(IR_BUNDLE_PATH_KEY, out_ir_bundle, 1024)
+}
 #[unsafe(no_mangle)]
-pub extern "system" fn host_emit_ir_from_compiler_state(_project_dir: *const u8, _out_ir_bundle: *mut u8) -> i32 { 1 }
+pub extern "system" fn host_run_cranelift_aot(_ir_bundle: *const u8, out_object_bundle: *mut u8) -> i32 {
+    read_env_ascii_to_out(OBJECT_BUNDLE_PATH_KEY, out_object_bundle, 1024)
+}
 #[unsafe(no_mangle)]
-pub extern "system" fn host_run_cranelift_aot(_ir_bundle: *const u8, _out_object_bundle: *mut u8) -> i32 { 1 }
+pub extern "system" fn host_link_executable_from_objects(_object_bundle: *const u8, output_exe: *const u8) -> i32 {
+    let mut template_path = [0u8; 1024];
+    let template_written = read_env_ascii(
+        LINK_TEMPLATE_EXE_KEY,
+        template_path.as_mut_ptr(),
+        template_path.len() as u32,
+    );
+    if template_written == 0 || template_written >= template_path.len() as u32 {
+        return 1;
+    }
+    copy_file_ascii(template_path.as_ptr(), output_exe)
+}
 #[unsafe(no_mangle)]
-pub extern "system" fn host_link_executable_from_objects(_object_bundle: *const u8, _output_exe: *const u8) -> i32 { 1 }
+pub extern "system" fn host_write_aot_cli_summary(_output_exe: *const u8, _ir_bundle: *const u8, _object_bundle: *const u8) -> i32 {
+    let mut summary_path = [0u8; 1024];
+    let summary_written = read_env_ascii(
+        SUMMARY_KEY,
+        summary_path.as_mut_ptr(),
+        summary_path.len() as u32,
+    );
+    if summary_written == 0 {
+        return 0;
+    }
+    if summary_written >= summary_path.len() as u32 {
+        return 1;
+    }
+    let mut template_path = [0u8; 1024];
+    let template_written = read_env_ascii(
+        SUMMARY_TEMPLATE_FILE_KEY,
+        template_path.as_mut_ptr(),
+        template_path.len() as u32,
+    );
+    if template_written == 0 || template_written >= template_path.len() as u32 {
+        return 1;
+    }
+    copy_file_ascii(template_path.as_ptr(), summary_path.as_ptr())
+}
 #[unsafe(no_mangle)]
-pub extern "system" fn host_write_aot_cli_summary(_output_exe: *const u8, _ir_bundle: *const u8, _object_bundle: *const u8) -> i32 { 1 }
+pub extern "system" fn host_run_self_host_aot_cli_from_env() -> i32 {
+    let argc = host_cli_arg_count();
+    if argc < 4 {
+        return 20;
+    }
+    let mut project_dir = [0u8; 1024];
+    if host_cli_arg_value(1, project_dir.as_mut_ptr()) != 0 {
+        return 21;
+    }
+    let mut output_exe = [0u8; 1024];
+    if host_cli_arg_value(3, output_exe.as_mut_ptr()) != 0 {
+        return 22;
+    }
+    if argc >= 6 {
+        let mut summary_file = [0u8; 1024];
+        if host_cli_arg_value(5, summary_file.as_mut_ptr()) != 0 {
+            return 23;
+        }
+        if host_set_summary_file(summary_file.as_ptr()) != 0 {
+            return 24;
+        }
+    }
+    let mut ir_bundle = [0u8; 1024];
+    if host_emit_ir_from_compiler_state(project_dir.as_ptr(), ir_bundle.as_mut_ptr()) != 0 {
+        return 25;
+    }
+    let mut object_bundle = [0u8; 1024];
+    if host_run_cranelift_aot(ir_bundle.as_ptr(), object_bundle.as_mut_ptr()) != 0 {
+        return 26;
+    }
+    if host_link_executable_from_objects(object_bundle.as_ptr(), output_exe.as_ptr()) != 0 {
+        return 27;
+    }
+    if host_write_aot_cli_summary(output_exe.as_ptr(), ir_bundle.as_ptr(), object_bundle.as_ptr()) != 0 {
+        return 28;
+    }
+    0
+}
 "#;
     std::fs::write(&source_path, source).map_err(|error| {
         format!(
@@ -4572,6 +7778,7 @@ fn run_self_host_aot_cli_with_backend(
             project_dir.display()
         ));
     }
+    let env_snapshot = capture_self_host_cli_env_snapshot();
     let changed_files = collect_stasis_files_for_self_host_project(project_dir)?;
     if changed_files.is_empty() {
         return Err(format!(
@@ -4579,14 +7786,18 @@ fn run_self_host_aot_cli_with_backend(
             project_dir.display()
         ));
     }
-    let ir_bundle_path = host_emit_ir_from_compiler_state_with_backend(backend, project_dir)?;
+    let ir_bundle_path =
+        host_emit_ir_from_compiler_state_with_backend(backend, project_dir, &env_snapshot)?;
     let object_bundle_path = host_run_cranelift_aot_from_ir_bundle(&ir_bundle_path)?;
-    let mut summary =
-        host_link_executable_from_object_bundle_with_backend(backend, &object_bundle_path, output_exe)?;
+    let mut summary = host_link_executable_from_object_bundle_with_backend(
+        backend,
+        &object_bundle_path,
+        output_exe,
+    )?;
     summary.source_file_count = changed_files.len();
     summary.ir_bundle_path = ir_bundle_path;
     summary.object_bundle_path = object_bundle_path;
-    write_default_aot_cli_summary_sidecar(&summary)?;
+    write_default_aot_cli_summary_sidecar(&summary, env_snapshot.summary_file_path.as_deref())?;
     Ok(summary)
 }
 
@@ -4634,19 +7845,26 @@ fn metric_uses_stub_fallback(metric: &stasis_compiler::FunctionMetric) -> bool {
     }
     metric.simple_i32_return_expr.is_none()
         && metric.simple_i32_return_call_target_id_hash.is_none()
-        && metric.simple_i32_return_call_one_arg_target_id_hash.is_none()
+        && metric
+            .simple_i32_return_call_one_arg_target_id_hash
+            .is_none()
         && metric
             .simple_i32_return_call_one_arg_arg_call_target_id_hash
             .is_none()
-        && metric.simple_i32_return_two_call_left_target_id_hash.is_none()
-        && metric.simple_i32_return_two_call_right_target_id_hash.is_none()
+        && metric
+            .simple_i32_return_two_call_left_target_id_hash
+            .is_none()
+        && metric
+            .simple_i32_return_two_call_right_target_id_hash
+            .is_none()
 }
 
-fn default_aot_cli_summary_sidecar_path(output_exe: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os("STASIS_AOT_SUMMARY_FILE") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+fn resolve_aot_cli_summary_sidecar_path(
+    output_exe: &Path,
+    configured_summary_path: Option<&Path>,
+) -> PathBuf {
+    if let Some(path) = configured_summary_path {
+        return path.to_path_buf();
     }
     let file_name = output_exe
         .file_name()
@@ -4655,8 +7873,20 @@ fn default_aot_cli_summary_sidecar_path(output_exe: &Path) -> PathBuf {
     output_exe.with_file_name(file_name)
 }
 
-fn write_default_aot_cli_summary_sidecar(summary: &SelfHostedAotCliSummary) -> Result<(), String> {
-    let sidecar_path = default_aot_cli_summary_sidecar_path(&summary.linked_image_path);
+#[cfg(test)]
+fn default_aot_cli_summary_sidecar_path(output_exe: &Path) -> PathBuf {
+    let configured_summary_path = std::env::var_os("STASIS_AOT_SUMMARY_FILE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    resolve_aot_cli_summary_sidecar_path(output_exe, configured_summary_path.as_deref())
+}
+
+fn write_default_aot_cli_summary_sidecar(
+    summary: &SelfHostedAotCliSummary,
+    configured_summary_path: Option<&Path>,
+) -> Result<(), String> {
+    let sidecar_path =
+        resolve_aot_cli_summary_sidecar_path(&summary.linked_image_path, configured_summary_path);
     if let Some(parent) = sidecar_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -4712,7 +7942,10 @@ mod self_host_file_selection_tests {
         .expect("collect should succeed");
         let names: Vec<String> = files
             .iter()
-            .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
             .collect();
         assert!(names.contains(&"entry.stasis".to_string()));
         assert!(names.contains(&"dep.stasis".to_string()));

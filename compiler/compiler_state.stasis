@@ -1,4 +1,4 @@
-const COMPILER_MAX_SOURCE: i32 = 131072;
+const COMPILER_MAX_SOURCE: i32 = 262144;
 const COMPILER_MAX_TOKENS: i32 = 32768;
 const COMPILER_MAX_ERRORS: i32 = 64;
 const COMPILER_MAX_FILES: i32 = 128;
@@ -37,6 +37,7 @@ enum CompilerErrorCode {
     ParseExpectAssignInLet = 2017,
     ParseExpectRBracket = 2018,
     ParseExpectIn = 2019,
+    SemanticFromConversionExpression = 4001,
     IncrementalFileOverflow = 3001,
     IncrementalFilePathEmpty = 3002
 }
@@ -114,7 +115,7 @@ struct CompilerError {
 
 struct CompilerFile {
     path: ascii[260];
-    source: ascii[131072];
+    source: ascii[262144];
     source_len: i32;
     source_hash: i32;
     dirty: bool;
@@ -134,6 +135,27 @@ struct CompilerFile {
     function_id_hashes: i32[512];
     function_sig_hashes: i32[512];
     function_body_hashes: i32[512];
+    function_return_type_codes: i32[512];
+    function_param_counts: i32[512];
+    function_first_param_type_codes: i32[512];
+    function_simple_i32_return_call_target_id_hashes: i32[512];
+    function_simple_i32_return_call_add_has: i32[512];
+    function_simple_i32_return_call_add_deltas: i32[512];
+    function_simple_i32_return_call_one_arg_has: i32[512];
+    function_simple_i32_return_call_one_arg_target_id_hashes: i32[512];
+    function_simple_i32_return_call_one_arg_i32_literals: i32[512];
+    function_simple_i32_return_call_one_arg_arg_call_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_has: i32[512];
+    function_simple_i32_return_two_call_left_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_right_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_op_codes: i32[512];
+    function_simple_void_print_i32_has: i32[512];
+    function_simple_void_print_i32_literals: i32[512];
+    function_simple_void_print_i32_call_target_id_hashes: i32[512];
+    function_simple_void_print_i32_call_one_arg_has: i32[512];
+    function_simple_void_print_i32_call_one_arg_arg_call_target_id_hashes: i32[512];
+    function_simple_void_print_i32_call_add_has: i32[512];
+    function_simple_void_print_i32_call_add_deltas: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -144,7 +166,7 @@ struct CompilerFile {
 }
 
 struct CompilerState {
-    source: ascii[131072];
+    source: ascii[262144];
     source_len: i32;
 
     files: CompilerFile[128];
@@ -174,6 +196,27 @@ struct CompilerState {
     function_id_hashes: i32[512];
     function_sig_hashes: i32[512];
     function_body_hashes: i32[512];
+    function_return_type_codes: i32[512];
+    function_param_counts: i32[512];
+    function_first_param_type_codes: i32[512];
+    function_simple_i32_return_call_target_id_hashes: i32[512];
+    function_simple_i32_return_call_add_has: i32[512];
+    function_simple_i32_return_call_add_deltas: i32[512];
+    function_simple_i32_return_call_one_arg_has: i32[512];
+    function_simple_i32_return_call_one_arg_target_id_hashes: i32[512];
+    function_simple_i32_return_call_one_arg_i32_literals: i32[512];
+    function_simple_i32_return_call_one_arg_arg_call_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_has: i32[512];
+    function_simple_i32_return_two_call_left_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_right_target_id_hashes: i32[512];
+    function_simple_i32_return_two_call_op_codes: i32[512];
+    function_simple_void_print_i32_has: i32[512];
+    function_simple_void_print_i32_literals: i32[512];
+    function_simple_void_print_i32_call_target_id_hashes: i32[512];
+    function_simple_void_print_i32_call_one_arg_has: i32[512];
+    function_simple_void_print_i32_call_one_arg_arg_call_target_id_hashes: i32[512];
+    function_simple_void_print_i32_call_add_has: i32[512];
+    function_simple_void_print_i32_call_add_deltas: i32[512];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
@@ -183,6 +226,11 @@ struct CompilerState {
     current_signature_name_start: i32;
     current_signature_name_len: i32;
     current_signature_param_count: i32;
+    current_signature_first_param_type_code: i32;
+    current_signature_first_param_name_hash: i32;
+    current_signature_second_param_name_hash: i32;
+    current_signature_third_param_name_hash: i32;
+    current_signature_fourth_param_name_hash: i32;
     current_signature_return_type_start: i32;
     current_signature_return_type_len: i32;
 

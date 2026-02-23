@@ -3,13 +3,15 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalCompileOutput {
     pub status: i32,
     pub layout_hash: i32,
+    pub hook_symbol: Option<String>,
     pub file_paths: Vec<String>,
     pub functions: Vec<FunctionMetric>,
     pub errors: Vec<ErrorMetric>,
@@ -22,6 +24,50 @@ pub struct FunctionMetric {
     pub id_hash: i32,
     pub sig_hash: i32,
     pub body_hash: i32,
+    pub return_type: String,
+    pub param_count: i32,
+    pub first_param_type_code: i32,
+    pub simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
+    pub simple_i32_return_call_target_id_hash: Option<i32>,
+    pub simple_i32_return_call_add_delta: Option<i32>,
+    pub simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
+    pub simple_i32_return_call_one_arg_i32_literal: Option<i32>,
+    pub simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    pub simple_i32_return_two_call_left_target_id_hash: Option<i32>,
+    pub simple_i32_return_two_call_right_target_id_hash: Option<i32>,
+    pub simple_i32_return_two_call_op_code: Option<i32>,
+    pub simple_void_print_i32_literal: Option<i32>,
+    pub simple_void_print_i32_call_target_id_hash: Option<i32>,
+    pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    pub simple_void_print_i32_call_add_delta: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimpleI32ReturnExpr {
+    Literal(i32),
+    Add(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Sub(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Mul(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Div(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Mod(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Select(
+        SimpleI32Condition,
+        Box<SimpleI32ReturnExpr>,
+        Box<SimpleI32ReturnExpr>,
+    ),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimpleI32Condition {
+    Eq(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Ne(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Le(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Ge(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Lt(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    Gt(Box<SimpleI32ReturnExpr>, Box<SimpleI32ReturnExpr>),
+    And(Box<SimpleI32Condition>, Box<SimpleI32Condition>),
+    Or(Box<SimpleI32Condition>, Box<SimpleI32Condition>),
+    Not(Box<SimpleI32Condition>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,11 +80,11 @@ pub struct ErrorMetric {
 
 #[derive(Debug, Clone)]
 struct FileState {
-    source_hash: u64,
     layout_hash: i32,
     main_decl_count: i32,
     main_valid_count: i32,
     main_invalid_count: i32,
+    functions: Vec<ParsedFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +93,22 @@ struct ParsedFunction {
     id_hash: i32,
     sig_hash: i32,
     body_hash: i32,
+    return_type: String,
+    param_count: i32,
+    first_param_type_code: i32,
+    simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
+    simple_i32_return_call_target_id_hash: Option<i32>,
+    simple_i32_return_call_add_delta: Option<i32>,
+    simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
+    simple_i32_return_call_one_arg_i32_literal: Option<i32>,
+    simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    simple_i32_return_two_call_left_target_id_hash: Option<i32>,
+    simple_i32_return_two_call_right_target_id_hash: Option<i32>,
+    simple_i32_return_two_call_op_code: Option<i32>,
+    simple_void_print_i32_literal: Option<i32>,
+    simple_void_print_i32_call_target_id_hash: Option<i32>,
+    simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    simple_void_print_i32_call_add_delta: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +118,14 @@ struct AnalysisResult {
     main_decl_count: i32,
     main_valid_count: i32,
     main_invalid_count: i32,
-    parse_errors: Vec<ErrorMetric>,
+    errors: Vec<ErrorMetric>,
 }
+
+const SIMPLE_ONE_ARG_FIRST_PARAM_SENTINEL: i32 = -2_147_483_647;
+const SIMPLE_ONE_ARG_FIRST_SECOND_PARAM_SENTINEL: i32 = -2_147_483_646;
+const SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_PARAM_SENTINEL: i32 = -2_147_483_645;
+const SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_FOURTH_PARAM_SENTINEL: i32 = -2_147_483_644;
+const SIMPLE_ONE_ARG_LITERAL_FIRST_SECOND_PARAM_SENTINEL: i32 = -2_147_483_643;
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
@@ -120,6 +188,7 @@ impl IncrementalCompilerHost {
             return Ok(IncrementalCompileOutput {
                 status: 0,
                 layout_hash: self.last_layout_hash_i32,
+                hook_symbol: current_hook_symbol(&self.state_by_path),
                 file_paths: Vec::new(),
                 functions: Vec::new(),
                 errors: Vec::new(),
@@ -130,11 +199,12 @@ impl IncrementalCompilerHost {
         let mut functions: Vec<FunctionMetric> = Vec::new();
         let mut errors: Vec<ErrorMetric> = Vec::new();
         let mut analyzed_by_path: BTreeMap<String, AnalysisResult> = BTreeMap::new();
+        let mut changed_functions_by_path: BTreeMap<String, Vec<ParsedFunction>> = BTreeMap::new();
 
         for (path_key, source) in &changed_sources {
-            let analyzed = analyze_source(source);
-            if !analyzed.parse_errors.is_empty() {
-                errors.extend(analyzed.parse_errors.clone());
+            let analyzed = analyze_source_via_stasis(source)?;
+            if !analyzed.errors.is_empty() {
+                errors.extend(analyzed.errors.clone());
             }
             analyzed_by_path.insert(path_key.clone(), analyzed);
         }
@@ -143,6 +213,7 @@ impl IncrementalCompilerHost {
             return Ok(IncrementalCompileOutput {
                 status: 2,
                 layout_hash: self.last_layout_hash_i32,
+                hook_symbol: current_hook_symbol(&self.state_by_path),
                 file_paths,
                 functions,
                 errors,
@@ -150,18 +221,31 @@ impl IncrementalCompilerHost {
         }
 
         for (path_key, analyzed) in &analyzed_by_path {
-            let source_hash = *self
-                .source_hash_by_path
+            let previous_functions = self
+                .state_by_path
                 .get(path_key)
-                .ok_or_else(|| format!("internal error: missing source hash for {path_key}"))?;
+                .map(|state| state.functions.clone())
+                .unwrap_or_default();
+            let mut changed_functions = Vec::new();
+            for parsed in &analyzed.functions {
+                let unchanged = previous_functions.iter().any(|prev| {
+                    prev.id_hash == parsed.id_hash
+                        && prev.sig_hash == parsed.sig_hash
+                        && prev.body_hash == parsed.body_hash
+                });
+                if !unchanged {
+                    changed_functions.push(parsed.clone());
+                }
+            }
+            changed_functions_by_path.insert(path_key.clone(), changed_functions);
             self.state_by_path.insert(
                 path_key.clone(),
                 FileState {
-                    source_hash,
                     layout_hash: analyzed.layout_hash,
                     main_decl_count: analyzed.main_decl_count,
                     main_valid_count: analyzed.main_valid_count,
                     main_invalid_count: analyzed.main_invalid_count,
+                    functions: analyzed.functions.clone(),
                 },
             );
         }
@@ -199,9 +283,14 @@ impl IncrementalCompilerHost {
         }
 
         if !errors.is_empty() {
+            eprintln!(
+                "compile_changed_files status=2 debug: main_decl_total={}, main_valid_total={}, main_invalid_total={}, errors={:?}",
+                main_decl_total, main_valid_total, main_invalid_total, errors
+            );
             return Ok(IncrementalCompileOutput {
                 status: 2,
                 layout_hash: self.last_layout_hash_i32,
+                hook_symbol: current_hook_symbol(&self.state_by_path),
                 file_paths,
                 functions,
                 errors,
@@ -210,14 +299,40 @@ impl IncrementalCompilerHost {
 
         for (file_index, (path_key, _)) in changed_sources.iter().enumerate() {
             file_paths.push(path_key.clone());
-            if let Some(analyzed) = analyzed_by_path.get(path_key) {
-                for parsed in &analyzed.functions {
+            if let Some(changed) = changed_functions_by_path.get(path_key) {
+                for parsed in changed {
                     functions.push(FunctionMetric {
                         file_index,
                         ordinal: parsed.ordinal,
                         id_hash: parsed.id_hash,
                         sig_hash: parsed.sig_hash,
                         body_hash: parsed.body_hash,
+                        return_type: parsed.return_type.clone(),
+                        param_count: parsed.param_count,
+                        first_param_type_code: parsed.first_param_type_code,
+                        simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
+                        simple_i32_return_call_target_id_hash: parsed
+                            .simple_i32_return_call_target_id_hash,
+                        simple_i32_return_call_add_delta: parsed.simple_i32_return_call_add_delta,
+                        simple_i32_return_call_one_arg_target_id_hash: parsed
+                            .simple_i32_return_call_one_arg_target_id_hash,
+                        simple_i32_return_call_one_arg_i32_literal: parsed
+                            .simple_i32_return_call_one_arg_i32_literal,
+                        simple_i32_return_call_one_arg_arg_call_target_id_hash: parsed
+                            .simple_i32_return_call_one_arg_arg_call_target_id_hash,
+                        simple_i32_return_two_call_left_target_id_hash: parsed
+                            .simple_i32_return_two_call_left_target_id_hash,
+                        simple_i32_return_two_call_right_target_id_hash: parsed
+                            .simple_i32_return_two_call_right_target_id_hash,
+                        simple_i32_return_two_call_op_code: parsed
+                            .simple_i32_return_two_call_op_code,
+                        simple_void_print_i32_literal: parsed.simple_void_print_i32_literal,
+                        simple_void_print_i32_call_target_id_hash: parsed
+                            .simple_void_print_i32_call_target_id_hash,
+                        simple_void_print_i32_call_one_arg_arg_call_target_id_hash: parsed
+                            .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+                        simple_void_print_i32_call_add_delta: parsed
+                            .simple_void_print_i32_call_add_delta,
                     });
                 }
             }
@@ -226,13 +341,13 @@ impl IncrementalCompilerHost {
         let mut layout_acc = 216613626_i32;
         for state in self.state_by_path.values() {
             layout_acc = hash_mix(layout_acc, state.layout_hash);
-            layout_acc = hash_mix(layout_acc, (state.source_hash & 0xffff_ffff) as i32);
         }
         self.last_layout_hash_i32 = layout_acc;
 
         Ok(IncrementalCompileOutput {
             status: 0,
             layout_hash: layout_acc,
+            hook_symbol: current_hook_symbol(&self.state_by_path),
             file_paths,
             functions,
             errors,
@@ -240,7 +355,7 @@ impl IncrementalCompilerHost {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        "native-rust"
+        "stasis-orchestrated"
     }
 }
 
@@ -250,325 +365,413 @@ impl Default for IncrementalCompilerHost {
     }
 }
 
-fn analyze_source(source: &str) -> AnalysisResult {
-    let sanitized = sanitize_for_scan(source);
-    let mut functions = Vec::new();
-    let mut parse_errors = Vec::new();
+fn analyze_source_via_stasis(source: &str) -> Result<AnalysisResult, String> {
+    let harness_source = build_stasis_analysis_harness(source);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("clock error: {error}"))?
+        .as_nanos();
+    let repo_root = repo_root_path()?;
+    let harness_dir = repo_root
+        .join(".stasis_cache")
+        .join("compiler_host")
+        .join(format!("run_{stamp}"));
+    fs::create_dir_all(&harness_dir).map_err(|error| {
+        format!(
+            "failed to create harness dir {}: {error}",
+            harness_dir.display()
+        )
+    })?;
+    let harness_path = harness_dir.join("analyze_source.stasis");
+    let mut file = fs::File::create(&harness_path).map_err(|error| {
+        format!(
+            "failed to create harness {}: {error}",
+            harness_path.display()
+        )
+    })?;
+    file.write_all(harness_source.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write harness {}: {error}",
+            harness_path.display()
+        )
+    })?;
+    drop(file);
 
-    let mut index = 0usize;
-    let bytes = sanitized.as_bytes();
-    let mut ordinal = 0usize;
-    let mut main_decl_count = 0;
-    let mut main_valid_count = 0;
-    let mut main_invalid_count = 0;
+    let script = bootstrap_stasisc_script_path()?;
 
-    while index < bytes.len() {
-        if !keyword_at(&sanitized, index, "function") {
-            index += 1;
-            continue;
+    // Fast path: skip wrapper preprocess/copy step for normal harness runs.
+    // Fall back to full wrapper flow if bootstrap output is malformed or fails.
+    let fast_output = run_stasis_analysis_harness(&script, &harness_path, true)?;
+    if fast_output.status.success() {
+        let stdout = String::from_utf8_lossy(&fast_output.stdout);
+        if let Ok(parsed) = parse_stasis_analysis_output(&stdout) {
+            return Ok(parsed);
         }
-        index += "function".len();
-
-        skip_ws(&sanitized, &mut index);
-        while index < bytes.len() && bytes[index] == b'@' {
-            index += 1;
-            consume_ident(&sanitized, &mut index);
-            skip_ws(&sanitized, &mut index);
-        }
-
-        let name_start = index;
-        if !consume_ident(&sanitized, &mut index) {
-            parse_errors.push(ErrorMetric {
-                code: 2003,
-                pos: name_start as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        }
-        let name = &sanitized[name_start..index];
-
-        skip_ws(&sanitized, &mut index);
-        if !consume_char(&sanitized, &mut index, '(') {
-            parse_errors.push(ErrorMetric {
-                code: 2004,
-                pos: index as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        }
-        let params_start = index;
-        let Some(params_end) = find_matching(&sanitized, params_start - 1, '(', ')') else {
-            parse_errors.push(ErrorMetric {
-                code: 2005,
-                pos: params_start as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        };
-        index = params_end + 1;
-
-        skip_ws(&sanitized, &mut index);
-        if !consume_char(&sanitized, &mut index, ':') {
-            parse_errors.push(ErrorMetric {
-                code: 2006,
-                pos: index as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        }
-        skip_ws(&sanitized, &mut index);
-        let return_start = index;
-        while index < bytes.len() {
-            let ch = bytes[index] as char;
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '[' || ch == ']' {
-                index += 1;
-            } else {
-                break;
-            }
-        }
-        if return_start == index {
-            parse_errors.push(ErrorMetric {
-                code: 2003,
-                pos: return_start as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        }
-        let return_type = &sanitized[return_start..index];
-
-        skip_ws(&sanitized, &mut index);
-        if !consume_char(&sanitized, &mut index, '{') {
-            parse_errors.push(ErrorMetric {
-                code: 2008,
-                pos: index as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        }
-        let body_open = index - 1;
-        let Some(body_close) = find_matching(&sanitized, body_open, '{', '}') else {
-            parse_errors.push(ErrorMetric {
-                code: 2009,
-                pos: body_open as i32,
-                detail_a: 0,
-                detail_b: 0,
-            });
-            break;
-        };
-        index = body_close + 1;
-
-        let signature_text = format!("{name}({}):{return_type}", sanitized[params_start..params_end].trim());
-        let body_text = &sanitized[body_open + 1..body_close];
-
-        if name == "main" {
-            main_decl_count += 1;
-            if sanitized[params_start..params_end].trim().is_empty() && return_type == "i32" {
-                main_valid_count += 1;
-            } else {
-                main_invalid_count += 1;
-            }
-        }
-
-        functions.push(ParsedFunction {
-            ordinal,
-            id_hash: hash_identifier(name),
-            sig_hash: hash_i32(&signature_text),
-            body_hash: hash_i32(body_text),
-        });
-        ordinal += 1;
     }
 
-    let layout_hash = compute_layout_hash(&sanitized);
+    let output = run_stasis_analysis_harness(&script, &harness_path, false)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("stasis harness failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_stasis_analysis_output(&stdout)
+}
 
-    AnalysisResult {
+fn run_stasis_analysis_harness(
+    script: &Path,
+    harness_path: &Path,
+    disable_preprocess: bool,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(script);
+    command
+        .arg("run")
+        .arg(harness_path)
+        // Bootstrap CLI `run` defaults to watch mode; host analysis harness must run once.
+        .arg("--no-watch");
+    if disable_preprocess {
+        command.env("STASIS_BOOTSTRAP_NO_PREPROCESS", "1");
+    }
+    command.output().map_err(|error| {
+        format!(
+            "failed running stasis compiler harness via {}: {error}",
+            script.display()
+        )
+    })
+}
+
+fn bootstrap_stasisc_script_path() -> Result<PathBuf, String> {
+    let repo_root = repo_root_path()?;
+    if cfg!(windows) {
+        let script = repo_root
+            .join("bootstrap")
+            .join("windows")
+            .join("stasisc.bat");
+        if script.exists() {
+            Ok(script)
+        } else {
+            Err(format!(
+                "bootstrap compiler launcher not found at {}",
+                script.display()
+            ))
+        }
+    } else {
+        Err("bootstrap compiler launcher is currently only wired for Windows".to_string())
+    }
+}
+
+fn repo_root_path() -> Result<PathBuf, String> {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    crate_root
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "failed to resolve repo root".to_string())
+}
+
+fn build_stasis_analysis_harness(source: &str) -> String {
+    let mut out = String::new();
+    out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
+    out.push_str("import \"../../../compiler/incremental_compiler.stasis\";\n");
+    out.push_str("global src_buf: ascii[262144];\n");
+    out.push_str("function load_source(): void {\n");
+    out.push_str("    ascii_clear(src_buf);\n");
+    for byte in source.as_bytes() {
+        out.push_str("    ascii_push(src_buf, ");
+        out.push_str(&byte.to_string());
+        out.push_str(");\n");
+    }
+    out.push_str("}\n");
+    out.push_str("function emit_metrics(status: i32): void {\n");
+    out.push_str("    print_string(\"__SC_BEGIN;\");\n");
+    out.push_str("    print_string(\"status=\"); print_i32(status); print_string(\";\");\n");
+    out.push_str(
+        "    print_string(\"layout=\"); print_i32(Compiler.layout_hash); print_string(\";\");\n",
+    );
+    out.push_str("    print_string(\"main_decl=\"); print_i32(Compiler.parsed_main_declaration_count); print_string(\";\");\n");
+    out.push_str("    print_string(\"main_valid=\"); print_i32(Compiler.parsed_main_valid_i32_count); print_string(\";\");\n");
+    out.push_str("    print_string(\"main_invalid=\"); print_i32(Compiler.parsed_main_invalid_signature_count); print_string(\";\");\n");
+    out.push_str(
+        "    print_string(\"errors=\"); print_i32(Compiler.error_count); print_string(\";\");\n",
+    );
+    out.push_str("    let ei: i32 = 0;\n");
+    out.push_str("    for (ei = 0; ei < Compiler.error_count; ei += 1) {\n");
+    out.push_str("        print_string(\"err=\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].code); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].pos); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].detail_a); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].detail_b); print_string(\";\");\n");
+    out.push_str("    }\n");
+    out.push_str("    print_string(\"fn_count=\"); print_i32(Compiler.tracked_function_count); print_string(\";\");\n");
+    out.push_str("    let fi: i32 = 0;\n");
+    out.push_str("    for (fi = 0; fi < Compiler.tracked_function_count; fi += 1) {\n");
+    out.push_str("        print_string(\"fn=\");\n");
+    out.push_str("        print_i32(fi); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_sig_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_body_hashes[fi]); print_string(\",\");\n");
+    out.push_str(
+        "        print_i32(Compiler.function_return_type_codes[fi]); print_string(\",\");\n",
+    );
+    out.push_str("        print_i32(Compiler.function_param_counts[fi]); print_string(\",\");\n");
+    out.push_str(
+        "        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n",
+    );
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_add_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_add_deltas[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_i32_literals[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_call_one_arg_arg_call_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_left_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_right_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_two_call_op_codes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_literals[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_one_arg_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_one_arg_arg_call_target_id_hashes[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_add_has[fi]); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.function_simple_void_print_i32_call_add_deltas[fi]); print_string(\";\");\n");
+    out.push_str("    }\n");
+    out.push_str("    print_string(\"__SC_END;\");\n");
+    out.push_str("}\n");
+    out.push_str("function main(): i32 {\n");
+    out.push_str("    compiler_reset_state();\n");
+    out.push_str("    load_source();\n");
+    out.push_str("    compiler_set_source(src_buf);\n");
+    out.push_str("    let status: i32 = run_incremental_compiler();\n");
+    out.push_str("    emit_metrics(status);\n");
+    out.push_str("    return 0;\n");
+    out.push_str("}\n");
+    out
+}
+
+fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> {
+    fn parse_i32(value: &str) -> i32 {
+        value.trim().parse::<i32>().unwrap_or_default()
+    }
+    fn parse_usize(value: &str) -> usize {
+        value.trim().parse::<usize>().unwrap_or_default()
+    }
+
+    let begin = stdout
+        .find("__SC_BEGIN;")
+        .ok_or_else(|| format!("missing harness begin marker in output: {stdout}"))?;
+    let end = stdout[begin..]
+        .find("__SC_END;")
+        .map(|index| begin + index)
+        .ok_or_else(|| format!("missing harness end marker in output: {stdout}"))?;
+    let payload = &stdout[begin + "__SC_BEGIN;".len()..end];
+
+    let mut status = 0i32;
+    let mut layout_hash = 0i32;
+    let mut main_decl_count = 0i32;
+    let mut main_valid_count = 0i32;
+    let mut main_invalid_count = 0i32;
+    let mut errors: Vec<ErrorMetric> = Vec::new();
+    let mut functions: Vec<ParsedFunction> = Vec::new();
+    for token in payload.split(';') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("status=") {
+            status = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("layout=") {
+            layout_hash = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("main_decl=") {
+            main_decl_count = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("main_valid=") {
+            main_valid_count = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("main_invalid=") {
+            main_invalid_count = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("err=") {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() == 4 {
+                errors.push(ErrorMetric {
+                    code: parse_i32(parts[0]),
+                    pos: parse_i32(parts[1]),
+                    detail_a: parse_i32(parts[2]),
+                    detail_b: parse_i32(parts[3]),
+                });
+            }
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("fn=") {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() == 25 {
+                let return_type = match parse_i32(parts[4]) {
+                    1 => "i32".to_string(),
+                    2 => "void".to_string(),
+                    _ => "unknown".to_string(),
+                };
+                let param_count = parse_i32(parts[5]);
+                let first_param_type_code = parse_i32(parts[6]);
+                let call_target_hash = parse_i32(parts[7]);
+                let simple_i32_call_add_has = parse_i32(parts[8]);
+                let simple_i32_call_add_delta = parse_i32(parts[9]);
+                let simple_i32_call_one_arg_has = parse_i32(parts[10]);
+                let simple_i32_call_one_arg_target_hash = parse_i32(parts[11]);
+                let simple_i32_call_one_arg_literal = parse_i32(parts[12]);
+                let simple_i32_call_one_arg_arg_call_target_hash = parse_i32(parts[13]);
+                let simple_i32_call_one_arg_uses_first_param =
+                    simple_i32_call_one_arg_arg_call_target_hash
+                        == SIMPLE_ONE_ARG_FIRST_PARAM_SENTINEL;
+                let simple_i32_call_one_arg_uses_first_second_param =
+                    simple_i32_call_one_arg_arg_call_target_hash
+                        == SIMPLE_ONE_ARG_FIRST_SECOND_PARAM_SENTINEL;
+                let simple_i32_call_one_arg_uses_first_second_third_param =
+                    simple_i32_call_one_arg_arg_call_target_hash
+                        == SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_PARAM_SENTINEL;
+                let simple_i32_call_one_arg_uses_first_second_third_fourth_param =
+                    simple_i32_call_one_arg_arg_call_target_hash
+                        == SIMPLE_ONE_ARG_FIRST_SECOND_THIRD_FOURTH_PARAM_SENTINEL;
+                let simple_i32_call_one_arg_uses_literal_first_second_param =
+                    simple_i32_call_one_arg_arg_call_target_hash
+                        == SIMPLE_ONE_ARG_LITERAL_FIRST_SECOND_PARAM_SENTINEL;
+                let simple_i32_two_call_has = parse_i32(parts[14]);
+                let simple_i32_two_call_left_hash = parse_i32(parts[15]);
+                let simple_i32_two_call_right_hash = parse_i32(parts[16]);
+                let simple_i32_two_call_op_code = parse_i32(parts[17]);
+                let simple_void_print_i32_has = parse_i32(parts[18]);
+                let simple_void_print_i32_literal = parse_i32(parts[19]);
+                let simple_void_print_i32_call_target_hash = parse_i32(parts[20]);
+                let simple_void_print_i32_call_one_arg_has = parse_i32(parts[21]);
+                let simple_void_print_i32_call_one_arg_arg_call_target_hash = parse_i32(parts[22]);
+                let simple_void_print_i32_call_add_has = parse_i32(parts[23]);
+                let simple_void_print_i32_call_add_delta = parse_i32(parts[24]);
+                let simple_void_print_i32_call_target_id_hash =
+                    if simple_void_print_i32_call_target_hash != 0 {
+                        Some(simple_void_print_i32_call_target_hash)
+                    } else {
+                        None
+                    };
+                functions.push(ParsedFunction {
+                    ordinal: parse_usize(parts[0]),
+                    id_hash: parse_i32(parts[1]),
+                    sig_hash: parse_i32(parts[2]),
+                    body_hash: parse_i32(parts[3]),
+                    return_type,
+                    param_count,
+                    first_param_type_code,
+                    simple_i32_return_expr: None,
+                    simple_i32_return_call_target_id_hash: if call_target_hash != 0 {
+                        Some(call_target_hash)
+                    } else {
+                        None
+                    },
+                    simple_i32_return_call_add_delta: if simple_i32_call_add_has == 1 {
+                        Some(simple_i32_call_add_delta)
+                    } else {
+                        None
+                    },
+                    simple_i32_return_call_one_arg_target_id_hash: if simple_i32_call_one_arg_has
+                        == 1
+                    {
+                        Some(simple_i32_call_one_arg_target_hash)
+                    } else {
+                        None
+                    },
+                    simple_i32_return_call_one_arg_i32_literal: if simple_i32_call_one_arg_has == 1
+                    {
+                        if simple_i32_call_one_arg_arg_call_target_hash == 0
+                            || simple_i32_call_one_arg_uses_literal_first_second_param
+                        {
+                            Some(simple_i32_call_one_arg_literal)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    },
+                    simple_i32_return_call_one_arg_arg_call_target_id_hash:
+                        if simple_i32_call_one_arg_has == 1
+                            && simple_i32_call_one_arg_arg_call_target_hash != 0
+                            && !simple_i32_call_one_arg_uses_first_param
+                            && !simple_i32_call_one_arg_uses_first_second_param
+                            && !simple_i32_call_one_arg_uses_first_second_third_param
+                            && !simple_i32_call_one_arg_uses_first_second_third_fourth_param
+                            && !simple_i32_call_one_arg_uses_literal_first_second_param
+                        {
+                            Some(simple_i32_call_one_arg_arg_call_target_hash)
+                        } else {
+                            None
+                        },
+                    simple_i32_return_two_call_left_target_id_hash: if simple_i32_two_call_has == 1
+                    {
+                        Some(simple_i32_two_call_left_hash)
+                    } else {
+                        None
+                    },
+                    simple_i32_return_two_call_right_target_id_hash: if simple_i32_two_call_has == 1
+                    {
+                        Some(simple_i32_two_call_right_hash)
+                    } else {
+                        None
+                    },
+                    simple_i32_return_two_call_op_code: if simple_i32_two_call_has == 1 {
+                        Some(simple_i32_two_call_op_code)
+                    } else {
+                        None
+                    },
+                    simple_void_print_i32_literal: if simple_void_print_i32_has == 1 {
+                        if (simple_void_print_i32_call_target_id_hash.is_none()
+                            && simple_i32_two_call_has == 0)
+                            || (simple_void_print_i32_call_one_arg_has == 1
+                                && simple_void_print_i32_call_one_arg_arg_call_target_hash == 0)
+                        {
+                            Some(simple_void_print_i32_literal)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    },
+                    simple_void_print_i32_call_target_id_hash,
+                    simple_void_print_i32_call_one_arg_arg_call_target_id_hash:
+                        if simple_void_print_i32_call_one_arg_has == 1
+                            && simple_void_print_i32_call_one_arg_arg_call_target_hash != 0
+                        {
+                            Some(simple_void_print_i32_call_one_arg_arg_call_target_hash)
+                        } else {
+                            None
+                        },
+                    simple_void_print_i32_call_add_delta: if simple_void_print_i32_call_add_has == 1
+                    {
+                        Some(simple_void_print_i32_call_add_delta)
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
+    }
+    if status != 0 && errors.is_empty() {
+        return Err(format!(
+            "stasis harness reported status {status} without diagnostics: {stdout}"
+        ));
+    }
+    Ok(AnalysisResult {
         functions,
         layout_hash,
         main_decl_count,
         main_valid_count,
         main_invalid_count,
-        parse_errors,
-    }
-}
-
-fn compute_layout_hash(sanitized: &str) -> i32 {
-    let mut hash = 216613626_i32;
-    let bytes = sanitized.as_bytes();
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        if keyword_at(sanitized, index, "global") {
-            hash = hash_mix(hash, hash_i32("global"));
-            index += "global".len();
-            skip_ws(sanitized, &mut index);
-            let start = index;
-            consume_ident(sanitized, &mut index);
-            hash = hash_mix(hash, hash_i32(&sanitized[start..index]));
-            skip_ws(sanitized, &mut index);
-            if index < bytes.len() && bytes[index] == b'{' {
-                if let Some(close) = find_matching(sanitized, index, '{', '}') {
-                    hash = hash_mix(hash, hash_i32(&sanitized[index + 1..close]));
-                    index = close + 1;
-                    continue;
-                }
-            }
-            while index < bytes.len() && bytes[index] != b';' && bytes[index] != b'\n' {
-                index += 1;
-            }
-            hash = hash_mix(hash, hash_i32(&sanitized[start..index]));
-            continue;
-        }
-        if keyword_at(sanitized, index, "struct") {
-            hash = hash_mix(hash, hash_i32("struct"));
-            index += "struct".len();
-            skip_ws(sanitized, &mut index);
-            let start = index;
-            consume_ident(sanitized, &mut index);
-            hash = hash_mix(hash, hash_i32(&sanitized[start..index]));
-            skip_ws(sanitized, &mut index);
-            if index < bytes.len() && bytes[index] == b'{' {
-                if let Some(close) = find_matching(sanitized, index, '{', '}') {
-                    hash = hash_mix(hash, hash_i32(&sanitized[index + 1..close]));
-                    index = close + 1;
-                    continue;
-                }
-            }
-            continue;
-        }
-        index += 1;
-    }
-
-    hash
-}
-
-fn keyword_at(source: &str, start: usize, keyword: &str) -> bool {
-    let bytes = source.as_bytes();
-    let kw = keyword.as_bytes();
-    if kw.is_empty() || start + kw.len() > bytes.len() {
-        return false;
-    }
-    if &bytes[start..start + kw.len()] != kw {
-        return false;
-    }
-    let left_ok = start == 0 || !is_ident(bytes[start - 1]);
-    let right_ok = start + kw.len() == bytes.len() || !is_ident(bytes[start + kw.len()]);
-    left_ok && right_ok
-}
-
-fn find_matching(source: &str, open_index: usize, open: char, close: char) -> Option<usize> {
-    let bytes = source.as_bytes();
-    if open_index >= bytes.len() || bytes[open_index] != open as u8 {
-        return None;
-    }
-    let mut depth = 0i32;
-    let mut i = open_index;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c == open {
-            depth += 1;
-        } else if c == close {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn consume_char(source: &str, index: &mut usize, expected: char) -> bool {
-    let bytes = source.as_bytes();
-    if *index < bytes.len() && bytes[*index] == expected as u8 {
-        *index += 1;
-        return true;
-    }
-    false
-}
-
-fn consume_ident(source: &str, index: &mut usize) -> bool {
-    let bytes = source.as_bytes();
-    if *index >= bytes.len() || !is_ident_start(bytes[*index]) {
-        return false;
-    }
-    *index += 1;
-    while *index < bytes.len() && is_ident(bytes[*index]) {
-        *index += 1;
-    }
-    true
-}
-
-fn skip_ws(source: &str, index: &mut usize) {
-    let bytes = source.as_bytes();
-    while *index < bytes.len() {
-        if (bytes[*index] as char).is_ascii_whitespace() {
-            *index += 1;
-        } else {
-            break;
-        }
-    }
-}
-
-fn is_ident_start(b: u8) -> bool {
-    (b as char).is_ascii_alphabetic() || b == b'_'
-}
-
-fn is_ident(b: u8) -> bool {
-    (b as char).is_ascii_alphanumeric() || b == b'_'
-}
-
-fn sanitize_for_scan(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                out.push(' ');
-                i += 1;
-            }
-            if i < bytes.len() && bytes[i] == b'\n' {
-                out.push('\n');
-                i += 1;
-            }
-            continue;
-        }
-
-        if bytes[i] == b'"' {
-            out.push('"');
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' {
-                    out.push(' ');
-                    i += 1;
-                    if i < bytes.len() {
-                        out.push(' ');
-                        i += 1;
-                    }
-                    continue;
-                }
-                if bytes[i] == b'"' {
-                    out.push('"');
-                    i += 1;
-                    break;
-                }
-                out.push(' ');
-                i += 1;
-            }
-            continue;
-        }
-
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-
-    out
+        errors,
+    })
 }
 
 fn normalize_path_key(path: &Path) -> String {
@@ -593,7 +796,8 @@ fn hash_text(value: &str) -> u64 {
 }
 
 fn hash_mix(hash: i32, value: i32) -> i32 {
-    hash.wrapping_mul(16777619).wrapping_add(value.wrapping_add(1))
+    hash.wrapping_mul(16777619)
+        .wrapping_add(value.wrapping_add(1))
 }
 
 fn hash_i32(value: &str) -> i32 {
@@ -608,36 +812,26 @@ fn hash_identifier(name: &str) -> i32 {
     hash_i32(name)
 }
 
+fn current_hook_symbol(state_by_path: &BTreeMap<String, FileState>) -> Option<String> {
+    let hook_hash = hash_identifier("on_code_swap");
+    for state in state_by_path.values() {
+        if state.functions.iter().any(|func| func.id_hash == hook_hash) {
+            return Some("on_code_swap".to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn backend_name_is_native_rust() {
+    fn backend_name_is_stasis_orchestrated() {
         let host = IncrementalCompilerHost::new();
-        assert_eq!(host.backend_name(), "native-rust");
-    }
-
-    #[test]
-    fn parse_main_signature_validation() {
-        let ok = analyze_source("function main(): i32 { return 0; }");
-        assert_eq!(ok.main_decl_count, 1);
-        assert_eq!(ok.main_valid_count, 1);
-        assert_eq!(ok.main_invalid_count, 0);
-
-        let bad = analyze_source("function main(x: i32): i32 { return x; }");
-        assert_eq!(bad.main_decl_count, 1);
-        assert_eq!(bad.main_valid_count, 0);
-        assert_eq!(bad.main_invalid_count, 1);
-    }
-
-    #[test]
-    fn parse_records_functions_and_hashes() {
-        let analyzed = analyze_source(
-            "function main(): i32 { return 0; }\nfunction on_code_swap(): void { return; }",
-        );
-        assert_eq!(analyzed.functions.len(), 2);
-        assert_eq!(analyzed.functions[1].id_hash, -663_287_521);
+        assert_eq!(host.backend_name(), "stasis-orchestrated");
     }
 
     #[test]
@@ -670,5 +864,1158 @@ mod tests {
         assert_eq!(deleted.status, 2);
         assert!(deleted.errors.iter().any(|error| error.code == 41));
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn harness_run_invocation_disables_watch_mode() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains(".arg(\"run\")"),
+            "expected harness to invoke bootstrap run mode"
+        );
+        assert!(
+            source.contains(".arg(\"--no-watch\")"),
+            "expected harness to force single-shot mode"
+        );
+    }
+
+    #[test]
+    fn harness_source_buffer_matches_compiler_max_source_budget() {
+        let harness = build_stasis_analysis_harness("function main(): i32 { return 0; }\n");
+        assert!(
+            harness.contains("global src_buf: ascii[262144];"),
+            "expected harness source buffer to match expanded compiler source budget"
+        );
+    }
+
+    #[test]
+    fn compile_records_function_hashes_return_type_and_hook_symbol() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_metrics_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.hook_symbol.as_deref(), Some("on_code_swap"));
+        assert_eq!(compile.functions.len(), 2);
+        assert!(compile.functions.iter().any(|f| f.return_type == "i32"));
+        assert!(compile.functions.iter().any(|f| f.return_type == "void"));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_i32_return_expr.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_i32_return_call_target_id_hash.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_i32_return_call_add_delta.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_i32_return_call_one_arg_target_id_hash.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_i32_return_call_one_arg_i32_literal.is_none()));
+        assert!(compile.functions.iter().all(|f| f
+            .simple_i32_return_call_one_arg_arg_call_target_id_hash
+            .is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_void_print_i32_literal.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_void_print_i32_call_target_id_hash.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_void_print_i32_call_add_delta.is_none()));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_target_hash() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_call_target_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(): i32 { return 7; }\nfunction main(): i32 { return callee(); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, None);
+        assert_eq!(main.simple_i32_return_call_one_arg_target_id_hash, None);
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_add_delta_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(): i32 { return 7; }\nfunction main(): i32 { return callee() + 5; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, Some(5));
+        assert_eq!(main.simple_i32_return_call_one_arg_target_id_hash, None);
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(9); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(main.simple_i32_return_call_target_id_hash, None);
+        assert_eq!(main.simple_i32_return_call_add_delta, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, Some(9));
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        let callee = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("callee"))
+            .expect("callee metric");
+        assert_eq!(callee.param_count, 1);
+        assert_eq!(callee.first_param_type_code, 1);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_first_param_passthrough_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_set_summary_file(summary_file: ascii[]): i32;\nfunction forward(summary_file: ascii[]): i32 { return host_set_summary_file(summary_file); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 1);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_set_summary_file"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_first_second_param_passthrough_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_two_param_passthrough_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(index: i32, out_value: ascii[]): i32 { return host_cli_arg_value(index, out_value); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 2);
+        assert_eq!(forward.first_param_type_code, 1);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_cli_arg_value"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_first_second_third_param_passthrough_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_three_param_passthrough_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_write_aot_cli_summary(output_exe: ascii[], ir_bundle_path: ascii[], object_bundle_path: ascii[]): i32;\nfunction forward(output_exe: ascii[], ir_bundle_path: ascii[], object_bundle_path: ascii[]): i32 { return host_write_aot_cli_summary(output_exe, ir_bundle_path, object_bundle_path); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 3);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_write_aot_cli_summary"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_first_second_third_fourth_param_passthrough_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_four_param_passthrough_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_load_source_file(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32;\nfunction forward(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32 { return host_load_source_file(project_dir, file_index, out_path, out_source); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 4);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_load_source_file"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_first_second_third_fourth_param_passthrough_add_delta_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_four_param_passthrough_add_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_load_source_file(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32;\nfunction forward(project_dir: ascii[], file_index: i32, out_path: ascii[], out_source: ascii[]): i32 { return host_load_source_file(project_dir, file_index, out_path, out_source) + 2; }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 4);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_load_source_file"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(forward.simple_i32_return_call_add_delta, Some(2));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_first_second_param_passthrough_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_literal_first_second_param_passthrough_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(out_value: ascii[]): i32 { return host_cli_arg_value(1, out_value); }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 1);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_cli_arg_value"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, Some(1));
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(forward.simple_i32_return_call_add_delta, None);
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_first_second_param_passthrough_add_delta_metadata(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_literal_first_second_param_passthrough_add_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "extern function host_cli_arg_value(index: i32, out_value: ascii[]): i32;\nfunction forward(out_value: ascii[]): i32 { return host_cli_arg_value(1, out_value) - 2; }\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let forward = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("forward"))
+            .expect("forward metric");
+        assert_eq!(forward.param_count, 1);
+        assert_eq!(forward.first_param_type_code, 0);
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("host_cli_arg_value"))
+        );
+        assert_eq!(forward.simple_i32_return_call_one_arg_i32_literal, Some(1));
+        assert_eq!(
+            forward.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(forward.simple_i32_return_call_add_delta, Some(-2));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_lit_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(9) + 2; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, Some(9));
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, Some(2));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_call_arg_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function arg_fn(): i32 { return 3; }\nfunction callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(arg_fn()); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 3);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            Some(hash_identifier("arg_fn"))
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_call_arg_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_call_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function arg_fn(): i32 { return 3; }\nfunction callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(arg_fn()) - 4; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 3);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            Some(hash_identifier("arg_fn"))
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, Some(-4));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_two_call_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_two_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function lhs(): i32 { return 7; }\nfunction rhs(): i32 { return 2; }\nfunction main(): i32 { return lhs() - rhs(); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 3);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(main.simple_i32_return_call_target_id_hash, None);
+        assert_eq!(main.simple_i32_return_call_add_delta, None);
+        assert_eq!(main.simple_i32_return_call_one_arg_target_id_hash, None);
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, None);
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(
+            main.simple_i32_return_two_call_left_target_id_hash,
+            Some(hash_identifier("lhs"))
+        );
+        assert_eq!(
+            main.simple_i32_return_two_call_right_target_id_hash,
+            Some(hash_identifier("rhs"))
+        );
+        assert_eq!(main.simple_i32_return_two_call_op_code, Some(2));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_literal() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_void_print_i32_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction on_code_swap(): void { print_i32(77); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(77));
+        assert_eq!(hook.simple_void_print_i32_call_target_id_hash, None);
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_call_target_hash() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_void_print_i32_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(): i32 { return 9; }\nfunction on_code_swap(): void { print_i32(callee()); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_literal_add_expression() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_void_print_i32_literal_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction on_code_swap(): void { print_i32(7 + 5); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(12));
+        assert_eq!(hook.simple_void_print_i32_call_target_id_hash, None);
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_call_target_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_void_print_i32_call_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(): i32 { return 9; }\nfunction on_code_swap(): void { print_i32(callee() - 4); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, Some(-4));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_and_literal() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_void_print_i32_call_one_arg_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(13)); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(13));
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_with_arg_call() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_call_arg_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction arg_fn(): i32 { return 6; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(arg_fn())); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            Some(hash_identifier("arg_fn"))
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_literal_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_add_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(13) + 2); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(13));
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, Some(2));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_with_arg_call_add_delta() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_call_add_{stamp}"
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction arg_fn(): i32 { return 6; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(arg_fn()) - 4); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            Some(hash_identifier("arg_fn"))
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, Some(-4));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_two_call_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_void_print_i32_two_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction lhs(): i32 { return 7; }\nfunction rhs(): i32 { return 2; }\nfunction on_code_swap(): void { print_i32(lhs() - rhs()); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(hook.simple_void_print_i32_call_target_id_hash, None);
+        assert_eq!(
+            hook.simple_i32_return_two_call_left_target_id_hash,
+            Some(hash_identifier("lhs"))
+        );
+        assert_eq!(
+            hook.simple_i32_return_two_call_right_target_id_hash,
+            Some(hash_identifier("rhs"))
+        );
+        assert_eq!(hook.simple_i32_return_two_call_op_code, Some(2));
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn second_compile_without_source_change_emits_no_functions() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_no_change_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction tick(): void { return; }\n",
+        )
+        .expect("write sample");
+
+        let first = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("first compile");
+        assert_eq!(first.status, 0);
+        assert!(first.functions.len() >= 2);
+
+        let second = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("second compile");
+        assert_eq!(second.status, 0);
+        assert_eq!(second.functions.len(), 0);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_emits_only_changed_functions_after_edit() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_changed_fn_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        let baseline = "function main(): i32 { return 0; }\nfunction tick(): void { return; }\n";
+        fs::write(&file, baseline).expect("write baseline");
+
+        let first = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("first compile");
+        assert_eq!(first.status, 0);
+        assert_eq!(first.functions.len(), 2);
+
+        let updated = "function main(): i32 { return 1; }\nfunction tick(): void { return; }\n";
+        fs::write(&file, updated).expect("write updated");
+        let second = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("second compile");
+        assert_eq!(second.status, 0);
+        assert_eq!(second.functions.len(), 1);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn receiver_overloads_produce_distinct_signature_hashes() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_receiver_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction damage(self: Enemy, amount: i32): void { return; }\nfunction damage(self: Hero, amount: i32): void { return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile");
+        assert_eq!(compile.status, 0);
+        let damage = compile
+            .functions
+            .iter()
+            .filter(|f| f.id_hash == hash_identifier("damage"))
+            .collect::<Vec<_>>();
+        assert_eq!(damage.len(), 2);
+        assert_ne!(damage[0].sig_hash, damage[1].sig_hash);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn from_conversion_in_expression_is_semantic_error() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_from_expr_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        let source =
+            "function main(): i32 { let x: i32 = 0; let y: i32 = 1; let z: i32 = x.from_i32(y); return 0; }\n";
+        fs::write(&file, source).expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 2);
+        assert!(compile.errors.iter().any(|error| error.code == 4001));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn hook_symbol_persists_when_non_hook_function_changes() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_hook_symbol_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        let baseline =
+            "function main(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n";
+        fs::write(&file, baseline).expect("write baseline");
+
+        let first = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("first compile");
+        assert_eq!(first.status, 0);
+        assert_eq!(first.hook_symbol.as_deref(), Some("on_code_swap"));
+
+        let updated =
+            "function main(): i32 { return 1; }\nfunction on_code_swap(): void { return; }\n";
+        fs::write(&file, updated).expect("write updated");
+        let second = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("second compile");
+        assert_eq!(second.status, 0);
+        assert_eq!(second.hook_symbol.as_deref(), Some("on_code_swap"));
+        assert_eq!(second.functions.len(), 1);
+        assert!(second.functions[0].simple_i32_return_expr.is_none());
+        fs::remove_dir_all(&temp_root).ok();
     }
 }

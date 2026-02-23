@@ -43,9 +43,12 @@
 
 ## Testing Guidelines
 - Ship work in feature slices from `docs/rewrite_v1_checklist.md` and include tests in the same PR.
+- Only implement changes that map to active items in `docs/rewrite_v1_checklist.md`; if a proposed change is outside the checklist, pause and ask before changing requirements or code.
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
+- Keep each test command bounded to 60 seconds max; split/shard runs when needed, and treat overruns as stability regressions.
+- After each edit/test step, check for lingering test processes (for example `target/debug/deps/*.exe`) and clean them up before the next step.
 - For incremental compilation:
 - Validate file-level invalidation correctness.
 - Validate per-function gating behavior.
