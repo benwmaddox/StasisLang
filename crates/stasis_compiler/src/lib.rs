@@ -1997,6 +1997,123 @@ mod tests {
     }
 
     #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_with_literal_multiply_expression()
+    {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_mul_expr_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(2 * 3)); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(6));
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_void_print_i32_one_arg_call_target_with_literal_divide_expression_add_delta(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_div_expr_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(8 / 2) - 1); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, Some(4));
+        assert_eq!(
+            hook.simple_void_print_i32_call_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, Some(-1));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_does_not_fold_simple_void_print_i32_one_arg_call_target_literal_divide_by_zero_expression(
+    ) {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_div_zero_expr_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function main(): i32 { return 0; }\nfunction callee(x: i32): i32 { return x; }\nfunction on_code_swap(): void { print_i32(callee(9 / 0)); return; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let hook = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("on_code_swap"))
+            .expect("hook metric");
+        assert_eq!(hook.simple_void_print_i32_literal, None);
+        assert_eq!(hook.simple_void_print_i32_call_target_id_hash, None);
+        assert_eq!(
+            hook.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(hook.simple_void_print_i32_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn compile_records_simple_void_print_i32_one_arg_call_target_with_arg_call() {
         let mut host = IncrementalCompilerHost::new();
         let stamp = SystemTime::now()
