@@ -200,7 +200,15 @@ pub fn link_objects_to_executable(
         command.arg(format!("/OUT:{}", output_executable.display()));
         command.arg(format!("/ENTRY:{entry_symbol}"));
         command.arg("/SUBSYSTEM:CONSOLE");
-        command.arg("kernel32.lib");
+        let windows_lib_paths = resolve_windows_link_lib_paths();
+        for lib_path in &windows_lib_paths {
+            command.arg(format!("/LIBPATH:{}", lib_path.display()));
+        }
+        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
+            command.arg(kernel32);
+        } else {
+            command.arg("kernel32.lib");
+        }
     } else {
         command.arg("-o");
         command.arg(output_executable);
@@ -320,6 +328,108 @@ fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
     } else {
         PathBuf::from("cc")
     }
+}
+
+#[cfg(windows)]
+fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    if let Ok(lib_env) = std::env::var("LIB") {
+        for raw in lib_env.split(';') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(trimmed);
+            if path.exists() && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+
+    if let Ok(vc_tools) = std::env::var("VCToolsInstallDir") {
+        let vc_lib = PathBuf::from(vc_tools).join("lib").join("x64");
+        if vc_lib.exists() && !out.contains(&vc_lib) {
+            out.push(vc_lib);
+        }
+    }
+
+    let msvc_roots = [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
+    ];
+    for root in msvc_roots {
+        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
+            let vc_lib = version_dir.join("lib").join("x64");
+            if vc_lib.exists() && !out.contains(&vc_lib) {
+                out.push(vc_lib);
+            }
+        }
+    }
+
+    let windows_kits_roots = [
+        r"C:\Program Files (x86)\Windows Kits\10\Lib",
+        r"C:\Program Files\Windows Kits\10\Lib",
+    ];
+    for root in windows_kits_roots {
+        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
+            let um = version_dir.join("um").join("x64");
+            if um.exists() && !out.contains(&um) {
+                out.push(um);
+            }
+            let ucrt = version_dir.join("ucrt").join("x64");
+            if ucrt.exists() && !out.contains(&ucrt) {
+                out.push(ucrt);
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(not(windows))]
+fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn resolve_kernel32_lib_path(lib_paths: &[PathBuf]) -> Option<PathBuf> {
+    for lib_path in lib_paths {
+        let candidate = lib_path.join("kernel32.lib");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn resolve_kernel32_lib_path(_lib_paths: &[PathBuf]) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn latest_child_dir(root: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.path())
+        .collect();
+    dirs.sort_by(|a, b| {
+        let an = a
+            .file_name()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_default();
+        let bn = b
+            .file_name()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_default();
+        bn.cmp(&an)
+    });
+    dirs.into_iter().next()
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
