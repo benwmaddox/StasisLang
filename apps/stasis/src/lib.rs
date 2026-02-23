@@ -1248,4 +1248,38 @@ mod tests {
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_smoke_compiles_and_commits_with_struct_global_main() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("run_main_with_struct_global_returns_7.stasis");
+        let config = RunnerConfig {
+            // Real backend compile can take multiple seconds on busy CI/dev hosts.
+            max_ticks: 7000,
+            tick_sleep_micros: 1000,
+            window: None,
+            inject_file_change: Some(fixture),
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_real_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
+        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert!(!summary.has_in_flight_work);
+    }
 }

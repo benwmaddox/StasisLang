@@ -353,6 +353,7 @@ function compiler_span_eq(start: i32, len: i32, text: ascii[]): bool {
 function compiler_keyword_kind(start: i32, len: i32): TokenKind {
     if (compiler_span_eq(start, len, "function")) { return TokenKind.KwFunction; }
     if (compiler_span_eq(start, len, "extern")) { return TokenKind.KwExtern; }
+    if (compiler_span_eq(start, len, "struct")) { return TokenKind.KwStruct; }
     if (compiler_span_eq(start, len, "return")) { return TokenKind.KwReturn; }
     if (compiler_span_eq(start, len, "let")) { return TokenKind.KwLet; }
     if (compiler_span_eq(start, len, "if")) { return TokenKind.KwIf; }
@@ -2636,6 +2637,14 @@ function parser_parse_function_declaration(): bool {
 }
 
 function parser_parse_global_declaration(): bool {
+    return parser_parse_layout_declaration_block();
+}
+
+function parser_parse_struct_declaration(): bool {
+    return parser_parse_layout_declaration_block();
+}
+
+function parser_parse_layout_declaration_block(): bool {
     let start_token: i32 = Compiler.parse_index;
     Compiler.parse_index += 1;
     if (!parser_capture_identifier()) {
@@ -2693,7 +2702,11 @@ function compiler_parse_program(): bool {
                 if (kind == TokenKind.KwGlobal) {
                     if (!parser_parse_global_declaration()) { return false; }
                 } else {
-                    return parser_error(CompilerErrorCode.ParseExpectFunctionOrExtern);
+                    if (kind == TokenKind.KwStruct) {
+                        if (!parser_parse_struct_declaration()) { return false; }
+                    } else {
+                        return parser_error(CompilerErrorCode.ParseExpectFunctionOrExtern);
+                    }
                 }
             }
         }

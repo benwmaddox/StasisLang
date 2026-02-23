@@ -1,0 +1,12 @@
+struct Enemy {
+    hp: i32;
+}
+
+global State {
+    score: i32;
+    first_enemy: Enemy;
+}
+
+function main(): i32 {
+    return 7;
+}
