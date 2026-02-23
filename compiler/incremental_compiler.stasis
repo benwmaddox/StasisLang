@@ -1438,6 +1438,26 @@ function parser_detect_simple_i32_return_call_target_id_hash(
     return 0;
 }
 
+function parser_is_literal_binary_foldable_arg_op(
+    op_kind: TokenKind,
+    rhs_literal: i32
+): i32 {
+    if (
+        op_kind == TokenKind.Plus ||
+        op_kind == TokenKind.Minus ||
+        op_kind == TokenKind.Star
+    ) {
+        return 1;
+    }
+    if (
+        (op_kind == TokenKind.Slash || op_kind == TokenKind.Percent) &&
+        rhs_literal != 0
+    ) {
+        return 1;
+    }
+    return 0;
+}
+
 function parser_detect_simple_i32_return_call_add_has(
     body_start_token: i32,
     body_end_token: i32,
@@ -1528,7 +1548,7 @@ function parser_detect_simple_i32_return_call_add_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> (+|-|*) <int_literal>) +/- <int_literal>; }
+    // { return callee(<int_literal> (+|-|*|/|%) <int_literal>) +/- <int_literal>; }
     if (
         body_end_token - body_start_token == 11 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1536,11 +1556,10 @@ function parser_detect_simple_i32_return_call_add_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        (
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
-        ) &&
+        parser_is_literal_binary_foldable_arg_op(
+            Compiler.tokens[body_start_token + 5].kind,
+            Compiler.tokens[body_start_token + 6].int_value
+        ) == 1 &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         (
@@ -1727,7 +1746,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> (+|-|*) <int_literal>); }
+    // { return callee(<int_literal> (+|-|*|/|%) <int_literal>); }
     if (
         body_end_token - body_start_token == 9 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1735,11 +1754,10 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        (
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
-        ) &&
+        parser_is_literal_binary_foldable_arg_op(
+            Compiler.tokens[body_start_token + 5].kind,
+            Compiler.tokens[body_start_token + 6].int_value
+        ) == 1 &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.Semicolon &&
@@ -1747,7 +1765,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> (+|-|*) <int_literal>) +/- <int_literal>; }
+    // { return callee(<int_literal> (+|-|*|/|%) <int_literal>) +/- <int_literal>; }
     if (
         body_end_token - body_start_token == 11 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1755,11 +1773,10 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
         Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        (
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
-        ) &&
+        parser_is_literal_binary_foldable_arg_op(
+            Compiler.tokens[body_start_token + 5].kind,
+            Compiler.tokens[body_start_token + 6].int_value
+        ) == 1 &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         (
@@ -2007,11 +2024,10 @@ function parser_detect_simple_i32_return_call_one_arg_i32_literal(
             body_end_token - body_start_token == 11
         ) &&
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
-        (
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
-        ) &&
+        parser_is_literal_binary_foldable_arg_op(
+            Compiler.tokens[body_start_token + 5].kind,
+            Compiler.tokens[body_start_token + 6].int_value
+        ) == 1 &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen
     ) {
@@ -2021,6 +2037,14 @@ function parser_detect_simple_i32_return_call_one_arg_i32_literal(
         }
         if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Star) {
             return Compiler.tokens[body_start_token + 4].int_value *
+                Compiler.tokens[body_start_token + 6].int_value;
+        }
+        if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Slash) {
+            return Compiler.tokens[body_start_token + 4].int_value /
+                Compiler.tokens[body_start_token + 6].int_value;
+        }
+        if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Percent) {
+            return Compiler.tokens[body_start_token + 4].int_value %
                 Compiler.tokens[body_start_token + 6].int_value;
         }
         return Compiler.tokens[body_start_token + 4].int_value +
