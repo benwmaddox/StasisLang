@@ -1421,6 +1421,86 @@ mod tests {
     }
 
     #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_expression_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_inc_call_target_one_arg_lit_expr_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(9 + 2); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, Some(11));
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, None);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_records_simple_i32_return_call_one_arg_literal_expression_add_delta_metadata() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_inc_call_target_one_arg_lit_expr_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(9 - 2) + 5; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        assert_eq!(compile.functions.len(), 2);
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_target_id_hash,
+            Some(hash_identifier("callee"))
+        );
+        assert_eq!(main.simple_i32_return_call_one_arg_i32_literal, Some(7));
+        assert_eq!(
+            main.simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            None
+        );
+        assert_eq!(main.simple_i32_return_call_add_delta, Some(5));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn compile_records_simple_i32_return_call_one_arg_call_arg_metadata() {
         let mut host = IncrementalCompilerHost::new();
         let stamp = SystemTime::now()

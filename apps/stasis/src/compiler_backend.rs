@@ -3135,6 +3135,52 @@ mod tests {
     }
 
     #[test]
+    fn aot_compile_accepts_one_arg_literal_expression_direct_call_target() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_one_arg_lit_expr_direct_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function callee(value: i32): i32 { return value; }\nfunction main(): i32 { return callee(9 + 2); }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(146),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest: AotPatchManifest =
+            serde_json::from_str(&manifest_text).expect("parse manifest json");
+        assert!(
+            !manifest
+                .fallback_stub_details
+                .iter()
+                .any(|detail| detail.id_hash == hash_identifier("main")),
+            "one-arg literal-expression direct-call lowering should not fall back for main()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn aot_compile_accepts_known_runtime_entry_host_extern_direct_call_target() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

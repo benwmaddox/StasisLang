@@ -1528,6 +1528,30 @@ function parser_detect_simple_i32_return_call_add_has(
     ) {
         return 1;
     }
+    // { return callee(<int_literal> +/- <int_literal>) +/- <int_literal>; }
+    if (
+        body_end_token - body_start_token == 11 &&
+        Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
+        Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
+        Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
+        Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
+        (
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
+        (
+            Compiler.tokens[body_start_token + 8].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 8].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 9].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
+        Compiler.tokens[body_start_token + 11].kind == TokenKind.RBrace
+    ) {
+        return 1;
+    }
     // { return callee(param0, param1) +/- <int_literal>; }
     if (
         Compiler.current_signature_param_count == 2 &&
@@ -1699,6 +1723,49 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
         Compiler.tokens[body_start_token + 8].kind == TokenKind.Semicolon &&
         Compiler.tokens[body_start_token + 9].kind == TokenKind.RBrace
+    ) {
+        return 1;
+    }
+    // { return callee(<int_literal> +/- <int_literal>); }
+    if (
+        body_end_token - body_start_token == 9 &&
+        Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
+        Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
+        Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
+        Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
+        (
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
+        Compiler.tokens[body_start_token + 8].kind == TokenKind.Semicolon &&
+        Compiler.tokens[body_start_token + 9].kind == TokenKind.RBrace
+    ) {
+        return 1;
+    }
+    // { return callee(<int_literal> +/- <int_literal>) +/- <int_literal>; }
+    if (
+        body_end_token - body_start_token == 11 &&
+        Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
+        Compiler.tokens[body_start_token + 1].kind == TokenKind.KwReturn &&
+        Compiler.tokens[body_start_token + 2].kind == TokenKind.Identifier &&
+        Compiler.tokens[body_start_token + 3].kind == TokenKind.LParen &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
+        (
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
+        (
+            Compiler.tokens[body_start_token + 8].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 8].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 9].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 10].kind == TokenKind.Semicolon &&
+        Compiler.tokens[body_start_token + 11].kind == TokenKind.RBrace
     ) {
         return 1;
     }
@@ -1930,6 +1997,26 @@ function parser_detect_simple_i32_return_call_one_arg_i32_literal(
 ): i32 {
     if (simple_i32_return_call_one_arg_has != 1) {
         return 0;
+    }
+    if (
+        (
+            body_end_token - body_start_token == 9 ||
+            body_end_token - body_start_token == 11
+        ) &&
+        Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
+        (
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+        ) &&
+        Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
+        Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen
+    ) {
+        if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus) {
+            return Compiler.tokens[body_start_token + 4].int_value -
+                Compiler.tokens[body_start_token + 6].int_value;
+        }
+        return Compiler.tokens[body_start_token + 4].int_value +
+            Compiler.tokens[body_start_token + 6].int_value;
     }
     if (
         body_end_token - body_start_token == 7 ||
