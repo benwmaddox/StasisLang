@@ -546,6 +546,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Current narrowing: known host passthrough wrapper lowering is covered for 1/2/3/4-parameter `i32` return-call forms; remaining lowering work is non-wrapper argument-bearing call shapes that still contribute to fallback-stub surface.
 - Keep full `apps/stasis` test suite stable under CI/load timing variance (watch/AOT failure-path regressions) while preserving deterministic assertions.
 - Enforce the 60-second per-command test budget by running bounded targeted groups; if a command exceeds budget, treat it as a regression signal and split/optimize before continuing slices.
+- Process improvement task: add a small declarative token-pattern helper layer in `.stasis` (not a parser rewrite) and migrate high-churn detectors first.
+- Process improvement task: add a deterministic fallback-pattern inventory test that groups fallback stubs by shape so next lowering slices are chosen by highest residual fallback impact.
+- Process enforcement task: keep narrow slice commits (avoid mixing parser shape expansion with unrelated backend/runtime work in one commit).
+- Process enforcement task: keep bounded targeted test groups plus explicit post-step lingering-process checks as required workflow.
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
 - Slice SH2a: Replace monolithic `.stasis` host bridge declaration with staged AOT extern contract (`emit_ir`, `run_cranelift_aot`, `link_executable`) while preserving `.stasis` orchestration ownership. (completed 2026-02-13)
 - Slice SH2b: Wire host bridge implementations for staged AOT extern calls and route CLI execution through them end-to-end. (completed 2026-02-13; current host `aot-cli` path executes staged bridge sequence)

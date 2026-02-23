@@ -87,3 +87,9 @@
 - Rust owns host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
 - `.stasis` owns compiler orchestration policies and language-level compile logic.
 - Use C only when unavoidable for platform-level bindings.
+
+## Compiler Slice Process (Active)
+- Add and use a small declarative token-pattern helper layer in `.stasis` for high-churn detector paths first; do not do broad parser rewrites in one pass.
+- Keep a deterministic fallback-pattern inventory test that groups fallback stubs by shape; use it to choose the next lowering slice by highest residual fallback impact.
+- Keep commits narrow and slice-scoped: avoid mixing parser-shape expansion with unrelated backend/runtime work in the same commit.
+- Keep test runs bounded and deterministic: each command must stay within 60 seconds, and lingering test/compiler processes must be checked/cleaned after each step.
