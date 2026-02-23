@@ -1528,7 +1528,7 @@ function parser_detect_simple_i32_return_call_add_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> +/- <int_literal>) +/- <int_literal>; }
+    // { return callee(<int_literal> (+|-|*) <int_literal>) +/- <int_literal>; }
     if (
         body_end_token - body_start_token == 11 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1538,7 +1538,8 @@ function parser_detect_simple_i32_return_call_add_has(
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
         (
             Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
         ) &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
@@ -1726,7 +1727,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> +/- <int_literal>); }
+    // { return callee(<int_literal> (+|-|*) <int_literal>); }
     if (
         body_end_token - body_start_token == 9 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1736,7 +1737,8 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
         (
             Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
         ) &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
@@ -1745,7 +1747,7 @@ function parser_detect_simple_i32_return_call_one_arg_has(
     ) {
         return 1;
     }
-    // { return callee(<int_literal> +/- <int_literal>) +/- <int_literal>; }
+    // { return callee(<int_literal> (+|-|*) <int_literal>) +/- <int_literal>; }
     if (
         body_end_token - body_start_token == 11 &&
         Compiler.tokens[body_start_token + 0].kind == TokenKind.LBrace &&
@@ -1755,7 +1757,8 @@ function parser_detect_simple_i32_return_call_one_arg_has(
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
         (
             Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
         ) &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen &&
@@ -2006,13 +2009,18 @@ function parser_detect_simple_i32_return_call_one_arg_i32_literal(
         Compiler.tokens[body_start_token + 4].kind == TokenKind.IntLiteral &&
         (
             Compiler.tokens[body_start_token + 5].kind == TokenKind.Plus ||
-            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus ||
+            Compiler.tokens[body_start_token + 5].kind == TokenKind.Star
         ) &&
         Compiler.tokens[body_start_token + 6].kind == TokenKind.IntLiteral &&
         Compiler.tokens[body_start_token + 7].kind == TokenKind.RParen
     ) {
         if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Minus) {
             return Compiler.tokens[body_start_token + 4].int_value -
+                Compiler.tokens[body_start_token + 6].int_value;
+        }
+        if (Compiler.tokens[body_start_token + 5].kind == TokenKind.Star) {
+            return Compiler.tokens[body_start_token + 4].int_value *
                 Compiler.tokens[body_start_token + 6].int_value;
         }
         return Compiler.tokens[body_start_token + 4].int_value +
