@@ -90,7 +90,7 @@
 
 ## Compiler Slice Process (Active)
 - Add and use a small declarative token-pattern helper layer in `.stasis` for high-churn detector paths first; do not do broad parser rewrites in one pass.
-- When adding a new token-shape variant, route related detector paths (`*_has`, `*_add_has`, literal fold extraction, sentinel selection) through shared helper functions in the same slice.
+- When adding a new token-shape variant, route related detector paths (`*_has`, `*_add_has`, literal fold extraction, sentinel selection) through shared helper functions in the same slice, and derive trailing token offsets from matched anchor indexes (avoid duplicating hard-coded offset sets per variant).
 - Keep a deterministic fallback-pattern inventory test that groups fallback stubs by shape; use it to choose the next lowering slice by highest residual fallback impact.
 - For each lowering slice, add both a `crates/stasis_compiler` metric test and an `apps/stasis` fallback/direct-call test before considering the slice complete.
 - Keep commits narrow and slice-scoped: avoid mixing parser-shape expansion with unrelated backend/runtime work in the same commit.
