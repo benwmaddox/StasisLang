@@ -96,3 +96,10 @@
 - Keep commits narrow and slice-scoped: avoid mixing parser-shape expansion with unrelated backend/runtime work in the same commit.
 - End each slice with a cruft pass on touched files (remove duplicated token-offset checks introduced by the slice, or fold them into helpers).
 - Keep test runs bounded and deterministic: each command must stay within 60 seconds, and lingering test/compiler processes must be checked/cleaned after each step.
+
+## Self-Reflection Loop (Required)
+- At the end of each compiler slice, record one `Good`, one `Bad`, and one `Adjustment` entry in the work summary, then update this file if a process rule should change.
+- Current reflection (2026-02-23):
+- Good: narrow slice commits plus bounded targeted tests kept changes stable and debuggable.
+- Bad: shape overlap can hide coverage gaps when a new variant is similar to one already supported.
+- Adjustment: before editing detectors, write a short shape matrix (form, anchor token, expected span, sentinel path) and ensure each new row gets one metric test and one backend fallback/direct-call test.
