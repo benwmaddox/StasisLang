@@ -3,6 +3,7 @@
 mod compiler_backend;
 mod events;
 pub mod scenarios;
+mod runtime_exec;
 mod self_host_runtime_bridge;
 mod watch;
 
@@ -16,6 +17,7 @@ pub use scenarios::WindowConfig;
 pub use compiler_backend::run_self_host_aot_cli;
 
 use compiler_backend::IncrementalCompilerBackend;
+use runtime_exec::RuntimeLauncher;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
@@ -23,12 +25,19 @@ use stasis_runner::swap::contracts::{
     SwapCommitStatus, TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
+
+#[derive(Debug, Clone, Default)]
+struct PendingAotCompileMetadata {
+    linked_image_path: Option<PathBuf>,
+    linked_image_size_bytes: Option<u64>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -163,9 +172,28 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut last_swap_status: Option<SwapCommitStatus> = None;
     let mut events: Vec<RunnerEvent> = Vec::new();
     let mut file_change_sent = false;
-    let disable_on_code_swap_hook = config.disable_on_code_swap_hook;
     let hook_failure_reason = config.hook_failure_reason.clone();
     let swap_failure_reason = config.swap_failure_reason.clone();
+    let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
+        BTreeMap::new();
+    let mut aot_linked_image_activations: u32 = 0;
+    let mut active_aot_linked_image_path: Option<PathBuf> = None;
+    let mut active_aot_linked_image_size_bytes: Option<u64> = None;
+    let mut active_aot_linked_image_generation: Option<u64> = None;
+    let mut retired_aot_linked_images: u32 = 0;
+
+    let mut runtime_launcher = config
+        .runtime_launch
+        .then(|| config.inject_file_change.clone().map(RuntimeLauncher::new))
+        .flatten();
+    let mut runtime_launch_failures: u32 = 0;
+    let mut runtime_launch_failure_reasons: Vec<String> = Vec::new();
+    if config.runtime_launch && runtime_launcher.is_none() {
+        runtime_launch_failures = 1;
+        runtime_launch_failure_reasons.push(
+            "runtime launch requested but no --watch-file source file is configured".to_string(),
+        );
+    }
 
     for tick in 0..config.max_ticks {
         if !file_change_sent {
@@ -188,48 +216,23 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         }
 
         pipeline.pump_coordinator();
-
+        capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         pipeline.process_commits_at_safe_point(|request| {
-            if !disable_on_code_swap_hook {
-                if let Some(hook_symbol) = request.hook_symbol.as_deref() {
-                    hook_runs += 1;
-                    if let Some(reason) = hook_failure_reason.as_ref() {
-                        hook_failures += 1;
-                        hook_failure_reasons.push(reason.clone());
-                        let hook_error = format!("{hook_symbol} failed: {reason}");
-                        events.push(RunnerEvent::HookResult {
-                            request_id: request.request_id.0,
-                            symbol: hook_symbol.to_string(),
-                            status: "failed".to_string(),
-                            error: Some(hook_error.clone()),
-                        });
-                        swap_commit_failures += 1;
-                        swap_failure_reasons.push(hook_error.clone());
-                        return SwapCommitResult::failed(request.request_id, hook_error);
-                    }
-
-                    events.push(RunnerEvent::HookResult {
-                        request_id: request.request_id.0,
-                        symbol: hook_symbol.to_string(),
-                        status: "success".to_string(),
-                        error: None,
-                    });
-                }
-            }
-
-            if let Some(reason) = swap_failure_reason.as_ref() {
-                swap_commit_failures += 1;
-                swap_failure_reasons.push(reason.clone());
-                SwapCommitResult::failed(request.request_id, reason.clone())
-            } else {
-                swap_commit_successes += 1;
-                let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
-                SwapCommitResult::success(
-                    request.request_id,
-                    outcome.swapped_fn_ids,
-                    outcome.new_generation,
-                )
-            }
+            apply_commit_request(
+                request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                hook_failure_reason.as_ref(),
+                swap_failure_reason.as_ref(),
+                &pending_aot_metadata,
+            )
         });
 
         pipeline.pump_coordinator();
@@ -246,6 +249,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             &mut events,
         );
         if let Some((request_id, status)) = new_commit {
+            let aot_metadata = pending_aot_metadata.remove(&request_id);
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -254,6 +258,33 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                     request_id: request_id.0,
                     ticks: SWAP_FLASH_TICKS_MAX,
                 });
+                if config.target_mode == TargetMode::AotProd {
+                    if let Some(metadata) = aot_metadata {
+                        if let Some(linked_path) = metadata.linked_image_path {
+                            if active_aot_linked_image_path
+                                .as_ref()
+                                .is_some_and(|active| active != &linked_path)
+                            {
+                                retired_aot_linked_images += 1;
+                            }
+                            active_aot_linked_image_path = Some(linked_path);
+                            active_aot_linked_image_size_bytes = metadata.linked_image_size_bytes;
+                            active_aot_linked_image_generation = pipeline
+                                .last_commit_result()
+                                .and_then(|result| result.new_generation.map(|value| value.0));
+                            aot_linked_image_activations += 1;
+                        }
+                    }
+                }
+                if config.runtime_launch {
+                    if let Some(launcher) = runtime_launcher.as_mut() {
+                        launcher.restart();
+                    }
+                }
+            }
+        } else if let Some(last_compile) = pipeline.last_compile_result() {
+            if last_compile.status == CompileStatus::Failed {
+                pending_aot_metadata.remove(&last_compile.request_id);
             }
         }
         if swap_flash_ticks_remaining > 0 {
@@ -270,47 +301,23 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         }
 
         pipeline.pump_coordinator();
+        capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         pipeline.process_commits_at_safe_point(|request| {
-            if !disable_on_code_swap_hook {
-                if let Some(hook_symbol) = request.hook_symbol.as_deref() {
-                    hook_runs += 1;
-                    if let Some(reason) = hook_failure_reason.as_ref() {
-                        hook_failures += 1;
-                        hook_failure_reasons.push(reason.clone());
-                        let hook_error = format!("{hook_symbol} failed: {reason}");
-                        events.push(RunnerEvent::HookResult {
-                            request_id: request.request_id.0,
-                            symbol: hook_symbol.to_string(),
-                            status: "failed".to_string(),
-                            error: Some(hook_error.clone()),
-                        });
-                        swap_commit_failures += 1;
-                        swap_failure_reasons.push(hook_error.clone());
-                        return SwapCommitResult::failed(request.request_id, hook_error);
-                    }
-
-                    events.push(RunnerEvent::HookResult {
-                        request_id: request.request_id.0,
-                        symbol: hook_symbol.to_string(),
-                        status: "success".to_string(),
-                        error: None,
-                    });
-                }
-            }
-
-            if let Some(reason) = swap_failure_reason.as_ref() {
-                swap_commit_failures += 1;
-                swap_failure_reasons.push(reason.clone());
-                SwapCommitResult::failed(request.request_id, reason.clone())
-            } else {
-                swap_commit_successes += 1;
-                let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
-                SwapCommitResult::success(
-                    request.request_id,
-                    outcome.swapped_fn_ids,
-                    outcome.new_generation,
-                )
-            }
+            apply_commit_request(
+                request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                hook_failure_reason.as_ref(),
+                swap_failure_reason.as_ref(),
+                &pending_aot_metadata,
+            )
         });
         pipeline.pump_coordinator();
         let new_commit = observe_pipeline_results(
@@ -326,6 +333,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             &mut events,
         );
         if let Some((request_id, status)) = new_commit {
+            let aot_metadata = pending_aot_metadata.remove(&request_id);
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -334,10 +342,46 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                     request_id: request_id.0,
                     ticks: SWAP_FLASH_TICKS_MAX,
                 });
+                if config.target_mode == TargetMode::AotProd {
+                    if let Some(metadata) = aot_metadata {
+                        if let Some(linked_path) = metadata.linked_image_path {
+                            if active_aot_linked_image_path
+                                .as_ref()
+                                .is_some_and(|active| active != &linked_path)
+                            {
+                                retired_aot_linked_images += 1;
+                            }
+                            active_aot_linked_image_path = Some(linked_path);
+                            active_aot_linked_image_size_bytes = metadata.linked_image_size_bytes;
+                            active_aot_linked_image_generation = pipeline
+                                .last_commit_result()
+                                .and_then(|result| result.new_generation.map(|value| value.0));
+                            aot_linked_image_activations += 1;
+                        }
+                    }
+                }
+                if config.runtime_launch {
+                    if let Some(launcher) = runtime_launcher.as_mut() {
+                        launcher.restart();
+                    }
+                }
+            }
+        } else if let Some(last_compile) = pipeline.last_compile_result() {
+            if last_compile.status == CompileStatus::Failed {
+                pending_aot_metadata.remove(&last_compile.request_id);
             }
         }
         thread::yield_now();
         thread::sleep(Duration::from_millis(1));
+    }
+
+    let runtime_launches = runtime_launcher
+        .as_ref()
+        .map(|launcher| launcher.summary().launches)
+        .unwrap_or(0);
+    if let Some(launcher) = runtime_launcher.as_ref() {
+        runtime_launch_failures += launcher.summary().failures;
+        runtime_launch_failure_reasons.extend(launcher.summary().failure_reasons.iter().cloned());
     }
 
     let has_in_flight_work = pipeline.has_in_flight_work();
@@ -377,15 +421,113 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         last_swap_status,
         has_in_flight_work,
         events,
-        runtime_launches: 0,
-        runtime_launch_failures: 0,
-        runtime_launch_failure_reasons: Vec::new(),
-        aot_linked_image_activations: 0,
-        active_aot_linked_image_path: None,
-        active_aot_linked_image_size_bytes: None,
-        active_aot_linked_image_generation: None,
-        retired_aot_linked_images: 0,
+        runtime_launches,
+        runtime_launch_failures,
+        runtime_launch_failure_reasons,
+        aot_linked_image_activations,
+        active_aot_linked_image_path,
+        active_aot_linked_image_size_bytes,
+        active_aot_linked_image_generation,
+        retired_aot_linked_images,
     }
+}
+
+fn capture_pending_aot_compile_metadata(
+    pipeline: &DevHotSwapPipeline,
+    pending_aot_metadata: &mut BTreeMap<RequestId, PendingAotCompileMetadata>,
+) {
+    let Some(result) = pipeline.last_compile_result() else {
+        return;
+    };
+    if result.status != CompileStatus::Success {
+        return;
+    }
+    pending_aot_metadata
+        .entry(result.request_id)
+        .or_insert_with(|| PendingAotCompileMetadata {
+            linked_image_path: result.aot_linked_image_path.clone(),
+            linked_image_size_bytes: result.aot_linked_image_size_bytes,
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_commit_request(
+    request: stasis_runner::swap::contracts::SwapCommitRequest,
+    pointer_table: &mut FunctionPointerTable,
+    config: &RunnerConfig,
+    hook_runs: &mut u32,
+    hook_failures: &mut u32,
+    hook_failure_reasons: &mut Vec<String>,
+    swap_commit_successes: &mut u32,
+    swap_commit_failures: &mut u32,
+    swap_failure_reasons: &mut Vec<String>,
+    events: &mut Vec<RunnerEvent>,
+    hook_failure_reason: Option<&String>,
+    swap_failure_reason: Option<&String>,
+    pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
+) -> SwapCommitResult {
+    if !config.disable_on_code_swap_hook {
+        if let Some(hook_symbol) = request.hook_symbol.as_deref() {
+            *hook_runs += 1;
+            if let Some(reason) = hook_failure_reason {
+                *hook_failures += 1;
+                hook_failure_reasons.push(reason.clone());
+                let hook_error = format!("{hook_symbol} failed: {reason}");
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            }
+
+            events.push(RunnerEvent::HookResult {
+                request_id: request.request_id.0,
+                symbol: hook_symbol.to_string(),
+                status: "success".to_string(),
+                error: None,
+            });
+        }
+    }
+
+    if let Some(reason) = swap_failure_reason {
+        *swap_commit_failures += 1;
+        swap_failure_reasons.push(reason.clone());
+        return SwapCommitResult::failed(request.request_id, reason.clone());
+    }
+
+    if config.target_mode == TargetMode::AotProd && config.aot_probe_loadability {
+        let Some(metadata) = pending_aot_metadata.get(&request.request_id) else {
+            let message = format!(
+                "AOT loadability probe failed for request {}: missing compile metadata",
+                request.request_id.0
+            );
+            *swap_commit_failures += 1;
+            swap_failure_reasons.push(message.clone());
+            return SwapCommitResult::failed(request.request_id, message);
+        };
+        let Some(path) = metadata.linked_image_path.as_ref() else {
+            let message = format!(
+                "AOT loadability probe failed for request {}: missing linked image path",
+                request.request_id.0
+            );
+            *swap_commit_failures += 1;
+            swap_failure_reasons.push(message.clone());
+            return SwapCommitResult::failed(request.request_id, message);
+        };
+        if let Err(message) = probe_aot_loadability(path) {
+            *swap_commit_failures += 1;
+            swap_failure_reasons.push(message.clone());
+            return SwapCommitResult::failed(request.request_id, message);
+        }
+    }
+
+    *swap_commit_successes += 1;
+    let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
+    SwapCommitResult::success(request.request_id, outcome.swapped_fn_ids, outcome.new_generation)
 }
 
 fn observe_pipeline_results(
@@ -468,6 +610,29 @@ fn observe_pipeline_results(
 fn duration_ms(duration: Duration) -> u64 {
     let millis = duration.as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn probe_aot_loadability(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!(
+            "AOT loadability probe failed: linked image does not exist at {}",
+            path.display()
+        ));
+    }
+    #[cfg(windows)]
+    {
+        stasis_dynload::Library::load(path).map(|_| ()).map_err(|error| {
+            format!(
+                "AOT loadability probe failed for {}: {error}",
+                path.display()
+            )
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("AOT loadability probe is currently supported on Windows only".to_string())
+    }
 }
 
 fn sleep_for_tick(tick_sleep_micros: u64) {
@@ -851,6 +1016,149 @@ mod tests {
 
         let modes = seen_modes.lock().expect("poisoned");
         assert_eq!(modes.as_slice(), &[TargetMode::AotProd]);
+    }
+
+    #[test]
+    fn runtime_launch_requires_injected_source_file() {
+        let config = RunnerConfig {
+            max_ticks: 1,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: None,
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: true,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_default_backend(config);
+        assert_eq!(summary.runtime_launches, 0);
+        assert_eq!(summary.runtime_launch_failures, 1);
+        assert!(summary
+            .runtime_launch_failure_reasons
+            .iter()
+            .any(|reason| reason.contains("no --watch-file source file")));
+    }
+
+    #[test]
+    fn aot_probe_loadability_rejects_missing_linked_image() {
+        let missing_linked_image = std::env::temp_dir().join(format!(
+            "stasis_missing_probe_{}.dll",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        if missing_linked_image.exists() {
+            fs::remove_file(&missing_linked_image).ok();
+        }
+
+        let linked_image_for_backend = missing_linked_image.clone();
+        let backend = move |request: CompileRequest| -> CompileResult {
+            CompileResult::success_with_host_set_metadata(
+                request.request_id,
+                LayoutHash([3; 32]),
+                FunctionPatchSet {
+                    functions: vec![FunctionPatch { fn_id: FnId(1) }],
+                },
+                None,
+                None,
+                None,
+                None,
+                Some(linked_image_for_backend.clone()),
+                Some(128),
+                Some("abc".to_string()),
+                None,
+            )
+        };
+
+        let config = RunnerConfig {
+            max_ticks: 200,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: Some(PathBuf::from("samples/probe_missing.stasis")),
+            watch_directory: None,
+            target_mode: TargetMode::AotProd,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: true,
+        };
+
+        let summary = run_with_backend(config, backend);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.swap_commit_successes, 0);
+        assert_eq!(summary.swap_commit_failures, 1);
+        assert!(summary
+            .swap_failure_reasons
+            .iter()
+            .any(|reason| reason.contains("AOT loadability probe failed")));
+        assert_eq!(summary.aot_linked_image_activations, 0);
+    }
+
+    #[test]
+    fn aot_activation_tracks_latest_linked_image_metadata() {
+        let linked_image = std::env::temp_dir().join(format!(
+            "stasis_activation_probe_{}.dll",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::write(&linked_image, "fake-linked-image").expect("write linked image fixture");
+
+        let linked_image_for_backend = linked_image.clone();
+        let backend = move |request: CompileRequest| -> CompileResult {
+            CompileResult::success_with_host_set_metadata(
+                request.request_id,
+                LayoutHash([5; 32]),
+                FunctionPatchSet {
+                    functions: vec![FunctionPatch { fn_id: FnId(1) }],
+                },
+                None,
+                None,
+                None,
+                None,
+                Some(linked_image_for_backend.clone()),
+                Some(17),
+                Some("abcd".to_string()),
+                None,
+            )
+        };
+
+        let config = RunnerConfig {
+            max_ticks: 200,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: Some(PathBuf::from("samples/prod_activation.stasis")),
+            watch_directory: None,
+            target_mode: TargetMode::AotProd,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_backend(config, backend);
+        fs::remove_file(&linked_image).ok();
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.aot_linked_image_activations, 1);
+        assert_eq!(
+            summary.active_aot_linked_image_path,
+            Some(linked_image.clone())
+        );
+        assert_eq!(summary.active_aot_linked_image_size_bytes, Some(17));
+        assert_eq!(summary.active_aot_linked_image_generation, Some(1));
+        assert_eq!(summary.retired_aot_linked_images, 0);
     }
 
     #[test]

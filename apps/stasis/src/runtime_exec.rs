@@ -88,6 +88,7 @@ impl RuntimeLauncher {
             .arg("1000000")
             .arg("--tick-sleep-us")
             .arg("16000")
+            .arg("--no-runtime-launch")
             .current_dir(&self.repo_root)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())

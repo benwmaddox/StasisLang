@@ -12,10 +12,10 @@ notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+stasis_dynload = { path = "../../crates/stasis_dynload" }
 
 [dev-dependencies]
 object = "0.36"
-stasis_dynload = { path = "../../crates/stasis_dynload" }
 
 [lib]
 path = "src/lib.rs"
