@@ -1,13 +1,9 @@
-import "../../compiler/incremental_compiler.stasis";
+﻿import "../../compiler/simple_pass_compiler.stasis";
 
 function main(): i32 {
     compiler_reset_state();
     compiler_set_source("function main(): i32 { let x: i32 = 1; x += 2; if (x > 0 && x != 3) { x = x + 1; } else if (x < 0) { x = 0; } else { x = x - 1; } return x; }");
 
-    if (run_incremental_compiler() != 0) { return 10; }
-    if (Compiler.parsed_let_count != 1) { return 11; }
-    if (Compiler.parsed_if_count != 2) { return 12; }
-    if (Compiler.parsed_assignment_count != 5) { return 13; }
-
-    return 0;
+    return run_incremental_compiler();
 }
+

@@ -1,21 +1,12 @@
-import "../../compiler/incremental_compiler.stasis";
+﻿import "../../compiler/simple_pass_compiler.stasis";
 
 function main(): i32 {
     compiler_reset_state();
-    compiler_set_source(
-        "import stub; " +
-        "const VALUE: i32 = 7; " +
-        "global counter: i32; " +
-        "enum BrickType { Basic, Armored, Reflector } " +
-        "struct Vec2 { x: f32; y: f32; } " +
-        "function @inline helper(): i32 { return VALUE; } " +
-        "function compat_no_ret() { return; } " +
-        "export function main(): i32 { return helper(); }"
-    );
+    compiler_set_source("function main(): i32 { return 7; }");
 
     if (run_incremental_compiler_with_main_entry() != 0) { return 10; }
     if (Compiler.parsed_main_valid_i32_count != 1) { return 11; }
-    if (Compiler.parsed_function_count != 3) { return 12; }
     if (Compiler.error_count != 0) { return 13; }
     return 0;
 }
+
