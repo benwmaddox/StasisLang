@@ -95,6 +95,9 @@
 - Reachability roots are `main`, `tick`, and `on_code_swap` when present, plus host-required exported entry symbols.
 - Build and maintain a simple call graph and type-reference graph; lower only reachable functions and reachable struct metadata.
 - Do not add new parser-shape fallback detectors; replace/delete detector-driven paths instead of expanding them.
+- Do not add temporary compiler fallbacks that fake behavior (for example hash-stub returns, hardcoded placeholder values, or "temporary" alternate compile paths).
+- If a path is not yet truly implemented, fail with a deterministic diagnostic instead of emitting fake semantics.
+- Size compiler slices small enough that every newly claimed feature path is real, end-to-end testable, and verified in JIT/AOT as applicable.
 - Keep lowering state compact and validated: assert invariants at statement/function boundaries (`value stack`, `block depth`, `pending jumps`) and fail deterministically on violations.
 - Use explicit jump-list backpatching with bounded limits and overflow diagnostics for control-flow emission.
 - Add only a tiny local post-emit cleanup pass before Cranelift handoff (no broad optimizer track in this phase).
