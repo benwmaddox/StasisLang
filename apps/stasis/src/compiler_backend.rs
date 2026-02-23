@@ -5914,7 +5914,7 @@ echo "signed" > "$1.signed"
         let source = project_dir.join("main.stasis");
         fs::write(
             &source,
-            "struct Enemy { hp: i32; }\nglobal State { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { return 7; }\n",
+            "struct Enemy { hp: i32; }\nglobal State { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { State.score = 7; return State.score; }\n",
         )
         .expect("write source");
         let output_exe = temp_root.join("program.exe");

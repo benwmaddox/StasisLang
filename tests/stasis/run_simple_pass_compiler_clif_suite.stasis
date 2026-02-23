@@ -102,9 +102,9 @@ test `simple pass add pair parenthesized emits param iadd`(): bool {
     );
 }
 
-test `simple pass struct and global declarations keep main lowering`(): bool {
+test `simple pass struct global field set get emits iconst`(): bool {
     let status: i32 = test_emit_main_clif_for_source(
-        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction main(): i32 { return 7; }\n"
+        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction main(): i32 { State.score = 7; return State.score; }\n"
     );
     return status == 0 && test_clif_contains_iconst(7);
 }

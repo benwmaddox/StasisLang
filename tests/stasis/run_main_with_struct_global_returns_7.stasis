@@ -8,5 +8,6 @@ global State {
 }
 
 function main(): i32 {
-    return 7;
+    State.score = 7;
+    return State.score;
 }
