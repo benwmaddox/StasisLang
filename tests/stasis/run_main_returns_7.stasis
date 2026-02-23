@@ -1,3 +1,11 @@
+function add_pair(left: i32, right: i32): i32 {
+    return left + right;
+}
+
 function main(): i32 {
-    return 7;
+    let total: i32 = add_pair(2, 3);
+    if (total > 4) {
+        return total + 2;
+    }
+    return 0;
 }

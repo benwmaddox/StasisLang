@@ -5651,6 +5651,111 @@ echo "signed" > "$1.signed"
 
     #[cfg(windows)]
     #[test]
+    fn self_host_aot_cli_runs_conditional_addition_main_if_real_toolchain_available() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let run_real_exe_smoke = std::env::var("STASIS_RUN_REAL_AOT_EXE_SMOKE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if !run_real_exe_smoke {
+            return;
+        }
+
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let old_helper = std::env::var("STASIS_CRANELIFT_AOT").ok();
+        let old_linker = std::env::var("STASIS_AOT_LINKER").ok();
+        std::env::set_var("STASIS_CRANELIFT_AOT", &helper_path);
+        std::env::set_var("STASIS_AOT_LINKER", &linker_path);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_real_exe_if_add_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let source = project_dir.join("main.stasis");
+        fs::write(
+            &source,
+            "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction main(): i32 { let total: i32 = add_pair(2, 3); if (total > 4) { return total + 2; } return 0; }\n",
+        )
+        .expect("write source");
+        let output_exe = temp_root.join("program.exe");
+
+        let result = run_self_host_aot_cli(&project_dir, &output_exe);
+        match result {
+            Ok(summary) => {
+                assert_eq!(summary.source_file_count, 1);
+                assert!(summary.linked_image_path.exists());
+                let status = Command::new(&summary.linked_image_path)
+                    .status()
+                    .expect("run compiled executable");
+                assert!(
+                    status.code().is_some(),
+                    "compiled executable should return a status code"
+                );
+            }
+            Err(message)
+                if message.contains("Application Control policy has blocked this file") =>
+            {
+                fs::remove_dir_all(&temp_root).ok();
+                if let Some(value) = old_helper {
+                    std::env::set_var("STASIS_CRANELIFT_AOT", value);
+                } else {
+                    std::env::remove_var("STASIS_CRANELIFT_AOT");
+                }
+                if let Some(value) = old_linker {
+                    std::env::set_var("STASIS_AOT_LINKER", value);
+                } else {
+                    std::env::remove_var("STASIS_AOT_LINKER");
+                }
+                return;
+            }
+            Err(message) => {
+                panic!("real toolchain self-host aot-cli run should succeed: {message}")
+            }
+        }
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_helper {
+            std::env::set_var("STASIS_CRANELIFT_AOT", value);
+        } else {
+            std::env::remove_var("STASIS_CRANELIFT_AOT");
+        }
+        if let Some(value) = old_linker {
+            std::env::set_var("STASIS_AOT_LINKER", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_LINKER");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn self_host_aot_cli_compiler_subset_builds_if_real_toolchain_available() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let run_smoke = std::env::var("STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE")
