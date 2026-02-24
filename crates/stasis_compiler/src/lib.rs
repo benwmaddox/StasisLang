@@ -624,11 +624,7 @@ fn build_stasis_analysis_harness(
     out.push_str("global clif_buf: ascii[8192];\n");
     out.push_str("function load_source(): void {\n");
     out.push_str("    ascii_clear(src_buf);\n");
-    for byte in source.as_bytes() {
-        out.push_str("    ascii_push(src_buf, ");
-        out.push_str(&byte.to_string());
-        out.push_str(");\n");
-    }
+    append_source_bytes_to_ascii_buffer(&mut out, source);
     out.push_str("}\n");
     out.push_str("function emit_metrics(status: i32): void {\n");
     out.push_str("    print_string(\"__SC_BEGIN;\");\n");
@@ -713,6 +709,32 @@ fn build_stasis_analysis_harness(
     out.push_str("    return 0;\n");
     out.push_str("}\n");
     out
+}
+
+fn is_ascii_literal_chunk_byte(byte: u8) -> bool {
+    matches!(byte, 32..=126) && byte != b'"' && byte != b'\\'
+}
+
+fn append_source_bytes_to_ascii_buffer(out: &mut String, source: &str) {
+    let bytes = source.as_bytes();
+    let mut index: usize = 0;
+    while index < bytes.len() {
+        if is_ascii_literal_chunk_byte(bytes[index]) {
+            let mut chunk = String::new();
+            while index < bytes.len() && is_ascii_literal_chunk_byte(bytes[index]) {
+                chunk.push(char::from(bytes[index]));
+                index += 1;
+            }
+            out.push_str("    ascii_append(src_buf, \"");
+            out.push_str(&chunk);
+            out.push_str("\");\n");
+            continue;
+        }
+        out.push_str("    ascii_push(src_buf, ");
+        out.push_str(&bytes[index].to_string());
+        out.push_str(");\n");
+        index += 1;
+    }
 }
 
 fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> {
@@ -1327,6 +1349,20 @@ mod tests {
         assert!(
             harness.contains("global src_buf: ascii[262144];"),
             "expected harness source buffer to match expanded compiler source budget"
+        );
+    }
+
+    #[test]
+    fn harness_load_source_uses_chunked_ascii_append_with_byte_fallback() {
+        let source = "function main(): i32 { print_string(\"x\"); return 0; }\n";
+        let harness = build_stasis_analysis_harness(source, &[]);
+        assert!(
+            harness.contains("ascii_append(src_buf, \"function main(): i32 { print_string(\");"),
+            "expected harness to emit chunked append for safe literal bytes"
+        );
+        assert!(
+            harness.contains("ascii_push(src_buf, 34);"),
+            "expected harness to emit byte push fallback for quote bytes"
         );
     }
 
