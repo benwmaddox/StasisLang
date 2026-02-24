@@ -133,7 +133,7 @@ struct AnalysisResult {
     errors: Vec<ErrorMetric>,
 }
 
-static HARNESS_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NEXT_ANALYSIS_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
@@ -141,6 +141,7 @@ pub struct IncrementalCompilerHost {
     last_layout_hash_i32: i32,
     required_reachability_root_hashes: Vec<i32>,
     last_reachable_function_keys: BTreeSet<FunctionKey>,
+    analysis_session_id: u64,
 }
 
 impl IncrementalCompilerHost {
@@ -151,6 +152,7 @@ impl IncrementalCompilerHost {
             last_layout_hash_i32: 0,
             required_reachability_root_hashes: Vec::new(),
             last_reachable_function_keys: BTreeSet::new(),
+            analysis_session_id: NEXT_ANALYSIS_SESSION_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -225,6 +227,7 @@ impl IncrementalCompilerHost {
         let analyzed_by_path = analyze_sources_via_stasis_parallel(
             &changed_sources,
             &self.required_reachability_root_hashes,
+            self.analysis_session_id,
         )?;
         for (path_key, analyzed) in &analyzed_by_path {
             if !analyzed.errors.is_empty() {
@@ -402,21 +405,23 @@ impl Default for IncrementalCompilerHost {
     }
 }
 
-fn analyze_source_via_stasis(
+fn analyze_source_via_stasis_in_slot(
     source: &str,
     required_reachability_root_hashes: &[i32],
+    analysis_session_id: u64,
+    slot_index: usize,
 ) -> Result<AnalysisResult, String> {
     let harness_source = build_stasis_analysis_harness(source, required_reachability_root_hashes);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("clock error: {error}"))?
-        .as_nanos();
-    let run_seq = HARNESS_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let repo_root = repo_root_path()?;
     let harness_dir = repo_root
         .join(".stasis_cache")
         .join("compiler_host")
-        .join(format!("run_{stamp}_{run_seq}_{}", std::process::id()));
+        .join(format!(
+            "pid_{}_session_{}",
+            std::process::id(),
+            analysis_session_id
+        ))
+        .join(format!("slot_{slot_index}"));
     fs::create_dir_all(&harness_dir).map_err(|error| {
         format!(
             "failed to create harness dir {}: {error}",
@@ -469,14 +474,19 @@ fn analyze_source_via_stasis(
 fn analyze_sources_via_stasis_parallel(
     changed_sources: &[(String, String)],
     required_reachability_root_hashes: &[i32],
+    analysis_session_id: u64,
 ) -> Result<BTreeMap<String, AnalysisResult>, String> {
     let mut handles = Vec::with_capacity(changed_sources.len());
-    for (path_key, source) in changed_sources {
+    for (slot_index, (path_key, source)) in changed_sources.iter().enumerate() {
         let path_key = path_key.clone();
         let source = source.clone();
         let roots = required_reachability_root_hashes.to_vec();
-        let handle =
-            std::thread::spawn(move || (path_key, analyze_source_via_stasis(&source, &roots)));
+        let handle = std::thread::spawn(move || {
+            (
+                path_key,
+                analyze_source_via_stasis_in_slot(&source, &roots, analysis_session_id, slot_index),
+            )
+        });
         handles.push(handle);
     }
 
@@ -618,8 +628,8 @@ fn build_stasis_analysis_harness(
     required_reachability_root_hashes: &[i32],
 ) -> String {
     let mut out = String::new();
-    out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
-    out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
+    out.push_str("import \"../../../../src/stdlib/stdlib.stasis\";\n");
+    out.push_str("import \"../../../../compiler/simple_pass_compiler.stasis\";\n");
     out.push_str("global src_buf: ascii[262144];\n");
     out.push_str("global clif_buf: ascii[8192];\n");
     out.push_str("function load_source(): void {\n");

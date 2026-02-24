@@ -613,6 +613,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added Windows App Control recovery path in host analysis: on blocked artifact load, host can sign blocked `.dll/.exe` and retry once via `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` (fallback `STASIS_AOT_SIGN_TOOL`).
 - Added dedicated in-memory reachability closure unit coverage (transitive roots, required roots, no-root fallback) to keep this boundary stable without shell-out tests.
 - Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
+- Host analysis harness source loading now emits chunked `ascii_append(...)` spans (with byte fallback for unsafe bytes) and writes harness files into stable per-host slots (`.stasis_cache/compiler_host/pid_<pid>_session_<id>/slot_<n>`), reducing path churn while avoiding cross-process/test collisions.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
 - Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
@@ -733,8 +734,8 @@ It is not part of the steady-state incremental JIT update loop.
 - End-to-end scenario test with window config assertion.
 - Current runtime coverage:
 - `apps/stasis` scenario run path uses the real incremental backend and drives runtime launch in graphics mode for Brickout.
-- Transitional note: `crates/stasis_compiler` now uses a Rust-native in-process incremental analyzer path and does not invoke `Stasis.Cli.exe` for compile requests.
-- Next step remains replacing this transitional Rust analyzer with the self-hosted `.stasis` compiler execution path inside the same process.
+- Transitional note: `crates/stasis_compiler` still invokes `Stasis.Cli.exe` for per-file analysis harness execution in compile requests; work is ongoing to remove this external process path.
+- Next step remains replacing harness shell-out analysis with true in-process `.stasis` compiler execution inside the same process.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Real compile -> function patch -> commit path updates patch identity on source edit.
