@@ -46,6 +46,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
 - AOT: emits object bytes through `cranelift-object`.
 - Current body support in backend emission is intentionally narrow: `return <i32 literal>;`, `return <i32 literal op literal>;` (`+ - * / %`), and `return;` (for `void`).
+- JIT path now supports in-memory execution verification in tests by invoking finalized function pointers directly (`noarg -> i32`) after compile.
 - Kept existing compiler host path intact for compatibility while evaluating this approach.
 
 ## Trial Test Coverage Added

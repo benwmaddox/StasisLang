@@ -67,6 +67,28 @@ impl JitProcess {
     pub fn artifacts(&self) -> &[JitArtifact] {
         &self.artifacts
     }
+
+    pub fn execute_i32_noarg_by_name(&self, name: &str) -> Result<i32, String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if function.return_type != TYPE_ID_I32 {
+            return Err(format!(
+                "function '{name}' is not i32-returning (type id {})",
+                function.return_type
+            ));
+        }
+        let artifact = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.function_id == function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
+        Ok((raw as u32) as i32)
+    }
 }
 
 impl Default for JitProcess {
@@ -215,5 +237,40 @@ mod tests {
         assert_eq!(report.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 1);
         assert!(process.artifacts()[0].code_ptr != 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_i32_in_memory_for_verification() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return -7; }\n");
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, -7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_execution_reflects_incremental_recompile() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.compile().expect("first compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute first"),
+            1
+        );
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return 3; }\n");
+        process.compile().expect("second compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute second"),
+            3
+        );
     }
 }
