@@ -573,6 +573,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Process enforcement task: keep narrow slice commits (avoid mixing reachability/DCE work with unrelated backend/runtime work in one commit).
 - Process enforcement task: keep bounded targeted test groups plus explicit post-step lingering-process checks as required workflow.
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
+- Scope anchor doc: `docs/compiler_prd_v2_compile_speed.md`.
 - Target gates:
 - Single-function incremental edit (1k function project): typical end-to-end compile path <= 5ms.
 - Cold start (1k function project): <= 250ms.
@@ -588,7 +589,13 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: benchmark command(s) and checked-in fixture generator with deterministic seed.
 - Tests: benchmark smoke runs in CI-optional mode and validates output format/consistency.
 - Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
-- Status: `pending`
+- Current progress:
+- Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
+- Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
+- Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
+- 1k functions: cold p50/p95 `15783.219ms`, incremental p50/p95 `11600.176ms`.
+- 5k baseline run is currently blocked by the enforced 60s per-command budget (command exceeds budget), treated as an active performance blocker driving `CS1`.
+- Status: `in_progress`
 - Slice CS1: Remove hot-path bootstrap harness process spawning from incremental compile path.
 - Language: `Rust + .stasis`.
 - Scope: replace per-file/project shell-out analysis (`analyze_source_via_stasis`/`analyze_project_reachability_via_stasis`) with in-process compile-state invocation path.
