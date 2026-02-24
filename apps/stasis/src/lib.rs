@@ -1274,13 +1274,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn real_backend_smoke_compiles_and_commits() {
+    fn real_backend_smoke_compiles_and_commits_literal_main() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
             .join("stasis")
-            .join("run_main_returns_7.stasis");
+            .join("rust_native_jit_smoke_main_returns_7.stasis");
         let config = RunnerConfig {
             // Real backend compile can take multiple seconds on busy CI/dev hosts.
             max_ticks: 7000,
@@ -1308,13 +1308,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn real_backend_smoke_compiles_and_commits_for_accumulation_main() {
+    fn real_backend_smoke_compiles_and_commits_binary_literal_main() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
             .join("stasis")
-            .join("run_main_for_accumulation_returns_6.stasis");
+            .join("rust_native_jit_smoke_main_returns_6_binary.stasis");
         let config = RunnerConfig {
             // Real backend compile can take multiple seconds on busy CI/dev hosts.
             max_ticks: 7000,
@@ -1342,13 +1342,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn real_backend_smoke_compiles_and_commits_with_struct_global_main() {
+    fn real_backend_smoke_compiles_and_commits_void_hook_and_literal_main() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
             .join("stasis")
-            .join("run_main_with_struct_global_returns_7.stasis");
+            .join("rust_native_jit_smoke_main_and_hook.stasis");
         let config = RunnerConfig {
             // Real backend compile can take multiple seconds on busy CI/dev hosts.
             max_ticks: 7000,

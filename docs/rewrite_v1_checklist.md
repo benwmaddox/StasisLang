@@ -590,6 +590,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Runtime commit path now supports JIT `FnId -> code_ptr` override application sourced from compile results when available (dev path can consume real JIT pointers instead of synthetic placeholder pointer generation).
 - Added engine-overhead benchmark harness for package/load/swap/render-loop timing slices: `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`.
 - Initial smoke snapshot recorded (single-sample run) in `docs/rust_native_compiler_prd.md` for both JIT and AOT runtime-overhead timing breakdown.
+- Runtime real-backend JIT smoke fixtures are now rust-native-compatible (`literal`, `binary literal`, `on_code_swap + literal`) so no-fallback dev mode stays deterministic while richer syntax slices are implemented.
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
 - Scope anchor doc: `docs/compiler_prd_v2_compile_speed.md`.
 - Target gates:
@@ -633,6 +634,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
 - Host analysis harness source loading now emits chunked `ascii_append(...)` spans (with byte fallback for unsafe bytes) and writes harness files into stable per-host slots (`.stasis_cache/compiler_host/pid_<pid>_session_<id>/slot_<n>`), reducing path churn while avoiding cross-process/test collisions.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
+- Non-engine `JitDev` compile path now runs rust-native JIT compilation only and emits explicit diagnostics on unsupported shapes; silent fallback to legacy host analysis was removed for this path.
+- Rust-native JIT return-expression lowering now supports parameter identifiers and infix arithmetic (`+ - * / %`) in addition to literal-only returns, with in-memory two-arg execution coverage for verification.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
 - Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.

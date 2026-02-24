@@ -46,12 +46,13 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - AOT emits an engine bundle (object files + manifest) with required entrypoints validated before output.
 - Runtime/graphics ownership target: keep windowing/render-loop integration in Rust host runtime code; dev uses `JitEnginePackage` as active execution handoff, prod uses `AotEngineBundle`.
 - `apps/stasis` real backend now uses an engine-mode in-process fast path (`tick` + `render` present) that bypasses legacy external-analysis host compile for that mode and emits compile contracts from rust-native process outputs.
+- `apps/stasis` non-engine `JitDev` compile path now enforces rust-native-only JIT compile contracts and returns explicit diagnostics on unsupported cases (no silent legacy fallback for this mode).
 - Dev runtime commit path now accepts JIT pointer overrides (`FnId -> code_ptr`) carried through compile results, allowing pointer-table commits to apply real JIT function pointers when present.
 - Removed backend trait indirection from the core compiler trial path.
 - Wired real Cranelift emission in both mode processes for currently supported function bodies:
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
 - AOT: emits object bytes through `cranelift-object`.
-- Current body support in backend emission is intentionally narrow: `return <i32 literal>;`, `return <i32 literal op literal>;` (`+ - * / %`), and `return;` (for `void`).
+- Current body support in backend emission is intentionally narrow: `return <i32 literal>;`, `return <i32 expr op expr>;` (`+ - * / %`) where `expr` is a literal or function parameter identifier, and `return;` (for `void`).
 - JIT path now supports in-memory execution verification in tests by invoking finalized function pointers directly (`noarg -> i32`) after compile.
 - AOT path now supports executable smoke verification in tests (`object -> linked exe -> process exit code`) when a Windows linker is available.
 - AOT defaults to an optimization-oriented profile (`speed`) and supports explicit profile selection.

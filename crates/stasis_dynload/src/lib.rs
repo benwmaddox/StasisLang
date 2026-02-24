@@ -45,8 +45,10 @@ impl Library {
         #[cfg(not(windows))]
         {
             let _ = symbol;
-            Err("dynamic symbol resolution is only supported on windows in stasis_dynload"
-                .to_string())
+            Err(
+                "dynamic symbol resolution is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
         }
     }
 }
@@ -75,6 +77,26 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     {
         let _ = address;
         Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+    }
+}
+
+pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i32, String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+        return Ok(callback(left, right));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = left;
+        let _ = right;
+        Err(
+            "native i32(i32,i32) invocation is only supported on windows in stasis_dynload"
+                .to_string(),
+        )
     }
 }
 
@@ -116,4 +138,3 @@ mod tests {
         assert!(value <= u64::from(u32::MAX));
     }
 }
-

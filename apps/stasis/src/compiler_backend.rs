@@ -226,10 +226,23 @@ impl CompilerBackend for IncrementalCompilerBackend {
         let has_on_code_swap_entrypoint = self.source_cache_has_function("on_code_swap");
         let use_engine_mode_contracts = has_tick_entrypoint && has_render_entrypoint;
         if use_engine_mode_contracts {
-            return self.compile_engine_mode_contract_request(
-                &request,
-                has_on_code_swap_entrypoint,
-            );
+            return self
+                .compile_engine_mode_contract_request(&request, has_on_code_swap_entrypoint);
+        }
+        if request.target_mode == TargetMode::JitDev {
+            return match self.compile_jit_non_engine_contract_request(&request) {
+                Ok(result) => result,
+                Err(message) => CompileResult::failed(
+                    request.request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: request.changed_files.first().cloned(),
+                        line: None,
+                        column: None,
+                    }],
+                ),
+            };
         }
 
         let parsed = match self.host.compile_changed_files(&request.changed_files) {
@@ -436,7 +449,8 @@ impl IncrementalCompilerBackend {
 
         match request.target_mode {
             TargetMode::JitDev => {
-                if let Err(message) = self.compile_jit_engine_package_from_cache(include_on_code_swap)
+                if let Err(message) =
+                    self.compile_jit_engine_package_from_cache(include_on_code_swap)
                 {
                     return CompileResult::failed(
                         request.request_id,
@@ -451,9 +465,10 @@ impl IncrementalCompilerBackend {
                 }
             }
             TargetMode::AotProd => {
-                let bundle = match self
-                    .compile_aot_engine_bundle_from_cache(request.request_id.0, include_on_code_swap)
-                {
+                let bundle = match self.compile_aot_engine_bundle_from_cache(
+                    request.request_id.0,
+                    include_on_code_swap,
+                ) {
                     Ok(bundle) => bundle,
                     Err(message) => {
                         return CompileResult::failed(
@@ -655,6 +670,67 @@ impl IncrementalCompilerBackend {
         result
     }
 
+    fn compile_jit_non_engine_contract_request(
+        &mut self,
+        request: &CompileRequest,
+    ) -> Result<CompileResult, String> {
+        let function_entries = self.collect_cached_function_entries()?;
+        let symbol_code_ptrs = self.compile_jit_symbol_code_ptrs_from_cache()?;
+        if function_entries.is_empty() || symbol_code_ptrs.is_empty() {
+            return Err(
+                "non-engine JIT compile requires at least one parsed function and emitted code pointer"
+                    .to_string(),
+            );
+        }
+
+        let mut functions = Vec::new();
+        let mut hook_fn_id: Option<FnId> = None;
+        let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
+        for entry in &function_entries {
+            let key = format!("rust_native::{}::{}", entry.path, entry.name);
+            let fn_id = self.fn_id_for_key(&key)?;
+            if let Some(previous) = fn_id_by_name.insert(entry.name.clone(), fn_id) {
+                if previous != fn_id {
+                    return Err(format!(
+                        "duplicate function name '{}' across files is not supported in non-engine JIT mode",
+                        entry.name
+                    ));
+                }
+            }
+            if entry.name == "on_code_swap" {
+                hook_fn_id = Some(fn_id);
+            }
+            functions.push(FunctionPatch { fn_id });
+        }
+
+        let mut jit_code_ptr_overrides = Vec::new();
+        for (name, fn_id) in fn_id_by_name {
+            let Some(code_ptr) = symbol_code_ptrs.get(&name).copied() else {
+                return Err(format!(
+                    "non-engine JIT missing emitted code pointer for function '{}'",
+                    name
+                ));
+            };
+            jit_code_ptr_overrides.push(JitCodePtrOverride { fn_id, code_ptr });
+        }
+
+        let mut result = CompileResult::success_with_host_set_metadata(
+            request.request_id,
+            self.layout_hash_from_source_cache(),
+            FunctionPatchSet { functions },
+            request.host_set_id.clone(),
+            request.host_set_hash,
+            hook_fn_id.map(|_| "on_code_swap".to_string()),
+            hook_fn_id,
+            None,
+            None,
+            None,
+            None,
+        );
+        result.jit_code_ptr_overrides = Some(jit_code_ptr_overrides);
+        Ok(result)
+    }
+
     fn refresh_cached_sources(&mut self, changed_files: &[PathBuf]) -> Result<(), String> {
         for path in changed_files {
             let key = path.to_string_lossy().to_string();
@@ -748,6 +824,17 @@ impl IncrementalCompilerBackend {
             .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
         self.last_jit_engine_package = Some(package);
         Ok(())
+    }
+
+    fn compile_jit_symbol_code_ptrs_from_cache(&self) -> Result<BTreeMap<String, u64>, String> {
+        let mut process = JitProcess::new();
+        for (path, source) in &self.source_by_path {
+            process.upsert_file(path.clone(), source.clone());
+        }
+        process
+            .compile()
+            .map_err(|error| format!("rust-native JIT compile failed: {error:?}"))?;
+        Ok(process.symbol_code_ptrs())
     }
 
     fn compile_aot_engine_bundle_from_cache(
@@ -3257,6 +3344,92 @@ mod tests {
     }
 
     #[test]
+    fn jit_dev_non_engine_source_emits_jit_code_ptr_overrides() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_non_engine_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "function helper(): i32 { return 7; }\nfunction main(): i32 { return 3; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_102),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics for non-engine rust-native jit compile"
+        );
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present");
+        assert_eq!(
+            patch_set.functions.len(),
+            2,
+            "expected helper + main patches from non-engine source"
+        );
+        let overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit code pointer overrides should be present for non-engine jit path");
+        assert_eq!(
+            overrides.len(),
+            2,
+            "expected helper + main code pointers in non-engine jit path"
+        );
+        assert!(
+            overrides.iter().all(|entry| entry.code_ptr != 0),
+            "non-engine jit overrides should use non-zero executable code pointers"
+        );
+        assert!(backend.last_jit_engine_package().is_none());
+        assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_non_engine_rejects_duplicate_function_names_without_legacy_fallback() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_jit_non_engine_dup_names_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let file_a = temp_root.join("a.stasis");
+        let file_b = temp_root.join("b.stasis");
+        fs::write(&file_a, "function main(): i32 { return 1; }\n").expect("write file a");
+        fs::write(&file_b, "function main(): i32 { return 2; }\n").expect("write file b");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_103),
+            vec![file_a, file_b],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("duplicate function name 'main' across files is not supported in non-engine JIT mode")),
+            "expected duplicate-name diagnostic instead of legacy fallback behavior"
+        );
+        assert!(result.jit_code_ptr_overrides.is_none());
+        assert!(backend.last_jit_engine_package().is_none());
+        assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn aot_prod_with_engine_entrypoints_builds_aot_engine_bundle_contract() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3284,7 +3457,10 @@ mod tests {
         assert!(bundle.manifest_path.exists());
         assert!(bundle.object_paths_by_function.contains_key("tick"));
         assert!(bundle.object_paths_by_function.contains_key("render"));
-        assert_eq!(result.aot_linked_image_path, Some(bundle.manifest_path.clone()));
+        assert_eq!(
+            result.aot_linked_image_path,
+            Some(bundle.manifest_path.clone())
+        );
         assert!(result.aot_linked_image_size_bytes.is_some());
         assert!(result.aot_linked_image_sha256.is_some());
         assert!(backend.last_jit_engine_package().is_none());

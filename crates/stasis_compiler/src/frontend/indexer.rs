@@ -12,6 +12,7 @@ pub struct IndexedFunction {
     pub source_range: Range<u32>,
     pub signature_hash: u64,
     pub body_hash: u64,
+    pub param_names: Vec<String>,
     pub params: Vec<TypeId>,
     pub return_type: TypeId,
     pub dependency_name_hashes: Vec<u64>,
@@ -22,10 +23,12 @@ pub fn index_file(source: &str, types: &TypeTable) -> Result<Vec<IndexedFunction
     let mut out = Vec::with_capacity(parsed.len());
     for function in parsed {
         let mut params = Vec::with_capacity(function.params.len());
+        let mut param_names = Vec::with_capacity(function.params.len());
         for param in &function.params {
             let type_id = types
                 .resolve(&param.type_name)
                 .ok_or_else(|| format!("unknown parameter type '{}'", param.type_name))?;
+            param_names.push(param.name.clone());
             params.push(type_id);
         }
         let return_type = types
@@ -44,6 +47,7 @@ pub fn index_file(source: &str, types: &TypeTable) -> Result<Vec<IndexedFunction
             source_range: function.body_range.start as u32..function.body_range.end as u32,
             signature_hash,
             body_hash,
+            param_names,
             params,
             return_type,
             dependency_name_hashes,
@@ -103,11 +107,12 @@ mod tests {
     #[test]
     fn indexes_basic_function_metadata() {
         let types = TypeTable::new();
-        let source = "function main(): i32 { return 7; }\n";
+        let source = "function main(value: i32): i32 { return value; }\n";
         let indexed = index_file(source, &types).expect("index");
         assert_eq!(indexed.len(), 1);
         assert_eq!(indexed[0].name, "main");
-        assert_eq!(indexed[0].params.len(), 0);
+        assert_eq!(indexed[0].param_names, vec!["value".to_string()]);
+        assert_eq!(indexed[0].params.len(), 1);
         assert_eq!(
             indexed[0].return_type,
             types.resolve("i32").unwrap_or_default()
