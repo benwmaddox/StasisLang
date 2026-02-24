@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+pub mod backend;
+pub mod compiler;
+pub mod frontend;
+pub mod ir;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
