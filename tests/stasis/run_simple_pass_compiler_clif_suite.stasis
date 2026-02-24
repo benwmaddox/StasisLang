@@ -202,7 +202,7 @@ test `simple pass cross file reachability marks callee in other file`(): bool {
     ) {
         return false;
     }
-    if (run_incremental_compiler_with_main_entry() != 0) {
+    if (run_incremental_compiler() != 0) {
         return false;
     }
     let a_file: i32 = compiler_find_file("a.stasis");
@@ -220,6 +220,39 @@ test `simple pass cross file reachability marks callee in other file`(): bool {
         compiler_file_function_is_reachable(a_file, main_index) &&
         compiler_file_function_is_reachable(b_file, helper_index) &&
         !compiler_file_function_is_reachable(b_file, dead_index)
+    );
+}
+
+test `simple pass cross file reachability marks duplicate callee hashes across files`(): bool {
+    compiler_reset_state();
+    if (!compiler_upsert_file("a.stasis", "function main(): i32 { return helper(); }\n")) {
+        return false;
+    }
+    if (!compiler_upsert_file("b.stasis", "function helper(): i32 { return 7; }\n")) {
+        return false;
+    }
+    if (!compiler_upsert_file("c.stasis", "function helper(): i32 { return 8; }\n")) {
+        return false;
+    }
+    if (run_incremental_compiler() != 0) {
+        return false;
+    }
+    let a_file: i32 = compiler_find_file("a.stasis");
+    let b_file: i32 = compiler_find_file("b.stasis");
+    let c_file: i32 = compiler_find_file("c.stasis");
+    if (a_file < 0 || b_file < 0 || c_file < 0) {
+        return false;
+    }
+    let main_index: i32 = compiler_find_file_function_index(a_file, compiler_hash_ascii("main"));
+    let helper_b_index: i32 = compiler_find_file_function_index(b_file, compiler_hash_ascii("helper"));
+    let helper_c_index: i32 = compiler_find_file_function_index(c_file, compiler_hash_ascii("helper"));
+    if (main_index < 0 || helper_b_index < 0 || helper_c_index < 0) {
+        return false;
+    }
+    return (
+        compiler_file_function_is_reachable(a_file, main_index) &&
+        compiler_file_function_is_reachable(b_file, helper_b_index) &&
+        compiler_file_function_is_reachable(c_file, helper_c_index)
     );
 }
 

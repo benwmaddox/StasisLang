@@ -88,6 +88,17 @@ function compiler_reset_state(): void {
     for (file_function_slot = 0; file_function_slot < COMPILER_MAX_FILE_FUNCTION_SLOTS; file_function_slot += 1) {
         Compiler.file_function_reachable_flags[file_function_slot] = 0;
         Compiler.file_function_call_edge_counts[file_function_slot] = 0;
+        Compiler.file_function_hash_next[file_function_slot] = -1;
+        Compiler.file_function_slot_file_indices[file_function_slot] = -1;
+        Compiler.file_function_slot_function_indices[file_function_slot] = -1;
+    }
+    let file_function_hash_bucket: i32 = 0;
+    for (
+        file_function_hash_bucket = 0;
+        file_function_hash_bucket < COMPILER_MAX_FILE_FUNCTION_HASH_BUCKETS;
+        file_function_hash_bucket += 1
+    ) {
+        Compiler.file_function_hash_bucket_heads[file_function_hash_bucket] = -1;
     }
     let file_function_edge_slot: i32 = 0;
     for (file_function_edge_slot = 0; file_function_edge_slot < COMPILER_MAX_FILE_FUNCTION_CALL_EDGE_SLOTS; file_function_edge_slot += 1) {
@@ -867,6 +878,9 @@ function compiler_store_current_functions_to_file(file_index: i32): void {
         let slot: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS + i;
         Compiler.file_function_reachable_flags[slot] = 0;
         Compiler.file_function_call_edge_counts[slot] = Compiler.function_call_edge_counts[i];
+        Compiler.file_function_hash_next[slot] = -1;
+        Compiler.file_function_slot_file_indices[slot] = file_index;
+        Compiler.file_function_slot_function_indices[slot] = i;
         let edge_index: i32 = 0;
         for (edge_index = 0; edge_index < COMPILER_MAX_FUNCTION_CALL_EDGES; edge_index += 1) {
             Compiler.file_function_call_edge_hashes[
@@ -980,6 +994,9 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
         let slot: i32 = new_index * COMPILER_MAX_TRACKED_FUNCTIONS + new_function_index;
         Compiler.file_function_reachable_flags[slot] = 0;
         Compiler.file_function_call_edge_counts[slot] = 0;
+        Compiler.file_function_hash_next[slot] = -1;
+        Compiler.file_function_slot_file_indices[slot] = -1;
+        Compiler.file_function_slot_function_indices[slot] = -1;
         let new_edge_index: i32 = 0;
         for (new_edge_index = 0; new_edge_index < COMPILER_MAX_FUNCTION_CALL_EDGES; new_edge_index += 1) {
             Compiler.file_function_call_edge_hashes[
@@ -3899,6 +3916,39 @@ function compiler_capture_last_error_for_file(file_index: i32): void {
     Compiler.files[file_index].last_error_detail_b = Compiler.errors[last].detail_b;
 }
 
+function compiler_file_function_hash_bucket(id_hash: i32): i32 {
+    let bucket: i32 = id_hash % COMPILER_MAX_FILE_FUNCTION_HASH_BUCKETS;
+    if (bucket < 0) {
+        bucket += COMPILER_MAX_FILE_FUNCTION_HASH_BUCKETS;
+    }
+    return bucket;
+}
+
+function compiler_build_file_function_hash_index(): void {
+    let bucket: i32 = 0;
+    for (bucket = 0; bucket < COMPILER_MAX_FILE_FUNCTION_HASH_BUCKETS; bucket += 1) {
+        Compiler.file_function_hash_bucket_heads[bucket] = -1;
+    }
+
+    let file_index: i32 = 0;
+    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
+        let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
+        let function_index: i32 = 0;
+        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
+            let id_hash: i32 = Compiler.files[file_index].function_id_hashes[function_index];
+            let slot: i32 = file_slot_base + function_index;
+            Compiler.file_function_hash_next[slot] = -1;
+            Compiler.file_function_slot_file_indices[slot] = file_index;
+            Compiler.file_function_slot_function_indices[slot] = function_index;
+            if (id_hash != 0) {
+                let id_bucket: i32 = compiler_file_function_hash_bucket(id_hash);
+                Compiler.file_function_hash_next[slot] = Compiler.file_function_hash_bucket_heads[id_bucket];
+                Compiler.file_function_hash_bucket_heads[id_bucket] = slot;
+            }
+        }
+    }
+}
+
 function compiler_clear_file_function_reachability_flags(): void {
     let file_index: i32 = 0;
     for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
@@ -3915,21 +3965,25 @@ function compiler_mark_file_functions_reachable_by_hash(id_hash: i32): bool {
     if (id_hash == 0) {
         return false;
     }
+    let bucket: i32 = compiler_file_function_hash_bucket(id_hash);
     let marked_any: bool = false;
-    let file_index: i32 = 0;
-    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
-        let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
-        let function_index: i32 = 0;
-        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
-            let slot: i32 = file_slot_base + function_index;
-            if (
-                Compiler.files[file_index].function_id_hashes[function_index] == id_hash &&
-                Compiler.file_function_reachable_flags[slot] == 0
-            ) {
-                Compiler.file_function_reachable_flags[slot] = 1;
-                marked_any = true;
-            }
+    let slot: i32 = Compiler.file_function_hash_bucket_heads[bucket];
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_FILE_FUNCTION_SLOTS && slot >= 0; guard += 1) {
+        let file_index: i32 = Compiler.file_function_slot_file_indices[slot];
+        let function_index: i32 = Compiler.file_function_slot_function_indices[slot];
+        if (
+            file_index >= 0 &&
+            file_index < Compiler.file_count &&
+            function_index >= 0 &&
+            function_index < Compiler.files[file_index].tracked_function_count &&
+            Compiler.files[file_index].function_id_hashes[function_index] == id_hash &&
+            Compiler.file_function_reachable_flags[slot] == 0
+        ) {
+            Compiler.file_function_reachable_flags[slot] = 1;
+            marked_any = true;
         }
+        slot = Compiler.file_function_hash_next[slot];
     }
     return marked_any;
 }
@@ -3980,6 +4034,7 @@ function compiler_expand_file_function_reachability(): bool {
 
 function compiler_build_cross_file_function_reachability_from_files(): bool {
     compiler_clear_file_function_reachability_flags();
+    compiler_build_file_function_hash_index();
     let found_root: bool = false;
     if (compiler_mark_file_functions_reachable_by_hash(compiler_hash_ascii("main"))) {
         found_root = true;

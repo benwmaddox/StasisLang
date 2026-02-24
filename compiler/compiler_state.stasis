@@ -21,6 +21,7 @@ const COMPILER_MAX_FUNCTION_CALL_EDGES: i32 = 8;
 const COMPILER_MAX_REQUIRED_REACHABILITY_ROOTS: i32 = 64;
 const COMPILER_MAX_FILE_FUNCTION_SLOTS: i32 = 65536;
 const COMPILER_MAX_FILE_FUNCTION_CALL_EDGE_SLOTS: i32 = 524288;
+const COMPILER_MAX_FILE_FUNCTION_HASH_BUCKETS: i32 = 65536;
 
 enum CompilerErrorCode {
     None = 0,
@@ -196,6 +197,10 @@ struct CompilerState {
     file_function_reachable_flags: i32[65536];
     file_function_call_edge_counts: i32[65536];
     file_function_call_edge_hashes: i32[524288];
+    file_function_hash_bucket_heads: i32[65536];
+    file_function_hash_next: i32[65536];
+    file_function_slot_file_indices: i32[65536];
+    file_function_slot_function_indices: i32[65536];
     function_reachable_flags: i32[512];
     reachability_queue: i32[512];
     required_reachability_root_count: i32;
