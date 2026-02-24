@@ -454,6 +454,17 @@ fn run_stasis_analysis_harness(
 }
 
 fn bootstrap_stasis_cli_exe_path() -> Result<PathBuf, String> {
+    if let Ok(override_path) = std::env::var("STASIS_COMPILER_ANALYSIS_EXE") {
+        let path = PathBuf::from(override_path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "stasis compiler analysis override not found at {}",
+            path.display()
+        ));
+    }
+
     let repo_root = repo_root_path()?;
     if cfg!(windows) {
         let source_exe = repo_root
@@ -1084,6 +1095,30 @@ mod tests {
             "expected host harness to resolve stasis cli executable, got {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn harness_cli_path_honors_explicit_analysis_exe_override() {
+        if !cfg!(windows) {
+            return;
+        }
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_compiler_analysis_exe_override_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let fake_exe = temp_root.join("custom_analysis.exe");
+        fs::write(&fake_exe, "stub").expect("write fake exe");
+        let previous = std::env::var("STASIS_COMPILER_ANALYSIS_EXE").ok();
+        std::env::set_var("STASIS_COMPILER_ANALYSIS_EXE", &fake_exe);
+        let resolved = bootstrap_stasis_cli_exe_path().expect("resolve override path");
+        if let Some(value) = previous {
+            std::env::set_var("STASIS_COMPILER_ANALYSIS_EXE", value);
+        } else {
+            std::env::remove_var("STASIS_COMPILER_ANALYSIS_EXE");
+        }
+        fs::remove_dir_all(&temp_root).ok();
+        assert_eq!(resolved, fake_exe);
     }
 
     #[test]
