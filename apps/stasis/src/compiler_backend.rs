@@ -3354,7 +3354,7 @@ mod tests {
         let source = temp_root.join("game_logic.stasis");
         fs::write(
             &source,
-            "function helper(): i32 { return 7; }\nfunction main(): i32 { let total: i32 = 5; if (total > 4) { return total + 2; } return 0; }\n",
+            "function helper(): i32 { return 7; }\nfunction main(): i32 { let total: i32 = helper(); if (total > 4) { return total + 2; } return 0; }\n",
         )
         .expect("write source");
 

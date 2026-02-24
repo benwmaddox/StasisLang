@@ -2,10 +2,10 @@ use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
-use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, Value};
+use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, FuncRef, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +55,7 @@ impl JitProcess {
             &mut self.artifacts,
             &mut self.modules,
         );
-        compiler.compile_with(|meta, hir| {
+        let report = compiler.compile_with(|meta, hir| {
             let symbol = format!("jit_fn_{}_{}", meta.id, *next_symbol_seq);
             *next_symbol_seq = next_symbol_seq.saturating_add(1);
             let (module, code_ptr) = compile_function_to_jit_module(meta, hir, &symbol)?;
@@ -70,7 +70,9 @@ impl JitProcess {
                 code_ptr,
             });
             Ok(())
-        })
+        })?;
+        self.refresh_runtime_dispatch_table();
+        Ok(report)
     }
 
     pub fn artifacts(&self) -> &[JitArtifact] {
@@ -179,6 +181,33 @@ impl JitProcess {
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))?;
         Ok(artifact.code_ptr)
     }
+
+    fn refresh_runtime_dispatch_table(&self) {
+        let mut entries = Vec::new();
+        for function in self.compiler.functions() {
+            if function.return_type != TYPE_ID_I32 {
+                continue;
+            }
+            if !function.params.iter().all(|type_id| *type_id == TYPE_ID_I32) {
+                continue;
+            }
+            let Ok(arity) = u8::try_from(function.params.len()) else {
+                continue;
+            };
+            if arity > 2 {
+                continue;
+            }
+            let Some(artifact) = self
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.function_id == function.id)
+            else {
+                continue;
+            };
+            entries.push((crate::hash_identifier(&function.name), arity, artifact.code_ptr as usize));
+        }
+        stasis_dynload::replace_jit_i32_dispatch_table(&entries);
+    }
 }
 
 impl Default for JitProcess {
@@ -192,9 +221,21 @@ fn compile_function_to_jit_module(
     hir: &FunctionHIR,
     symbol: &str,
 ) -> Result<(JITModule, u64), String> {
-    let builder = JITBuilder::new(default_libcall_names())
+    let mut jit_builder = JITBuilder::new(default_libcall_names())
         .map_err(|error| format!("failed to construct JIT builder: {error}"))?;
-    let mut module = JITModule::new(builder);
+    jit_builder.symbol(
+        "stasis_jit_call_i32_0",
+        stasis_dynload::stasis_jit_call_i32_0 as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_call_i32_1",
+        stasis_dynload::stasis_jit_call_i32_1 as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_call_i32_2",
+        stasis_dynload::stasis_jit_call_i32_2 as *const u8,
+    );
+    let mut module = JITModule::new(jit_builder);
     let mut context = module.make_context();
     context.func.signature = module.make_signature();
     for param_type in &meta.params {
@@ -230,10 +271,20 @@ fn compile_function_to_jit_module(
     let function_id = module
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare JIT function {symbol}: {error}"))?;
+    let runtime_call_imports = RuntimeCallImportIds {
+        call_i32_0: declare_i32_call_import(&mut module, "stasis_jit_call_i32_0", 1)?,
+        call_i32_1: declare_i32_call_import(&mut module, "stasis_jit_call_i32_1", 2)?,
+        call_i32_2: declare_i32_call_import(&mut module, "stasis_jit_call_i32_2", 3)?,
+    };
 
     let mut function_builder_context = FunctionBuilderContext::new();
     {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+        let runtime_call_refs = RuntimeCallRefs {
+            call_i32_0: module.declare_func_in_func(runtime_call_imports.call_i32_0, builder.func),
+            call_i32_1: module.declare_func_in_func(runtime_call_imports.call_i32_1, builder.func),
+            call_i32_2: module.declare_func_in_func(runtime_call_imports.call_i32_2, builder.func),
+        };
         let entry = builder.create_block();
         for _ in &meta.params {
             builder.append_block_param(entry, types::I32);
@@ -263,8 +314,12 @@ fn compile_function_to_jit_module(
 
         if meta.return_type == TYPE_ID_I32 {
             let statements = parse_simple_statements(hir)?;
-            let terminated =
-                emit_simple_i32_statements(&mut builder, &statements, &mut values_by_name)?;
+            let terminated = emit_simple_i32_statements(
+                &mut builder,
+                &statements,
+                &mut values_by_name,
+                &runtime_call_refs,
+            )?;
             if !terminated {
                 return Err(format!(
                     "i32 function '{}' must end with a return statement",
@@ -286,6 +341,33 @@ fn compile_function_to_jit_module(
         .map_err(|error| format!("failed to finalize JIT definitions: {error}"))?;
     let code_ptr = module.get_finalized_function(function_id) as usize as u64;
     Ok((module, code_ptr))
+}
+
+struct RuntimeCallImportIds {
+    call_i32_0: FuncId,
+    call_i32_1: FuncId,
+    call_i32_2: FuncId,
+}
+
+struct RuntimeCallRefs {
+    call_i32_0: FuncRef,
+    call_i32_1: FuncRef,
+    call_i32_2: FuncRef,
+}
+
+fn declare_i32_call_import(
+    module: &mut JITModule,
+    symbol: &str,
+    param_count: usize,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    for _ in 0..param_count {
+        signature.params.push(AbiParam::new(types::I32));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,15 +690,26 @@ fn emit_simple_i32_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
     values_by_name: &mut BTreeMap<String, Value>,
+    runtime_call_refs: &RuntimeCallRefs,
 ) -> Result<bool, String> {
     for statement in statements {
         match statement {
             SimpleStmt::Let { name, expression } => {
-                let value = emit_simple_i32_expression(builder, expression, values_by_name)?;
+                let value = emit_simple_i32_expression(
+                    builder,
+                    expression,
+                    values_by_name,
+                    runtime_call_refs,
+                )?;
                 values_by_name.insert(name.clone(), value);
             }
             SimpleStmt::Return(expression) => {
-                let value = emit_simple_i32_expression(builder, expression, values_by_name)?;
+                let value = emit_simple_i32_expression(
+                    builder,
+                    expression,
+                    values_by_name,
+                    runtime_call_refs,
+                )?;
                 builder.ins().return_(&[value]);
                 return Ok(true);
             }
@@ -627,8 +720,12 @@ fn emit_simple_i32_statements(
                 condition,
                 then_statements,
             } => {
-                let condition_value =
-                    emit_simple_condition(builder, condition, values_by_name)?;
+                let condition_value = emit_simple_condition(
+                    builder,
+                    condition,
+                    values_by_name,
+                    runtime_call_refs,
+                )?;
                 let then_block = builder.create_block();
                 let continue_block = builder.create_block();
                 builder
@@ -638,8 +735,12 @@ fn emit_simple_i32_statements(
                 builder.switch_to_block(then_block);
 
                 let mut then_values = values_by_name.clone();
-                let then_terminated =
-                    emit_simple_i32_statements(builder, then_statements, &mut then_values)?;
+                let then_terminated = emit_simple_i32_statements(
+                    builder,
+                    then_statements,
+                    &mut then_values,
+                    runtime_call_refs,
+                )?;
                 if !then_terminated {
                     builder.ins().jump(continue_block, &[]);
                 }
@@ -656,6 +757,10 @@ fn emit_simple_i32_statements(
 enum SimpleExpr {
     Int(i64),
     Identifier(String),
+    Call {
+        target: String,
+        args: Vec<SimpleExpr>,
+    },
     Binary {
         lhs: Box<SimpleExpr>,
         op: char,
@@ -684,6 +789,7 @@ enum ExprToken {
     Int(i64),
     Identifier(String),
     Op(char),
+    Comma,
     LParen,
     RParen,
 }
@@ -725,6 +831,10 @@ fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprToken>, String
         match byte {
             b'+' | b'-' | b'*' | b'/' | b'%' => {
                 tokens.push(ExprToken::Op(byte as char));
+                index += 1;
+            }
+            b',' => {
+                tokens.push(ExprToken::Comma);
                 index += 1;
             }
             b'(' => {
@@ -778,7 +888,31 @@ impl ExprParser<'_> {
         self.cursor += 1;
         match token {
             ExprToken::Int(value) => Ok(SimpleExpr::Int(value)),
-            ExprToken::Identifier(name) => Ok(SimpleExpr::Identifier(name)),
+            ExprToken::Identifier(name) => {
+                if matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
+                    self.cursor += 1;
+                    let mut args = Vec::new();
+                    if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
+                        loop {
+                            args.push(self.parse_precedence(0)?);
+                            if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
+                                self.cursor += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    match self.tokens.get(self.cursor) {
+                        Some(ExprToken::RParen) => {
+                            self.cursor += 1;
+                            Ok(SimpleExpr::Call { target: name, args })
+                        }
+                        _ => Err("expected ')' after call arguments".to_string()),
+                    }
+                } else {
+                    Ok(SimpleExpr::Identifier(name))
+                }
+            }
             ExprToken::Op('-') => {
                 let rhs = self.parse_primary()?;
                 Ok(SimpleExpr::Binary {
@@ -819,6 +953,7 @@ fn emit_simple_i32_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
     values_by_name: &BTreeMap<String, Value>,
+    runtime_call_refs: &RuntimeCallRefs,
 ) -> Result<Value, String> {
     match expression {
         SimpleExpr::Int(value) => {
@@ -831,9 +966,46 @@ fn emit_simple_i32_expression(
             .get(name)
             .copied()
             .ok_or_else(|| format!("unknown identifier '{name}' in return expression")),
+        SimpleExpr::Call { target, args } => {
+            let target_hash = builder
+                .ins()
+                .iconst(types::I32, i64::from(crate::hash_identifier(target)));
+            let call = match args.len() {
+                0 => builder.ins().call(runtime_call_refs.call_i32_0, &[target_hash]),
+                1 => {
+                    let arg0 =
+                        emit_simple_i32_expression(builder, &args[0], values_by_name, runtime_call_refs)?;
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_i32_1, &[target_hash, arg0])
+                }
+                2 => {
+                    let arg0 =
+                        emit_simple_i32_expression(builder, &args[0], values_by_name, runtime_call_refs)?;
+                    let arg1 =
+                        emit_simple_i32_expression(builder, &args[1], values_by_name, runtime_call_refs)?;
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_i32_2, &[target_hash, arg0, arg1])
+                }
+                other => {
+                    return Err(format!(
+                        "unsupported call arity {} in return expression for target '{}'",
+                        other, target
+                    ))
+                }
+            };
+            let results = builder.inst_results(call);
+            results
+                .first()
+                .copied()
+                .ok_or_else(|| format!("call to '{}' produced no value", target))
+        }
         SimpleExpr::Binary { lhs, op, rhs } => {
-            let lhs_value = emit_simple_i32_expression(builder, lhs, values_by_name)?;
-            let rhs_value = emit_simple_i32_expression(builder, rhs, values_by_name)?;
+            let lhs_value =
+                emit_simple_i32_expression(builder, lhs, values_by_name, runtime_call_refs)?;
+            let rhs_value =
+                emit_simple_i32_expression(builder, rhs, values_by_name, runtime_call_refs)?;
             let value = match op {
                 '+' => builder.ins().iadd(lhs_value, rhs_value),
                 '-' => builder.ins().isub(lhs_value, rhs_value),
@@ -855,9 +1027,10 @@ fn emit_simple_condition(
     builder: &mut FunctionBuilder<'_>,
     condition: &SimpleCondition,
     values_by_name: &BTreeMap<String, Value>,
+    runtime_call_refs: &RuntimeCallRefs,
 ) -> Result<Value, String> {
-    let lhs = emit_simple_i32_expression(builder, &condition.lhs, values_by_name)?;
-    let rhs = emit_simple_i32_expression(builder, &condition.rhs, values_by_name)?;
+    let lhs = emit_simple_i32_expression(builder, &condition.lhs, values_by_name, runtime_call_refs)?;
+    let rhs = emit_simple_i32_expression(builder, &condition.rhs, values_by_name, runtime_call_refs)?;
     let intcc = match condition.op {
         ComparisonOp::Eq => IntCC::Equal,
         ComparisonOp::Ne => IntCC::NotEqual,
@@ -896,14 +1069,13 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { return helper(); }\n",
+            "function main(): i32 { return helper(1, 2, 3); }\n",
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("unexpected trailing tokens")
-                        || message.contains("unsupported token"),
+                    message.contains("unsupported call arity 3"),
                     "unexpected message: {message}"
                 );
             }
@@ -1038,6 +1210,36 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute in memory");
         assert_eq!(value, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_noarg_call_expression() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 7; }\nfunction main(): i32 { return helper() + 2; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, 9);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_two_arg_call_expression() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function add_pair(left: i32, right: i32): i32 { return left + right; }\nfunction main(): i32 { return add_pair(2, 3); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, 5);
     }
 
     #[cfg(windows)]

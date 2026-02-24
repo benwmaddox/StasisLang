@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
 use std::ffi::{c_char, c_void, CString, OsStr};
@@ -98,6 +99,95 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
                 .to_string(),
         )
     }
+}
+
+pub fn replace_jit_i32_dispatch_table(entries: &[(i32, u8, usize)]) {
+    let table = jit_i32_dispatch_table();
+    let mut guard = table.lock().expect("jit dispatch table mutex poisoned");
+    guard.clear();
+    for (id_hash, arity, code_ptr) in entries {
+        guard.insert((*id_hash, *arity), *code_ptr);
+    }
+}
+
+pub extern "C" fn stasis_jit_call_i32_0(id_hash: i32) -> i32 {
+    dispatch_i32_call0(id_hash).unwrap_or_default()
+}
+
+pub extern "C" fn stasis_jit_call_i32_1(id_hash: i32, arg0: i32) -> i32 {
+    dispatch_i32_call1(id_hash, arg0).unwrap_or_default()
+}
+
+pub extern "C" fn stasis_jit_call_i32_2(id_hash: i32, arg0: i32, arg1: i32) -> i32 {
+    dispatch_i32_call2(id_hash, arg0, arg1).unwrap_or_default()
+}
+
+fn dispatch_i32_call0(id_hash: i32) -> Result<i32, String> {
+    let address = lookup_jit_i32_target(id_hash, 0)?;
+    if address == 0 {
+        return Err(format!("missing code pointer for id_hash={id_hash}, arity=0"));
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        return Ok(callback());
+    }
+    #[cfg(not(windows))]
+    {
+        Err("jit i32 dispatch call0 is only supported on windows".to_string())
+    }
+}
+
+fn dispatch_i32_call1(id_hash: i32, arg0: i32) -> Result<i32, String> {
+    let address = lookup_jit_i32_target(id_hash, 1)?;
+    if address == 0 {
+        return Err(format!("missing code pointer for id_hash={id_hash}, arity=1"));
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+        return Ok(callback(arg0));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = arg0;
+        Err("jit i32 dispatch call1 is only supported on windows".to_string())
+    }
+}
+
+fn dispatch_i32_call2(id_hash: i32, arg0: i32, arg1: i32) -> Result<i32, String> {
+    let address = lookup_jit_i32_target(id_hash, 2)?;
+    if address == 0 {
+        return Err(format!("missing code pointer for id_hash={id_hash}, arity=2"));
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return Ok(callback(arg0, arg1));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = arg0;
+        let _ = arg1;
+        Err("jit i32 dispatch call2 is only supported on windows".to_string())
+    }
+}
+
+fn lookup_jit_i32_target(id_hash: i32, arity: u8) -> Result<usize, String> {
+    let table = jit_i32_dispatch_table();
+    let guard = table.lock().expect("jit dispatch table mutex poisoned");
+    guard
+        .get(&(id_hash, arity))
+        .copied()
+        .ok_or_else(|| format!("missing jit dispatch entry for id_hash={id_hash}, arity={arity}"))
+}
+
+type JitDispatchMap = std::collections::HashMap<(i32, u8), usize>;
+
+fn jit_i32_dispatch_table() -> &'static Mutex<JitDispatchMap> {
+    static TABLE: OnceLock<Mutex<JitDispatchMap>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(windows)]
