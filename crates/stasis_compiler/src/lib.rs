@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalCompileOutput {
@@ -131,6 +133,8 @@ struct AnalysisResult {
     errors: Vec<ErrorMetric>,
 }
 
+static HARNESS_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
     state_by_path: BTreeMap<String, FileState>,
@@ -218,15 +222,23 @@ impl IncrementalCompilerHost {
         let mut file_paths = Vec::with_capacity(changed_sources.len());
         let mut functions: Vec<FunctionMetric> = Vec::new();
         let mut errors: Vec<ErrorMetric> = Vec::new();
-        let mut analyzed_by_path: BTreeMap<String, AnalysisResult> = BTreeMap::new();
-
-        for (path_key, source) in &changed_sources {
-            let analyzed =
-                analyze_source_via_stasis(source, &self.required_reachability_root_hashes)?;
+        let analyzed_by_path = analyze_sources_via_stasis_parallel(
+            &changed_sources,
+            &self.required_reachability_root_hashes,
+        )?;
+        for (path_key, analyzed) in &analyzed_by_path {
             if !analyzed.errors.is_empty() {
                 errors.extend(analyzed.errors.clone());
             }
-            analyzed_by_path.insert(path_key.clone(), analyzed);
+            if !changed_sources
+                .iter()
+                .any(|(changed_path, _)| changed_path == path_key)
+            {
+                return Err(format!(
+                    "analysis returned unexpected path key {}",
+                    path_key
+                ));
+            }
         }
 
         if !errors.is_empty() {
@@ -399,11 +411,12 @@ fn analyze_source_via_stasis(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("clock error: {error}"))?
         .as_nanos();
+    let run_seq = HARNESS_RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     let repo_root = repo_root_path()?;
     let harness_dir = repo_root
         .join(".stasis_cache")
         .join("compiler_host")
-        .join(format!("run_{stamp}"));
+        .join(format!("run_{stamp}_{run_seq}_{}", std::process::id()));
     fs::create_dir_all(&harness_dir).map_err(|error| {
         format!(
             "failed to create harness dir {}: {error}",
@@ -428,11 +441,54 @@ fn analyze_source_via_stasis(
     let cli = bootstrap_stasis_cli_exe_path()?;
     let output = run_stasis_analysis_harness(&cli, &harness_path)?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if maybe_sign_blocked_analysis_artifact(&stderr)? {
+            let retry_output = run_stasis_analysis_harness(&cli, &harness_path)?;
+            if !retry_output.status.success() {
+                let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
+                return Err(format!(
+                    "stasis harness failed after signing retry: {}",
+                    retry_stderr.trim()
+                ));
+            }
+            let stdout = String::from_utf8_lossy(&retry_output.stdout);
+            return parse_stasis_analysis_output(&stdout);
+        }
+        if stderr.contains("Application Control policy has blocked this file") {
+            return Err(format!(
+                "stasis harness blocked by Windows Application Control. set STASIS_COMPILER_ANALYSIS_SIGN_TOOL (or STASIS_AOT_SIGN_TOOL) to a signing command and retry. details: {}",
+                stderr.trim()
+            ));
+        }
         return Err(format!("stasis harness failed: {}", stderr.trim()));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_stasis_analysis_output(&stdout)
+}
+
+fn analyze_sources_via_stasis_parallel(
+    changed_sources: &[(String, String)],
+    required_reachability_root_hashes: &[i32],
+) -> Result<BTreeMap<String, AnalysisResult>, String> {
+    let mut handles = Vec::with_capacity(changed_sources.len());
+    for (path_key, source) in changed_sources {
+        let path_key = path_key.clone();
+        let source = source.clone();
+        let roots = required_reachability_root_hashes.to_vec();
+        let handle =
+            std::thread::spawn(move || (path_key, analyze_source_via_stasis(&source, &roots)));
+        handles.push(handle);
+    }
+
+    let mut analyzed_by_path: BTreeMap<String, AnalysisResult> = BTreeMap::new();
+    for handle in handles {
+        let (path_key, result) = handle
+            .join()
+            .map_err(|_| "analysis worker thread panicked".to_string())?;
+        let analyzed = result?;
+        analyzed_by_path.insert(path_key, analyzed);
+    }
+    Ok(analyzed_by_path)
 }
 
 fn run_stasis_analysis_harness(
@@ -451,6 +507,60 @@ fn run_stasis_analysis_harness(
             cli.display()
         )
     })
+}
+
+fn resolve_analysis_sign_tool() -> Option<OsString> {
+    std::env::var_os("STASIS_COMPILER_ANALYSIS_SIGN_TOOL")
+        .or_else(|| std::env::var_os("STASIS_AOT_SIGN_TOOL"))
+}
+
+fn parse_blocked_artifact_path(stderr: &str) -> Option<PathBuf> {
+    let marker = "failed to load ";
+    let start = stderr.find(marker)? + marker.len();
+    let rest = &stderr[start..];
+    let end = rest.find(" (err=")?;
+    let raw = rest[..end].trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+fn maybe_sign_blocked_analysis_artifact(stderr: &str) -> Result<bool, String> {
+    if !stderr.contains("Application Control policy has blocked this file") {
+        return Ok(false);
+    }
+    let Some(path) = parse_blocked_artifact_path(stderr) else {
+        return Ok(false);
+    };
+    let Some(sign_tool) = resolve_analysis_sign_tool() else {
+        return Ok(false);
+    };
+    if !path.exists() {
+        return Err(format!(
+            "blocked artifact path from harness output does not exist: {}",
+            path.display()
+        ));
+    }
+    let status = Command::new(&sign_tool)
+        .arg(&path)
+        .status()
+        .map_err(|error| {
+            format!(
+                "failed to launch analysis signer tool {:?} for {}: {error}",
+                sign_tool,
+                path.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "analysis signer tool {:?} failed for {} with status {:?}",
+            sign_tool,
+            path.display(),
+            status.code()
+        ));
+    }
+    Ok(true)
 }
 
 fn bootstrap_stasis_cli_exe_path() -> Result<PathBuf, String> {
@@ -895,7 +1005,10 @@ fn current_hook_symbol(state_by_path: &BTreeMap<String, FileState>) -> Option<St
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ANALYSIS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_file_state(functions: Vec<ParsedFunction>) -> FileState {
         FileState {
@@ -1102,6 +1215,7 @@ mod tests {
         if !cfg!(windows) {
             return;
         }
+        let _guard = ANALYSIS_ENV_LOCK.lock().expect("analysis env lock");
         let temp_root = std::env::temp_dir().join(format!(
             "stasis_compiler_analysis_exe_override_{}",
             std::process::id()
@@ -1119,6 +1233,92 @@ mod tests {
         }
         fs::remove_dir_all(&temp_root).ok();
         assert_eq!(resolved, fake_exe);
+    }
+
+    #[test]
+    fn parse_blocked_artifact_path_extracts_expected_windows_path() {
+        let message = "error: failed to load F:\\StasisLang\\.stasis_cache\\run\\abc.dll (err=4551 An Application Control policy has blocked this file.\r\n)";
+        let parsed = parse_blocked_artifact_path(message).expect("blocked path");
+        assert!(parsed.ends_with(Path::new(".stasis_cache").join("run").join("abc.dll")));
+    }
+
+    #[test]
+    fn resolve_analysis_sign_tool_prefers_analysis_specific_override() {
+        let _guard = ANALYSIS_ENV_LOCK.lock().expect("analysis env lock");
+        let old_analysis = std::env::var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL").ok();
+        let old_aot = std::env::var("STASIS_AOT_SIGN_TOOL").ok();
+        std::env::set_var("STASIS_AOT_SIGN_TOOL", "fallback_signer");
+        std::env::set_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL", "analysis_signer");
+        let resolved = resolve_analysis_sign_tool()
+            .expect("sign tool")
+            .to_string_lossy()
+            .to_string();
+        if let Some(value) = old_analysis {
+            std::env::set_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL");
+        }
+        if let Some(value) = old_aot {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
+        assert_eq!(resolved, "analysis_signer");
+    }
+
+    #[test]
+    fn maybe_sign_blocked_analysis_artifact_invokes_signer_when_configured() {
+        let _guard = ANALYSIS_ENV_LOCK.lock().expect("analysis env lock");
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_compiler_analysis_sign_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let blocked = temp_root.join("blocked.dll");
+        fs::write(&blocked, "blocked").expect("write blocked artifact");
+        let signer = if cfg!(windows) {
+            let signer = temp_root.join("fake-sign.cmd");
+            let script = "@echo off\r\necho signed>\"%~1.signed\"\r\nexit /b 0\r\n";
+            fs::write(&signer, script).expect("write fake signer");
+            signer
+        } else {
+            let signer = temp_root.join("fake-sign.sh");
+            let script = "#!/bin/sh\nset -eu\necho signed > \"$1.signed\"\n";
+            fs::write(&signer, script).expect("write fake signer");
+            let status = std::process::Command::new("chmod")
+                .arg("+x")
+                .arg(&signer)
+                .status()
+                .expect("chmod signer");
+            assert!(status.success(), "chmod should succeed");
+            signer
+        };
+        let old_analysis = std::env::var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL").ok();
+        std::env::set_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL", &signer);
+        let stderr = format!(
+            "error: failed to load {} (err=4551 An Application Control policy has blocked this file.\r\n)",
+            blocked.display()
+        );
+        let signed = maybe_sign_blocked_analysis_artifact(&stderr).expect("sign blocked");
+        if let Some(value) = old_analysis {
+            std::env::set_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_COMPILER_ANALYSIS_SIGN_TOOL");
+        }
+        let marker = blocked.with_file_name(format!(
+            "{}.signed",
+            blocked
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("blocked.dll")
+        ));
+        assert!(signed, "expected blocked artifact signing attempt");
+        assert!(
+            marker.exists(),
+            "expected signer marker {}",
+            marker.display()
+        );
+        fs::remove_dir_all(&temp_root).ok();
     }
 
     #[test]

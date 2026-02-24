@@ -593,9 +593,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
 - Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
-- 1k functions: cold p50/p95 `8767.555ms`, incremental p50/p95 `4434.688ms`.
-- 5k functions: cold p50/p95 `46130.863ms`, incremental p50/p95 `4435.567ms` (completes within 5-minute budget).
+- 1k functions: cold p50/p95 `4390.080ms`, incremental p50/p95 `4280.470ms`.
+- 5k functions: cold p50/p95 `7177.709ms`, incremental p50/p95 `4542.079ms` (completes within 5-minute budget).
 - Benchmark hygiene note: incremental sample generation now forces a real body mutation per sample (no no-op edit timing).
+- Host analysis now parallelizes per-file harness runs within a compile request (cold-start improvement; incremental unchanged).
 - Status: `done`
 - Slice CS1: Remove hot-path bootstrap harness process spawning from incremental compile path.
 - Language: `Rust + .stasis`.
@@ -604,10 +605,12 @@ It is not part of the steady-state incremental JIT update loop.
 - Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
 - Done gate: single-function incremental compile path executes entirely in-process.
 - Current progress:
+- Added per-file analysis parallelization inside `compile_changed_files` and made harness temp-run IDs process/thread safe.
 - Removed project-wide reachability shell-out from `compile_changed_files`; reachability closure now computes directly from in-memory parsed state and required roots.
 - Removed unused reachability harness generation/parsing code paths from `crates/stasis_compiler/src/lib.rs`.
 - Removed `stasisc.bat`/wrapper preprocess launch path from host analysis; harness now invokes `Stasis.Cli.exe` directly.
 - Added `STASIS_COMPILER_ANALYSIS_EXE` override to route host analysis to a specified compiler executable (for future self-host binary adoption without host code changes).
+- Added Windows App Control recovery path in host analysis: on blocked artifact load, host can sign blocked `.dll/.exe` and retry once via `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` (fallback `STASIS_AOT_SIGN_TOOL`).
 - Added dedicated in-memory reachability closure unit coverage (transitive roots, required roots, no-root fallback) to keep this boundary stable without shell-out tests.
 - Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.

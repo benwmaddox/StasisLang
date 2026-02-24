@@ -37,6 +37,20 @@ Add-MpPreference -ExclusionPath "F:\StasisLang\bootstrap\windows\stasis-cli"
 
 Note: this requires elevated/admin PowerShell and does not override WDAC/AppLocker policy.
 
+4. Configure signing hooks for generated analysis/runtime artifacts.
+
+- `STASIS_AOT_SIGN_TOOL` signs AOT-produced executables.
+- `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` signs blocked compiler-analysis artifacts (for example `.stasis_cache\run\*.dll`) and retries once automatically.
+
+Example (PowerShell):
+
+```powershell
+$env:STASIS_AOT_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
+$env:STASIS_COMPILER_ANALYSIS_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
+```
+
+Signer contract: tool is invoked as `<tool> <artifact_path>` and must return exit code `0` on success.
+
 ## WDAC / AppLocker Environments
 
 If Defender exclusions are insufficient, ask IT/security to allow one of:
@@ -53,6 +67,6 @@ Publisher rules are preferred to reduce churn when binaries change.
 
 - If a run fails with "Application Control policy has blocked this file":
 - confirm the blocked executable path.
-- verify it is under `.stasis_cache/tmp` (not `%TEMP%`).
+- verify it is under `.stasis_cache/tmp` or `.stasis_cache/run` (not `%TEMP%`).
 - verify signature exists (`Get-AuthenticodeSignature <file>`).
 - check Windows Event Viewer policy logs for WDAC/AppLocker rule details.
