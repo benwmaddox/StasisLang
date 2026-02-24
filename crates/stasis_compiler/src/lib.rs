@@ -425,19 +425,8 @@ fn analyze_source_via_stasis(
     })?;
     drop(file);
 
-    let script = bootstrap_stasisc_script_path()?;
-
-    // Fast path: skip wrapper preprocess/copy step for normal harness runs.
-    // Fall back to full wrapper flow if bootstrap output is malformed or fails.
-    let fast_output = run_stasis_analysis_harness(&script, &harness_path, true)?;
-    if fast_output.status.success() {
-        let stdout = String::from_utf8_lossy(&fast_output.stdout);
-        if let Ok(parsed) = parse_stasis_analysis_output(&stdout) {
-            return Ok(parsed);
-        }
-    }
-
-    let output = run_stasis_analysis_harness(&script, &harness_path, false)?;
+    let cli = bootstrap_stasis_cli_exe_path()?;
+    let output = run_stasis_analysis_harness(&cli, &harness_path)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("stasis harness failed: {}", stderr.trim()));
@@ -447,44 +436,50 @@ fn analyze_source_via_stasis(
 }
 
 fn run_stasis_analysis_harness(
-    script: &Path,
+    cli: &Path,
     harness_path: &Path,
-    disable_preprocess: bool,
 ) -> Result<std::process::Output, String> {
-    let mut command = Command::new(script);
+    let mut command = Command::new(cli);
     command
         .arg("run")
         .arg(harness_path)
         // Bootstrap CLI `run` defaults to watch mode; host analysis harness must run once.
         .arg("--no-watch");
-    if disable_preprocess {
-        command.env("STASIS_BOOTSTRAP_NO_PREPROCESS", "1");
-    }
     command.output().map_err(|error| {
         format!(
             "failed running stasis compiler harness via {}: {error}",
-            script.display()
+            cli.display()
         )
     })
 }
 
-fn bootstrap_stasisc_script_path() -> Result<PathBuf, String> {
+fn bootstrap_stasis_cli_exe_path() -> Result<PathBuf, String> {
     let repo_root = repo_root_path()?;
     if cfg!(windows) {
-        let script = repo_root
+        let source_exe = repo_root
+            .join("Stasis.Cli")
+            .join("bin")
+            .join("Release")
+            .join("net9.0")
+            .join("Stasis.Cli.exe");
+        if source_exe.exists() {
+            return Ok(source_exe);
+        }
+        let bootstrap_exe = repo_root
             .join("bootstrap")
             .join("windows")
-            .join("stasisc.bat");
-        if script.exists() {
-            Ok(script)
+            .join("stasis-cli")
+            .join("Stasis.Cli.exe");
+        if bootstrap_exe.exists() {
+            Ok(bootstrap_exe)
         } else {
             Err(format!(
-                "bootstrap compiler launcher not found at {}",
-                script.display()
+                "stasis cli executable not found at {}",
+                bootstrap_exe.display()
             ))
         }
     } else {
-        Err("bootstrap compiler launcher is currently only wired for Windows".to_string())
+        Err("stasis cli executable is currently only wired for Windows".to_string())
     }
 }
 
@@ -1069,11 +1064,25 @@ mod tests {
         let source = include_str!("lib.rs");
         assert!(
             source.contains(".arg(\"run\")"),
-            "expected harness to invoke bootstrap run mode"
+            "expected harness to invoke stasis cli run mode"
         );
         assert!(
             source.contains(".arg(\"--no-watch\")"),
             "expected harness to force single-shot mode"
+        );
+    }
+
+    #[test]
+    fn harness_no_longer_uses_bootstrap_wrapper_preprocess_path() {
+        let path = bootstrap_stasis_cli_exe_path().expect("stasis cli path");
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        assert!(
+            name.eq_ignore_ascii_case("Stasis.Cli.exe"),
+            "expected host harness to resolve stasis cli executable, got {}",
+            path.display()
         );
     }
 
