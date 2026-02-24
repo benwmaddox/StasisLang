@@ -44,6 +44,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Added explicit engine-facing split:
 - JIT emits an in-process engine package (`tick`/`render`/optional `on_code_swap` -> code pointers) for runtime embedding.
 - AOT emits an engine bundle (object files + manifest) with required entrypoints validated before output.
+- Runtime/graphics ownership target: keep windowing/render-loop integration in Rust host runtime code; dev uses `JitEnginePackage` as active execution handoff, prod uses `AotEngineBundle`.
 - Removed backend trait indirection from the core compiler trial path.
 - Wired real Cranelift emission in both mode processes for currently supported function bodies:
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
@@ -69,6 +70,14 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - `1,000` functions: cold `p50=349.027ms`, cold `p95=354.803ms`; one-function JIT update `p50=2.982ms`, `p95=3.145ms`.
 - `5,000` functions: cold `p50=1738.212ms`, cold `p95=1755.483ms`; one-function JIT update `p50=13.262ms`, `p95=13.672ms`.
 
+## Timing Scope Notes
+- Current benchmark numbers measure compiler/JIT path only.
+- Not included:
+- AOT object writing/linking to a final `.exe`.
+- Engine-side packaging/load/swap/render-loop overhead.
+- Process startup and `cargo build` overhead.
+
 ## Next Trial Slices
 - Expand backend body support beyond literal-return-only while keeping direct one-pass lowering.
 - Improve compile-time performance against target gates (`<250ms @1k cold`, `<5ms typical single-function update`).
+- Add a deferred end-to-end engine overhead benchmark/test that includes package/build artifact handoff, load, swap commit, and render-loop progression timing.

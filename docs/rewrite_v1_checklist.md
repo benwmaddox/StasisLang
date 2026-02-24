@@ -572,6 +572,20 @@ It is not part of the steady-state incremental JIT update loop.
 - Enforce the 5-minute (300-second) per-command test budget by running bounded targeted groups; if a command exceeds budget, treat it as a regression signal and split/optimize before continuing slices.
 - Process enforcement task: keep narrow slice commits (avoid mixing reachability/DCE work with unrelated backend/runtime work in one commit).
 - Process enforcement task: keep bounded targeted test groups plus explicit post-step lingering-process checks as required workflow.
+- Dual-lane execution policy (effective now):
+- Maintain two active lane lists: `Language/Compiler Completeness` and `Windows Runtime/UI Proving`.
+- Alternate slices between lanes (`A1 -> B1 -> A2 -> B2 ...`) to continuously prove language work in runtime context.
+- If blocked on one lane (tooling, external dependency, unresolved design gate), pause that lane, record blocker in commit/PR notes, and continue with the next slice from the other lane.
+- Lane A (`Language/Compiler Completeness`) priority queue:
+- `CS1` (finish fully in-process compile path), then `CS2`, `CS3`, `CS4`, `CS5`, `CS6`, `CS7`, `CS8`.
+- `S10/S10b` completion and remaining `S13/S14/S15/S16` host-set and phase/budget policy work.
+- Lane B (`Windows Runtime/UI Proving`) priority queue:
+- Wire runtime consumption and validation of mode outputs (`JitEnginePackage` in dev, `AotEngineBundle` in prod) through commit/runtime path.
+- Keep graphics/window/render-loop implementation in Rust host runtime code.
+- In dev/runtime iteration, use in-process JIT compile outputs as the active execution path (`JitEnginePackage`) so edits stay fast.
+- In production/release path, use AOT bundle outputs (`AotEngineBundle`) for packaged/runtime execution.
+- Add deferred engine-overhead benchmark/test (`package/load/swap/render-loop`) and baseline it separately from compiler-only timings.
+- Strengthen Windows executable/runtime parity smokes (JIT + AOT) on Brickout-oriented scenarios.
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
 - Scope anchor doc: `docs/compiler_prd_v2_compile_speed.md`.
 - Target gates:
@@ -665,6 +679,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Scope: wire benchmark thresholds, deterministic invalidation checks, and compile-path invariants into routine verification.
 - Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
 - Tests: gated benchmark and invalidation suites.
+- Deferred test task (post-CS8): add a separate engine-overhead benchmark covering package/bundle handoff, runtime load, swap commit, and render-loop progression timing; keep it distinct from compiler-only timing gates.
 - Done gate: project can reject regressions automatically against PRD v2 targets.
 - Status: `pending`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
