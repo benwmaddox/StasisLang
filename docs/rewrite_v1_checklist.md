@@ -671,7 +671,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: reduced `FunctionMetric`/state surface and simpler host<->compiler contract.
 - Tests: replace detector-centric tests with behavior/e2e compile-and-run checks.
 - Done gate: no temporary fallback metadata contract remains in active compile path.
-- Status: `pending`
+- Current progress:
+- Removed stale detector-centric `compile_records_simple_*` host tests in `crates/stasis_compiler/src/lib.rs` that expected deprecated call-shape metadata.
+- Kept semantic guard coverage by enforcing `from_*` conversion usage as statement-only (expression usage now returns semantic error `4001`).
+- Status: `in_progress`
 - Slice CS6: Add interned `TypeId` table and remove string-based type comparisons from hot parse/emit paths.
 - Language: `.stasis`.
 - Scope: introduce fixed-cap intern table (`TypeId`) and switch param/return/global/struct field typing to interned IDs.
