@@ -1,6 +1,6 @@
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TYPE_ID_I32, TYPE_ID_VOID};
+use crate::frontend::types::{TypeId, TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, FuncRef, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -55,10 +55,13 @@ impl JitProcess {
             &mut self.artifacts,
             &mut self.modules,
         );
-        let report = compiler.compile_with(|meta, hir| {
+        let index = compiler.index_pass()?;
+        let call_signatures = collect_supported_i32_call_signatures(compiler.functions());
+        let emit = compiler.emit_pass_with(&mut |meta, hir| {
             let symbol = format!("jit_fn_{}_{}", meta.id, *next_symbol_seq);
             *next_symbol_seq = next_symbol_seq.saturating_add(1);
-            let (module, code_ptr) = compile_function_to_jit_module(meta, hir, &symbol)?;
+            let (module, code_ptr) =
+                compile_function_to_jit_module(meta, hir, &symbol, &call_signatures)?;
             let slot = *next_slot;
             *next_slot = next_slot.saturating_add(1);
             modules.push(module);
@@ -71,6 +74,7 @@ impl JitProcess {
             });
             Ok(())
         })?;
+        let report = CompileReport { index, emit };
         self.refresh_runtime_dispatch_table();
         Ok(report)
     }
@@ -188,7 +192,11 @@ impl JitProcess {
             if function.return_type != TYPE_ID_I32 {
                 continue;
             }
-            if !function.params.iter().all(|type_id| *type_id == TYPE_ID_I32) {
+            if !function
+                .params
+                .iter()
+                .all(|type_id| *type_id == TYPE_ID_I32)
+            {
                 continue;
             }
             let Ok(arity) = u8::try_from(function.params.len()) else {
@@ -204,7 +212,7 @@ impl JitProcess {
             else {
                 continue;
             };
-            entries.push((crate::hash_identifier(&function.name), arity, artifact.code_ptr as usize));
+            entries.push((function.id, arity, artifact.code_ptr as usize));
         }
         stasis_dynload::replace_jit_i32_dispatch_table(&entries);
     }
@@ -216,10 +224,47 @@ impl Default for JitProcess {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CallSignature {
+    function_id: FunctionId,
+    params: Vec<TypeId>,
+    return_type: TypeId,
+}
+
+type CallSignatureMap = BTreeMap<String, Vec<CallSignature>>;
+
+fn collect_supported_i32_call_signatures(functions: &[FunctionMeta]) -> CallSignatureMap {
+    let mut map: CallSignatureMap = BTreeMap::new();
+    for function in functions {
+        if function.return_type != TYPE_ID_I32 {
+            continue;
+        }
+        if !function
+            .params
+            .iter()
+            .all(|type_id| *type_id == TYPE_ID_I32)
+        {
+            continue;
+        }
+        if function.params.len() > 2 {
+            continue;
+        }
+        map.entry(function.name.clone())
+            .or_default()
+            .push(CallSignature {
+                function_id: function.id,
+                params: function.params.clone(),
+                return_type: function.return_type,
+            });
+    }
+    map
+}
+
 fn compile_function_to_jit_module(
     meta: &FunctionMeta,
     hir: &FunctionHIR,
     symbol: &str,
+    call_signatures: &CallSignatureMap,
 ) -> Result<(JITModule, u64), String> {
     let mut jit_builder = JITBuilder::new(default_libcall_names())
         .map_err(|error| format!("failed to construct JIT builder: {error}"))?;
@@ -300,7 +345,7 @@ fn compile_function_to_jit_module(
                 meta.params.len()
             ));
         }
-        let mut values_by_name = BTreeMap::new();
+        let mut values_by_name: BTreeMap<String, ValueBinding> = BTreeMap::new();
         let block_params: Vec<Value> = builder.block_params(entry).to_vec();
         for (index, name) in meta.param_names.iter().enumerate() {
             let Some(value) = block_params.get(index).copied() else {
@@ -309,7 +354,13 @@ fn compile_function_to_jit_module(
                     index, meta.name
                 ));
             };
-            values_by_name.insert(name.clone(), value);
+            values_by_name.insert(
+                name.clone(),
+                ValueBinding {
+                    value,
+                    type_id: meta.params[index],
+                },
+            );
         }
 
         if meta.return_type == TYPE_ID_I32 {
@@ -319,6 +370,7 @@ fn compile_function_to_jit_module(
                 &statements,
                 &mut values_by_name,
                 &runtime_call_refs,
+                call_signatures,
             )?;
             if !terminated {
                 return Err(format!(
@@ -353,6 +405,12 @@ struct RuntimeCallRefs {
     call_i32_0: FuncRef,
     call_i32_1: FuncRef,
     call_i32_2: FuncRef,
+}
+
+#[derive(Clone, Copy)]
+struct ValueBinding {
+    value: Value,
+    type_id: TypeId,
 }
 
 fn declare_i32_call_import(
@@ -476,7 +534,9 @@ fn parse_let_statement(statement_text: &str) -> Result<SimpleStmt, String> {
     cursor = expect_byte(after_let, cursor, b'=', "'=' in let statement")?;
     let expression_text = after_let[cursor..].trim();
     if expression_text.is_empty() {
-        return Err(format!("missing expression in let statement '{statement_text}'"));
+        return Err(format!(
+            "missing expression in let statement '{statement_text}'"
+        ));
     }
     Ok(SimpleStmt::Let {
         name: name.to_string(),
@@ -620,12 +680,7 @@ fn find_statement_terminator(source: &str, start: usize) -> Result<usize, String
     ))
 }
 
-fn find_matching_delimiter(
-    source: &str,
-    open_index: usize,
-    open: u8,
-    close: u8,
-) -> Option<usize> {
+fn find_matching_delimiter(source: &str, open_index: usize, open: u8, close: u8) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes.get(open_index).copied() != Some(open) {
         return None;
@@ -689,28 +744,42 @@ fn snippet_from(source: &str, cursor: usize) -> String {
 fn emit_simple_i32_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
-    values_by_name: &mut BTreeMap<String, Value>,
+    values_by_name: &mut BTreeMap<String, ValueBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    call_signatures: &CallSignatureMap,
 ) -> Result<bool, String> {
     for statement in statements {
         match statement {
             SimpleStmt::Let { name, expression } => {
-                let value = emit_simple_i32_expression(
+                let binding = emit_simple_i32_expression(
                     builder,
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    call_signatures,
                 )?;
-                values_by_name.insert(name.clone(), value);
+                if binding.type_id != TYPE_ID_I32 {
+                    return Err(format!(
+                        "let binding '{}' expected i32 expression in current jit path",
+                        name
+                    ));
+                }
+                values_by_name.insert(name.clone(), binding);
             }
             SimpleStmt::Return(expression) => {
-                let value = emit_simple_i32_expression(
+                let binding = emit_simple_i32_expression(
                     builder,
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    call_signatures,
                 )?;
-                builder.ins().return_(&[value]);
+                if binding.type_id != TYPE_ID_I32 {
+                    return Err(
+                        "return expression expected i32 value in current jit path".to_string()
+                    );
+                }
+                builder.ins().return_(&[binding.value]);
                 return Ok(true);
             }
             SimpleStmt::ReturnVoid => {
@@ -725,6 +794,7 @@ fn emit_simple_i32_statements(
                     condition,
                     values_by_name,
                     runtime_call_refs,
+                    call_signatures,
                 )?;
                 let then_block = builder.create_block();
                 let continue_block = builder.create_block();
@@ -740,6 +810,7 @@ fn emit_simple_i32_statements(
                     then_statements,
                     &mut then_values,
                     runtime_call_refs,
+                    call_signatures,
                 )?;
                 if !then_terminated {
                     builder.ins().jump(continue_block, &[]);
@@ -790,6 +861,7 @@ enum ExprToken {
     Identifier(String),
     Op(char),
     Comma,
+    Dot,
     LParen,
     RParen,
 }
@@ -835,6 +907,10 @@ fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprToken>, String
             }
             b',' => {
                 tokens.push(ExprToken::Comma);
+                index += 1;
+            }
+            b'.' => {
+                tokens.push(ExprToken::Dot);
                 index += 1;
             }
             b'(' => {
@@ -889,7 +965,44 @@ impl ExprParser<'_> {
         match token {
             ExprToken::Int(value) => Ok(SimpleExpr::Int(value)),
             ExprToken::Identifier(name) => {
-                if matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
+                if matches!(self.tokens.get(self.cursor), Some(ExprToken::Dot)) {
+                    self.cursor += 1;
+                    let method_name = match self.tokens.get(self.cursor).cloned() {
+                        Some(ExprToken::Identifier(method_name)) => method_name,
+                        _ => {
+                            return Err(
+                                "expected method identifier after '.' in receiver call".to_string()
+                            )
+                        }
+                    };
+                    self.cursor += 1;
+                    if !matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
+                        return Err("expected '(' after method name in receiver call expression"
+                            .to_string());
+                    }
+                    self.cursor += 1;
+                    let mut args = vec![SimpleExpr::Identifier(name)];
+                    if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
+                        loop {
+                            args.push(self.parse_precedence(0)?);
+                            if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
+                                self.cursor += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    match self.tokens.get(self.cursor) {
+                        Some(ExprToken::RParen) => {
+                            self.cursor += 1;
+                            Ok(SimpleExpr::Call {
+                                target: method_name,
+                                args,
+                            })
+                        }
+                        _ => Err("expected ')' after call arguments".to_string()),
+                    }
+                } else if matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
                     self.cursor += 1;
                     let mut args = Vec::new();
                     if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
@@ -949,45 +1062,92 @@ impl ExprParser<'_> {
     }
 }
 
+fn resolve_call_signature<'a>(
+    target: &str,
+    arg_types: &[TypeId],
+    call_signatures: &'a CallSignatureMap,
+) -> Result<&'a CallSignature, String> {
+    let Some(candidates) = call_signatures.get(target) else {
+        return Err(format!("unknown call target '{}'", target));
+    };
+    let mut matches = candidates
+        .iter()
+        .filter(|candidate| candidate.params.as_slice() == arg_types);
+    let Some(first) = matches.next() else {
+        return Err(format!(
+            "no matching overload for call target '{}' with parameter types {:?}",
+            target, arg_types
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "ambiguous overload for call target '{}' with parameter types {:?}",
+            target, arg_types
+        ));
+    }
+    if first.return_type != TYPE_ID_I32 {
+        return Err(format!(
+            "call target '{}' does not return i32 in current jit path",
+            target
+        ));
+    }
+    Ok(first)
+}
+
 fn emit_simple_i32_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
-    values_by_name: &BTreeMap<String, Value>,
+    values_by_name: &BTreeMap<String, ValueBinding>,
     runtime_call_refs: &RuntimeCallRefs,
-) -> Result<Value, String> {
+    call_signatures: &CallSignatureMap,
+) -> Result<ValueBinding, String> {
     match expression {
         SimpleExpr::Int(value) => {
             let value = i32::try_from(*value).map_err(|_| {
                 format!("integer literal out of i32 range in return expression: {value}")
             })?;
-            Ok(builder.ins().iconst(types::I32, i64::from(value)))
+            Ok(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(value)),
+                type_id: TYPE_ID_I32,
+            })
         }
         SimpleExpr::Identifier(name) => values_by_name
             .get(name)
             .copied()
             .ok_or_else(|| format!("unknown identifier '{name}' in return expression")),
         SimpleExpr::Call { target, args } => {
-            let target_hash = builder
-                .ins()
-                .iconst(types::I32, i64::from(crate::hash_identifier(target)));
-            let call = match args.len() {
-                0 => builder.ins().call(runtime_call_refs.call_i32_0, &[target_hash]),
-                1 => {
-                    let arg0 =
-                        emit_simple_i32_expression(builder, &args[0], values_by_name, runtime_call_refs)?;
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_i32_1, &[target_hash, arg0])
-                }
-                2 => {
-                    let arg0 =
-                        emit_simple_i32_expression(builder, &args[0], values_by_name, runtime_call_refs)?;
-                    let arg1 =
-                        emit_simple_i32_expression(builder, &args[1], values_by_name, runtime_call_refs)?;
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_i32_2, &[target_hash, arg0, arg1])
-                }
+            let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
+            let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
+            for arg in args {
+                let binding = emit_simple_i32_expression(
+                    builder,
+                    arg,
+                    values_by_name,
+                    runtime_call_refs,
+                    call_signatures,
+                )?;
+                arg_values.push(binding.value);
+                arg_types.push(binding.type_id);
+            }
+            let signature = resolve_call_signature(target, &arg_types, call_signatures)?;
+            let function_id_i32 = i32::try_from(signature.function_id).map_err(|_| {
+                format!(
+                    "function id {} out of i32 range for call target '{}'",
+                    signature.function_id, target
+                )
+            })?;
+            let fn_id_value = builder.ins().iconst(types::I32, i64::from(function_id_i32));
+            let call = match arg_values.len() {
+                0 => builder
+                    .ins()
+                    .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
+                1 => builder
+                    .ins()
+                    .call(runtime_call_refs.call_i32_1, &[fn_id_value, arg_values[0]]),
+                2 => builder.ins().call(
+                    runtime_call_refs.call_i32_2,
+                    &[fn_id_value, arg_values[0], arg_values[1]],
+                ),
                 other => {
                     return Err(format!(
                         "unsupported call arity {} in return expression for target '{}'",
@@ -996,29 +1156,51 @@ fn emit_simple_i32_expression(
                 }
             };
             let results = builder.inst_results(call);
-            results
+            let value = results
                 .first()
                 .copied()
-                .ok_or_else(|| format!("call to '{}' produced no value", target))
+                .ok_or_else(|| format!("call to '{}' produced no value", target))?;
+            Ok(ValueBinding {
+                value,
+                type_id: signature.return_type,
+            })
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
-            let lhs_value =
-                emit_simple_i32_expression(builder, lhs, values_by_name, runtime_call_refs)?;
-            let rhs_value =
-                emit_simple_i32_expression(builder, rhs, values_by_name, runtime_call_refs)?;
+            let lhs_value = emit_simple_i32_expression(
+                builder,
+                lhs,
+                values_by_name,
+                runtime_call_refs,
+                call_signatures,
+            )?;
+            let rhs_value = emit_simple_i32_expression(
+                builder,
+                rhs,
+                values_by_name,
+                runtime_call_refs,
+                call_signatures,
+            )?;
+            if lhs_value.type_id != TYPE_ID_I32 || rhs_value.type_id != TYPE_ID_I32 {
+                return Err(
+                    "binary expression operands must both be i32 in current jit path".to_string(),
+                );
+            }
             let value = match op {
-                '+' => builder.ins().iadd(lhs_value, rhs_value),
-                '-' => builder.ins().isub(lhs_value, rhs_value),
-                '*' => builder.ins().imul(lhs_value, rhs_value),
-                '/' => builder.ins().sdiv(lhs_value, rhs_value),
-                '%' => builder.ins().srem(lhs_value, rhs_value),
+                '+' => builder.ins().iadd(lhs_value.value, rhs_value.value),
+                '-' => builder.ins().isub(lhs_value.value, rhs_value.value),
+                '*' => builder.ins().imul(lhs_value.value, rhs_value.value),
+                '/' => builder.ins().sdiv(lhs_value.value, rhs_value.value),
+                '%' => builder.ins().srem(lhs_value.value, rhs_value.value),
                 other => {
                     return Err(format!(
                         "unsupported binary operator '{other}' in return expression"
                     ))
                 }
             };
-            Ok(value)
+            Ok(ValueBinding {
+                value,
+                type_id: TYPE_ID_I32,
+            })
         }
     }
 }
@@ -1026,11 +1208,29 @@ fn emit_simple_i32_expression(
 fn emit_simple_condition(
     builder: &mut FunctionBuilder<'_>,
     condition: &SimpleCondition,
-    values_by_name: &BTreeMap<String, Value>,
+    values_by_name: &BTreeMap<String, ValueBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    call_signatures: &CallSignatureMap,
 ) -> Result<Value, String> {
-    let lhs = emit_simple_i32_expression(builder, &condition.lhs, values_by_name, runtime_call_refs)?;
-    let rhs = emit_simple_i32_expression(builder, &condition.rhs, values_by_name, runtime_call_refs)?;
+    let lhs = emit_simple_i32_expression(
+        builder,
+        &condition.lhs,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+    )?;
+    let rhs = emit_simple_i32_expression(
+        builder,
+        &condition.rhs,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+    )?;
+    if lhs.type_id != TYPE_ID_I32 || rhs.type_id != TYPE_ID_I32 {
+        return Err(
+            "if condition comparison requires i32 operands in current jit path".to_string(),
+        );
+    }
     let intcc = match condition.op {
         ComparisonOp::Eq => IntCC::Equal,
         ComparisonOp::Ne => IntCC::NotEqual,
@@ -1039,7 +1239,7 @@ fn emit_simple_condition(
         ComparisonOp::Gt => IntCC::SignedGreaterThan,
         ComparisonOp::Ge => IntCC::SignedGreaterThanOrEqual,
     };
-    Ok(builder.ins().icmp(intcc, lhs, rhs))
+    Ok(builder.ins().icmp(intcc, lhs.value, rhs.value))
 }
 
 #[cfg(test)]
@@ -1075,7 +1275,8 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("unsupported call arity 3"),
+                    message.contains("unknown call target 'helper'")
+                        || message.contains("unsupported call arity 3"),
                     "unexpected message: {message}"
                 );
             }
@@ -1240,6 +1441,21 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute in memory");
         assert_eq!(value, 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_receiver_style_call_expression() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function damage(enemy: i32, amount: i32): i32 { return enemy - amount; }\nfunction main(): i32 { let enemy: i32 = 10; return enemy.damage(3); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, 7);
     }
 
     #[cfg(windows)]

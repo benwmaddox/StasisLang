@@ -3354,7 +3354,7 @@ mod tests {
         let source = temp_root.join("game_logic.stasis");
         fs::write(
             &source,
-            "function helper(): i32 { return 7; }\nfunction main(): i32 { let total: i32 = helper(); if (total > 4) { return total + 2; } return 0; }\n",
+            "function damage(enemy: i32, amount: i32): i32 { return enemy - amount; }\nfunction main(): i32 { let enemy: i32 = 10; if (enemy > 4) { return enemy.damage(3); } return 0; }\n",
         )
         .expect("write source");
 
@@ -3376,7 +3376,7 @@ mod tests {
         assert_eq!(
             patch_set.functions.len(),
             2,
-            "expected helper + main patches from non-engine source"
+            "expected damage + main patches from non-engine source"
         );
         let overrides = result
             .jit_code_ptr_overrides
@@ -3385,7 +3385,7 @@ mod tests {
         assert_eq!(
             overrides.len(),
             2,
-            "expected helper + main code pointers in non-engine jit path"
+            "expected damage + main code pointers in non-engine jit path"
         );
         assert!(
             overrides.iter().all(|entry| entry.code_ptr != 0),
