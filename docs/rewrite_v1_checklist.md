@@ -572,6 +572,81 @@ It is not part of the steady-state incremental JIT update loop.
 - Enforce the 60-second per-command test budget by running bounded targeted groups; if a command exceeds budget, treat it as a regression signal and split/optimize before continuing slices.
 - Process enforcement task: keep narrow slice commits (avoid mixing reachability/DCE work with unrelated backend/runtime work in one commit).
 - Process enforcement task: keep bounded targeted test groups plus explicit post-step lingering-process checks as required workflow.
+- Compile-speed lock-in checklist (PRD v2, current top compiler priority):
+- Target gates:
+- Single-function incremental edit (1k function project): typical end-to-end compile path <= 5ms.
+- Cold start (1k function project): <= 250ms.
+- Cold start (5k function project): <= 1000ms.
+- Deterministic output and deterministic invalidation behavior are required for all targets.
+- Constraint gates:
+- Keep `.stasis` as compiler logic owner; Rust remains host/runtime glue only.
+- Keep compiler data flat and fixed-cap where practical (`ascii[n]`, fixed arrays, index-based adjacency); avoid new per-function heap allocations.
+- Avoid new parser-shape fallback expansion; prefer direct parse/emit and delete non-conforming paths when touched.
+- Slice CS0: Add deterministic compile-time benchmark harness and baselines.
+- Language: `Rust + .stasis` (measurement only; no policy ownership shift).
+- Scope: add repeatable benchmark fixtures for 1k/5k function projects and emit p50/p95 timings for cold/incremental runs.
+- Deliverable: benchmark command(s) and checked-in fixture generator with deterministic seed.
+- Tests: benchmark smoke runs in CI-optional mode and validates output format/consistency.
+- Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
+- Status: `pending`
+- Slice CS1: Remove hot-path bootstrap harness process spawning from incremental compile path.
+- Language: `Rust + .stasis`.
+- Scope: replace per-file/project shell-out analysis (`analyze_source_via_stasis`/`analyze_project_reachability_via_stasis`) with in-process compile-state invocation path.
+- Deliverable: `compile_changed_files` no longer launches external bootstrap process during normal operation.
+- Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
+- Done gate: single-function incremental compile path executes entirely in-process.
+- Status: `pending`
+- Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
+- Language: `.stasis`.
+- Scope:
+- Index pass: parse signatures only, update symbol table, compute signature hashes, mark dirty set.
+- Emit pass: parse/resolve/emit bodies only for dirty functions and invalidated dependents.
+- Deliverable: unchanged files/functions skip body parse and skip CLIF emission.
+- Tests: signature-only change, body-only change, unchanged-file no-op, and mixed-file edit cases.
+- Done gate: dirty-function set is deterministic and minimal for covered scenarios.
+- Status: `pending`
+- Slice CS3: Implement O(1) function symbol lookup via open-addressed hash table in `.stasis`.
+- Language: `.stasis`.
+- Scope: replace linear function-name scans for call resolution and file-function lookup with open-addressed table operations.
+- Deliverable: symbol table API with deterministic probing and collision handling.
+- Tests: collision-heavy fixture, duplicate-name/across-file behavior, and lookup determinism.
+- Done gate: no hot-path linear scans remain for function symbol resolution.
+- Status: `pending`
+- Slice CS4: Implement first-class dependency invalidation graph (dependencies + dependents) with ripple propagation.
+- Language: `.stasis`.
+- Scope: store forward + reverse adjacency in flat arrays and propagate dirty state from signature/body changes to dependents.
+- Deliverable: deterministic ripple invalidation without full-project rebuild for local edits.
+- Tests: single-edge, fan-out, multi-level chain, and no-op signature-equal edits.
+- Done gate: invalidation matches expected closure and touches only impacted functions.
+- Status: `pending`
+- Slice CS5: Remove legacy `simple_*` detector metadata channels from compiler state and host contracts.
+- Language: `.stasis + Rust`.
+- Scope: delete obsolete detector/fallback metrics and rely on real parse/resolve/emit behavior for supported slices.
+- Deliverable: reduced `FunctionMetric`/state surface and simpler host<->compiler contract.
+- Tests: replace detector-centric tests with behavior/e2e compile-and-run checks.
+- Done gate: no temporary fallback metadata contract remains in active compile path.
+- Status: `pending`
+- Slice CS6: Add interned `TypeId` table and remove string-based type comparisons from hot parse/emit paths.
+- Language: `.stasis`.
+- Scope: introduce fixed-cap intern table (`TypeId`) and switch param/return/global/struct field typing to interned IDs.
+- Deliverable: O(1) type identity checks in parse/emit path.
+- Tests: type interning determinism, unknown-type diagnostics, and unchanged behavior on current fixtures.
+- Done gate: hot path has no repeated string type comparisons for resolved types.
+- Status: `pending`
+- Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
+- Language: `.stasis`.
+- Scope: emit CLIF directly during dirty-function body parse with compact scratch reuse; keep only real supported paths.
+- Deliverable: no stub/fallback emission in supported slices; unsupported constructs fail deterministically with diagnostics.
+- Tests: per-slice CLIF assertions + JIT/AOT executable verification for representative branches.
+- Done gate: each new compiler feature slice includes compile->JIT run and compile->AOT exe run verification.
+- Status: `pending`
+- Slice CS8: Lock acceptance gates and stop conditions.
+- Language: `Rust + .stasis + docs`.
+- Scope: wire benchmark thresholds, deterministic invalidation checks, and compile-path invariants into routine verification.
+- Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
+- Tests: gated benchmark and invalidation suites.
+- Done gate: project can reject regressions automatically against PRD v2 targets.
+- Status: `pending`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
 - Slice SH2a: Replace monolithic `.stasis` host bridge declaration with staged AOT extern contract (`emit_ir`, `run_cranelift_aot`, `link_executable`) while preserving `.stasis` orchestration ownership. (completed 2026-02-13)
 - Slice SH2b: Wire host bridge implementations for staged AOT extern calls and route CLI execution through them end-to-end. (completed 2026-02-13; current host `aot-cli` path executes staged bridge sequence)
