@@ -58,7 +58,13 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - `frontend::parser::tests::*`
 - `frontend::indexer::tests::*`
 
+## Benchmark Snapshot (2026-02-24)
+- Command:
+- `cargo run -p stasis_compiler --example rust_native_jit_bench -- --functions 1000,5000 --cold-samples 3 --incremental-samples 5`
+- Results:
+- `1,000` functions: cold `p50=349.027ms`, cold `p95=354.803ms`; one-function JIT update `p50=2.982ms`, `p95=3.145ms`.
+- `5,000` functions: cold `p50=1738.212ms`, cold `p95=1755.483ms`; one-function JIT update `p50=13.262ms`, `p95=13.672ms`.
+
 ## Next Trial Slices
 - Expand backend body support beyond literal-return-only while keeping direct one-pass lowering.
-- Add deterministic compile-time benchmarks for cold/incremental timings against the PRD targets.
-- Add e2e execution validation on emitted JIT/AOT artifacts for a minimal `main` path.
+- Improve compile-time performance against target gates (`<250ms @1k cold`, `<5ms typical single-function update`).
