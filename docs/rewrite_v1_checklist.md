@@ -606,6 +606,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Current progress:
 - Removed project-wide reachability shell-out from `compile_changed_files`; reachability closure now computes directly from in-memory parsed state and required roots.
 - Removed unused reachability harness generation/parsing code paths from `crates/stasis_compiler/src/lib.rs`.
+- Added dedicated in-memory reachability closure unit coverage (transitive roots, required roots, no-root fallback) to keep this boundary stable without shell-out tests.
 - Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` shell-out path so normal compile stays fully in-process.
 - Status: `in_progress`

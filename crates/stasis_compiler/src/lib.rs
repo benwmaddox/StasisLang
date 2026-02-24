@@ -891,6 +891,46 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn test_file_state(functions: Vec<ParsedFunction>) -> FileState {
+        FileState {
+            layout_hash: 0,
+            main_decl_count: 0,
+            main_valid_count: 0,
+            main_invalid_count: 0,
+            functions,
+        }
+    }
+
+    fn test_parsed_function(name: &str, sig_hash: i32, callees: &[&str]) -> ParsedFunction {
+        ParsedFunction {
+            ordinal: 0,
+            id_hash: hash_identifier(name),
+            sig_hash,
+            body_hash: sig_hash.wrapping_mul(31),
+            return_type: "i32".to_string(),
+            param_count: 0,
+            first_param_type_code: 0,
+            simple_i32_return_expr: None,
+            simple_i32_return_call_target_id_hash: None,
+            simple_i32_return_call_add_delta: None,
+            simple_i32_return_call_one_arg_target_id_hash: None,
+            simple_i32_return_call_one_arg_i32_literal: None,
+            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_return_two_call_left_target_id_hash: None,
+            simple_i32_return_two_call_right_target_id_hash: None,
+            simple_i32_return_two_call_op_code: None,
+            simple_void_print_i32_literal: None,
+            simple_void_print_i32_call_target_id_hash: None,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
+            simple_void_print_i32_call_add_delta: None,
+            call_target_id_hashes: callees
+                .iter()
+                .map(|callee| hash_identifier(callee))
+                .collect(),
+            clif_text: String::new(),
+        }
+    }
+
     #[test]
     fn backend_name_is_stasis_orchestrated() {
         let host = IncrementalCompilerHost::new();
@@ -902,6 +942,101 @@ mod tests {
         let mut host = IncrementalCompilerHost::new();
         let err = host.compile_changed_files(&[]).expect_err("expected error");
         assert!(err.contains("no changed files"));
+    }
+
+    #[test]
+    fn in_memory_reachability_is_transitive_from_default_roots() {
+        let path_a = "/tmp/a.stasis".to_string();
+        let path_b = "/tmp/b.stasis".to_string();
+        let mut state_by_path = BTreeMap::new();
+        state_by_path.insert(
+            path_a.clone(),
+            test_file_state(vec![
+                test_parsed_function("main", 11, &["bridge"]),
+                test_parsed_function("dead", 12, &[]),
+            ]),
+        );
+        state_by_path.insert(
+            path_b.clone(),
+            test_file_state(vec![
+                test_parsed_function("bridge", 21, &["leaf"]),
+                test_parsed_function("leaf", 22, &[]),
+            ]),
+        );
+
+        let reachable = compute_reachable_function_keys_from_state(&state_by_path, &[]);
+        assert!(reachable.contains(&FunctionKey {
+            path: path_a.clone(),
+            id_hash: hash_identifier("main"),
+            sig_hash: 11,
+        }));
+        assert!(reachable.contains(&FunctionKey {
+            path: path_b.clone(),
+            id_hash: hash_identifier("bridge"),
+            sig_hash: 21,
+        }));
+        assert!(reachable.contains(&FunctionKey {
+            path: path_b,
+            id_hash: hash_identifier("leaf"),
+            sig_hash: 22,
+        }));
+        assert!(!reachable.contains(&FunctionKey {
+            path: path_a,
+            id_hash: hash_identifier("dead"),
+            sig_hash: 12,
+        }));
+    }
+
+    #[test]
+    fn in_memory_reachability_keeps_all_when_no_roots_exist() {
+        let path = "/tmp/helpers.stasis".to_string();
+        let mut state_by_path = BTreeMap::new();
+        state_by_path.insert(
+            path.clone(),
+            test_file_state(vec![
+                test_parsed_function("helper_a", 31, &[]),
+                test_parsed_function("helper_b", 32, &["helper_a"]),
+            ]),
+        );
+
+        let reachable = compute_reachable_function_keys_from_state(&state_by_path, &[]);
+        assert_eq!(reachable.len(), 2);
+        assert!(reachable.contains(&FunctionKey {
+            path: path.clone(),
+            id_hash: hash_identifier("helper_a"),
+            sig_hash: 31,
+        }));
+        assert!(reachable.contains(&FunctionKey {
+            path,
+            id_hash: hash_identifier("helper_b"),
+            sig_hash: 32,
+        }));
+    }
+
+    #[test]
+    fn in_memory_reachability_honors_required_roots() {
+        let path = "/tmp/required_root.stasis".to_string();
+        let mut state_by_path = BTreeMap::new();
+        state_by_path.insert(
+            path.clone(),
+            test_file_state(vec![
+                test_parsed_function("main", 41, &[]),
+                test_parsed_function("bridge_entry", 42, &[]),
+            ]),
+        );
+
+        let required = [hash_identifier("bridge_entry")];
+        let reachable = compute_reachable_function_keys_from_state(&state_by_path, &required);
+        assert!(reachable.contains(&FunctionKey {
+            path: path.clone(),
+            id_hash: hash_identifier("main"),
+            sig_hash: 41,
+        }));
+        assert!(reachable.contains(&FunctionKey {
+            path,
+            id_hash: hash_identifier("bridge_entry"),
+            sig_hash: 42,
+        }));
     }
 
     #[test]
