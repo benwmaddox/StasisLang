@@ -636,6 +636,7 @@ It is not part of the steady-state incremental JIT update loop.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
 - Non-engine `JitDev` compile path now runs rust-native JIT compilation only and emits explicit diagnostics on unsupported shapes; silent fallback to legacy host analysis was removed for this path.
 - Rust-native JIT return-expression lowering now supports parameter identifiers and infix arithmetic (`+ - * / %`) in addition to literal-only returns, with in-memory two-arg execution coverage for verification.
+- Rust-native JIT `i32` statement lowering now supports a simple block subset (`let` bindings and `if` branches with comparison conditions) with deterministic in-memory execution tests, while still keeping direct one-pass lowering.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
 - Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
