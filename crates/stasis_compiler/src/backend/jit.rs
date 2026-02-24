@@ -3,7 +3,7 @@ use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, Functi
 use crate::frontend::types::{TypeId, TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, FuncRef, InstBuilder, Value};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::BTreeMap;
@@ -323,7 +323,8 @@ fn compile_function_to_jit_module(
                 meta.params.len()
             ));
         }
-        let mut values_by_name: BTreeMap<String, ValueBinding> = BTreeMap::new();
+        let mut values_by_name: BTreeMap<String, LocalBinding> = BTreeMap::new();
+        let mut next_variable = 0u32;
         let block_params: Vec<Value> = builder.block_params(entry).to_vec();
         for (index, name) in meta.param_names.iter().enumerate() {
             let Some(value) = block_params.get(index).copied() else {
@@ -332,10 +333,11 @@ fn compile_function_to_jit_module(
                     index, meta.name
                 ));
             };
+            let variable = declare_new_i32_variable(&mut builder, &mut next_variable, value)?;
             values_by_name.insert(
                 name.clone(),
-                ValueBinding {
-                    value,
+                LocalBinding {
+                    var: variable,
                     type_id: meta.params[index],
                 },
             );
@@ -349,6 +351,7 @@ fn compile_function_to_jit_module(
                 &mut values_by_name,
                 &runtime_call_refs,
                 call_signatures,
+                &mut next_variable,
             )?;
             if !terminated {
                 return Err(format!(
@@ -391,6 +394,12 @@ struct ValueBinding {
     type_id: TypeId,
 }
 
+#[derive(Clone, Copy)]
+struct LocalBinding {
+    var: Variable,
+    type_id: TypeId,
+}
+
 fn declare_i32_call_import(
     module: &mut JITModule,
     symbol: &str,
@@ -406,18 +415,50 @@ fn declare_i32_call_import(
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
+fn declare_new_i32_variable(
+    builder: &mut FunctionBuilder<'_>,
+    next_variable: &mut u32,
+    initial_value: Value,
+) -> Result<Variable, String> {
+    let next = *next_variable;
+    let variable = Variable::from_u32(next);
+    *next_variable = next_variable
+        .checked_add(1)
+        .ok_or_else(|| "too many local variables".to_string())?;
+    builder.declare_var(variable, types::I32);
+    builder.def_var(variable, initial_value);
+    Ok(variable)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SimpleStmt {
     Let {
         name: String,
         expression: SimpleExpr,
     },
+    Assign {
+        name: String,
+        op: AssignOp,
+        expression: SimpleExpr,
+    },
     If {
         condition: SimpleCondition,
         then_statements: Vec<SimpleStmt>,
     },
+    For {
+        init: Box<SimpleStmt>,
+        condition: SimpleCondition,
+        step: Box<SimpleStmt>,
+        body_statements: Vec<SimpleStmt>,
+    },
     Return(SimpleExpr),
     ReturnVoid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignOp {
+    Set,
+    Add,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,10 +519,24 @@ fn parse_simple_statements_from_block(block_text: &str) -> Result<Vec<SimpleStmt
             cursor = semicolon + 1;
             continue;
         }
+        if starts_with_keyword(inner, cursor, "for") {
+            let (statement, next_cursor) = parse_for_statement(inner, cursor)?;
+            statements.push(statement);
+            cursor = next_cursor;
+            continue;
+        }
         if starts_with_keyword(inner, cursor, "if") {
             let (statement, next_cursor) = parse_if_statement(inner, cursor)?;
             statements.push(statement);
             cursor = next_cursor;
+            continue;
+        }
+        if looks_like_assignment(inner, cursor) {
+            let assignment_start = cursor;
+            let semicolon = find_statement_terminator(inner, cursor)?;
+            let statement_text = inner[assignment_start..semicolon].trim();
+            statements.push(parse_assignment_statement(statement_text)?);
+            cursor = semicolon + 1;
             continue;
         }
         return Err(format!(
@@ -522,6 +577,43 @@ fn parse_let_statement(statement_text: &str) -> Result<SimpleStmt, String> {
     })
 }
 
+fn parse_assignment_statement(statement_text: &str) -> Result<SimpleStmt, String> {
+    let mut cursor = skip_ascii_whitespace(statement_text, 0);
+    let (name, next) = parse_identifier(statement_text, cursor)?;
+    cursor = skip_ascii_whitespace(statement_text, next);
+    let (op, op_width) = if statement_text
+        .as_bytes()
+        .get(cursor..cursor + 2)
+        .is_some_and(|bytes| bytes == b"+=")
+    {
+        (AssignOp::Add, 2)
+    } else if statement_text
+        .as_bytes()
+        .get(cursor)
+        .is_some_and(|byte| *byte == b'=')
+    {
+        (AssignOp::Set, 1)
+    } else {
+        return Err(format!(
+            "unsupported assignment operator in statement '{}'",
+            statement_text
+        ));
+    };
+    cursor += op_width;
+    let expression_text = statement_text[cursor..].trim();
+    if expression_text.is_empty() {
+        return Err(format!(
+            "missing expression in assignment statement '{}'",
+            statement_text
+        ));
+    }
+    Ok(SimpleStmt::Assign {
+        name: name.to_string(),
+        op,
+        expression: parse_simple_i32_expression(expression_text)?,
+    })
+}
+
 fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt, String> {
     let after_return = statement_text
         .strip_prefix("return")
@@ -533,6 +625,51 @@ fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt, String> {
     Ok(SimpleStmt::Return(parse_simple_i32_expression(
         expression_text,
     )?))
+}
+
+fn parse_for_statement(source: &str, start: usize) -> Result<(SimpleStmt, usize), String> {
+    let mut cursor = start + "for".len();
+    cursor = skip_ascii_whitespace(source, cursor);
+    cursor = expect_byte(source, cursor, b'(', "'(' after for")?;
+    let header_open = cursor - 1;
+    let header_close = find_matching_delimiter(source, header_open, b'(', b')')
+        .ok_or_else(|| "missing ')' for for-header".to_string())?;
+    let header = source[header_open + 1..header_close].trim();
+    let header_parts = split_for_header(header)?;
+    let init_text = header_parts[0].trim();
+    let condition_text = header_parts[1].trim();
+    let step_text = header_parts[2].trim();
+
+    if init_text.is_empty() || condition_text.is_empty() || step_text.is_empty() {
+        return Err(format!("for header has empty segment: '{header}'"));
+    }
+
+    let init = if starts_with_keyword(init_text, 0, "let") {
+        parse_let_statement(init_text)?
+    } else {
+        parse_assignment_statement(init_text)?
+    };
+    let condition = parse_simple_condition(condition_text)?;
+    let step = parse_assignment_statement(step_text)?;
+
+    cursor = skip_ascii_whitespace(source, header_close + 1);
+    cursor = expect_byte(source, cursor, b'{', "'{' after for header")?;
+    let body_open = cursor - 1;
+    let body_close = find_matching_delimiter(source, body_open, b'{', b'}')
+        .ok_or_else(|| "missing '}' for for body".to_string())?;
+    let body_block = &source[body_open..=body_close];
+    let body_statements = parse_simple_statements_from_block(body_block)?;
+    let next_cursor = body_close + 1;
+
+    Ok((
+        SimpleStmt::For {
+            init: Box::new(init),
+            condition,
+            step: Box::new(step),
+            body_statements,
+        },
+        next_cursor,
+    ))
 }
 
 fn parse_if_statement(source: &str, start: usize) -> Result<(SimpleStmt, usize), String> {
@@ -640,6 +777,58 @@ fn starts_with_keyword(source: &str, cursor: usize, keyword: &str) -> bool {
     !source.as_bytes()[end].is_ascii_alphanumeric() && source.as_bytes()[end] != b'_'
 }
 
+fn looks_like_assignment(source: &str, cursor: usize) -> bool {
+    let bytes = source.as_bytes();
+    if cursor >= bytes.len() {
+        return false;
+    }
+    let first = bytes[cursor];
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return false;
+    }
+    let mut index = cursor + 1;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+        index += 1;
+    }
+    index = skip_ascii_whitespace(source, index);
+    source
+        .as_bytes()
+        .get(index..index + 2)
+        .is_some_and(|slice| slice == b"+=")
+        || source
+            .as_bytes()
+            .get(index)
+            .is_some_and(|byte| *byte == b'=')
+}
+
+fn split_for_header(header: &str) -> Result<[String; 3], String> {
+    let mut parts: Vec<String> = Vec::new();
+    let bytes = header.as_bytes();
+    let mut depth = 0i32;
+    let mut segment_start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b';' if depth == 0 => {
+                parts.push(header[segment_start..index].to_string());
+                segment_start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    parts.push(header[segment_start..].to_string());
+    if parts.len() != 3 {
+        return Err(format!(
+            "for header must contain exactly 3 segments separated by ';': '{}'",
+            header
+        ));
+    }
+    Ok([parts.remove(0), parts.remove(0), parts.remove(0)])
+}
+
 fn find_statement_terminator(source: &str, start: usize) -> Result<usize, String> {
     let mut depth = 0i32;
     let mut index = start;
@@ -722,9 +911,10 @@ fn snippet_from(source: &str, cursor: usize) -> String {
 fn emit_simple_i32_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
-    values_by_name: &mut BTreeMap<String, ValueBinding>,
+    values_by_name: &mut BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     call_signatures: &CallSignatureMap,
+    next_variable: &mut u32,
 ) -> Result<bool, String> {
     for statement in statements {
         match statement {
@@ -742,7 +932,50 @@ fn emit_simple_i32_statements(
                         name
                     ));
                 }
-                values_by_name.insert(name.clone(), binding);
+                let variable = declare_new_i32_variable(builder, next_variable, binding.value)?;
+                values_by_name.insert(
+                    name.clone(),
+                    LocalBinding {
+                        var: variable,
+                        type_id: TYPE_ID_I32,
+                    },
+                );
+            }
+            SimpleStmt::Assign {
+                name,
+                op,
+                expression,
+            } => {
+                let Some(local) = values_by_name.get(name).copied() else {
+                    return Err(format!("assignment target '{}' is not defined", name));
+                };
+                let rhs = emit_simple_i32_expression(
+                    builder,
+                    expression,
+                    values_by_name,
+                    runtime_call_refs,
+                    call_signatures,
+                )?;
+                if local.type_id != rhs.type_id {
+                    return Err(format!(
+                        "assignment type mismatch for '{}': target type {}, expression type {}",
+                        name, local.type_id, rhs.type_id
+                    ));
+                }
+                let value = match op {
+                    AssignOp::Set => rhs.value,
+                    AssignOp::Add => {
+                        if local.type_id != TYPE_ID_I32 {
+                            return Err(format!(
+                                "'+=' requires i32 target in current jit path for '{}'",
+                                name
+                            ));
+                        }
+                        let lhs = builder.use_var(local.var);
+                        builder.ins().iadd(lhs, rhs.value)
+                    }
+                };
+                builder.def_var(local.var, value);
             }
             SimpleStmt::Return(expression) => {
                 let binding = emit_simple_i32_expression(
@@ -789,6 +1022,7 @@ fn emit_simple_i32_statements(
                     &mut then_values,
                     runtime_call_refs,
                     call_signatures,
+                    next_variable,
                 )?;
                 if !then_terminated {
                     builder.ins().jump(continue_block, &[]);
@@ -797,9 +1031,104 @@ fn emit_simple_i32_statements(
                 builder.seal_block(continue_block);
                 builder.switch_to_block(continue_block);
             }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                let mut loop_values = values_by_name.clone();
+                emit_for_control_statement(
+                    builder,
+                    init.as_ref(),
+                    &mut loop_values,
+                    runtime_call_refs,
+                    call_signatures,
+                    next_variable,
+                )?;
+
+                let condition_block = builder.create_block();
+                let body_block = builder.create_block();
+                let step_block = builder.create_block();
+                let continue_block = builder.create_block();
+
+                builder.ins().jump(condition_block, &[]);
+                builder.switch_to_block(condition_block);
+
+                let condition_value = emit_simple_condition(
+                    builder,
+                    condition,
+                    &loop_values,
+                    runtime_call_refs,
+                    call_signatures,
+                )?;
+                builder
+                    .ins()
+                    .brif(condition_value, body_block, &[], continue_block, &[]);
+
+                builder.seal_block(body_block);
+                builder.switch_to_block(body_block);
+                let body_terminated = emit_simple_i32_statements(
+                    builder,
+                    body_statements,
+                    &mut loop_values,
+                    runtime_call_refs,
+                    call_signatures,
+                    next_variable,
+                )?;
+                if !body_terminated {
+                    builder.ins().jump(step_block, &[]);
+                }
+
+                builder.seal_block(step_block);
+                builder.switch_to_block(step_block);
+                emit_for_control_statement(
+                    builder,
+                    step.as_ref(),
+                    &mut loop_values,
+                    runtime_call_refs,
+                    call_signatures,
+                    next_variable,
+                )?;
+                builder.ins().jump(condition_block, &[]);
+                builder.seal_block(condition_block);
+
+                builder.seal_block(continue_block);
+                builder.switch_to_block(continue_block);
+            }
         }
     }
     Ok(false)
+}
+
+fn emit_for_control_statement(
+    builder: &mut FunctionBuilder<'_>,
+    statement: &SimpleStmt,
+    values_by_name: &mut BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    call_signatures: &CallSignatureMap,
+    next_variable: &mut u32,
+) -> Result<(), String> {
+    match statement {
+        SimpleStmt::Let { .. } | SimpleStmt::Assign { .. } => {
+            let terminated = emit_simple_i32_statements(
+                builder,
+                std::slice::from_ref(statement),
+                values_by_name,
+                runtime_call_refs,
+                call_signatures,
+                next_variable,
+            )?;
+            if terminated {
+                return Err("for-loop control statement cannot terminate function".to_string());
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "unsupported for-loop control statement in current jit path: {:?}",
+            other
+        )),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1075,7 +1404,7 @@ fn resolve_call_signature<'a>(
 fn emit_simple_i32_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
-    values_by_name: &BTreeMap<String, ValueBinding>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     call_signatures: &CallSignatureMap,
 ) -> Result<ValueBinding, String> {
@@ -1092,6 +1421,10 @@ fn emit_simple_i32_expression(
         SimpleExpr::Identifier(name) => values_by_name
             .get(name)
             .copied()
+            .map(|local| ValueBinding {
+                value: builder.use_var(local.var),
+                type_id: local.type_id,
+            })
             .ok_or_else(|| format!("unknown identifier '{name}' in return expression")),
         SimpleExpr::Call { target, args } => {
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
@@ -1186,7 +1519,7 @@ fn emit_simple_i32_expression(
 fn emit_simple_condition(
     builder: &mut FunctionBuilder<'_>,
     condition: &SimpleCondition,
-    values_by_name: &BTreeMap<String, ValueBinding>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     call_signatures: &CallSignatureMap,
 ) -> Result<Value, String> {
@@ -1321,6 +1654,19 @@ mod tests {
     }
 
     #[test]
+    fn jit_process_supports_for_loop_shape() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; i < 4; i += 1) { sum += i; } return sum; }\n",
+        );
+        let report = process.compile().expect("jit compile");
+        assert_eq!(report.index.parsed_functions, 1);
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert!(process.artifacts()[0].code_ptr != 0);
+    }
+
+    #[test]
     fn jit_process_supports_void_return_functions() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -1389,6 +1735,21 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute in memory");
         assert_eq!(value, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_for_loop_accumulation() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; i < 4; i += 1) { sum += i; } return sum; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, 6);
     }
 
     #[cfg(windows)]
