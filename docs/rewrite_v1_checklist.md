@@ -588,6 +588,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Strengthen Windows executable/runtime parity smokes (JIT + AOT) on Brickout-oriented scenarios.
 - Lane B progress note:
 - Runtime commit path now supports JIT `FnId -> code_ptr` override application sourced from compile results when available (dev path can consume real JIT pointers instead of synthetic placeholder pointer generation).
+- Added engine-overhead benchmark harness for package/load/swap/render-loop timing slices: `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`.
+- Initial smoke snapshot recorded (single-sample run) in `docs/rust_native_compiler_prd.md` for both JIT and AOT runtime-overhead timing breakdown.
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
 - Scope anchor doc: `docs/compiler_prd_v2_compile_speed.md`.
 - Target gates:
@@ -682,7 +684,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Scope: wire benchmark thresholds, deterministic invalidation checks, and compile-path invariants into routine verification.
 - Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
 - Tests: gated benchmark and invalidation suites.
-- Deferred test task (post-CS8): add a separate engine-overhead benchmark covering package/bundle handoff, runtime load, swap commit, and render-loop progression timing; keep it distinct from compiler-only timing gates.
+- Engine-overhead benchmark task (separate from compiler-only timing gates): harness command added (`cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`); remaining work is threshold/baseline gating policy integration.
 - Done gate: project can reject regressions automatically against PRD v2 targets.
 - Status: `pending`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)

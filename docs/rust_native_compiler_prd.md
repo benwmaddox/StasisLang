@@ -79,7 +79,16 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Engine-side packaging/load/swap/render-loop overhead.
 - Process startup and `cargo build` overhead.
 
+## Engine Overhead Snapshot (2026-02-24)
+- Command:
+- `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 1 --ticks 240`
+- Results (single-sample smoke baseline):
+- `jit`: total `124.577ms`, compile `2.000ms`, commit `0.000ms`, runtime-overhead `122.577ms`.
+- `aot`: total `124.029ms`, compile `2.000ms`, commit `0.000ms`, runtime-overhead `122.029ms`, load-artifact `0.049ms`.
+
 ## Next Trial Slices
 - Expand backend body support beyond literal-return-only while keeping direct one-pass lowering.
 - Improve compile-time performance against target gates (`<250ms @1k cold`, `<5ms typical single-function update`).
 - Add a deferred end-to-end engine overhead benchmark/test that includes package/build artifact handoff, load, swap commit, and render-loop progression timing.
+- Added engine-overhead benchmark harness command:
+- `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`
