@@ -45,7 +45,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Wired real Cranelift emission in both mode processes for currently supported function bodies:
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
 - AOT: emits object bytes through `cranelift-object`.
-- Current body support in backend emission is intentionally narrow: `return <i32 literal>;` (for `i32`) and `return;` (for `void`).
+- Current body support in backend emission is intentionally narrow: `return <i32 literal>;`, `return <i32 literal op literal>;` (`+ - * / %`), and `return;` (for `void`).
 - Kept existing compiler host path intact for compatibility while evaluating this approach.
 
 ## Trial Test Coverage Added

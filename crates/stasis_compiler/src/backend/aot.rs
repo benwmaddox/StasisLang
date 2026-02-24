@@ -1,3 +1,4 @@
+use crate::backend::eval_simple_i32_return_expression;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
@@ -118,7 +119,7 @@ fn compile_function_to_object_bytes(
         builder.seal_block(entry);
 
         if meta.return_type == TYPE_ID_I32 {
-            let value = parse_i32_return_literal(hir)?;
+            let value = eval_simple_i32_return_expression(hir)?;
             let literal = builder.ins().iconst(types::I32, value);
             builder.ins().return_(&[literal]);
         } else {
@@ -135,27 +136,6 @@ fn compile_function_to_object_bytes(
     product
         .emit()
         .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
-}
-
-fn parse_i32_return_literal(hir: &FunctionHIR) -> Result<i64, String> {
-    let Some(block) = hir.blocks.first() else {
-        return Err("function body missing block text".to_string());
-    };
-    let source = block.source.as_str();
-    let return_index = source
-        .find("return")
-        .ok_or_else(|| "expected i32 return literal but no return statement found".to_string())?;
-    let tail = &source[return_index + "return".len()..];
-    let semicolon_index = tail
-        .find(';')
-        .ok_or_else(|| "expected i32 return literal statement ending in ';'".to_string())?;
-    let value_text = tail[..semicolon_index].trim();
-    if value_text.is_empty() {
-        return Err("expected i32 return literal but return expression was empty".to_string());
-    }
-    value_text
-        .parse::<i64>()
-        .map_err(|error| format!("expected i32 return literal, found '{value_text}': {error}"))
 }
 
 #[cfg(test)]
@@ -184,7 +164,8 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("expected i32 return literal"),
+                    message.contains("expected integer literal")
+                        || message.contains("unsupported return expression"),
                     "unexpected message: {message}"
                 );
             }
@@ -210,6 +191,16 @@ mod tests {
         let second = process.compile().expect("second compile");
         assert_eq!(second.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 2);
+    }
+
+    #[test]
+    fn aot_process_supports_binary_literal_return_expression() {
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 4 + 5; }\n");
+        let report = process.compile().expect("aot compile");
+        assert_eq!(report.index.parsed_functions, 1);
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert!(process.artifacts()[0].object_bytes_len > 0);
     }
 
     #[test]
