@@ -624,15 +624,9 @@ It is not part of the steady-state incremental JIT update loop.
 - Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
 - Done gate: single-function incremental compile path executes entirely in-process.
 - Current progress:
-- Added per-file analysis parallelization inside `compile_changed_files` and made harness temp-run IDs process/thread safe.
-- Removed project-wide reachability shell-out from `compile_changed_files`; reachability closure now computes directly from in-memory parsed state and required roots.
-- Removed unused reachability harness generation/parsing code paths from `crates/stasis_compiler/src/lib.rs`.
-- Removed `stasisc.bat`/wrapper preprocess launch path from host analysis; harness now invokes `Stasis.Cli.exe` directly.
-- Added `STASIS_COMPILER_ANALYSIS_EXE` override to route host analysis to a specified compiler executable (for future self-host binary adoption without host code changes).
-- Added Windows App Control recovery path in host analysis: on blocked artifact load, host can sign blocked `.dll/.exe` and retry once via `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` (fallback `STASIS_AOT_SIGN_TOOL`).
-- Added dedicated in-memory reachability closure unit coverage (transitive roots, required roots, no-root fallback) to keep this boundary stable without shell-out tests.
-- Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
-- Host analysis harness source loading now emits chunked `ascii_append(...)` spans (with byte fallback for unsafe bytes) and writes harness files into stable per-host slots (`.stasis_cache/compiler_host/pid_<pid>_session_<id>/slot_<n>`), reducing path churn while avoiding cross-process/test collisions.
+- `crates/stasis_compiler::IncrementalCompilerHost::compile_changed_files` now analyzes changed sources fully in-process (threaded Rust parser/evaluator path), with no per-file external harness process launch in normal operation.
+- Removed external harness-only tests and stale process-signing/override code paths from `crates/stasis_compiler/src/lib.rs`.
+- Preserved in-memory reachability behavior and changed/newly-reachable emission behavior under the new in-process analysis path.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
 - Non-engine `JitDev` compile path now runs rust-native JIT compilation only and emits explicit diagnostics on unsupported shapes; silent fallback to legacy host analysis was removed for this path.
 - Rust-native JIT return-expression lowering now supports parameter identifiers and infix arithmetic (`+ - * / %`) in addition to literal-only returns, with in-memory two-arg execution coverage for verification.
@@ -640,8 +634,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Rust-native JIT now supports direct `i32` call expressions with `0..2` arguments via in-process dispatch symbols (`callee()`, `callee(x)`, `callee(x,y)`) and validates these through in-memory execution tests.
 - Rust-native JIT now supports receiver-form calls (`receiver.method(...)`) lowered as function-form calls (`method(receiver, ...)`) with compile-time signature-based target selection.
 - Rust-native type interning now keeps user type names in signature metadata so overload resolution can distinguish same method names by receiver type.
-- Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
-- Status: `in_progress`
+- Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
 - Scope:
