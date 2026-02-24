@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
@@ -110,7 +110,6 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
-    reachable_in_source: bool,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
 }
@@ -134,7 +133,6 @@ struct AnalysisResult {
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
-    source_text_by_path: BTreeMap<String, String>,
     state_by_path: BTreeMap<String, FileState>,
     last_layout_hash_i32: i32,
     required_reachability_root_hashes: Vec<i32>,
@@ -145,7 +143,6 @@ impl IncrementalCompilerHost {
     pub fn new() -> Self {
         Self {
             source_hash_by_path: BTreeMap::new(),
-            source_text_by_path: BTreeMap::new(),
             state_by_path: BTreeMap::new(),
             last_layout_hash_i32: 0,
             required_reachability_root_hashes: Vec::new(),
@@ -183,8 +180,6 @@ impl IncrementalCompilerHost {
             match fs::read(&path) {
                 Ok(bytes) => {
                     let source = String::from_utf8_lossy(&bytes).to_string();
-                    self.source_text_by_path
-                        .insert(path_key.clone(), source.clone());
                     let source_hash = hash_text(&source);
                     let changed = self
                         .source_hash_by_path
@@ -198,9 +193,8 @@ impl IncrementalCompilerHost {
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {
                     let removed_hash = self.source_hash_by_path.remove(&path_key).is_some();
-                    let removed_source = self.source_text_by_path.remove(&path_key).is_some();
                     let removed_state = self.state_by_path.remove(&path_key).is_some();
-                    if removed_hash || removed_source || removed_state {
+                    if removed_hash || removed_state {
                         deleted_paths.push(path_key);
                     }
                 }
@@ -303,15 +297,10 @@ impl IncrementalCompilerHost {
         }
 
         let previous_reachable_keys = self.last_reachable_function_keys.clone();
-        let current_sources: Vec<(String, String)> = self
-            .source_text_by_path
-            .iter()
-            .map(|(path, source)| (path.clone(), source.clone()))
-            .collect();
-        let current_reachable_keys = analyze_project_reachability_via_stasis(
-            &current_sources,
+        let current_reachable_keys = compute_reachable_function_keys_from_state(
+            &self.state_by_path,
             &self.required_reachability_root_hashes,
-        )?;
+        );
         let previous_body_hash_by_key = build_function_body_hash_by_key(&previous_state_by_path);
         let mut file_index_by_path: BTreeMap<String, usize> = BTreeMap::new();
         for (path_key, state) in &self.state_by_path {
@@ -360,14 +349,14 @@ impl IncrementalCompilerHost {
                         .simple_i32_return_two_call_left_target_id_hash,
                     simple_i32_return_two_call_right_target_id_hash: parsed
                         .simple_i32_return_two_call_right_target_id_hash,
-                    simple_i32_return_two_call_op_code: parsed
-                        .simple_i32_return_two_call_op_code,
+                    simple_i32_return_two_call_op_code: parsed.simple_i32_return_two_call_op_code,
                     simple_void_print_i32_literal: parsed.simple_void_print_i32_literal,
                     simple_void_print_i32_call_target_id_hash: parsed
                         .simple_void_print_i32_call_target_id_hash,
                     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: parsed
                         .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
-                    simple_void_print_i32_call_add_delta: parsed.simple_void_print_i32_call_add_delta,
+                    simple_void_print_i32_call_add_delta: parsed
+                        .simple_void_print_i32_call_add_delta,
                     clif_text: parsed.clif_text.clone(),
                 });
             }
@@ -405,8 +394,7 @@ fn analyze_source_via_stasis(
     source: &str,
     required_reachability_root_hashes: &[i32],
 ) -> Result<AnalysisResult, String> {
-    let harness_source =
-        build_stasis_analysis_harness(source, required_reachability_root_hashes);
+    let harness_source = build_stasis_analysis_harness(source, required_reachability_root_hashes);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("clock error: {error}"))?
@@ -456,62 +444,6 @@ fn analyze_source_via_stasis(
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_stasis_analysis_output(&stdout)
-}
-
-fn analyze_project_reachability_via_stasis(
-    files: &[(String, String)],
-    required_reachability_root_hashes: &[i32],
-) -> Result<BTreeSet<FunctionKey>, String> {
-    if files.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let harness_source = build_stasis_reachability_harness(files, required_reachability_root_hashes);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("clock error: {error}"))?
-        .as_nanos();
-    let repo_root = repo_root_path()?;
-    let harness_dir = repo_root
-        .join(".stasis_cache")
-        .join("compiler_host")
-        .join(format!("reachability_{stamp}"));
-    fs::create_dir_all(&harness_dir).map_err(|error| {
-        format!(
-            "failed to create reachability harness dir {}: {error}",
-            harness_dir.display()
-        )
-    })?;
-    let harness_path = harness_dir.join("analyze_reachability.stasis");
-    let mut file = fs::File::create(&harness_path).map_err(|error| {
-        format!(
-            "failed to create reachability harness {}: {error}",
-            harness_path.display()
-        )
-    })?;
-    file.write_all(harness_source.as_bytes()).map_err(|error| {
-        format!(
-            "failed to write reachability harness {}: {error}",
-            harness_path.display()
-        )
-    })?;
-    drop(file);
-
-    let script = bootstrap_stasisc_script_path()?;
-    let fast_output = run_stasis_analysis_harness(&script, &harness_path, true)?;
-    if fast_output.status.success() {
-        let stdout = String::from_utf8_lossy(&fast_output.stdout);
-        if let Ok(parsed) = parse_stasis_reachability_output(&stdout, files) {
-            return Ok(parsed);
-        }
-    }
-
-    let output = run_stasis_analysis_harness(&script, &harness_path, false)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("stasis reachability harness failed: {}", stderr.trim()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_stasis_reachability_output(&stdout, files)
 }
 
 fn run_stasis_analysis_harness(
@@ -565,7 +497,10 @@ fn repo_root_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "failed to resolve repo root".to_string())
 }
 
-fn build_stasis_analysis_harness(source: &str, required_reachability_root_hashes: &[i32]) -> String {
+fn build_stasis_analysis_harness(
+    source: &str,
+    required_reachability_root_hashes: &[i32],
+) -> String {
     let mut out = String::new();
     out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
     out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
@@ -615,18 +550,20 @@ fn build_stasis_analysis_harness(source: &str, required_reachability_root_hashes
     out.push_str("        print_i32(Compiler.function_id_hashes[fi]); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_sig_hashes[fi]); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_body_hashes[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_return_type_codes[fi]); print_string(\",\");\n");
+    out.push_str(
+        "        print_i32(Compiler.function_return_type_codes[fi]); print_string(\",\");\n",
+    );
     out.push_str("        print_i32(Compiler.function_param_counts[fi]); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n");
+    out.push_str(
+        "        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n",
+    );
     out.push_str(
         "        print_i32(Compiler.function_simple_i32_return_literal_flags[fi]); print_string(\",\");\n",
     );
     out.push_str("        print_i32(Compiler.function_simple_i32_return_literals[fi]); print_string(\",\");\n");
     out.push_str("        if (compiler_is_function_reachable(fi)) { print_i32(1); } else { print_i32(0); }\n");
     out.push_str("        print_string(\";\");\n");
-    out.push_str(
-        "        let edge_count: i32 = Compiler.function_call_edge_counts[fi];\n",
-    );
+    out.push_str("        let edge_count: i32 = Compiler.function_call_edge_counts[fi];\n");
     out.push_str("        let edge_index: i32 = 0;\n");
     out.push_str("        for (edge_index = 0; edge_index < edge_count; edge_index += 1) {\n");
     out.push_str("            print_string(\"edge=\");\n");
@@ -636,9 +573,7 @@ fn build_stasis_analysis_harness(source: &str, required_reachability_root_hashes
     out.push_str("            print_string(\";\");\n");
     out.push_str("        }\n");
     out.push_str("        compiler_emit_function_clif_for_index(fi, clif_buf);\n");
-    out.push_str(
-        "        print_string(\"clif=\"); print_string(clif_buf); print_string(\";\");\n",
-    );
+    out.push_str("        print_string(\"clif=\"); print_string(clif_buf); print_string(\";\");\n");
     out.push_str("    }\n");
     out.push_str("    print_string(\"__SC_END;\");\n");
     out.push_str("}\n");
@@ -659,74 +594,6 @@ fn build_stasis_analysis_harness(source: &str, required_reachability_root_hashes
     out.push_str("    compiler_set_source(src_buf);\n");
     out.push_str("    let status: i32 = run_incremental_compiler();\n");
     out.push_str("    emit_metrics(status);\n");
-    out.push_str("    return 0;\n");
-    out.push_str("}\n");
-    out
-}
-
-fn build_stasis_reachability_harness(
-    files: &[(String, String)],
-    required_reachability_root_hashes: &[i32],
-) -> String {
-    let mut out = String::new();
-    out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
-    out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
-    out.push_str("global path_buf: ascii[260];\n");
-    out.push_str("global src_buf: ascii[262144];\n");
-    out.push_str("function main(): i32 {\n");
-    out.push_str("    compiler_reset_state();\n");
-    out.push_str("    compiler_clear_required_reachability_roots();\n");
-    for root_hash in required_reachability_root_hashes {
-        out.push_str("    compiler_add_required_reachability_root_hash(");
-        out.push_str(&root_hash.to_string());
-        out.push_str(");\n");
-    }
-    for (path, source) in files {
-        out.push_str("    ascii_clear(path_buf);\n");
-        for byte in path.as_bytes() {
-            out.push_str("    ascii_push(path_buf, ");
-            out.push_str(&byte.to_string());
-            out.push_str(");\n");
-        }
-        out.push_str("    ascii_clear(src_buf);\n");
-        for byte in source.as_bytes() {
-            out.push_str("    ascii_push(src_buf, ");
-            out.push_str(&byte.to_string());
-            out.push_str(");\n");
-        }
-        out.push_str("    compiler_upsert_file(path_buf, src_buf);\n");
-    }
-    out.push_str("    let status: i32 = run_incremental_compiler();\n");
-    out.push_str("    print_string(\"__SC_REACH_BEGIN;\");\n");
-    out.push_str("    print_string(\"status=\"); print_i32(status); print_string(\";\");\n");
-    out.push_str("    print_string(\"errors=\"); print_i32(Compiler.error_count); print_string(\";\");\n");
-    out.push_str("    let ei: i32 = 0;\n");
-    out.push_str("    for (ei = 0; ei < Compiler.error_count; ei += 1) {\n");
-    out.push_str("        print_string(\"err=\");\n");
-    out.push_str("        print_i32(Compiler.errors[ei].code); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.errors[ei].pos); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.errors[ei].detail_a); print_string(\",\");\n");
-    out.push_str("        print_i32(Compiler.errors[ei].detail_b); print_string(\";\");\n");
-    out.push_str("    }\n");
-    out.push_str("    let file_index: i32 = 0;\n");
-    out.push_str("    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {\n");
-    out.push_str("        let function_index: i32 = 0;\n");
-    out.push_str(
-        "        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {\n",
-    );
-    out.push_str("            if (compiler_file_function_is_reachable(file_index, function_index)) {\n");
-    out.push_str("                print_string(\"reach=\");\n");
-    out.push_str("                print_i32(file_index); print_string(\",\");\n");
-    out.push_str(
-        "                print_i32(Compiler.files[file_index].function_id_hashes[function_index]); print_string(\",\");\n",
-    );
-    out.push_str(
-        "                print_i32(Compiler.files[file_index].function_sig_hashes[function_index]); print_string(\";\");\n",
-    );
-    out.push_str("            }\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n");
-    out.push_str("    print_string(\"__SC_REACH_END;\");\n");
     out.push_str("    return 0;\n");
     out.push_str("}\n");
     out
@@ -813,11 +680,6 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                 } else {
                     0
                 };
-                let reachable_in_source = if parts.len() >= 10 {
-                    parse_i32(parts[9]) != 0
-                } else {
-                    false
-                };
                 let simple_i32_return_expr = if simple_i32_return_literal_flag != 0 {
                     Some(SimpleI32ReturnExpr::Literal(
                         simple_i32_return_literal_value,
@@ -846,7 +708,6 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                     simple_void_print_i32_call_target_id_hash: None,
                     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
                     simple_void_print_i32_call_add_delta: None,
-                    reachable_in_source,
                     call_target_id_hashes: Vec::new(),
                     clif_text: String::new(),
                 });
@@ -879,74 +740,6 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
         main_invalid_count,
         errors,
     })
-}
-
-fn parse_stasis_reachability_output(
-    stdout: &str,
-    files: &[(String, String)],
-) -> Result<BTreeSet<FunctionKey>, String> {
-    fn parse_i32(value: &str) -> i32 {
-        value.trim().parse::<i32>().unwrap_or_default()
-    }
-    fn parse_usize(value: &str) -> usize {
-        value.trim().parse::<usize>().unwrap_or_default()
-    }
-
-    let begin = stdout
-        .find("__SC_REACH_BEGIN;")
-        .ok_or_else(|| format!("missing reachability harness begin marker in output: {stdout}"))?;
-    let end = stdout[begin..]
-        .find("__SC_REACH_END;")
-        .map(|index| begin + index)
-        .ok_or_else(|| format!("missing reachability harness end marker in output: {stdout}"))?;
-    let payload = &stdout[begin + "__SC_REACH_BEGIN;".len()..end];
-
-    let mut status = 0i32;
-    let mut errors: Vec<ErrorMetric> = Vec::new();
-    let mut reachable = BTreeSet::new();
-    for token in payload.split(';') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        if let Some(value) = token.strip_prefix("status=") {
-            status = parse_i32(value);
-            continue;
-        }
-        if let Some(value) = token.strip_prefix("err=") {
-            let parts: Vec<&str> = value.split(',').collect();
-            if parts.len() == 4 {
-                errors.push(ErrorMetric {
-                    code: parse_i32(parts[0]),
-                    pos: parse_i32(parts[1]),
-                    detail_a: parse_i32(parts[2]),
-                    detail_b: parse_i32(parts[3]),
-                });
-            }
-            continue;
-        }
-        if let Some(value) = token.strip_prefix("reach=") {
-            let parts: Vec<&str> = value.split(',').collect();
-            if parts.len() == 3 {
-                let file_index = parse_usize(parts[0]);
-                if let Some((path, _)) = files.get(file_index) {
-                    reachable.insert(FunctionKey {
-                        path: path.clone(),
-                        id_hash: parse_i32(parts[1]),
-                        sig_hash: parse_i32(parts[2]),
-                    });
-                }
-            }
-            continue;
-        }
-    }
-    if status != 0 {
-        return Err(format!(
-            "reachability harness status {status} with errors {:?}: {stdout}",
-            errors
-        ));
-    }
-    Ok(reachable)
 }
 
 fn normalize_path_key(path: &Path) -> String {
@@ -1005,6 +798,81 @@ fn build_function_body_hash_by_key(
         }
     }
     by_key
+}
+
+fn all_reachability_root_hashes(required_roots: &[i32]) -> Vec<i32> {
+    let mut roots = vec![
+        hash_identifier("main"),
+        hash_identifier("tick"),
+        hash_identifier("on_code_swap"),
+    ];
+    for root in required_roots {
+        if !roots.contains(root) {
+            roots.push(*root);
+        }
+    }
+    roots
+}
+
+fn compute_reachable_function_keys_from_state(
+    state_by_path: &BTreeMap<String, FileState>,
+    required_roots: &[i32],
+) -> BTreeSet<FunctionKey> {
+    let mut all_keys = Vec::new();
+    let mut by_id_hash: BTreeMap<i32, Vec<FunctionKey>> = BTreeMap::new();
+    let mut call_edges_by_key: BTreeMap<FunctionKey, Vec<i32>> = BTreeMap::new();
+
+    for (path, state) in state_by_path {
+        for function in &state.functions {
+            let key = function_key_for(path, function);
+            all_keys.push(key.clone());
+            by_id_hash
+                .entry(function.id_hash)
+                .or_default()
+                .push(key.clone());
+            call_edges_by_key.insert(key, function.call_target_id_hashes.clone());
+        }
+    }
+
+    if all_keys.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let roots = all_reachability_root_hashes(required_roots);
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    let mut found_root = false;
+
+    for root_hash in roots {
+        if let Some(keys) = by_id_hash.get(&root_hash) {
+            found_root = true;
+            for key in keys {
+                if reachable.insert(key.clone()) {
+                    queue.push_back(key.clone());
+                }
+            }
+        }
+    }
+
+    if !found_root {
+        return all_keys.into_iter().collect();
+    }
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(callee_hashes) = call_edges_by_key.get(&current) {
+            for callee_hash in callee_hashes {
+                if let Some(callee_keys) = by_id_hash.get(callee_hash) {
+                    for callee_key in callee_keys {
+                        if reachable.insert(callee_key.clone()) {
+                            queue.push_back(callee_key.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    reachable
 }
 
 fn current_hook_symbol(state_by_path: &BTreeMap<String, FileState>) -> Option<String> {
@@ -3070,8 +2938,7 @@ mod tests {
             .iter()
             .any(|f| f.id_hash == hash_identifier("helper")));
 
-        fs::write(&file_a, "function main(): i32 { return helper(); }\n")
-            .expect("write a updated");
+        fs::write(&file_a, "function main(): i32 { return helper(); }\n").expect("write a updated");
         let second = host
             .compile_changed_files(std::slice::from_ref(&file_a))
             .expect("second compile");

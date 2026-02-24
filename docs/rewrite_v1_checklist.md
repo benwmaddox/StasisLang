@@ -593,16 +593,21 @@ It is not part of the steady-state incremental JIT update loop.
 - Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
 - Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
-- 1k functions: cold p50/p95 `15783.219ms`, incremental p50/p95 `11600.176ms`.
-- 5k functions: benchmark run executed under 5-minute budget (`~185.7s`) but fails before timing output with bootstrap harness Cranelift error: `define_function failed for module__main` / `Code for function is too large` (current harness serialization path does not scale to 5k and is an active `CS1` blocker).
-- Status: `in_progress`
+- 1k functions: cold p50/p95 `8679.478ms`, incremental p50/p95 `4324.059ms`.
+- 5k functions: cold p50/p95 `48217.360ms`, incremental p50/p95 `1.904ms` (completes within 5-minute budget).
+- Status: `done`
 - Slice CS1: Remove hot-path bootstrap harness process spawning from incremental compile path.
 - Language: `Rust + .stasis`.
-- Scope: replace per-file/project shell-out analysis (`analyze_source_via_stasis`/`analyze_project_reachability_via_stasis`) with in-process compile-state invocation path.
+- Scope: replace per-file/project shell-out analysis with in-process compile-state invocation path.
 - Deliverable: `compile_changed_files` no longer launches external bootstrap process during normal operation.
 - Tests: existing incremental/reachability tests remain green; add explicit regression test asserting no external harness invocation on normal compile path.
 - Done gate: single-function incremental compile path executes entirely in-process.
-- Status: `pending`
+- Current progress:
+- Removed project-wide reachability shell-out from `compile_changed_files`; reachability closure now computes directly from in-memory parsed state and required roots.
+- Removed unused reachability harness generation/parsing code paths from `crates/stasis_compiler/src/lib.rs`.
+- Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
+- Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` shell-out path so normal compile stays fully in-process.
+- Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
 - Scope:
