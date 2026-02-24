@@ -18,22 +18,18 @@ pub struct IndexedFunction {
     pub dependency_name_hashes: Vec<u64>,
 }
 
-pub fn index_file(source: &str, types: &TypeTable) -> Result<Vec<IndexedFunction>, String> {
+pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunction>, String> {
     let parsed = parse_top_level_functions(source)?;
     let mut out = Vec::with_capacity(parsed.len());
     for function in parsed {
         let mut params = Vec::with_capacity(function.params.len());
         let mut param_names = Vec::with_capacity(function.params.len());
         for param in &function.params {
-            let type_id = types
-                .resolve(&param.type_name)
-                .ok_or_else(|| format!("unknown parameter type '{}'", param.type_name))?;
+            let type_id = types.resolve_or_intern(&param.type_name);
             param_names.push(param.name.clone());
             params.push(type_id);
         }
-        let return_type = types
-            .resolve(&function.return_type_name)
-            .ok_or_else(|| format!("unknown return type '{}'", function.return_type_name))?;
+        let return_type = types.resolve_or_intern(&function.return_type_name);
         let name_hash = hash_text(&function.name);
         let signature_hash = hash_signature(name_hash, &params, return_type);
         let body_text = source
@@ -106,9 +102,9 @@ mod tests {
 
     #[test]
     fn indexes_basic_function_metadata() {
-        let types = TypeTable::new();
+        let mut types = TypeTable::new();
         let source = "function main(value: i32): i32 { return value; }\n";
-        let indexed = index_file(source, &types).expect("index");
+        let indexed = index_file(source, &mut types).expect("index");
         assert_eq!(indexed.len(), 1);
         assert_eq!(indexed[0].name, "main");
         assert_eq!(indexed[0].param_names, vec!["value".to_string()]);
@@ -121,10 +117,10 @@ mod tests {
 
     #[test]
     fn collects_dependency_hashes_for_call_sites() {
-        let types = TypeTable::new();
+        let mut types = TypeTable::new();
         let source =
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n";
-        let indexed = index_file(source, &types).expect("index");
+        let indexed = index_file(source, &mut types).expect("index");
         let main = indexed
             .iter()
             .find(|function| function.name == "main")

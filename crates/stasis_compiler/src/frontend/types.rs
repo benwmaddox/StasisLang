@@ -4,9 +4,9 @@ pub type TypeId = u16;
 pub const TYPE_ID_VOID: TypeId = 0;
 pub const TYPE_ID_I32: TypeId = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeInfo {
-    pub name: &'static str,
+    pub name: String,
     pub size: u16,
     pub flags: u16,
 }
@@ -14,17 +14,21 @@ pub struct TypeInfo {
 #[derive(Debug, Clone)]
 pub struct TypeTable {
     types: Vec<TypeInfo>,
-    by_name: HashMap<&'static str, TypeId>,
+    by_name: HashMap<String, TypeId>,
 }
 
 impl TypeTable {
     pub fn new() -> Self {
         let mut types = Vec::new();
         let mut by_name = HashMap::new();
-        let mut add_builtin = |name: &'static str, size: u16, flags: u16| {
+        let mut add_builtin = |name: &str, size: u16, flags: u16| {
             let id = types.len() as TypeId;
-            types.push(TypeInfo { name, size, flags });
-            by_name.insert(name, id);
+            types.push(TypeInfo {
+                name: name.to_string(),
+                size,
+                flags,
+            });
+            by_name.insert(name.to_string(), id);
         };
         // `void` first so missing return annotations can default to 0.
         add_builtin("void", 0, 0);
@@ -36,8 +40,22 @@ impl TypeTable {
         self.by_name.get(name).copied()
     }
 
-    pub fn type_info(&self, id: TypeId) -> Option<TypeInfo> {
-        self.types.get(id as usize).copied()
+    pub fn resolve_or_intern(&mut self, name: &str) -> TypeId {
+        if let Some(existing) = self.resolve(name) {
+            return existing;
+        }
+        let id = self.types.len() as TypeId;
+        self.types.push(TypeInfo {
+            name: name.to_string(),
+            size: 4,
+            flags: 0,
+        });
+        self.by_name.insert(name.to_string(), id);
+        id
+    }
+
+    pub fn type_info(&self, id: TypeId) -> Option<&TypeInfo> {
+        self.types.get(id as usize)
     }
 
     pub fn void_id(&self) -> TypeId {

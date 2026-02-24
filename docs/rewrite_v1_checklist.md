@@ -639,6 +639,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Rust-native JIT `i32` statement lowering now supports a simple block subset (`let` bindings and `if` branches with comparison conditions) with deterministic in-memory execution tests, while still keeping direct one-pass lowering.
 - Rust-native JIT now supports direct `i32` call expressions with `0..2` arguments via in-process dispatch symbols (`callee()`, `callee(x)`, `callee(x,y)`) and validates these through in-memory execution tests.
 - Rust-native JIT now supports receiver-form calls (`receiver.method(...)`) lowered as function-form calls (`method(receiver, ...)`) with compile-time signature-based target selection.
+- Rust-native type interning now keeps user type names in signature metadata so overload resolution can distinguish same method names by receiver type.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
 - Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.

@@ -117,7 +117,7 @@ impl Compiler {
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = index_file(&self.files[file_id].content, &self.types)
+            let indexed = index_file(&self.files[file_id].content, &mut self.types)
                 .map_err(CompileError::Frontend)?;
             self.files[file_id].functions.clear();
             for indexed_function in indexed {

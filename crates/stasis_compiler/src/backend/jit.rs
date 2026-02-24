@@ -192,13 +192,6 @@ impl JitProcess {
             if function.return_type != TYPE_ID_I32 {
                 continue;
             }
-            if !function
-                .params
-                .iter()
-                .all(|type_id| *type_id == TYPE_ID_I32)
-            {
-                continue;
-            }
             let Ok(arity) = u8::try_from(function.params.len()) else {
                 continue;
             };
@@ -239,13 +232,6 @@ fn collect_supported_i32_call_signatures(functions: &[FunctionMeta]) -> CallSign
         if function.return_type != TYPE_ID_I32 {
             continue;
         }
-        if !function
-            .params
-            .iter()
-            .all(|type_id| *type_id == TYPE_ID_I32)
-        {
-            continue;
-        }
         if function.params.len() > 2 {
             continue;
         }
@@ -283,20 +269,12 @@ fn compile_function_to_jit_module(
     let mut module = JITModule::new(jit_builder);
     let mut context = module.make_context();
     context.func.signature = module.make_signature();
-    for param_type in &meta.params {
-        match *param_type {
-            TYPE_ID_I32 => context
-                .func
-                .signature
-                .params
-                .push(AbiParam::new(types::I32)),
-            other => {
-                return Err(format!(
-                    "unsupported JIT parameter type id {other} for function {}",
-                    meta.name
-                ));
-            }
-        }
+    for _ in &meta.params {
+        context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(types::I32));
     }
     match meta.return_type {
         TYPE_ID_VOID => {}
@@ -1456,6 +1434,40 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute in memory");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_resolves_same_method_name_by_receiver_type() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function damage(enemy: Enemy, amount: i32): i32 { return amount + 1; }\nfunction damage(player: Player, amount: i32): i32 { return amount + 2; }\nfunction main(enemy: Enemy, player: Player): i32 { return enemy.damage(3) + player.damage(3); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_twoarg_by_name("main", 10, 20)
+            .expect("execute in memory");
+        assert_eq!(value, 9);
+    }
+
+    #[test]
+    fn jit_process_rejects_ambiguous_overload_for_same_receiver_shape() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function damage(enemy: Enemy, amount: i32): i32 { return amount + 1; }\nfunction damage(other_enemy: Enemy, amount: i32): i32 { return amount + 2; }\nfunction main(enemy: Enemy): i32 { return enemy.damage(3); }\n",
+        );
+        let error = process.compile().expect_err("expected ambiguous overload");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("ambiguous overload for call target 'damage'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
