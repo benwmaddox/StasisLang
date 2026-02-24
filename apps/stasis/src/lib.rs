@@ -21,8 +21,8 @@ use runtime_exec::RuntimeLauncher;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
-    FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, SwapCommitResult,
-    SwapCommitStatus, TargetMode, TextSource,
+    FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash,
+    RequestId, SwapCommitResult, SwapCommitStatus, TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::BTreeMap;
@@ -176,6 +176,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let swap_failure_reason = config.swap_failure_reason.clone();
     let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
         BTreeMap::new();
+    let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+        BTreeMap::new();
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -217,6 +219,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
 
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
+        capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
             apply_commit_request(
                 request,
@@ -232,6 +235,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 hook_failure_reason.as_ref(),
                 swap_failure_reason.as_ref(),
                 &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
             )
         });
 
@@ -250,6 +254,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         );
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
+            pending_jit_code_ptr_overrides.remove(&request_id);
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -285,6 +290,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         } else if let Some(last_compile) = pipeline.last_compile_result() {
             if last_compile.status == CompileStatus::Failed {
                 pending_aot_metadata.remove(&last_compile.request_id);
+                pending_jit_code_ptr_overrides.remove(&last_compile.request_id);
             }
         }
         if swap_flash_ticks_remaining > 0 {
@@ -302,6 +308,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
 
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
+        capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
             apply_commit_request(
                 request,
@@ -317,6 +324,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 hook_failure_reason.as_ref(),
                 swap_failure_reason.as_ref(),
                 &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
             )
         });
         pipeline.pump_coordinator();
@@ -334,6 +342,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         );
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
+            pending_jit_code_ptr_overrides.remove(&request_id);
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -369,6 +378,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         } else if let Some(last_compile) = pipeline.last_compile_result() {
             if last_compile.status == CompileStatus::Failed {
                 pending_aot_metadata.remove(&last_compile.request_id);
+                pending_jit_code_ptr_overrides.remove(&last_compile.request_id);
             }
         }
         thread::yield_now();
@@ -450,6 +460,24 @@ fn capture_pending_aot_compile_metadata(
         });
 }
 
+fn capture_pending_jit_compile_metadata(
+    pipeline: &DevHotSwapPipeline,
+    pending_jit_code_ptr_overrides: &mut BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
+) {
+    let Some(result) = pipeline.last_compile_result() else {
+        return;
+    };
+    if result.status != CompileStatus::Success {
+        return;
+    }
+    let Some(overrides) = result.jit_code_ptr_overrides.clone() else {
+        return;
+    };
+    pending_jit_code_ptr_overrides
+        .entry(result.request_id)
+        .or_insert(overrides);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_commit_request(
     request: stasis_runner::swap::contracts::SwapCommitRequest,
@@ -465,6 +493,7 @@ fn apply_commit_request(
     hook_failure_reason: Option<&String>,
     swap_failure_reason: Option<&String>,
     pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
+    pending_jit_code_ptr_overrides: &BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
 ) -> SwapCommitResult {
     if !config.disable_on_code_swap_hook {
         if let Some(hook_symbol) = request.hook_symbol.as_deref() {
@@ -526,7 +555,15 @@ fn apply_commit_request(
     }
 
     *swap_commit_successes += 1;
-    let outcome = pointer_table.commit_patch_set(&request.fn_patch_set);
+    let outcome = if config.target_mode == TargetMode::JitDev {
+        if let Some(overrides) = pending_jit_code_ptr_overrides.get(&request.request_id) {
+            pointer_table.commit_patch_set_with_overrides(&request.fn_patch_set, overrides)
+        } else {
+            pointer_table.commit_patch_set(&request.fn_patch_set)
+        }
+    } else {
+        pointer_table.commit_patch_set(&request.fn_patch_set)
+    };
     SwapCommitResult::success(request.request_id, outcome.swapped_fn_ids, outcome.new_generation)
 }
 
@@ -673,6 +710,60 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn apply_commit_request_uses_jit_code_ptr_overrides_when_present() {
+        let request_id = RequestId(44);
+        let request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig::default();
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        assert_eq!(swap_commit_successes, 1);
+        assert_eq!(pointer_table.code_ptr(FnId(9)), Some(stasis_jit::CodePtr(0x9988)));
+    }
 
     #[test]
     fn runner_loop_compiles_and_commits_one_change() {

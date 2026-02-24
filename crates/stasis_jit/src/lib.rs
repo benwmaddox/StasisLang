@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use stasis_runner::swap::contracts::{CodeGeneration, FnId, FunctionPatchSet};
+use stasis_runner::swap::contracts::{CodeGeneration, FnId, FunctionPatchSet, JitCodePtrOverride};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CodePtr(pub u64);
@@ -90,6 +90,48 @@ impl FunctionPointerTable {
         for patch in &patch_set.functions {
             let fn_id = patch.fn_id;
             let code_ptr = make_code_ptr(new_generation, fn_id);
+            self.entries.insert(fn_id, code_ptr);
+            swapped_fn_ids.push(fn_id);
+        }
+
+        if self.generation > 1 {
+            self.pending_retire
+                .push_back(CodeGeneration(self.generation - 1));
+        }
+
+        let mut retired_generations = Vec::new();
+        while self.pending_retire.len() > self.safe_retire_window {
+            if let Some(retired) = self.pending_retire.pop_front() {
+                retired_generations.push(retired);
+            }
+        }
+
+        CommitOutcome {
+            new_generation,
+            swapped_fn_ids,
+            retired_generations,
+        }
+    }
+
+    pub fn commit_patch_set_with_overrides(
+        &mut self,
+        patch_set: &FunctionPatchSet,
+        overrides: &[JitCodePtrOverride],
+    ) -> CommitOutcome {
+        self.generation += 1;
+        let new_generation = CodeGeneration(self.generation);
+        let override_by_fn: BTreeMap<FnId, CodePtr> = overrides
+            .iter()
+            .map(|entry| (entry.fn_id, CodePtr(entry.code_ptr)))
+            .collect();
+
+        let mut swapped_fn_ids = Vec::with_capacity(patch_set.functions.len());
+        for patch in &patch_set.functions {
+            let fn_id = patch.fn_id;
+            let code_ptr = override_by_fn
+                .get(&fn_id)
+                .copied()
+                .unwrap_or_else(|| make_code_ptr(new_generation, fn_id));
             self.entries.insert(fn_id, code_ptr);
             swapped_fn_ids.push(fn_id);
         }
@@ -518,6 +560,21 @@ mod tests {
         assert_eq!(outcome.new_generation, CodeGeneration(2));
         assert_ne!(before, after);
         assert_eq!(after, CodePtr((2_u64 << 32) | 3));
+    }
+
+    #[test]
+    fn commit_with_overrides_applies_explicit_code_ptrs() {
+        let mut table = FunctionPointerTable::new();
+        let patch = patch_set(&[9, 11]);
+        let overrides = vec![JitCodePtrOverride {
+            fn_id: FnId(9),
+            code_ptr: 0x1234,
+        }];
+
+        let outcome = table.commit_patch_set_with_overrides(&patch, &overrides);
+        assert_eq!(outcome.swapped_fn_ids, vec![FnId(9), FnId(11)]);
+        assert_eq!(table.code_ptr(FnId(9)), Some(CodePtr(0x1234)));
+        assert_ne!(table.code_ptr(FnId(11)), Some(CodePtr(0x1234)));
     }
 
     #[test]

@@ -122,6 +122,12 @@ pub struct AotFunctionSymbol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JitCodePtrOverride {
+    pub fn_id: FnId,
+    pub code_ptr: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileStatus {
     Success,
     Failed,
@@ -150,6 +156,8 @@ pub struct CompileResult {
     pub aot_linked_image_sha256: Option<String>,
     #[serde(default)]
     pub aot_function_symbols: Option<Vec<AotFunctionSymbol>>,
+    #[serde(default)]
+    pub jit_code_ptr_overrides: Option<Vec<JitCodePtrOverride>>,
 }
 
 impl CompileResult {
@@ -211,6 +219,7 @@ impl CompileResult {
             aot_linked_image_size_bytes,
             aot_linked_image_sha256,
             aot_function_symbols,
+            jit_code_ptr_overrides: None,
         }
     }
 
@@ -230,6 +239,7 @@ impl CompileResult {
             aot_linked_image_size_bytes: None,
             aot_linked_image_sha256: None,
             aot_function_symbols: None,
+            jit_code_ptr_overrides: None,
         }
     }
 }
@@ -334,6 +344,7 @@ mod tests {
         assert_eq!(result.aot_linked_image_size_bytes, None);
         assert_eq!(result.aot_linked_image_sha256, None);
         assert_eq!(result.aot_function_symbols, None);
+        assert_eq!(result.jit_code_ptr_overrides, None);
     }
 
     #[test]
@@ -389,6 +400,7 @@ mod tests {
                 symbol: "fn_55".to_string(),
             }])
         );
+        assert_eq!(result.jit_code_ptr_overrides, None);
     }
 
     #[test]
@@ -416,6 +428,7 @@ mod tests {
         assert!(result.aot_linked_image_size_bytes.is_none());
         assert!(result.aot_linked_image_sha256.is_none());
         assert!(result.aot_function_symbols.is_none());
+        assert!(result.jit_code_ptr_overrides.is_none());
     }
 
     #[test]

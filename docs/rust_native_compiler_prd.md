@@ -45,6 +45,8 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - JIT emits an in-process engine package (`tick`/`render`/optional `on_code_swap` -> code pointers) for runtime embedding.
 - AOT emits an engine bundle (object files + manifest) with required entrypoints validated before output.
 - Runtime/graphics ownership target: keep windowing/render-loop integration in Rust host runtime code; dev uses `JitEnginePackage` as active execution handoff, prod uses `AotEngineBundle`.
+- `apps/stasis` real backend now uses an engine-mode in-process fast path (`tick` + `render` present) that bypasses legacy external-analysis host compile for that mode and emits compile contracts from rust-native process outputs.
+- Dev runtime commit path now accepts JIT pointer overrides (`FnId -> code_ptr`) carried through compile results, allowing pointer-table commits to apply real JIT function pointers when present.
 - Removed backend trait indirection from the core compiler trial path.
 - Wired real Cranelift emission in both mode processes for currently supported function bodies:
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.

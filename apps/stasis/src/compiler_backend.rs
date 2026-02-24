@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
+use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
+use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::frontend::parser::parse_top_level_functions;
 use stasis_compiler::{IncrementalCompilerHost, SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
     compile_clif_to_object, link_objects_to_dynamic_library, link_objects_to_executable,
@@ -7,7 +11,7 @@ use stasis_jit::{
 };
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, Diagnostic, DiagnosticSeverity, FnId,
-    FunctionPatch, FunctionPatchSet, LayoutHash, RequestId, TargetMode,
+    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, RequestId, TargetMode,
 };
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,12 +20,15 @@ use std::path::{Path, PathBuf};
 
 pub struct IncrementalCompilerBackend {
     host: IncrementalCompilerHost,
+    source_by_path: BTreeMap<String, String>,
     fn_id_by_signature: BTreeMap<String, FnId>,
     next_fn_id: u32,
     aot_compile_config: AotCompileConfig,
     aot_link_config: AotLinkConfig,
     aot_artifact_root: std::path::PathBuf,
     enable_aot_link_step: bool,
+    last_jit_engine_package: Option<JitEnginePackage>,
+    last_aot_engine_bundle: Option<AotEngineBundle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +76,23 @@ struct SelfHostObjectBundle {
     object_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineFunctionEntry {
+    path: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestFunctionRow {
+    name: String,
+    symbol: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifest {
+    functions: Vec<EngineBundleManifestFunctionRow>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SelfHostCliEnvSnapshot {
     strict_self_host: bool,
@@ -99,6 +123,7 @@ impl IncrementalCompilerBackend {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         Self {
             host: IncrementalCompilerHost::new(),
+            source_by_path: BTreeMap::new(),
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config: AotCompileConfig::default(),
@@ -107,6 +132,8 @@ impl IncrementalCompilerBackend {
             enable_aot_link_step: std::env::var("STASIS_AOT_LINK_ARTIFACTS")
                 .ok()
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+            last_jit_engine_package: None,
+            last_aot_engine_bundle: None,
         }
     }
 
@@ -124,12 +151,15 @@ impl IncrementalCompilerBackend {
     ) -> Self {
         Self {
             host: IncrementalCompilerHost::new(),
+            source_by_path: BTreeMap::new(),
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config,
             aot_link_config: AotLinkConfig::default(),
             aot_artifact_root,
             enable_aot_link_step: false,
+            last_jit_engine_package: None,
+            last_aot_engine_bundle: None,
         }
     }
 
@@ -142,12 +172,15 @@ impl IncrementalCompilerBackend {
     ) -> Self {
         Self {
             host: IncrementalCompilerHost::new(),
+            source_by_path: BTreeMap::new(),
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config,
             aot_link_config,
             aot_artifact_root,
             enable_aot_link_step,
+            last_jit_engine_package: None,
+            last_aot_engine_bundle: None,
         }
     }
 
@@ -173,6 +206,32 @@ impl Default for IncrementalCompilerBackend {
 
 impl CompilerBackend for IncrementalCompilerBackend {
     fn compile(&mut self, request: CompileRequest) -> CompileResult {
+        self.last_jit_engine_package = None;
+        self.last_aot_engine_bundle = None;
+        if let Err(message) = self.refresh_cached_sources(&request.changed_files) {
+            return CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message,
+                    path: request.changed_files.first().cloned(),
+                    line: None,
+                    column: None,
+                }],
+            );
+        }
+
+        let has_tick_entrypoint = self.source_cache_has_function("tick");
+        let has_render_entrypoint = self.source_cache_has_function("render");
+        let has_on_code_swap_entrypoint = self.source_cache_has_function("on_code_swap");
+        let use_engine_mode_contracts = has_tick_entrypoint && has_render_entrypoint;
+        if use_engine_mode_contracts {
+            return self.compile_engine_mode_contract_request(
+                &request,
+                has_on_code_swap_entrypoint,
+            );
+        }
+
         let parsed = match self.host.compile_changed_files(&request.changed_files) {
             Ok(result) => result,
             Err(message) => {
@@ -347,6 +406,413 @@ impl IncrementalCompilerBackend {
         self.fn_id_by_signature
             .iter()
             .find_map(|(key, fn_id)| key.contains(&token).then_some(*fn_id))
+    }
+
+    fn compile_engine_mode_contract_request(
+        &mut self,
+        request: &CompileRequest,
+        include_on_code_swap: bool,
+    ) -> CompileResult {
+        let function_entries = match self.collect_cached_function_entries() {
+            Ok(entries) => entries,
+            Err(message) => {
+                return CompileResult::failed(
+                    request.request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: request.changed_files.first().cloned(),
+                        line: None,
+                        column: None,
+                    }],
+                );
+            }
+        };
+
+        let mut aot_linked_image_path: Option<PathBuf> = None;
+        let mut aot_linked_image_size_bytes: Option<u64> = None;
+        let mut aot_linked_image_sha256: Option<String> = None;
+        let mut manifest_rows: Vec<EngineBundleManifestFunctionRow> = Vec::new();
+
+        match request.target_mode {
+            TargetMode::JitDev => {
+                if let Err(message) = self.compile_jit_engine_package_from_cache(include_on_code_swap)
+                {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message,
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                }
+            }
+            TargetMode::AotProd => {
+                let bundle = match self
+                    .compile_aot_engine_bundle_from_cache(request.request_id.0, include_on_code_swap)
+                {
+                    Ok(bundle) => bundle,
+                    Err(message) => {
+                        return CompileResult::failed(
+                            request.request_id,
+                            vec![Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message,
+                                path: request.changed_files.first().cloned(),
+                                line: None,
+                                column: None,
+                            }],
+                        );
+                    }
+                };
+                aot_linked_image_path = Some(bundle.manifest_path.clone());
+                let metadata = std::fs::metadata(&bundle.manifest_path).map_err(|error| {
+                    CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "failed to stat AOT engine bundle manifest {}: {error}",
+                                bundle.manifest_path.display()
+                            ),
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    )
+                });
+                match metadata {
+                    Ok(meta) => aot_linked_image_size_bytes = Some(meta.len()),
+                    Err(result) => return result,
+                }
+                let digest = compute_file_sha256_hex(&bundle.manifest_path).map_err(|error| {
+                    CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "failed to hash AOT engine bundle manifest {}: {error}",
+                                bundle.manifest_path.display()
+                            ),
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    )
+                });
+                match digest {
+                    Ok(hash) => aot_linked_image_sha256 = Some(hash),
+                    Err(result) => return result,
+                }
+                let manifest = match self.read_engine_bundle_manifest(&bundle.manifest_path) {
+                    Ok(manifest) => manifest,
+                    Err(message) => {
+                        return CompileResult::failed(
+                            request.request_id,
+                            vec![Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message,
+                                path: request.changed_files.first().cloned(),
+                                line: None,
+                                column: None,
+                            }],
+                        );
+                    }
+                };
+                manifest_rows = manifest.functions;
+            }
+        }
+
+        let mut functions = Vec::new();
+        let mut hook_fn_id: Option<FnId> = None;
+        let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
+        for entry in &function_entries {
+            let key = format!("rust_native::{}::{}", entry.path, entry.name);
+            let fn_id = match self.fn_id_for_key(&key) {
+                Ok(id) => id,
+                Err(message) => {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message,
+                            path: None,
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                }
+            };
+            if let Some(previous) = fn_id_by_name.insert(entry.name.clone(), fn_id) {
+                if previous != fn_id {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "duplicate function name '{}' across files is not supported in engine contract mode",
+                                entry.name
+                            ),
+                            path: None,
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                }
+            }
+            if entry.name == "on_code_swap" {
+                hook_fn_id = Some(fn_id);
+            }
+            functions.push(FunctionPatch { fn_id });
+        }
+
+        let aot_function_symbols = if request.target_mode == TargetMode::AotProd {
+            let mut symbols = Vec::new();
+            for row in manifest_rows {
+                let Some(fn_id) = fn_id_by_name.get(&row.name).copied() else {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "AOT engine bundle manifest symbol row '{}' has no matching function mapping",
+                                row.name
+                            ),
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                };
+                symbols.push(AotFunctionSymbol {
+                    fn_id,
+                    symbol: row.symbol,
+                });
+            }
+            Some(symbols)
+        } else {
+            None
+        };
+
+        let jit_code_ptr_overrides = if request.target_mode == TargetMode::JitDev {
+            let Some(package) = self.last_jit_engine_package.as_ref() else {
+                return CompileResult::failed(
+                    request.request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "missing JIT engine package after successful JIT compile"
+                            .to_string(),
+                        path: request.changed_files.first().cloned(),
+                        line: None,
+                        column: None,
+                    }],
+                );
+            };
+            let mut overrides = Vec::new();
+            for (name, fn_id) in &fn_id_by_name {
+                let Some(code_ptr) = package.symbol_code_ptrs.get(name).copied() else {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!(
+                                "JIT engine package missing symbol pointer for function '{}'",
+                                name
+                            ),
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                };
+                overrides.push(JitCodePtrOverride {
+                    fn_id: *fn_id,
+                    code_ptr,
+                });
+            }
+            Some(overrides)
+        } else {
+            None
+        };
+
+        let mut result = CompileResult::success_with_host_set_metadata(
+            request.request_id,
+            self.layout_hash_from_source_cache(),
+            FunctionPatchSet { functions },
+            request.host_set_id.clone(),
+            request.host_set_hash,
+            include_on_code_swap.then(|| "on_code_swap".to_string()),
+            hook_fn_id,
+            aot_linked_image_path,
+            aot_linked_image_size_bytes,
+            aot_linked_image_sha256,
+            aot_function_symbols,
+        );
+        result.jit_code_ptr_overrides = jit_code_ptr_overrides;
+        result
+    }
+
+    fn refresh_cached_sources(&mut self, changed_files: &[PathBuf]) -> Result<(), String> {
+        for path in changed_files {
+            let key = path.to_string_lossy().to_string();
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let source = String::from_utf8_lossy(&bytes).to_string();
+                    self.source_by_path.insert(key, source);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.source_by_path.remove(&key);
+                }
+                Err(error) => {
+                    return Err(format!("failed reading {}: {error}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn source_cache_has_function(&self, function_name: &str) -> bool {
+        let needle = format!("function {function_name}(");
+        self.source_by_path
+            .values()
+            .any(|source| source.contains(&needle))
+    }
+
+    fn collect_cached_function_entries(&self) -> Result<Vec<EngineFunctionEntry>, String> {
+        let mut entries = Vec::new();
+        for (path, source) in &self.source_by_path {
+            let parsed = parse_top_level_functions(source).map_err(|error| {
+                format!("failed to parse top-level functions in {path} for engine mode: {error}")
+            })?;
+            for function in parsed {
+                entries.push(EngineFunctionEntry {
+                    path: path.clone(),
+                    name: function.name,
+                });
+            }
+        }
+        if entries.is_empty() {
+            return Err(
+                "engine contract mode requires at least one function in cached source set"
+                    .to_string(),
+            );
+        }
+        Ok(entries)
+    }
+
+    fn read_engine_bundle_manifest(&self, path: &Path) -> Result<EngineBundleManifest, String> {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read AOT engine bundle manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&text).map_err(|error| {
+            format!(
+                "failed to parse AOT engine bundle manifest {}: {error}",
+                path.display()
+            )
+        })
+    }
+
+    fn layout_hash_from_source_cache(&self) -> LayoutHash {
+        let mut hasher = Sha256::new();
+        for (path, source) in &self.source_by_path {
+            hasher.update(path.as_bytes());
+            hasher.update([0u8]);
+            hasher.update(source.as_bytes());
+            hasher.update([0xffu8]);
+        }
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        LayoutHash(bytes)
+    }
+
+    fn compile_jit_engine_package_from_cache(
+        &mut self,
+        include_on_code_swap: bool,
+    ) -> Result<(), String> {
+        let mut process = JitProcess::new();
+        for (path, source) in &self.source_by_path {
+            process.upsert_file(path.clone(), source.clone());
+        }
+        process
+            .compile()
+            .map_err(|error| format!("rust-native JIT engine compile failed: {error:?}"))?;
+        let package = process
+            .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
+            .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
+        self.last_jit_engine_package = Some(package);
+        Ok(())
+    }
+
+    fn compile_aot_engine_bundle_from_cache(
+        &mut self,
+        request_id: u64,
+        include_on_code_swap: bool,
+    ) -> Result<AotEngineBundle, String> {
+        let mut process = AotProcess::with_optimization_profile(
+            Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
+        );
+        for (path, source) in &self.source_by_path {
+            process.upsert_file(path.clone(), source.clone());
+        }
+        process
+            .compile()
+            .map_err(|error| format!("rust-native AOT engine compile failed: {error:?}"))?;
+
+        let bundle_output_dir = self
+            .aot_artifact_root
+            .join("engine_bundle")
+            .join(format!("request_{}", request_id));
+        if bundle_output_dir.exists() {
+            std::fs::remove_dir_all(&bundle_output_dir).map_err(|error| {
+                format!(
+                    "failed to clear existing AOT engine bundle directory {}: {error}",
+                    bundle_output_dir.display()
+                )
+            })?;
+        }
+
+        let bundle = process.write_engine_bundle(
+            &Self::engine_entrypoints(include_on_code_swap),
+            &bundle_output_dir,
+        )?;
+        self.last_aot_engine_bundle = Some(bundle.clone());
+        Ok(bundle)
+    }
+
+    fn engine_entrypoints(include_on_code_swap: bool) -> EngineEntrypoints {
+        EngineEntrypoints {
+            tick: "tick".to_string(),
+            render: "render".to_string(),
+            on_code_swap: include_on_code_swap.then(|| "on_code_swap".to_string()),
+        }
+    }
+
+    fn aot_optimization_profile_from_compile_config(
+        config: &AotCompileConfig,
+    ) -> AotOptimizationProfile {
+        match config.opt_level.as_str() {
+            "none" => AotOptimizationProfile::None,
+            "speed_and_size" => AotOptimizationProfile::SpeedAndSize,
+            "speed" => AotOptimizationProfile::Speed,
+            _ => AotOptimizationProfile::Speed,
+        }
+    }
+
+    #[cfg(test)]
+    fn last_jit_engine_package(&self) -> Option<&JitEnginePackage> {
+        self.last_jit_engine_package.as_ref()
+    }
+
+    #[cfg(test)]
+    fn last_aot_engine_bundle(&self) -> Option<&AotEngineBundle> {
+        self.last_aot_engine_bundle.as_ref()
     }
 
     fn emit_aot_artifacts(
@@ -2743,6 +3209,85 @@ mod tests {
             hash,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_with_engine_entrypoints_builds_jit_engine_package_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_engine_package_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_100),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let jit_overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit overrides should be present in engine JIT mode");
+        assert!(
+            !jit_overrides.is_empty(),
+            "jit overrides should include compiled function pointers"
+        );
+        assert!(
+            jit_overrides.iter().all(|entry| entry.code_ptr != 0),
+            "jit overrides should carry non-zero pointers"
+        );
+        let package = backend
+            .last_jit_engine_package()
+            .expect("jit engine package should be present");
+        assert!(package.tick_code_ptr != 0);
+        assert!(package.render_code_ptr != 0);
+        assert!(package.on_code_swap_code_ptr.is_some());
+        assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_prod_with_engine_entrypoints_builds_aot_engine_bundle_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_engine_bundle_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_101),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("aot engine bundle should be present");
+        assert!(bundle.manifest_path.exists());
+        assert!(bundle.object_paths_by_function.contains_key("tick"));
+        assert!(bundle.object_paths_by_function.contains_key("render"));
+        assert_eq!(result.aot_linked_image_path, Some(bundle.manifest_path.clone()));
+        assert!(result.aot_linked_image_size_bytes.is_some());
+        assert!(result.aot_linked_image_sha256.is_some());
+        assert!(backend.last_jit_engine_package().is_none());
         fs::remove_dir_all(&temp_root).ok();
     }
 

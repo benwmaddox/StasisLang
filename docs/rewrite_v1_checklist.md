@@ -586,6 +586,8 @@ It is not part of the steady-state incremental JIT update loop.
 - In production/release path, use AOT bundle outputs (`AotEngineBundle`) for packaged/runtime execution.
 - Add deferred engine-overhead benchmark/test (`package/load/swap/render-loop`) and baseline it separately from compiler-only timings.
 - Strengthen Windows executable/runtime parity smokes (JIT + AOT) on Brickout-oriented scenarios.
+- Lane B progress note:
+- Runtime commit path now supports JIT `FnId -> code_ptr` override application sourced from compile results when available (dev path can consume real JIT pointers instead of synthetic placeholder pointer generation).
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
 - Scope anchor doc: `docs/compiler_prd_v2_compile_speed.md`.
 - Target gates:
@@ -628,6 +630,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added dedicated in-memory reachability closure unit coverage (transitive roots, required roots, no-root fallback) to keep this boundary stable without shell-out tests.
 - Cross-file reachability regression runtime dropped from ~239s to ~5.6s on local machine after this change.
 - Host analysis harness source loading now emits chunked `ascii_append(...)` spans (with byte fallback for unsafe bytes) and writes harness files into stable per-host slots (`.stasis_cache/compiler_host/pid_<pid>_session_<id>/slot_<n>`), reducing path churn while avoiding cross-process/test collisions.
+- `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
 - Remaining for CS1 done gate: remove per-changed-file `analyze_source_via_stasis` external process path so normal compile stays fully in-process.
 - Status: `in_progress`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
