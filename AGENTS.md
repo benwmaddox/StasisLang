@@ -124,4 +124,12 @@
 - Good: replacing the copied orchestration file with a fresh single-pass parser immediately clarified scope and ownership.
 - Bad: initial rewrite used unsupported control-flow keywords (`break`/`continue`), causing avoidable bootstrap failures.
 - Adjustment: after the first parser chunk, run one bootstrap fixture immediately to validate language-surface assumptions before adding more code.
+- Current reflection (2026-02-23, struct-layout reachability slice):
+- Good: wiring struct/global pruning directly in `.stasis` kept the change small and testable while preserving host-glue boundaries.
+- Bad: direct bootstrap fixture execution exceeded the 60-second command budget and is too slow for routine slice verification.
+- Adjustment: default slice verification to bounded Rust-side harness tests for fast feedback, and run bootstrap fixture commands only as explicitly budgeted checks.
+- Current reflection (2026-02-24, host-required root wiring slice):
+- Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
+- Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.
+- Adjustment: introduce a small explicit compile-config object in Rust host next, so required roots and future compile flags are passed through one typed path.
 

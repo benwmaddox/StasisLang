@@ -13,6 +13,14 @@ const COMPILER_MAX_TRACKED_PARAM_HASHES: i32 = 4;
 const COMPILER_MAX_EVAL_BINDINGS: i32 = 256;
 const COMPILER_MAX_EVAL_CALL_DEPTH: i32 = 16;
 const COMPILER_MAX_EVAL_CALL_ARGS: i32 = 4;
+const COMPILER_MAX_LAYOUT_STRUCTS: i32 = 64;
+const COMPILER_MAX_LAYOUT_GLOBALS: i32 = 64;
+const COMPILER_MAX_LAYOUT_FIELDS_PER_DECL: i32 = 32;
+const COMPILER_MAX_LAYOUT_FLAT_FIELDS: i32 = 2048;
+const COMPILER_MAX_FUNCTION_CALL_EDGES: i32 = 8;
+const COMPILER_MAX_REQUIRED_REACHABILITY_ROOTS: i32 = 64;
+const COMPILER_MAX_FILE_FUNCTION_SLOTS: i32 = 65536;
+const COMPILER_MAX_FILE_FUNCTION_CALL_EDGE_SLOTS: i32 = 524288;
 
 enum CompilerErrorCode {
     None = 0,
@@ -173,6 +181,8 @@ struct CompilerState {
     function_id_hashes: i32[512];
     function_sig_hashes: i32[512];
     function_body_hashes: i32[512];
+    function_signature_start_tokens: i32[512];
+    function_signature_end_tokens: i32[512];
     function_body_start_tokens: i32[512];
     function_body_end_tokens: i32[512];
     function_param_name_hashes: i32[2048];
@@ -181,9 +191,35 @@ struct CompilerState {
     function_first_param_type_codes: i32[512];
     function_simple_i32_return_literal_flags: i32[512];
     function_simple_i32_return_literals: i32[512];
+    function_call_edge_counts: i32[512];
+    function_call_edge_hashes: i32[4096];
+    file_function_reachable_flags: i32[65536];
+    file_function_call_edge_counts: i32[65536];
+    file_function_call_edge_hashes: i32[524288];
+    function_reachable_flags: i32[512];
+    reachability_queue: i32[512];
+    required_reachability_root_count: i32;
+    required_reachability_root_hashes: i32[64];
     parsed_main_declaration_count: i32;
     parsed_main_valid_i32_count: i32;
     parsed_main_invalid_signature_count: i32;
+    layout_struct_count: i32;
+    layout_struct_name_hashes: i32[64];
+    layout_struct_field_counts: i32[64];
+    layout_struct_field_name_hashes: i32[2048];
+    layout_struct_field_type_hashes: i32[2048];
+    layout_struct_reachable_flags: i32[64];
+    layout_struct_reachability_queue: i32[64];
+    layout_global_count: i32;
+    layout_global_name_hashes: i32[64];
+    layout_global_field_counts: i32[64];
+    layout_global_field_name_hashes: i32[2048];
+    layout_global_field_type_hashes: i32[2048];
+    layout_global_reachable_flags: i32[64];
+    layout_flat_field_count: i32;
+    layout_flat_field_path_hashes: i32[2048];
+    layout_flat_field_offsets: i32[2048];
+    layout_memory_size_bytes: i32;
 
     captured_identifier_start: i32;
     captured_identifier_len: i32;
@@ -203,6 +239,7 @@ struct CompilerState {
     eval_binding_name_hashes: i32[256];
     eval_binding_values: i32[256];
     eval_field_count: i32;
+    eval_field_used: i32[256];
     eval_field_path_hashes: i32[256];
     eval_field_values: i32[256];
     eval_call_depth: i32;

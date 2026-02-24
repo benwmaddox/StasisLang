@@ -13,6 +13,34 @@ function compiler_reset_current_parse_metrics(): void {
     Compiler.parsed_main_declaration_count = 0;
     Compiler.parsed_main_valid_i32_count = 0;
     Compiler.parsed_main_invalid_signature_count = 0;
+    Compiler.layout_struct_count = 0;
+    Compiler.layout_global_count = 0;
+    Compiler.layout_flat_field_count = 0;
+    Compiler.layout_memory_size_bytes = 0;
+    let reachability_reset_index: i32 = 0;
+    for (reachability_reset_index = 0; reachability_reset_index < COMPILER_MAX_TRACKED_FUNCTIONS; reachability_reset_index += 1) {
+        Compiler.function_reachable_flags[reachability_reset_index] = 0;
+        Compiler.reachability_queue[reachability_reset_index] = 0;
+        Compiler.function_signature_start_tokens[reachability_reset_index] = 0;
+        Compiler.function_signature_end_tokens[reachability_reset_index] = 0;
+        Compiler.function_body_start_tokens[reachability_reset_index] = 0;
+        Compiler.function_body_end_tokens[reachability_reset_index] = 0;
+        Compiler.function_call_edge_counts[reachability_reset_index] = 0;
+        let call_edge_reset_index: i32 = 0;
+        for (call_edge_reset_index = 0; call_edge_reset_index < COMPILER_MAX_FUNCTION_CALL_EDGES; call_edge_reset_index += 1) {
+            Compiler.function_call_edge_hashes[
+                reachability_reset_index * COMPILER_MAX_FUNCTION_CALL_EDGES + call_edge_reset_index
+            ] = 0;
+        }
+    }
+    let layout_reachability_reset_index: i32 = 0;
+    for (layout_reachability_reset_index = 0; layout_reachability_reset_index < COMPILER_MAX_LAYOUT_STRUCTS; layout_reachability_reset_index += 1) {
+        Compiler.layout_struct_reachable_flags[layout_reachability_reset_index] = 0;
+        Compiler.layout_struct_reachability_queue[layout_reachability_reset_index] = 0;
+    }
+    for (layout_reachability_reset_index = 0; layout_reachability_reset_index < COMPILER_MAX_LAYOUT_GLOBALS; layout_reachability_reset_index += 1) {
+        Compiler.layout_global_reachable_flags[layout_reachability_reset_index] = 0;
+    }
 
     Compiler.captured_identifier_start = 0;
     Compiler.captured_identifier_len = 0;
@@ -32,7 +60,7 @@ function compiler_reset_current_parse_metrics(): void {
     ascii_clear(Compiler.clif_symbol_buffer);
 
     Compiler.eval_binding_count = 0;
-    Compiler.eval_field_count = 0;
+    compiler_eval_clear_field_table();
     Compiler.eval_call_depth = 0;
     Compiler.eval_cursor = 0;
     Compiler.eval_last_i32 = 0;
@@ -56,6 +84,16 @@ function compiler_reset_state(): void {
     Compiler.source_len = 0;
     Compiler.file_count = 0;
     Compiler.current_file_index = -1;
+    let file_function_slot: i32 = 0;
+    for (file_function_slot = 0; file_function_slot < COMPILER_MAX_FILE_FUNCTION_SLOTS; file_function_slot += 1) {
+        Compiler.file_function_reachable_flags[file_function_slot] = 0;
+        Compiler.file_function_call_edge_counts[file_function_slot] = 0;
+    }
+    let file_function_edge_slot: i32 = 0;
+    for (file_function_edge_slot = 0; file_function_edge_slot < COMPILER_MAX_FILE_FUNCTION_CALL_EDGE_SLOTS; file_function_edge_slot += 1) {
+        Compiler.file_function_call_edge_hashes[file_function_edge_slot] = 0;
+    }
+    compiler_clear_required_reachability_roots();
     compiler_reset_current_parse_metrics();
     compiler_reset_run_counters();
 }
@@ -87,6 +125,182 @@ function compiler_hash_source_span(hash: i32, start: i32, len: i32): i32 {
         out = compiler_hash_mix(out, u8_to_i32(Compiler.source[start + i]));
     }
     return out;
+}
+
+function compiler_layout_extend_path_hash(path_hash: i32, segment_hash: i32): i32 {
+    let out: i32 = compiler_hash_mix(path_hash, 46);
+    return compiler_hash_mix(out, segment_hash);
+}
+
+function compiler_layout_find_struct_index(name_hash: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.layout_struct_count; i += 1) {
+        if (Compiler.layout_struct_name_hashes[i] == name_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_layout_find_global_index(name_hash: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.layout_global_count; i += 1) {
+        if (Compiler.layout_global_name_hashes[i] == name_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_layout_begin_struct(name_hash: i32): i32 {
+    let existing: i32 = compiler_layout_find_struct_index(name_hash);
+    if (existing >= 0) {
+        Compiler.layout_struct_field_counts[existing] = 0;
+        return existing;
+    }
+    if (Compiler.layout_struct_count >= COMPILER_MAX_LAYOUT_STRUCTS) {
+        return -1;
+    }
+    let index: i32 = Compiler.layout_struct_count;
+    Compiler.layout_struct_count += 1;
+    Compiler.layout_struct_name_hashes[index] = name_hash;
+    Compiler.layout_struct_field_counts[index] = 0;
+    return index;
+}
+
+function compiler_layout_begin_global(name_hash: i32): i32 {
+    let existing: i32 = compiler_layout_find_global_index(name_hash);
+    if (existing >= 0) {
+        Compiler.layout_global_field_counts[existing] = 0;
+        return existing;
+    }
+    if (Compiler.layout_global_count >= COMPILER_MAX_LAYOUT_GLOBALS) {
+        return -1;
+    }
+    let index: i32 = Compiler.layout_global_count;
+    Compiler.layout_global_count += 1;
+    Compiler.layout_global_name_hashes[index] = name_hash;
+    Compiler.layout_global_field_counts[index] = 0;
+    return index;
+}
+
+function compiler_layout_add_struct_field(struct_index: i32, field_name_hash: i32, field_type_hash: i32): bool {
+    if (struct_index < 0 || struct_index >= Compiler.layout_struct_count) {
+        return false;
+    }
+    let count: i32 = Compiler.layout_struct_field_counts[struct_index];
+    if (count >= COMPILER_MAX_LAYOUT_FIELDS_PER_DECL) {
+        return false;
+    }
+    let slot: i32 = struct_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + count;
+    Compiler.layout_struct_field_name_hashes[slot] = field_name_hash;
+    Compiler.layout_struct_field_type_hashes[slot] = field_type_hash;
+    Compiler.layout_struct_field_counts[struct_index] = count + 1;
+    return true;
+}
+
+function compiler_layout_add_global_field(global_index: i32, field_name_hash: i32, field_type_hash: i32): bool {
+    if (global_index < 0 || global_index >= Compiler.layout_global_count) {
+        return false;
+    }
+    let count: i32 = Compiler.layout_global_field_counts[global_index];
+    if (count >= COMPILER_MAX_LAYOUT_FIELDS_PER_DECL) {
+        return false;
+    }
+    let slot: i32 = global_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + count;
+    Compiler.layout_global_field_name_hashes[slot] = field_name_hash;
+    Compiler.layout_global_field_type_hashes[slot] = field_type_hash;
+    Compiler.layout_global_field_counts[global_index] = count + 1;
+    return true;
+}
+
+function compiler_layout_find_flat_field_offset(path_hash: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.layout_flat_field_count; i += 1) {
+        if (Compiler.layout_flat_field_path_hashes[i] == path_hash) {
+            return Compiler.layout_flat_field_offsets[i];
+        }
+    }
+    return -1;
+}
+
+function compiler_layout_append_flat_field(path_hash: i32): bool {
+    let existing_offset: i32 = compiler_layout_find_flat_field_offset(path_hash);
+    if (existing_offset >= 0) {
+        return true;
+    }
+    if (Compiler.layout_flat_field_count >= COMPILER_MAX_LAYOUT_FLAT_FIELDS) {
+        return false;
+    }
+    let slot: i32 = Compiler.layout_flat_field_count;
+    Compiler.layout_flat_field_count += 1;
+    Compiler.layout_flat_field_path_hashes[slot] = path_hash;
+    Compiler.layout_flat_field_offsets[slot] = Compiler.layout_memory_size_bytes;
+    Compiler.layout_memory_size_bytes += 4;
+    return true;
+}
+
+function compiler_layout_resolve_type_into_paths(type_hash: i32, path_hash: i32, depth: i32): bool {
+    if (depth > COMPILER_MAX_LAYOUT_FIELDS_PER_DECL) {
+        return false;
+    }
+    if (type_hash == compiler_hash_ascii("i32")) {
+        return compiler_layout_append_flat_field(path_hash);
+    }
+
+    let struct_index: i32 = compiler_layout_find_struct_index(type_hash);
+    if (struct_index < 0) {
+        return compiler_layout_append_flat_field(path_hash);
+    }
+
+    let field_count: i32 = Compiler.layout_struct_field_counts[struct_index];
+    let i: i32 = 0;
+    for (i = 0; i < field_count; i += 1) {
+        let slot: i32 = struct_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + i;
+        let nested_path_hash: i32 = compiler_layout_extend_path_hash(
+            path_hash,
+            Compiler.layout_struct_field_name_hashes[slot]
+        );
+        if (
+            !compiler_layout_resolve_type_into_paths(
+                Compiler.layout_struct_field_type_hashes[slot],
+                nested_path_hash,
+                depth + 1
+            )
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function compiler_build_flat_layout_paths(): bool {
+    Compiler.layout_flat_field_count = 0;
+    Compiler.layout_memory_size_bytes = 0;
+
+    let global_index: i32 = 0;
+    for (global_index = 0; global_index < Compiler.layout_global_count; global_index += 1) {
+        let global_name_hash: i32 = Compiler.layout_global_name_hashes[global_index];
+        let field_count: i32 = Compiler.layout_global_field_counts[global_index];
+        let field_index: i32 = 0;
+        for (field_index = 0; field_index < field_count; field_index += 1) {
+            let slot: i32 = global_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+            let field_path_hash: i32 = compiler_layout_extend_path_hash(
+                global_name_hash,
+                Compiler.layout_global_field_name_hashes[slot]
+            );
+            if (
+                !compiler_layout_resolve_type_into_paths(
+                    Compiler.layout_global_field_type_hashes[slot],
+                    field_path_hash,
+                    0
+                )
+            ) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 function compiler_push_error(code: i32, pos: i32, detail_a: i32, detail_b: i32): void {
@@ -121,6 +335,8 @@ function compiler_record_current_function(
     first_param_type_code: i32,
     simple_i32_return_literal_flag: i32,
     simple_i32_return_literal_value: i32,
+    signature_start_token: i32,
+    signature_end_token: i32,
     body_start_token: i32,
     body_end_token: i32
 ): void {
@@ -133,6 +349,8 @@ function compiler_record_current_function(
     Compiler.function_id_hashes[index] = id_hash;
     Compiler.function_sig_hashes[index] = sig_hash;
     Compiler.function_body_hashes[index] = body_hash;
+    Compiler.function_signature_start_tokens[index] = signature_start_token;
+    Compiler.function_signature_end_tokens[index] = signature_end_token;
     Compiler.function_body_start_tokens[index] = body_start_token;
     Compiler.function_body_end_tokens[index] = body_end_token;
     Compiler.function_return_type_codes[index] = return_type_code;
@@ -145,6 +363,65 @@ function compiler_record_current_function(
     Compiler.function_param_name_hashes[param_base + 1] = Compiler.current_signature_param_name_hashes[1];
     Compiler.function_param_name_hashes[param_base + 2] = Compiler.current_signature_param_name_hashes[2];
     Compiler.function_param_name_hashes[param_base + 3] = Compiler.current_signature_param_name_hashes[3];
+    compiler_record_function_call_edges(index, body_start_token, body_end_token);
+}
+
+function compiler_clear_function_call_edges(index: i32): void {
+    if (index < 0 || index >= COMPILER_MAX_TRACKED_FUNCTIONS) {
+        return;
+    }
+    Compiler.function_call_edge_counts[index] = 0;
+    let i: i32 = 0;
+    for (i = 0; i < COMPILER_MAX_FUNCTION_CALL_EDGES; i += 1) {
+        Compiler.function_call_edge_hashes[index * COMPILER_MAX_FUNCTION_CALL_EDGES + i] = 0;
+    }
+}
+
+function compiler_add_function_call_edge(index: i32, callee_hash: i32): void {
+    if (index < 0 || index >= Compiler.tracked_function_count) {
+        return;
+    }
+    if (callee_hash == 0) {
+        return;
+    }
+    let count: i32 = Compiler.function_call_edge_counts[index];
+    let edge_index: i32 = 0;
+    for (edge_index = 0; edge_index < count; edge_index += 1) {
+        if (
+            Compiler.function_call_edge_hashes[
+                index * COMPILER_MAX_FUNCTION_CALL_EDGES + edge_index
+            ] == callee_hash
+        ) {
+            return;
+        }
+    }
+    if (count >= COMPILER_MAX_FUNCTION_CALL_EDGES) {
+        return;
+    }
+    Compiler.function_call_edge_hashes[
+        index * COMPILER_MAX_FUNCTION_CALL_EDGES + count
+    ] = callee_hash;
+    Compiler.function_call_edge_counts[index] = count + 1;
+}
+
+function compiler_record_function_call_edges(index: i32, body_start_token: i32, body_end_token: i32): void {
+    compiler_clear_function_call_edges(index);
+    if (
+        body_start_token < 0 ||
+        body_end_token <= body_start_token ||
+        body_end_token >= Compiler.token_count
+    ) {
+        return;
+    }
+    let cursor: i32 = body_start_token + 1;
+    for (cursor = body_start_token + 1; cursor < body_end_token; cursor += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Identifier &&
+            parser_token_kind_at(cursor + 1) == TokenKind.LParen
+        ) {
+            compiler_add_function_call_edge(index, compiler_eval_identifier_hash_at(cursor));
+        }
+    }
 }
 
 function compiler_find_current_function_index(id_hash: i32): i32 {
@@ -155,6 +432,408 @@ function compiler_find_current_function_index(id_hash: i32): i32 {
         }
     }
     return -1;
+}
+
+function compiler_clear_function_reachability_flags(): void {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        Compiler.function_reachable_flags[i] = 0;
+        Compiler.reachability_queue[i] = 0;
+    }
+}
+
+function compiler_mark_function_reachable(index: i32): bool {
+    if (index < 0 || index >= Compiler.tracked_function_count) {
+        return false;
+    }
+    if (Compiler.function_reachable_flags[index] == 1) {
+        return false;
+    }
+    Compiler.function_reachable_flags[index] = 1;
+    return true;
+}
+
+function compiler_mark_functions_reachable_by_hash(id_hash: i32, tail: i32): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        if (Compiler.function_id_hashes[i] == id_hash) {
+            if (compiler_mark_function_reachable(i)) {
+                if (tail >= COMPILER_MAX_TRACKED_FUNCTIONS) {
+                    return -1;
+                }
+                Compiler.reachability_queue[tail] = i;
+                tail += 1;
+            }
+        }
+    }
+    return tail;
+}
+
+function compiler_clear_required_reachability_roots(): void {
+    Compiler.required_reachability_root_count = 0;
+    let i: i32 = 0;
+    for (i = 0; i < COMPILER_MAX_REQUIRED_REACHABILITY_ROOTS; i += 1) {
+        Compiler.required_reachability_root_hashes[i] = 0;
+    }
+}
+
+function compiler_add_required_reachability_root_hash(id_hash: i32): bool {
+    if (id_hash == 0) {
+        return false;
+    }
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.required_reachability_root_count; i += 1) {
+        if (Compiler.required_reachability_root_hashes[i] == id_hash) {
+            return true;
+        }
+    }
+    if (Compiler.required_reachability_root_count >= COMPILER_MAX_REQUIRED_REACHABILITY_ROOTS) {
+        return false;
+    }
+    let slot: i32 = Compiler.required_reachability_root_count;
+    Compiler.required_reachability_root_count += 1;
+    Compiler.required_reachability_root_hashes[slot] = id_hash;
+    return true;
+}
+
+function compiler_scan_reachable_callees(function_index: i32, tail: i32): i32 {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return -1;
+    }
+    let body_start: i32 = Compiler.function_body_start_tokens[function_index];
+    let body_end: i32 = Compiler.function_body_end_tokens[function_index];
+    if (
+        body_start < 0 ||
+        body_end <= body_start ||
+        body_end >= Compiler.token_count
+    ) {
+        return -1;
+    }
+
+    let cursor: i32 = body_start + 1;
+    for (cursor = body_start + 1; cursor < body_end; cursor += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Identifier &&
+            parser_token_kind_at(cursor + 1) == TokenKind.LParen
+        ) {
+            let callee_hash: i32 = compiler_eval_identifier_hash_at(cursor);
+            tail = compiler_mark_functions_reachable_by_hash(callee_hash, tail);
+            if (tail < 0) {
+                return -1;
+            }
+        }
+    }
+    return tail;
+}
+
+function compiler_build_function_reachability(): bool {
+    compiler_clear_function_reachability_flags();
+
+    let tail: i32 = 0;
+    tail = compiler_mark_functions_reachable_by_hash(compiler_hash_ascii("main"), tail);
+    if (tail < 0) { return false; }
+    tail = compiler_mark_functions_reachable_by_hash(compiler_hash_ascii("tick"), tail);
+    if (tail < 0) { return false; }
+    tail = compiler_mark_functions_reachable_by_hash(compiler_hash_ascii("on_code_swap"), tail);
+    if (tail < 0) { return false; }
+    let host_root_index: i32 = 0;
+    for (host_root_index = 0; host_root_index < Compiler.required_reachability_root_count; host_root_index += 1) {
+        tail = compiler_mark_functions_reachable_by_hash(
+            Compiler.required_reachability_root_hashes[host_root_index],
+            tail
+        );
+        if (tail < 0) { return false; }
+    }
+
+    if (tail == 0) {
+        let all_index: i32 = 0;
+        for (all_index = 0; all_index < Compiler.tracked_function_count; all_index += 1) {
+            Compiler.function_reachable_flags[all_index] = 1;
+        }
+        return true;
+    }
+
+    let head: i32 = 0;
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_TRACKED_FUNCTIONS && head < tail; guard += 1) {
+        let function_index: i32 = Compiler.reachability_queue[head];
+        head += 1;
+        tail = compiler_scan_reachable_callees(function_index, tail);
+        if (tail < 0) {
+            return false;
+        }
+    }
+    return head >= tail;
+}
+
+function compiler_is_function_reachable(function_index: i32): bool {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return false;
+    }
+    return Compiler.function_reachable_flags[function_index] == 1;
+}
+
+function compiler_clear_layout_reachability_flags(): void {
+    let i: i32 = 0;
+    for (i = 0; i < COMPILER_MAX_LAYOUT_STRUCTS; i += 1) {
+        Compiler.layout_struct_reachable_flags[i] = 0;
+        Compiler.layout_struct_reachability_queue[i] = 0;
+    }
+    for (i = 0; i < COMPILER_MAX_LAYOUT_GLOBALS; i += 1) {
+        Compiler.layout_global_reachable_flags[i] = 0;
+    }
+}
+
+function compiler_mark_struct_reachable_by_index(struct_index: i32, tail: i32): i32 {
+    if (struct_index < 0 || struct_index >= Compiler.layout_struct_count) {
+        return tail;
+    }
+    if (Compiler.layout_struct_reachable_flags[struct_index] == 1) {
+        return tail;
+    }
+    if (tail < 0 || tail >= COMPILER_MAX_LAYOUT_STRUCTS) {
+        return -1;
+    }
+    Compiler.layout_struct_reachable_flags[struct_index] = 1;
+    Compiler.layout_struct_reachability_queue[tail] = struct_index;
+    return tail + 1;
+}
+
+function compiler_mark_global_references_from_reachable_function(function_index: i32): bool {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return false;
+    }
+    let body_start: i32 = Compiler.function_body_start_tokens[function_index];
+    let body_end: i32 = Compiler.function_body_end_tokens[function_index];
+    if (
+        body_start < 0 ||
+        body_end <= body_start ||
+        body_end >= Compiler.token_count
+    ) {
+        return false;
+    }
+
+    let cursor: i32 = body_start + 1;
+    for (cursor = body_start + 1; cursor < body_end; cursor += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Identifier &&
+            parser_token_kind_at(cursor - 1) != TokenKind.Dot
+        ) {
+            let identifier_hash: i32 = compiler_eval_identifier_hash_at(cursor);
+            let global_index: i32 = compiler_layout_find_global_index(identifier_hash);
+            if (global_index >= 0) {
+                Compiler.layout_global_reachable_flags[global_index] = 1;
+            }
+        }
+    }
+    return true;
+}
+
+function compiler_mark_reachable_globals(): bool {
+    let function_index: i32 = 0;
+    for (function_index = 0; function_index < Compiler.tracked_function_count; function_index += 1) {
+        if (compiler_is_function_reachable(function_index)) {
+            if (!compiler_mark_global_references_from_reachable_function(function_index)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+function compiler_mark_struct_type_references_in_token_range(
+    start_token: i32,
+    end_token: i32,
+    tail: i32
+): i32 {
+    if (
+        start_token < 0 ||
+        end_token <= start_token ||
+        end_token >= Compiler.token_count
+    ) {
+        return -1;
+    }
+    let cursor: i32 = start_token;
+    for (cursor = start_token; cursor < end_token; cursor += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Colon &&
+            parser_token_kind_at(cursor + 1) == TokenKind.Identifier
+        ) {
+            let type_hash: i32 = compiler_eval_identifier_hash_at(cursor + 1);
+            tail = compiler_mark_struct_reachable_by_index(
+                compiler_layout_find_struct_index(type_hash),
+                tail
+            );
+            if (tail < 0) {
+                return -1;
+            }
+        }
+    }
+    return tail;
+}
+
+function compiler_mark_structs_from_reachable_function_types(tail: i32): i32 {
+    let function_index: i32 = 0;
+    for (function_index = 0; function_index < Compiler.tracked_function_count; function_index += 1) {
+        if (compiler_is_function_reachable(function_index)) {
+            tail = compiler_mark_struct_type_references_in_token_range(
+                Compiler.function_signature_start_tokens[function_index],
+                Compiler.function_signature_end_tokens[function_index],
+                tail
+            );
+            if (tail < 0) {
+                return -1;
+            }
+            tail = compiler_mark_struct_type_references_in_token_range(
+                Compiler.function_body_start_tokens[function_index],
+                Compiler.function_body_end_tokens[function_index],
+                tail
+            );
+            if (tail < 0) {
+                return -1;
+            }
+        }
+    }
+    return tail;
+}
+
+function compiler_mark_structs_from_reachable_globals(tail: i32): i32 {
+    let global_index: i32 = 0;
+    for (global_index = 0; global_index < Compiler.layout_global_count; global_index += 1) {
+        if (Compiler.layout_global_reachable_flags[global_index] == 1) {
+            let field_count: i32 = Compiler.layout_global_field_counts[global_index];
+            let field_index: i32 = 0;
+            for (field_index = 0; field_index < field_count; field_index += 1) {
+                let slot: i32 = global_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+                tail = compiler_mark_struct_reachable_by_index(
+                    compiler_layout_find_struct_index(Compiler.layout_global_field_type_hashes[slot]),
+                    tail
+                );
+                if (tail < 0) {
+                    return -1;
+                }
+            }
+        }
+    }
+    return tail;
+}
+
+function compiler_expand_reachable_struct_closure(tail: i32): bool {
+    let head: i32 = 0;
+    let guard: i32 = 0;
+    for (guard = 0; guard < COMPILER_MAX_LAYOUT_STRUCTS && head < tail; guard += 1) {
+        let struct_index: i32 = Compiler.layout_struct_reachability_queue[head];
+        head += 1;
+        if (struct_index < 0 || struct_index >= Compiler.layout_struct_count) {
+            return false;
+        }
+
+        let field_count: i32 = Compiler.layout_struct_field_counts[struct_index];
+        let field_index: i32 = 0;
+        for (field_index = 0; field_index < field_count; field_index += 1) {
+            let slot: i32 = struct_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+            tail = compiler_mark_struct_reachable_by_index(
+                compiler_layout_find_struct_index(Compiler.layout_struct_field_type_hashes[slot]),
+                tail
+            );
+            if (tail < 0) {
+                return false;
+            }
+        }
+    }
+    return head >= tail;
+}
+
+function compiler_prune_unreachable_layout_structs(): void {
+    let write_index: i32 = 0;
+    let read_index: i32 = 0;
+    for (read_index = 0; read_index < Compiler.layout_struct_count; read_index += 1) {
+        if (Compiler.layout_struct_reachable_flags[read_index] == 1) {
+            if (write_index != read_index) {
+                Compiler.layout_struct_name_hashes[write_index] = Compiler.layout_struct_name_hashes[read_index];
+                Compiler.layout_struct_field_counts[write_index] = Compiler.layout_struct_field_counts[read_index];
+                let field_count: i32 = Compiler.layout_struct_field_counts[read_index];
+                let field_index: i32 = 0;
+                for (field_index = 0; field_index < field_count; field_index += 1) {
+                    let read_slot: i32 = read_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+                    let write_slot: i32 = write_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+                    Compiler.layout_struct_field_name_hashes[write_slot] = Compiler.layout_struct_field_name_hashes[read_slot];
+                    Compiler.layout_struct_field_type_hashes[write_slot] = Compiler.layout_struct_field_type_hashes[read_slot];
+                }
+            }
+            write_index += 1;
+        }
+    }
+    Compiler.layout_struct_count = write_index;
+}
+
+function compiler_prune_unreachable_layout_globals(): void {
+    let write_index: i32 = 0;
+    let read_index: i32 = 0;
+    for (read_index = 0; read_index < Compiler.layout_global_count; read_index += 1) {
+        if (Compiler.layout_global_reachable_flags[read_index] == 1) {
+            if (write_index != read_index) {
+                Compiler.layout_global_name_hashes[write_index] = Compiler.layout_global_name_hashes[read_index];
+                Compiler.layout_global_field_counts[write_index] = Compiler.layout_global_field_counts[read_index];
+                let field_count: i32 = Compiler.layout_global_field_counts[read_index];
+                let field_index: i32 = 0;
+                for (field_index = 0; field_index < field_count; field_index += 1) {
+                    let read_slot: i32 = read_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+                    let write_slot: i32 = write_index * COMPILER_MAX_LAYOUT_FIELDS_PER_DECL + field_index;
+                    Compiler.layout_global_field_name_hashes[write_slot] = Compiler.layout_global_field_name_hashes[read_slot];
+                    Compiler.layout_global_field_type_hashes[write_slot] = Compiler.layout_global_field_type_hashes[read_slot];
+                }
+            }
+            write_index += 1;
+        }
+    }
+    Compiler.layout_global_count = write_index;
+}
+
+function compiler_prune_unreachable_layout_metadata(): void {
+    compiler_prune_unreachable_layout_structs();
+    compiler_prune_unreachable_layout_globals();
+
+    let i: i32 = 0;
+    for (i = 0; i < COMPILER_MAX_LAYOUT_STRUCTS; i += 1) {
+        if (i < Compiler.layout_struct_count) {
+            Compiler.layout_struct_reachable_flags[i] = 1;
+        } else {
+            Compiler.layout_struct_reachable_flags[i] = 0;
+        }
+        Compiler.layout_struct_reachability_queue[i] = 0;
+    }
+    for (i = 0; i < COMPILER_MAX_LAYOUT_GLOBALS; i += 1) {
+        if (i < Compiler.layout_global_count) {
+            Compiler.layout_global_reachable_flags[i] = 1;
+        } else {
+            Compiler.layout_global_reachable_flags[i] = 0;
+        }
+    }
+}
+
+function compiler_build_layout_reachability(): bool {
+    compiler_clear_layout_reachability_flags();
+
+    if (!compiler_mark_reachable_globals()) {
+        return false;
+    }
+
+    let tail: i32 = 0;
+    tail = compiler_mark_structs_from_reachable_function_types(tail);
+    if (tail < 0) {
+        return false;
+    }
+    tail = compiler_mark_structs_from_reachable_globals(tail);
+    if (tail < 0) {
+        return false;
+    }
+    if (!compiler_expand_reachable_struct_closure(tail)) {
+        return false;
+    }
+
+    compiler_prune_unreachable_layout_metadata();
+    return true;
 }
 
 function compiler_find_file_function_index(file_index: i32, id_hash: i32): i32 {
@@ -185,6 +864,17 @@ function compiler_store_current_functions_to_file(file_index: i32): void {
         Compiler.files[file_index].function_first_param_type_codes[i] = Compiler.function_first_param_type_codes[i];
         Compiler.files[file_index].function_simple_i32_return_literal_flags[i] = Compiler.function_simple_i32_return_literal_flags[i];
         Compiler.files[file_index].function_simple_i32_return_literals[i] = Compiler.function_simple_i32_return_literals[i];
+        let slot: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS + i;
+        Compiler.file_function_reachable_flags[slot] = 0;
+        Compiler.file_function_call_edge_counts[slot] = Compiler.function_call_edge_counts[i];
+        let edge_index: i32 = 0;
+        for (edge_index = 0; edge_index < COMPILER_MAX_FUNCTION_CALL_EDGES; edge_index += 1) {
+            Compiler.file_function_call_edge_hashes[
+                slot * COMPILER_MAX_FUNCTION_CALL_EDGES + edge_index
+            ] = Compiler.function_call_edge_hashes[
+                i * COMPILER_MAX_FUNCTION_CALL_EDGES + edge_index
+            ];
+        }
     }
 
     Compiler.files[file_index].layout_hash = Compiler.layout_hash;
@@ -276,7 +966,7 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     }
 
     let new_index: i32 = Compiler.file_count;
-    Compiler.file_count += 1;
+    Compiler.file_count = Compiler.file_count + 1;
     ascii_clear(Compiler.files[new_index].path);
     ascii_copy(Compiler.files[new_index].path, path);
     ascii_clear(Compiler.files[new_index].source);
@@ -285,6 +975,18 @@ function compiler_upsert_file(path: ascii[], src: ascii[]): bool {
     Compiler.files[new_index].source_hash = hash;
     Compiler.files[new_index].dirty = true;
     Compiler.files[new_index].tracked_function_count = 0;
+    let new_function_index: i32 = 0;
+    for (new_function_index = 0; new_function_index < COMPILER_MAX_TRACKED_FUNCTIONS; new_function_index += 1) {
+        let slot: i32 = new_index * COMPILER_MAX_TRACKED_FUNCTIONS + new_function_index;
+        Compiler.file_function_reachable_flags[slot] = 0;
+        Compiler.file_function_call_edge_counts[slot] = 0;
+        let new_edge_index: i32 = 0;
+        for (new_edge_index = 0; new_edge_index < COMPILER_MAX_FUNCTION_CALL_EDGES; new_edge_index += 1) {
+            Compiler.file_function_call_edge_hashes[
+                slot * COMPILER_MAX_FUNCTION_CALL_EDGES + new_edge_index
+            ] = 0;
+        }
+    }
     Compiler.files[new_index].layout_hash = 216613626;
     Compiler.files[new_index].last_status = CompilerStatus.Idle;
     Compiler.files[new_index].last_error_code = 0;
@@ -531,20 +1233,24 @@ function parser_capture_identifier(): bool {
     return true;
 }
 
-function parser_identifier_text_eq(start: i32, len: i32, expected: ascii[]): bool {
-    return compiler_span_eq(start, len, expected);
+function parser_captured_identifier_hash(): i32 {
+    return compiler_hash_source_span(
+        216613626,
+        Compiler.captured_identifier_start,
+        Compiler.captured_identifier_len
+    );
 }
 
 function parser_type_code_from_identifier_span(start: i32, len: i32): i32 {
-    if (parser_identifier_text_eq(start, len, "i32")) { return 1; }
+    if (compiler_span_eq(start, len, "i32")) { return 1; }
     return 0;
 }
 
 function parser_return_type_code(): i32 {
-    if (parser_identifier_text_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "i32")) {
+    if (compiler_span_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "i32")) {
         return 1;
     }
-    if (parser_identifier_text_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "void")) {
+    if (compiler_span_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "void")) {
         return 2;
     }
     if (Compiler.current_signature_return_type_len == 0) {
@@ -553,13 +1259,13 @@ function parser_return_type_code(): i32 {
     return 0;
 }
 function parser_note_main_signature_if_needed(): void {
-    if (!parser_identifier_text_eq(Compiler.current_signature_name_start, Compiler.current_signature_name_len, "main")) {
+    if (!compiler_span_eq(Compiler.current_signature_name_start, Compiler.current_signature_name_len, "main")) {
         return;
     }
     Compiler.parsed_main_declaration_count += 1;
     if (
         Compiler.current_signature_param_count == 0 &&
-        parser_identifier_text_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "i32")
+        compiler_span_eq(Compiler.current_signature_return_type_start, Compiler.current_signature_return_type_len, "i32")
     ) {
         Compiler.parsed_main_valid_i32_count += 1;
     } else {
@@ -1118,6 +1824,8 @@ function parser_record_function_fingerprint(
         Compiler.current_signature_first_param_type_code,
         Compiler.current_simple_i32_return_literal_flag,
         Compiler.current_simple_i32_return_literal_value,
+        signature_start_token,
+        signature_end_token,
         body_start_token,
         body_end_token
     );
@@ -1488,31 +2196,66 @@ function compiler_eval_set_binding(name_hash: i32, value: i32): bool {
     return true;
 }
 
-function compiler_eval_find_field_index(path_hash: i32): i32 {
+function compiler_eval_clear_field_table(): void {
+    Compiler.eval_field_count = 0;
     let i: i32 = 0;
-    let found: i32 = -1;
-    for (i = 0; i < Compiler.eval_field_count; i += 1) {
-        if (Compiler.eval_field_path_hashes[i] == path_hash) {
-            found = i;
+    for (i = 0; i < COMPILER_MAX_EVAL_BINDINGS; i += 1) {
+        Compiler.eval_field_used[i] = 0;
+        Compiler.eval_field_path_hashes[i] = 0;
+        Compiler.eval_field_values[i] = 0;
+    }
+}
+
+function compiler_eval_field_start_slot(path_hash: i32): i32 {
+    let hash: i32 = path_hash;
+    if (hash < 0) {
+        hash = 0 - hash;
+        if (hash < 0) {
+            hash = 0;
         }
     }
-    return found;
+    return hash % COMPILER_MAX_EVAL_BINDINGS;
+}
+
+function compiler_eval_find_field_index(path_hash: i32): i32 {
+    if (Compiler.eval_field_count <= 0) {
+        return -1;
+    }
+    let start: i32 = compiler_eval_field_start_slot(path_hash);
+    let probe: i32 = 0;
+    for (probe = 0; probe < COMPILER_MAX_EVAL_BINDINGS; probe += 1) {
+        let slot: i32 = (start + probe) % COMPILER_MAX_EVAL_BINDINGS;
+        if (Compiler.eval_field_used[slot] == 0) {
+            return -1;
+        }
+        if (Compiler.eval_field_path_hashes[slot] == path_hash) {
+            return slot;
+        }
+    }
+    return -1;
 }
 
 function compiler_eval_set_field(path_hash: i32, value: i32): bool {
-    let existing: i32 = compiler_eval_find_field_index(path_hash);
-    if (existing >= 0) {
-        Compiler.eval_field_values[existing] = value;
-        return true;
+    let start: i32 = compiler_eval_field_start_slot(path_hash);
+    let probe: i32 = 0;
+    for (probe = 0; probe < COMPILER_MAX_EVAL_BINDINGS; probe += 1) {
+        let slot: i32 = (start + probe) % COMPILER_MAX_EVAL_BINDINGS;
+        if (Compiler.eval_field_used[slot] == 0) {
+            if (Compiler.eval_field_count >= COMPILER_MAX_EVAL_BINDINGS) {
+                return false;
+            }
+            Compiler.eval_field_used[slot] = 1;
+            Compiler.eval_field_path_hashes[slot] = path_hash;
+            Compiler.eval_field_values[slot] = value;
+            Compiler.eval_field_count += 1;
+            return true;
+        }
+        if (Compiler.eval_field_path_hashes[slot] == path_hash) {
+            Compiler.eval_field_values[slot] = value;
+            return true;
+        }
     }
-    if (Compiler.eval_field_count >= COMPILER_MAX_EVAL_BINDINGS) {
-        return false;
-    }
-    let slot: i32 = Compiler.eval_field_count;
-    Compiler.eval_field_count += 1;
-    Compiler.eval_field_path_hashes[slot] = path_hash;
-    Compiler.eval_field_values[slot] = value;
-    return true;
+    return false;
 }
 
 function compiler_eval_assignment_op_index_at(start_index: i32): i32 {
@@ -2653,7 +3396,7 @@ function compiler_try_eval_noarg_i32_function(function_index: i32): bool {
     }
 
     Compiler.eval_binding_count = 0;
-    Compiler.eval_field_count = 0;
+    compiler_eval_clear_field_table();
     Compiler.eval_call_depth = 0;
     Compiler.eval_cursor = 0;
     Compiler.eval_last_i32 = 0;
@@ -2665,6 +3408,9 @@ function compiler_try_eval_noarg_i32_function(function_index: i32): bool {
 function compiler_emit_function_clif_for_index(index: i32, out: ascii[]): void {
     ascii_clear(out);
     if (index < 0 || index >= Compiler.tracked_function_count) {
+        return;
+    }
+    if (compiler_emit_global_i32_store_return_body(index, out)) {
         return;
     }
 
@@ -2772,54 +3518,282 @@ function parser_parse_function_declaration(): bool {
     return true;
 }
 
-function parser_parse_global_declaration(): bool {
-    return parser_parse_layout_declaration_block();
-}
-
-function parser_parse_struct_declaration(): bool {
-    return parser_parse_layout_declaration_block();
-}
-
 function parser_parse_layout_declaration_block(): bool {
+    let decl_kind: TokenKind = parser_current_kind();
+    let is_global_decl: bool = decl_kind == TokenKind.KwGlobal;
     let start_token: i32 = Compiler.parse_index;
     Compiler.parse_index += 1;
     if (!parser_capture_identifier()) {
         return false;
     }
+    let decl_name_hash: i32 = parser_captured_identifier_hash();
+    let decl_index: i32 = -1;
+    if (is_global_decl) {
+        decl_index = compiler_layout_begin_global(decl_name_hash);
+    } else {
+        decl_index = compiler_layout_begin_struct(decl_name_hash);
+    }
+    if (decl_index < 0) {
+        return parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
+    }
+
     if (!parser_expect(TokenKind.LBrace, CompilerErrorCode.ParseExpectLBrace)) {
         return false;
     }
 
-    let depth: i32 = 1;
     let guard: i32 = 0;
-    for (guard = 0; guard < COMPILER_MAX_BODY_STMTS; guard += 1) {
-        let kind: TokenKind = parser_current_kind();
-        if (kind == TokenKind.Eof) {
-            return parser_error(CompilerErrorCode.ParseExpectRBrace);
+    for (guard = 0; guard < COMPILER_MAX_BODY_STMTS && parser_current_kind() != TokenKind.RBrace; guard += 1) {
+        if (!parser_capture_identifier()) {
+            return false;
         }
-        if (kind == TokenKind.LBrace) {
-            depth += 1;
-            Compiler.parse_index += 1;
+        let field_name_hash: i32 = parser_captured_identifier_hash();
+        if (!parser_expect(TokenKind.Colon, CompilerErrorCode.ParseExpectColon)) {
+            return false;
+        }
+        if (!parser_capture_identifier()) {
+            return false;
+        }
+        let field_type_hash: i32 = parser_captured_identifier_hash();
+        if (is_global_decl) {
+            if (!compiler_layout_add_global_field(decl_index, field_name_hash, field_type_hash)) {
+                return parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
+            }
         } else {
-            if (kind == TokenKind.RBrace) {
-                depth -= 1;
-                Compiler.parse_index += 1;
-                if (depth == 0) {
-                    let end_token: i32 = Compiler.parse_index - 1;
-                    let start_pos: i32 = Compiler.tokens[start_token].start;
-                    let span_len: i32 = Compiler.tokens[end_token].end - start_pos;
-                    Compiler.layout_hash = compiler_hash_source_span(Compiler.layout_hash, start_pos, span_len);
-                    if (parser_current_kind() == TokenKind.Semicolon) {
-                        Compiler.parse_index += 1;
-                    }
-                    return true;
-                }
-            } else {
-                Compiler.parse_index += 1;
+            if (!compiler_layout_add_struct_field(decl_index, field_name_hash, field_type_hash)) {
+                return parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
             }
         }
+        if (!parser_expect(TokenKind.Semicolon, CompilerErrorCode.ParseExpectSemicolon)) {
+            return false;
+        }
     }
-    return parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
+    if (guard >= COMPILER_MAX_BODY_STMTS) {
+        return parser_error(CompilerErrorCode.ParseBodyGuardExhausted);
+    }
+    if (!parser_expect(TokenKind.RBrace, CompilerErrorCode.ParseExpectRBrace)) {
+        return false;
+    }
+
+    let end_token: i32 = Compiler.parse_index - 1;
+    let start_pos: i32 = Compiler.tokens[start_token].start;
+    let span_len: i32 = Compiler.tokens[end_token].end - start_pos;
+    Compiler.layout_hash = compiler_hash_source_span(Compiler.layout_hash, start_pos, span_len);
+    if (parser_current_kind() == TokenKind.Semicolon) {
+        Compiler.parse_index += 1;
+    }
+    return true;
+}
+
+function compiler_is_global_i32_store_return_shape(function_index: i32): bool {
+    if (function_index < 0 || function_index >= Compiler.tracked_function_count) {
+        return false;
+    }
+    if (Compiler.function_param_counts[function_index] != 0) {
+        return false;
+    }
+    if (Compiler.function_return_type_codes[function_index] != 1) {
+        return false;
+    }
+    if (Compiler.layout_memory_size_bytes <= 0 || Compiler.layout_flat_field_count <= 0) {
+        return false;
+    }
+
+    let body_start: i32 = Compiler.function_body_start_tokens[function_index];
+    let body_end: i32 = Compiler.function_body_end_tokens[function_index];
+    if (
+        body_start < 0 ||
+        body_end <= body_start ||
+        Compiler.tokens[body_start].kind != TokenKind.LBrace ||
+        Compiler.tokens[body_end].kind != TokenKind.RBrace
+    ) {
+        return false;
+    }
+
+    let cursor: i32 = body_start + 1;
+    if (parser_token_kind_at(cursor) != TokenKind.Identifier) {
+        return false;
+    }
+    let assign_path_hash: i32 = compiler_eval_identifier_hash_at(cursor);
+    cursor += 1;
+
+    let path_guard: i32 = 0;
+    let path_done: i32 = 0;
+    for (path_guard = 0; path_guard < COMPILER_MAX_CALL_NEST && path_done == 0; path_guard += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Dot &&
+            parser_token_kind_at(cursor + 1) == TokenKind.Identifier
+        ) {
+            assign_path_hash = compiler_layout_extend_path_hash(
+                assign_path_hash,
+                compiler_eval_identifier_hash_at(cursor + 1)
+            );
+            cursor += 2;
+        } else {
+            path_done = 1;
+        }
+    }
+    if (path_done == 0) {
+        return false;
+    }
+
+    if (parser_token_kind_at(cursor) != TokenKind.Assign) {
+        return false;
+    }
+    cursor += 1;
+    if (parser_token_kind_at(cursor) != TokenKind.IntLiteral) {
+        return false;
+    }
+    cursor += 1;
+    if (parser_token_kind_at(cursor) != TokenKind.Semicolon) {
+        return false;
+    }
+    cursor += 1;
+    if (parser_token_kind_at(cursor) != TokenKind.KwReturn) {
+        return false;
+    }
+    cursor += 1;
+    if (parser_token_kind_at(cursor) != TokenKind.Identifier) {
+        return false;
+    }
+    let return_path_hash: i32 = compiler_eval_identifier_hash_at(cursor);
+    cursor += 1;
+
+    let return_path_guard: i32 = 0;
+    let return_path_done: i32 = 0;
+    for (return_path_guard = 0; return_path_guard < COMPILER_MAX_CALL_NEST && return_path_done == 0; return_path_guard += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Dot &&
+            parser_token_kind_at(cursor + 1) == TokenKind.Identifier
+        ) {
+            return_path_hash = compiler_layout_extend_path_hash(
+                return_path_hash,
+                compiler_eval_identifier_hash_at(cursor + 1)
+            );
+            cursor += 2;
+        } else {
+            return_path_done = 1;
+        }
+    }
+    if (return_path_done == 0) {
+        return false;
+    }
+
+    if (return_path_hash != assign_path_hash) {
+        return false;
+    }
+    if (parser_token_kind_at(cursor) != TokenKind.Semicolon) {
+        return false;
+    }
+    cursor += 1;
+    if (cursor != body_end) {
+        return false;
+    }
+    if (compiler_layout_find_flat_field_offset(assign_path_hash) < 0) {
+        return false;
+    }
+    return true;
+}
+
+function compiler_find_global_i32_store_return_owner_index(): i32 {
+    let i: i32 = 0;
+    for (i = 0; i < Compiler.tracked_function_count; i += 1) {
+        if (compiler_is_global_i32_store_return_shape(i)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function compiler_emit_global_i32_store_return_body(function_index: i32, out: ascii[]): bool {
+    if (!compiler_is_global_i32_store_return_shape(function_index)) {
+        return false;
+    }
+
+    let body_start: i32 = Compiler.function_body_start_tokens[function_index];
+    let cursor: i32 = body_start + 1;
+    let assign_path_hash: i32 = compiler_eval_identifier_hash_at(cursor);
+    cursor += 1;
+    let path_guard: i32 = 0;
+    let path_done: i32 = 0;
+    for (path_guard = 0; path_guard < COMPILER_MAX_CALL_NEST && path_done == 0; path_guard += 1) {
+        if (
+            parser_token_kind_at(cursor) == TokenKind.Dot &&
+            parser_token_kind_at(cursor + 1) == TokenKind.Identifier
+        ) {
+            assign_path_hash = compiler_layout_extend_path_hash(
+                assign_path_hash,
+                compiler_eval_identifier_hash_at(cursor + 1)
+            );
+            cursor += 2;
+        } else {
+            path_done = 1;
+        }
+    }
+    if (path_done == 0) {
+        return false;
+    }
+    if (parser_token_kind_at(cursor) != TokenKind.Assign) {
+        return false;
+    }
+    cursor += 1;
+    if (parser_token_kind_at(cursor) != TokenKind.IntLiteral) {
+        return false;
+    }
+    let assigned_value: i32 = Compiler.tokens[cursor].int_value;
+
+    let field_offset: i32 = compiler_layout_find_flat_field_offset(assign_path_hash);
+    if (field_offset < 0) {
+        return false;
+    }
+    let owner_index: i32 = compiler_find_global_i32_store_return_owner_index();
+    if (owner_index < 0) {
+        return false;
+    }
+
+    ascii_clear(Compiler.clif_symbol_buffer);
+    ascii_append(Compiler.clif_symbol_buffer, "sp_global_mem_layout_");
+    ascii_push_i32(Compiler.clif_symbol_buffer, compiler_abs_i32(Compiler.layout_hash));
+
+    let memory_size: i32 = Compiler.layout_memory_size_bytes;
+    if (memory_size < 4) {
+        memory_size = 4;
+    }
+
+    if (owner_index == function_index) {
+        ascii_append(out, "global ");
+    } else {
+        ascii_append(out, "global_import ");
+    }
+    ascii_append(out, Compiler.clif_symbol_buffer);
+    ascii_append(out, ": i8[");
+    ascii_push_i32(out, memory_size);
+    ascii_append(out, "]\n");
+
+    compiler_emit_symbol_name_for_index(function_index, Compiler.clif_symbol_buffer);
+    ascii_append(out, "function %");
+    ascii_append(out, Compiler.clif_symbol_buffer);
+    ascii_append(out, "() -> i32 ");
+    compiler_emit_clif_call_conv(out);
+    ascii_append(out, " {\nblock0:\n");
+
+    ascii_clear(Compiler.clif_symbol_buffer);
+    ascii_append(Compiler.clif_symbol_buffer, "sp_global_mem_layout_");
+    ascii_push_i32(Compiler.clif_symbol_buffer, compiler_abs_i32(Compiler.layout_hash));
+
+    ascii_append(out, "v0 = global_value ");
+    ascii_append(out, Compiler.clif_symbol_buffer);
+    ascii_append(out, "\n");
+    ascii_append(out, "v1 = iconst.i64 ");
+    ascii_push_i32(out, field_offset);
+    ascii_append(out, "\n");
+    ascii_append(out, "v2 = iadd v0, v1\n");
+    ascii_append(out, "v3 = iconst.i32 ");
+    ascii_push_i32(out, assigned_value);
+    ascii_append(out, "\n");
+    ascii_append(out, "store v3, v2\n");
+    ascii_append(out, "v4 = load.i32 v2\n");
+    ascii_append(out, "return v4\n}\n");
+    return true;
 }
 
 function compiler_parse_program(): bool {
@@ -2836,10 +3810,10 @@ function compiler_parse_program(): bool {
                 if (!parser_parse_function_declaration()) { return false; }
             } else {
                 if (kind == TokenKind.KwGlobal) {
-                    if (!parser_parse_global_declaration()) { return false; }
+                    if (!parser_parse_layout_declaration_block()) { return false; }
                 } else {
                     if (kind == TokenKind.KwStruct) {
-                        if (!parser_parse_struct_declaration()) { return false; }
+                        if (!parser_parse_layout_declaration_block()) { return false; }
                     } else {
                         return parser_error(CompilerErrorCode.ParseExpectFunctionOrExtern);
                     }
@@ -2850,7 +3824,33 @@ function compiler_parse_program(): bool {
     return parser_error(CompilerErrorCode.ParseItemGuardExhausted);
 }
 function compiler_validate_semantics(): bool {
-    // Keep semantics minimal in the simple pass.
+    if (!compiler_build_function_reachability()) {
+        compiler_push_error(
+            CompilerErrorCode.ParseBodyGuardExhausted,
+            parser_current_pos(),
+            Compiler.tracked_function_count,
+            Compiler.current_file_index
+        );
+        return false;
+    }
+    if (!compiler_build_layout_reachability()) {
+        compiler_push_error(
+            CompilerErrorCode.ParseBodyGuardExhausted,
+            parser_current_pos(),
+            Compiler.layout_struct_count,
+            Compiler.current_file_index
+        );
+        return false;
+    }
+    if (!compiler_build_flat_layout_paths()) {
+        compiler_push_error(
+            CompilerErrorCode.ParseBodyGuardExhausted,
+            parser_current_pos(),
+            Compiler.layout_flat_field_count,
+            Compiler.current_file_index
+        );
+        return false;
+    }
     return true;
 }
 
@@ -2897,6 +3897,128 @@ function compiler_capture_last_error_for_file(file_index: i32): void {
     Compiler.files[file_index].last_error_pos = Compiler.errors[last].pos;
     Compiler.files[file_index].last_error_detail_a = Compiler.errors[last].detail_a;
     Compiler.files[file_index].last_error_detail_b = Compiler.errors[last].detail_b;
+}
+
+function compiler_clear_file_function_reachability_flags(): void {
+    let file_index: i32 = 0;
+    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
+        let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
+        let function_index: i32 = 0;
+        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
+            let slot: i32 = file_slot_base + function_index;
+            Compiler.file_function_reachable_flags[slot] = 0;
+        }
+    }
+}
+
+function compiler_mark_file_functions_reachable_by_hash(id_hash: i32): bool {
+    if (id_hash == 0) {
+        return false;
+    }
+    let marked_any: bool = false;
+    let file_index: i32 = 0;
+    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
+        let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
+        let function_index: i32 = 0;
+        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
+            let slot: i32 = file_slot_base + function_index;
+            if (
+                Compiler.files[file_index].function_id_hashes[function_index] == id_hash &&
+                Compiler.file_function_reachable_flags[slot] == 0
+            ) {
+                Compiler.file_function_reachable_flags[slot] = 1;
+                marked_any = true;
+            }
+        }
+    }
+    return marked_any;
+}
+
+function compiler_mark_all_file_functions_reachable(): void {
+    let file_index: i32 = 0;
+    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
+        let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
+        let function_index: i32 = 0;
+        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
+            let slot: i32 = file_slot_base + function_index;
+            Compiler.file_function_reachable_flags[slot] = 1;
+        }
+    }
+}
+
+function compiler_expand_file_function_reachability(): bool {
+    let max_steps: i32 = COMPILER_MAX_FILES * COMPILER_MAX_TRACKED_FUNCTIONS;
+    let step: i32 = 0;
+    for (step = 0; step < max_steps; step += 1) {
+        let changed_in_step: bool = false;
+        let file_index: i32 = 0;
+        for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {
+            let file_slot_base: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS;
+            let function_index: i32 = 0;
+            for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {
+                let slot: i32 = file_slot_base + function_index;
+                if (Compiler.file_function_reachable_flags[slot] == 1) {
+                    let edge_count: i32 = Compiler.file_function_call_edge_counts[slot];
+                    let edge_index: i32 = 0;
+                    for (edge_index = 0; edge_index < edge_count; edge_index += 1) {
+                        let callee_hash: i32 = Compiler.file_function_call_edge_hashes[
+                            slot * COMPILER_MAX_FUNCTION_CALL_EDGES + edge_index
+                        ];
+                        if (compiler_mark_file_functions_reachable_by_hash(callee_hash)) {
+                            changed_in_step = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (!changed_in_step) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function compiler_build_cross_file_function_reachability_from_files(): bool {
+    compiler_clear_file_function_reachability_flags();
+    let found_root: bool = false;
+    if (compiler_mark_file_functions_reachable_by_hash(compiler_hash_ascii("main"))) {
+        found_root = true;
+    }
+    if (compiler_mark_file_functions_reachable_by_hash(compiler_hash_ascii("tick"))) {
+        found_root = true;
+    }
+    if (compiler_mark_file_functions_reachable_by_hash(compiler_hash_ascii("on_code_swap"))) {
+        found_root = true;
+    }
+    let required_index: i32 = 0;
+    for (required_index = 0; required_index < Compiler.required_reachability_root_count; required_index += 1) {
+        if (
+            compiler_mark_file_functions_reachable_by_hash(
+                Compiler.required_reachability_root_hashes[required_index]
+            )
+        ) {
+            found_root = true;
+        }
+    }
+
+    if (!found_root) {
+        compiler_mark_all_file_functions_reachable();
+        return true;
+    }
+    return compiler_expand_file_function_reachability();
+}
+
+function compiler_file_function_is_reachable(file_index: i32, function_index: i32): bool {
+    if (
+        file_index < 0 ||
+        file_index >= Compiler.file_count ||
+        function_index < 0 ||
+        function_index >= Compiler.files[file_index].tracked_function_count
+    ) {
+        return false;
+    }
+    let slot: i32 = file_index * COMPILER_MAX_TRACKED_FUNCTIONS + function_index;
+    return Compiler.file_function_reachable_flags[slot] == 1;
 }
 
 function compiler_aggregate_from_files(): void {
@@ -2953,6 +4075,11 @@ function compiler_run_incremental_pipeline(): i32 {
         }
     }
 
+    if (!compiler_build_cross_file_function_reachability_from_files()) {
+        compiler_push_error(CompilerErrorCode.ParseBodyGuardExhausted, 0, Compiler.file_count, 0);
+        Compiler.status = CompilerStatus.ParseError;
+        return compiler_get_status_code();
+    }
     compiler_aggregate_from_files();
     Compiler.status = CompilerStatus.Ok;
     return compiler_get_status_code();

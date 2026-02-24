@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
@@ -110,7 +110,16 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
+    reachable_in_source: bool,
+    call_target_id_hashes: Vec<i32>,
     clif_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FunctionKey {
+    path: String,
+    id_hash: i32,
+    sig_hash: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -125,16 +134,32 @@ struct AnalysisResult {
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
+    source_text_by_path: BTreeMap<String, String>,
     state_by_path: BTreeMap<String, FileState>,
     last_layout_hash_i32: i32,
+    required_reachability_root_hashes: Vec<i32>,
+    last_reachable_function_keys: BTreeSet<FunctionKey>,
 }
 
 impl IncrementalCompilerHost {
     pub fn new() -> Self {
         Self {
             source_hash_by_path: BTreeMap::new(),
+            source_text_by_path: BTreeMap::new(),
             state_by_path: BTreeMap::new(),
             last_layout_hash_i32: 0,
+            required_reachability_root_hashes: Vec::new(),
+            last_reachable_function_keys: BTreeSet::new(),
+        }
+    }
+
+    pub fn set_required_reachability_roots(&mut self, roots: &[&str]) {
+        self.required_reachability_root_hashes.clear();
+        for root in roots {
+            let id_hash = hash_identifier(root);
+            if !self.required_reachability_root_hashes.contains(&id_hash) {
+                self.required_reachability_root_hashes.push(id_hash);
+            }
         }
     }
 
@@ -149,6 +174,7 @@ impl IncrementalCompilerHost {
         let mut files = changed_files.to_vec();
         files.sort();
         files.dedup();
+        let previous_state_by_path = self.state_by_path.clone();
 
         let mut changed_sources: Vec<(String, String)> = Vec::new();
         let mut deleted_paths: Vec<String> = Vec::new();
@@ -157,20 +183,24 @@ impl IncrementalCompilerHost {
             match fs::read(&path) {
                 Ok(bytes) => {
                     let source = String::from_utf8_lossy(&bytes).to_string();
+                    self.source_text_by_path
+                        .insert(path_key.clone(), source.clone());
                     let source_hash = hash_text(&source);
                     let changed = self
                         .source_hash_by_path
                         .get(&path_key)
                         .is_none_or(|existing| *existing != source_hash);
-                    self.source_hash_by_path.insert(path_key.clone(), source_hash);
+                    self.source_hash_by_path
+                        .insert(path_key.clone(), source_hash);
                     if changed {
                         changed_sources.push((path_key, source));
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {
                     let removed_hash = self.source_hash_by_path.remove(&path_key).is_some();
+                    let removed_source = self.source_text_by_path.remove(&path_key).is_some();
                     let removed_state = self.state_by_path.remove(&path_key).is_some();
-                    if removed_hash || removed_state {
+                    if removed_hash || removed_source || removed_state {
                         deleted_paths.push(path_key);
                     }
                 }
@@ -195,10 +225,10 @@ impl IncrementalCompilerHost {
         let mut functions: Vec<FunctionMetric> = Vec::new();
         let mut errors: Vec<ErrorMetric> = Vec::new();
         let mut analyzed_by_path: BTreeMap<String, AnalysisResult> = BTreeMap::new();
-        let mut changed_functions_by_path: BTreeMap<String, Vec<ParsedFunction>> = BTreeMap::new();
 
         for (path_key, source) in &changed_sources {
-            let analyzed = analyze_source_via_stasis(source)?;
+            let analyzed =
+                analyze_source_via_stasis(source, &self.required_reachability_root_hashes)?;
             if !analyzed.errors.is_empty() {
                 errors.extend(analyzed.errors.clone());
             }
@@ -217,23 +247,6 @@ impl IncrementalCompilerHost {
         }
 
         for (path_key, analyzed) in &analyzed_by_path {
-            let previous_functions = self
-                .state_by_path
-                .get(path_key)
-                .map(|state| state.functions.clone())
-                .unwrap_or_default();
-            let mut changed_functions = Vec::new();
-            for parsed in &analyzed.functions {
-                let unchanged = previous_functions.iter().any(|prev| {
-                    prev.id_hash == parsed.id_hash
-                        && prev.sig_hash == parsed.sig_hash
-                        && prev.body_hash == parsed.body_hash
-                });
-                if !unchanged {
-                    changed_functions.push(parsed.clone());
-                }
-            }
-            changed_functions_by_path.insert(path_key.clone(), changed_functions);
             self.state_by_path.insert(
                 path_key.clone(),
                 FileState {
@@ -279,10 +292,6 @@ impl IncrementalCompilerHost {
         }
 
         if !errors.is_empty() {
-            eprintln!(
-                "compile_changed_files status=2 debug: main_decl_total={}, main_valid_total={}, main_invalid_total={}, errors={:?}",
-                main_decl_total, main_valid_total, main_invalid_total, errors
-            );
             return Ok(IncrementalCompileOutput {
                 status: 2,
                 layout_hash: self.last_layout_hash_i32,
@@ -293,45 +302,74 @@ impl IncrementalCompilerHost {
             });
         }
 
-        for (file_index, (path_key, _)) in changed_sources.iter().enumerate() {
-            file_paths.push(path_key.clone());
-            if let Some(changed) = changed_functions_by_path.get(path_key) {
-                for parsed in changed {
-                    functions.push(FunctionMetric {
-                        file_index,
-                        ordinal: parsed.ordinal,
-                        id_hash: parsed.id_hash,
-                        sig_hash: parsed.sig_hash,
-                        body_hash: parsed.body_hash,
-                        return_type: parsed.return_type.clone(),
-                        param_count: parsed.param_count,
-                        first_param_type_code: parsed.first_param_type_code,
-                        simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
-                        simple_i32_return_call_target_id_hash: parsed
-                            .simple_i32_return_call_target_id_hash,
-                        simple_i32_return_call_add_delta: parsed.simple_i32_return_call_add_delta,
-                        simple_i32_return_call_one_arg_target_id_hash: parsed
-                            .simple_i32_return_call_one_arg_target_id_hash,
-                        simple_i32_return_call_one_arg_i32_literal: parsed
-                            .simple_i32_return_call_one_arg_i32_literal,
-                        simple_i32_return_call_one_arg_arg_call_target_id_hash: parsed
-                            .simple_i32_return_call_one_arg_arg_call_target_id_hash,
-                        simple_i32_return_two_call_left_target_id_hash: parsed
-                            .simple_i32_return_two_call_left_target_id_hash,
-                        simple_i32_return_two_call_right_target_id_hash: parsed
-                            .simple_i32_return_two_call_right_target_id_hash,
-                        simple_i32_return_two_call_op_code: parsed
-                            .simple_i32_return_two_call_op_code,
-                        simple_void_print_i32_literal: parsed.simple_void_print_i32_literal,
-                        simple_void_print_i32_call_target_id_hash: parsed
-                            .simple_void_print_i32_call_target_id_hash,
-                        simple_void_print_i32_call_one_arg_arg_call_target_id_hash: parsed
-                            .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
-                        simple_void_print_i32_call_add_delta: parsed
-                            .simple_void_print_i32_call_add_delta,
-                        clif_text: parsed.clif_text.clone(),
-                    });
+        let previous_reachable_keys = self.last_reachable_function_keys.clone();
+        let current_sources: Vec<(String, String)> = self
+            .source_text_by_path
+            .iter()
+            .map(|(path, source)| (path.clone(), source.clone()))
+            .collect();
+        let current_reachable_keys = analyze_project_reachability_via_stasis(
+            &current_sources,
+            &self.required_reachability_root_hashes,
+        )?;
+        let previous_body_hash_by_key = build_function_body_hash_by_key(&previous_state_by_path);
+        let mut file_index_by_path: BTreeMap<String, usize> = BTreeMap::new();
+        for (path_key, state) in &self.state_by_path {
+            for parsed in &state.functions {
+                let key = function_key_for(path_key, parsed);
+                if !current_reachable_keys.contains(&key) {
+                    continue;
                 }
+                let changed_definition = match previous_body_hash_by_key.get(&key) {
+                    Some(previous_body_hash) => *previous_body_hash != parsed.body_hash,
+                    None => true,
+                };
+                let previously_reachable = previous_reachable_keys.contains(&key);
+                if !changed_definition && previously_reachable {
+                    continue;
+                }
+
+                let file_index = if let Some(existing) = file_index_by_path.get(path_key) {
+                    *existing
+                } else {
+                    let new_index = file_paths.len();
+                    file_paths.push(path_key.clone());
+                    file_index_by_path.insert(path_key.clone(), new_index);
+                    new_index
+                };
+                functions.push(FunctionMetric {
+                    file_index,
+                    ordinal: parsed.ordinal,
+                    id_hash: parsed.id_hash,
+                    sig_hash: parsed.sig_hash,
+                    body_hash: parsed.body_hash,
+                    return_type: parsed.return_type.clone(),
+                    param_count: parsed.param_count,
+                    first_param_type_code: parsed.first_param_type_code,
+                    simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
+                    simple_i32_return_call_target_id_hash: parsed
+                        .simple_i32_return_call_target_id_hash,
+                    simple_i32_return_call_add_delta: parsed.simple_i32_return_call_add_delta,
+                    simple_i32_return_call_one_arg_target_id_hash: parsed
+                        .simple_i32_return_call_one_arg_target_id_hash,
+                    simple_i32_return_call_one_arg_i32_literal: parsed
+                        .simple_i32_return_call_one_arg_i32_literal,
+                    simple_i32_return_call_one_arg_arg_call_target_id_hash: parsed
+                        .simple_i32_return_call_one_arg_arg_call_target_id_hash,
+                    simple_i32_return_two_call_left_target_id_hash: parsed
+                        .simple_i32_return_two_call_left_target_id_hash,
+                    simple_i32_return_two_call_right_target_id_hash: parsed
+                        .simple_i32_return_two_call_right_target_id_hash,
+                    simple_i32_return_two_call_op_code: parsed
+                        .simple_i32_return_two_call_op_code,
+                    simple_void_print_i32_literal: parsed.simple_void_print_i32_literal,
+                    simple_void_print_i32_call_target_id_hash: parsed
+                        .simple_void_print_i32_call_target_id_hash,
+                    simple_void_print_i32_call_one_arg_arg_call_target_id_hash: parsed
+                        .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+                    simple_void_print_i32_call_add_delta: parsed.simple_void_print_i32_call_add_delta,
+                    clif_text: parsed.clif_text.clone(),
+                });
             }
         }
 
@@ -340,6 +378,7 @@ impl IncrementalCompilerHost {
             layout_acc = hash_mix(layout_acc, state.layout_hash);
         }
         self.last_layout_hash_i32 = layout_acc;
+        self.last_reachable_function_keys = current_reachable_keys;
 
         Ok(IncrementalCompileOutput {
             status: 0,
@@ -362,8 +401,12 @@ impl Default for IncrementalCompilerHost {
     }
 }
 
-fn analyze_source_via_stasis(source: &str) -> Result<AnalysisResult, String> {
-    let harness_source = build_stasis_analysis_harness(source);
+fn analyze_source_via_stasis(
+    source: &str,
+    required_reachability_root_hashes: &[i32],
+) -> Result<AnalysisResult, String> {
+    let harness_source =
+        build_stasis_analysis_harness(source, required_reachability_root_hashes);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("clock error: {error}"))?
@@ -413,6 +456,62 @@ fn analyze_source_via_stasis(source: &str) -> Result<AnalysisResult, String> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_stasis_analysis_output(&stdout)
+}
+
+fn analyze_project_reachability_via_stasis(
+    files: &[(String, String)],
+    required_reachability_root_hashes: &[i32],
+) -> Result<BTreeSet<FunctionKey>, String> {
+    if files.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let harness_source = build_stasis_reachability_harness(files, required_reachability_root_hashes);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("clock error: {error}"))?
+        .as_nanos();
+    let repo_root = repo_root_path()?;
+    let harness_dir = repo_root
+        .join(".stasis_cache")
+        .join("compiler_host")
+        .join(format!("reachability_{stamp}"));
+    fs::create_dir_all(&harness_dir).map_err(|error| {
+        format!(
+            "failed to create reachability harness dir {}: {error}",
+            harness_dir.display()
+        )
+    })?;
+    let harness_path = harness_dir.join("analyze_reachability.stasis");
+    let mut file = fs::File::create(&harness_path).map_err(|error| {
+        format!(
+            "failed to create reachability harness {}: {error}",
+            harness_path.display()
+        )
+    })?;
+    file.write_all(harness_source.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write reachability harness {}: {error}",
+            harness_path.display()
+        )
+    })?;
+    drop(file);
+
+    let script = bootstrap_stasisc_script_path()?;
+    let fast_output = run_stasis_analysis_harness(&script, &harness_path, true)?;
+    if fast_output.status.success() {
+        let stdout = String::from_utf8_lossy(&fast_output.stdout);
+        if let Ok(parsed) = parse_stasis_reachability_output(&stdout, files) {
+            return Ok(parsed);
+        }
+    }
+
+    let output = run_stasis_analysis_harness(&script, &harness_path, false)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("stasis reachability harness failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_stasis_reachability_output(&stdout, files)
 }
 
 fn run_stasis_analysis_harness(
@@ -466,7 +565,7 @@ fn repo_root_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "failed to resolve repo root".to_string())
 }
 
-fn build_stasis_analysis_harness(source: &str) -> String {
+fn build_stasis_analysis_harness(source: &str, required_reachability_root_hashes: &[i32]) -> String {
     let mut out = String::new();
     out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
     out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
@@ -500,34 +599,57 @@ fn build_stasis_analysis_harness(source: &str) -> String {
     out.push_str("        print_i32(Compiler.errors[ei].detail_a); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.errors[ei].detail_b); print_string(\";\");\n");
     out.push_str("    }\n");
-    out.push_str("    print_string(\"fn_count=\"); print_i32(Compiler.tracked_function_count); print_string(\";\");\n");
+    out.push_str("    let reachable_count: i32 = 0;\n");
     out.push_str("    let fi: i32 = 0;\n");
+    out.push_str("    for (fi = 0; fi < Compiler.tracked_function_count; fi += 1) {\n");
+    out.push_str("        if (compiler_is_function_reachable(fi)) {\n");
+    out.push_str("            reachable_count += 1;\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str(
+        "    print_string(\"fn_count=\"); print_i32(reachable_count); print_string(\";\");\n",
+    );
     out.push_str("    for (fi = 0; fi < Compiler.tracked_function_count; fi += 1) {\n");
     out.push_str("        print_string(\"fn=\");\n");
     out.push_str("        print_i32(fi); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_id_hashes[fi]); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_sig_hashes[fi]); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_body_hashes[fi]); print_string(\",\");\n");
-    out.push_str(
-        "        print_i32(Compiler.function_return_type_codes[fi]); print_string(\",\");\n",
-    );
+    out.push_str("        print_i32(Compiler.function_return_type_codes[fi]); print_string(\",\");\n");
     out.push_str("        print_i32(Compiler.function_param_counts[fi]); print_string(\",\");\n");
-    out.push_str(
-        "        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n",
-    );
+    out.push_str("        print_i32(Compiler.function_first_param_type_codes[fi]); print_string(\",\");\n");
     out.push_str(
         "        print_i32(Compiler.function_simple_i32_return_literal_flags[fi]); print_string(\",\");\n",
     );
+    out.push_str("        print_i32(Compiler.function_simple_i32_return_literals[fi]); print_string(\",\");\n");
+    out.push_str("        if (compiler_is_function_reachable(fi)) { print_i32(1); } else { print_i32(0); }\n");
+    out.push_str("        print_string(\";\");\n");
     out.push_str(
-        "        print_i32(Compiler.function_simple_i32_return_literals[fi]); print_string(\";\");\n",
+        "        let edge_count: i32 = Compiler.function_call_edge_counts[fi];\n",
     );
+    out.push_str("        let edge_index: i32 = 0;\n");
+    out.push_str("        for (edge_index = 0; edge_index < edge_count; edge_index += 1) {\n");
+    out.push_str("            print_string(\"edge=\");\n");
+    out.push_str(
+        "            print_i32(Compiler.function_call_edge_hashes[fi * COMPILER_MAX_FUNCTION_CALL_EDGES + edge_index]);\n",
+    );
+    out.push_str("            print_string(\";\");\n");
+    out.push_str("        }\n");
     out.push_str("        compiler_emit_function_clif_for_index(fi, clif_buf);\n");
-    out.push_str("        print_string(\"clif=\"); print_string(clif_buf); print_string(\";\");\n");
+    out.push_str(
+        "        print_string(\"clif=\"); print_string(clif_buf); print_string(\";\");\n",
+    );
     out.push_str("    }\n");
     out.push_str("    print_string(\"__SC_END;\");\n");
     out.push_str("}\n");
     out.push_str("function main(): i32 {\n");
     out.push_str("    compiler_reset_state();\n");
+    out.push_str("    compiler_clear_required_reachability_roots();\n");
+    for root_hash in required_reachability_root_hashes {
+        out.push_str("    compiler_add_required_reachability_root_hash(");
+        out.push_str(&root_hash.to_string());
+        out.push_str(");\n");
+    }
     if cfg!(windows) {
         out.push_str("    Compiler.clif_call_conv_code = 1;\n");
     } else {
@@ -537,6 +659,74 @@ fn build_stasis_analysis_harness(source: &str) -> String {
     out.push_str("    compiler_set_source(src_buf);\n");
     out.push_str("    let status: i32 = run_incremental_compiler();\n");
     out.push_str("    emit_metrics(status);\n");
+    out.push_str("    return 0;\n");
+    out.push_str("}\n");
+    out
+}
+
+fn build_stasis_reachability_harness(
+    files: &[(String, String)],
+    required_reachability_root_hashes: &[i32],
+) -> String {
+    let mut out = String::new();
+    out.push_str("import \"../../../src/stdlib/stdlib.stasis\";\n");
+    out.push_str("import \"../../../compiler/simple_pass_compiler.stasis\";\n");
+    out.push_str("global path_buf: ascii[260];\n");
+    out.push_str("global src_buf: ascii[262144];\n");
+    out.push_str("function main(): i32 {\n");
+    out.push_str("    compiler_reset_state();\n");
+    out.push_str("    compiler_clear_required_reachability_roots();\n");
+    for root_hash in required_reachability_root_hashes {
+        out.push_str("    compiler_add_required_reachability_root_hash(");
+        out.push_str(&root_hash.to_string());
+        out.push_str(");\n");
+    }
+    for (path, source) in files {
+        out.push_str("    ascii_clear(path_buf);\n");
+        for byte in path.as_bytes() {
+            out.push_str("    ascii_push(path_buf, ");
+            out.push_str(&byte.to_string());
+            out.push_str(");\n");
+        }
+        out.push_str("    ascii_clear(src_buf);\n");
+        for byte in source.as_bytes() {
+            out.push_str("    ascii_push(src_buf, ");
+            out.push_str(&byte.to_string());
+            out.push_str(");\n");
+        }
+        out.push_str("    compiler_upsert_file(path_buf, src_buf);\n");
+    }
+    out.push_str("    let status: i32 = run_incremental_compiler();\n");
+    out.push_str("    print_string(\"__SC_REACH_BEGIN;\");\n");
+    out.push_str("    print_string(\"status=\"); print_i32(status); print_string(\";\");\n");
+    out.push_str("    print_string(\"errors=\"); print_i32(Compiler.error_count); print_string(\";\");\n");
+    out.push_str("    let ei: i32 = 0;\n");
+    out.push_str("    for (ei = 0; ei < Compiler.error_count; ei += 1) {\n");
+    out.push_str("        print_string(\"err=\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].code); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].pos); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].detail_a); print_string(\",\");\n");
+    out.push_str("        print_i32(Compiler.errors[ei].detail_b); print_string(\";\");\n");
+    out.push_str("    }\n");
+    out.push_str("    let file_index: i32 = 0;\n");
+    out.push_str("    for (file_index = 0; file_index < Compiler.file_count; file_index += 1) {\n");
+    out.push_str("        let function_index: i32 = 0;\n");
+    out.push_str(
+        "        for (function_index = 0; function_index < Compiler.files[file_index].tracked_function_count; function_index += 1) {\n",
+    );
+    out.push_str("            if (compiler_file_function_is_reachable(file_index, function_index)) {\n");
+    out.push_str("                print_string(\"reach=\");\n");
+    out.push_str("                print_i32(file_index); print_string(\",\");\n");
+    out.push_str(
+        "                print_i32(Compiler.files[file_index].function_id_hashes[function_index]); print_string(\",\");\n",
+    );
+    out.push_str(
+        "                print_i32(Compiler.files[file_index].function_sig_hashes[function_index]); print_string(\";\");\n",
+    );
+    out.push_str("            }\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("    print_string(\"__SC_REACH_END;\");\n");
     out.push_str("    return 0;\n");
     out.push_str("}\n");
     out
@@ -623,8 +813,15 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                 } else {
                     0
                 };
+                let reachable_in_source = if parts.len() >= 10 {
+                    parse_i32(parts[9]) != 0
+                } else {
+                    false
+                };
                 let simple_i32_return_expr = if simple_i32_return_literal_flag != 0 {
-                    Some(SimpleI32ReturnExpr::Literal(simple_i32_return_literal_value))
+                    Some(SimpleI32ReturnExpr::Literal(
+                        simple_i32_return_literal_value,
+                    ))
                 } else {
                     None
                 };
@@ -649,8 +846,16 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
                     simple_void_print_i32_call_target_id_hash: None,
                     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
                     simple_void_print_i32_call_add_delta: None,
+                    reachable_in_source,
+                    call_target_id_hashes: Vec::new(),
                     clif_text: String::new(),
                 });
+            }
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("edge=") {
+            if let Some(function) = functions.last_mut() {
+                function.call_target_id_hashes.push(parse_i32(value));
             }
             continue;
         }
@@ -674,6 +879,74 @@ fn parse_stasis_analysis_output(stdout: &str) -> Result<AnalysisResult, String> 
         main_invalid_count,
         errors,
     })
+}
+
+fn parse_stasis_reachability_output(
+    stdout: &str,
+    files: &[(String, String)],
+) -> Result<BTreeSet<FunctionKey>, String> {
+    fn parse_i32(value: &str) -> i32 {
+        value.trim().parse::<i32>().unwrap_or_default()
+    }
+    fn parse_usize(value: &str) -> usize {
+        value.trim().parse::<usize>().unwrap_or_default()
+    }
+
+    let begin = stdout
+        .find("__SC_REACH_BEGIN;")
+        .ok_or_else(|| format!("missing reachability harness begin marker in output: {stdout}"))?;
+    let end = stdout[begin..]
+        .find("__SC_REACH_END;")
+        .map(|index| begin + index)
+        .ok_or_else(|| format!("missing reachability harness end marker in output: {stdout}"))?;
+    let payload = &stdout[begin + "__SC_REACH_BEGIN;".len()..end];
+
+    let mut status = 0i32;
+    let mut errors: Vec<ErrorMetric> = Vec::new();
+    let mut reachable = BTreeSet::new();
+    for token in payload.split(';') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("status=") {
+            status = parse_i32(value);
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("err=") {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() == 4 {
+                errors.push(ErrorMetric {
+                    code: parse_i32(parts[0]),
+                    pos: parse_i32(parts[1]),
+                    detail_a: parse_i32(parts[2]),
+                    detail_b: parse_i32(parts[3]),
+                });
+            }
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("reach=") {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() == 3 {
+                let file_index = parse_usize(parts[0]);
+                if let Some((path, _)) = files.get(file_index) {
+                    reachable.insert(FunctionKey {
+                        path: path.clone(),
+                        id_hash: parse_i32(parts[1]),
+                        sig_hash: parse_i32(parts[2]),
+                    });
+                }
+            }
+            continue;
+        }
+    }
+    if status != 0 {
+        return Err(format!(
+            "reachability harness status {status} with errors {:?}: {stdout}",
+            errors
+        ));
+    }
+    Ok(reachable)
 }
 
 fn normalize_path_key(path: &Path) -> String {
@@ -712,6 +985,26 @@ fn hash_i32(value: &str) -> i32 {
 
 fn hash_identifier(name: &str) -> i32 {
     hash_i32(name)
+}
+
+fn function_key_for(path: &str, function: &ParsedFunction) -> FunctionKey {
+    FunctionKey {
+        path: path.to_string(),
+        id_hash: function.id_hash,
+        sig_hash: function.sig_hash,
+    }
+}
+
+fn build_function_body_hash_by_key(
+    state_by_path: &BTreeMap<String, FileState>,
+) -> BTreeMap<FunctionKey, i32> {
+    let mut by_key = BTreeMap::new();
+    for (path, state) in state_by_path {
+        for function in &state.functions {
+            by_key.insert(function_key_for(path, function), function.body_hash);
+        }
+    }
+    by_key
 }
 
 fn current_hook_symbol(state_by_path: &BTreeMap<String, FileState>) -> Option<String> {
@@ -783,7 +1076,7 @@ mod tests {
 
     #[test]
     fn harness_source_buffer_matches_compiler_max_source_budget() {
-        let harness = build_stasis_analysis_harness("function main(): i32 { return 0; }\n");
+        let harness = build_stasis_analysis_harness("function main(): i32 { return 0; }\n", &[]);
         assert!(
             harness.contains("global src_buf: ascii[262144];"),
             "expected harness source buffer to match expanded compiler source budget"
@@ -999,8 +1292,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root =
-            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_passthrough_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_passthrough_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1604,8 +1898,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_expr_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_call_target_one_arg_lit_expr_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1644,8 +1938,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_expr_add_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_expr_add_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1684,8 +1979,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_paren_lit_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_paren_lit_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1766,8 +2062,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_mul_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_mul_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1807,8 +2104,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_mul_expr_add_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_mul_expr_add_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1847,8 +2145,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_div_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_div_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1887,8 +2186,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_mod_expr_add_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_mod_expr_add_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -1927,8 +2227,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_call_target_one_arg_lit_div_zero_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_call_target_one_arg_lit_div_zero_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2263,8 +2564,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_mul_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_mul_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2303,8 +2605,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_div_expr_add_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_div_expr_add_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2343,8 +2646,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_mod_expr_add_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_mod_expr_add_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2383,8 +2687,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_div_zero_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_div_zero_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2420,8 +2725,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_inc_void_print_i32_call_one_arg_lit_mod_zero_expr_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_inc_void_print_i32_call_one_arg_lit_mod_zero_expr_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp dir");
         let file = temp_root.join("sample.stasis");
         fs::write(
@@ -2666,6 +2972,126 @@ mod tests {
     }
 
     #[test]
+    fn reachability_prunes_unreachable_helper_functions_from_emission() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_reachability_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function helper(): i32 { return 9; }\nfunction tick(): void { return; }\nfunction main(): i32 { return 1; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile");
+        assert_eq!(compile.status, 0);
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("main")));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("tick")));
+        assert!(!compile
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("helper")));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn host_required_reachability_root_keeps_otherwise_unreachable_function() {
+        let mut host = IncrementalCompilerHost::new();
+        host.set_required_reachability_roots(&["bridge_entry"]);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_required_root_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function bridge_entry(): i32 { return 9; }\nfunction main(): i32 { return 1; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile");
+        assert_eq!(compile.status, 0);
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("main")));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("bridge_entry")));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn cross_file_reachability_emits_newly_reachable_unchanged_callee() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_cross_file_reachability_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file_a = temp_root.join("a.stasis");
+        let file_b = temp_root.join("b.stasis");
+        fs::write(&file_a, "function main(): i32 { return 0; }\n").expect("write a baseline");
+        fs::write(
+            &file_b,
+            "function helper(): i32 { return 7; }\nfunction dead(): i32 { return 0; }\n",
+        )
+        .expect("write b baseline");
+
+        let first = host
+            .compile_changed_files(&[file_a.clone(), file_b.clone()])
+            .expect("first compile");
+        assert_eq!(first.status, 0);
+        assert!(first
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("main")));
+        assert!(!first
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("helper")));
+
+        fs::write(&file_a, "function main(): i32 { return helper(); }\n")
+            .expect("write a updated");
+        let second = host
+            .compile_changed_files(std::slice::from_ref(&file_a))
+            .expect("second compile");
+        assert_eq!(second.status, 0);
+        assert!(second
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("main")));
+        assert!(second
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("helper")));
+        assert!(!second
+            .functions
+            .iter()
+            .any(|f| f.id_hash == hash_identifier("dead")));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn receiver_overloads_produce_distinct_signature_hashes() {
         let mut host = IncrementalCompilerHost::new();
         let stamp = SystemTime::now()
@@ -2677,7 +3103,7 @@ mod tests {
         let file = temp_root.join("sample.stasis");
         fs::write(
             &file,
-            "function main(): i32 { return 0; }\nfunction damage(self: Enemy, amount: i32): void { return; }\nfunction damage(self: Hero, amount: i32): void { return; }\n",
+            "function main(): i32 { damage(0, 1); return 0; }\nfunction damage(self: Enemy, amount: i32): void { return; }\nfunction damage(self: Hero, amount: i32): void { return; }\n",
         )
         .expect("write sample");
 
@@ -2692,6 +3118,127 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(damage.len(), 2);
         assert_ne!(damage[0].sig_hash, damage[1].sig_hash);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn struct_global_lowering_uses_single_owner_global_and_import_for_secondary_function() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_global_owner_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "struct Enemy { hp: i32; }\n\
+             global State { score: i32; enemy: Enemy; }\n\
+             function set_first(): i32 { State.enemy.hp = 3; return State.enemy.hp; }\n\
+             function set_second(): i32 { State.score = 7; return State.score; }\n\
+             function main(): i32 { set_first(); return set_second(); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile");
+        assert_eq!(compile.status, 0);
+
+        let first = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("set_first"))
+            .expect("set_first metric");
+        let second = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("set_second"))
+            .expect("set_second metric");
+
+        assert!(
+            first.clif_text.contains("global sp_global_mem_layout_"),
+            "expected owner function to define global arena: {}",
+            first.clif_text
+        );
+        assert!(
+            !first
+                .clif_text
+                .contains("global_import sp_global_mem_layout_"),
+            "owner function should not import arena: {}",
+            first.clif_text
+        );
+        assert!(
+            second
+                .clif_text
+                .contains("global_import sp_global_mem_layout_"),
+            "secondary function should import arena: {}",
+            second.clif_text
+        );
+        assert!(
+            !second.clif_text.contains("global sp_global_mem_layout_"),
+            "secondary function should not redefine arena: {}",
+            second.clif_text
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn reachability_prunes_unreachable_struct_and_global_layout_from_emitted_arena() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_inc_dead_struct_global_prune_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "struct Live { hp: i32; }\n\
+             struct Dead { value: i32; }\n\
+             global LiveState { enemy: Live; }\n\
+             global DeadState { dead: Dead; }\n\
+             function dead_write(): i32 { DeadState.dead.value = 9; return DeadState.dead.value; }\n\
+             function main(): i32 { LiveState.enemy.hp = 7; return LiveState.enemy.hp; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile");
+        assert_eq!(compile.status, 0);
+        assert!(compile
+            .functions
+            .iter()
+            .any(|function| function.id_hash == hash_identifier("main")));
+        assert!(!compile
+            .functions
+            .iter()
+            .any(|function| function.id_hash == hash_identifier("dead_write")));
+
+        let main = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("main"))
+            .expect("main metric");
+        assert!(
+            main.clif_text.contains("global sp_global_mem_layout_"),
+            "expected main to own shared arena: {}",
+            main.clif_text
+        );
+        assert!(
+            main.clif_text.contains(": i8[4]"),
+            "expected arena size to include only reachable field: {}",
+            main.clif_text
+        );
+        assert!(
+            !main.clif_text.contains(": i8[8]"),
+            "unexpected arena size indicates dead layout survived pruning: {}",
+            main.clif_text
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2753,4 +3300,3 @@ mod tests {
         fs::remove_dir_all(&temp_root).ok();
     }
 }
-

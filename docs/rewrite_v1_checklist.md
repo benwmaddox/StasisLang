@@ -11,6 +11,7 @@ Locked decisions:
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Planned compiler orchestration file path is `compiler/simple_pass_compiler.stasis`.
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
+- Call dispatch policy: debug/hot-swap mode keeps indirect dispatch (`FnId -> code_ptr`); release/AOT mode can lower direct call edges where compatibility gates allow.
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
@@ -61,6 +62,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Single top priority is `S10b` (`SH1 -> SH2 -> SH3`) until `.stasis` self-host AOT CLI core is running end-to-end.
 - All other in-progress tracks (`S8b`, `S10`, and remaining `R*`/`H*` slices) are lower priority and should only be touched if they directly unblock `S10b`.
 - Main integration gap: real backend compile path is now default, but emitted function patches are metadata-only (`FnId` mapping from hashes) and are not yet executing newly generated machine code through the pointer table.
+- Shared global-layout arena lowering now emits one owning `global` declaration per compile unit and uses `global_import` for other lowered functions, enabling multi-object AOT linking without duplicate data symbol definitions.
+- Simple-pass compiler now builds a root-based function reachability set in `.stasis` (`main`, `tick`, `on_code_swap`) and emits reachable functions only through host analysis harness output (current call-edge discovery uses direct identifier-call tokens; files with no roots keep all functions reachable to avoid helper-file drops in current per-file host analysis flow).
 - Ownership enforcement: compiler frontend semantics are routed through `.stasis` (`compiler/simple_pass_compiler.stasis`), and Rust is constrained to host/runtime glue.
 - Rust semantic analyzer paths were removed from `crates/stasis_compiler`; ownership guard test now enforces zero reintroduction (`tests/compiler_logic_ownership_guard.rs`).
 
@@ -528,7 +531,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Simple-pass evaluator now honors boolean literal identifiers (`true`/`false`) and short-circuit `&&`/`||` semantics during CLIF pre-evaluation, with fast `.stasis` compiler-ownership coverage in `tests/stasis/run_simple_pass_compiler_clif_suite.stasis`.
 - Simple-pass evaluator `for` execution now has fast `.stasis` coverage for let-init and assignment-init loops, false-condition body skip, and early return from loop body in `tests/stasis/run_simple_pass_compiler_clif_suite.stasis`.
 - Simple-pass CLIF emission now emits real parameterized `i32` arithmetic-return bodies (including parenthesized forms like `return (left + right);`) instead of hash stubs, with coverage in `tests/stasis/run_simple_pass_compiler_clif_suite.stasis`.
-- Simple-pass parser/evaluator now accepts top-level `struct Name { ... }` declarations and real dotted `global.field` set/get execution in `main` (`State.score = 7; return State.score;`), with fast CLIF + JIT + AOT end-to-end coverage.
+- Simple-pass parser now builds deterministic flattened global field layout metadata (nested struct fields included) and lowers direct nested global set/read shape (`State.first_enemy.hp = 7; return State.first_enemy.hp;`) to CLIF direct address + `store`/`load` operations (no runtime hash lookup) against a deterministic shared arena symbol (`sp_global_mem_layout_<layout_hash>`) in the current entry-main lowering path.
 - Added real-backend JIT smoke for `for` accumulation fixture (`apps/stasis::tests::real_backend_smoke_compiles_and_commits_for_accumulation_main`) using `tests/stasis/run_main_for_accumulation_returns_6.stasis`.
 - Added real-toolchain self-host AOT executable smoke for `for` accumulation main (`apps/stasis::compiler_backend::tests::self_host_aot_cli_runs_for_accumulation_main_if_real_toolchain_available`), verifying exit code `6` end-to-end.
 - Incremental compiler host harness now uses a fast bootstrap invocation path (`STASIS_BOOTSTRAP_NO_PREPROCESS=1`) with automatic fallback to the legacy preprocess/copy wrapper path on malformed or failed harness output, reducing self-host analysis latency while preserving compatibility.
@@ -556,7 +559,9 @@ It is not part of the steady-state incremental JIT update loop.
 - Simple-path rule: keep compilation one-pass by default (`parse/check/lower per function`) with explicit exceptions only for required pre-scan metadata and jump fixup resolution.
 - Simple-path rule: no new parser-shape/fallback-detector expansions; if a path depends on detector branching, replace or delete it instead of extending it.
 - DCE task: implement function reachability graph in `.stasis` and mark reachable symbols from roots `{main, tick, on_code_swap}` plus host-required exported entries.
+- DCE progress note: root closure + direct-call reachability and reachable-only function emission are wired for current per-source analysis, and host-required entry roots are now injectable from Rust host harness into `.stasis` reachability state; remaining work is broader cross-file closure semantics.
 - DCE task: implement struct reachability from reachable function signatures/body type references + reachable globals, and prune unreachable struct metadata before lowering.
+- DCE progress note: layout reachability now marks reachable globals from reachable function bodies, marks struct closure from reachable function type annotations + reachable globals, and prunes unreachable struct/global layout metadata before flattened offset lowering; remaining work is host-required export root wiring and broader cross-file closure semantics.
 - DCE task: gate Cranelift emission to reachable functions only (JIT + AOT paths) and remove unreachable symbol emission.
 - DCE task: remove legacy `simple_*` detector metric channels from compiler state + host parsing once reachability contracts are wired end-to-end.
 - Cleanup task: aggressively delete non-conforming detector/fallback metadata paths and obsolete tests as reachability-lowered paths replace them.

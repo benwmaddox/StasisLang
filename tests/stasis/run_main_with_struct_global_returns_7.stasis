@@ -8,6 +8,6 @@ global State {
 }
 
 function main(): i32 {
-    State.score = 7;
-    return State.score;
+    State.first_enemy.hp = 7;
+    return State.first_enemy.hp;
 }

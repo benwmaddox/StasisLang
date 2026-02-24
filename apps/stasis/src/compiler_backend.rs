@@ -447,56 +447,64 @@ impl IncrementalCompilerBackend {
                     .simple_i32_return_call_one_arg_arg_call_target_id_hash
                     .is_none()
                 && metric.param_count == 1;
-            let resolved_simple_two_arg_passthrough_call_target = if simple_i32_two_arg_uses_first_second_param_passthrough {
-                resolve_known_host_two_arg_i32_extern_symbol_by_hash(
-                    metric.simple_i32_return_call_one_arg_target_id_hash,
-                    metric.first_param_type_code,
-                )
-            } else {
-                None
-            };
-            let resolved_simple_three_arg_passthrough_call_target = if simple_i32_three_arg_uses_first_second_third_param_passthrough {
-                resolve_known_host_three_arg_i32_extern_symbol_by_hash(
-                    metric.simple_i32_return_call_one_arg_target_id_hash,
-                    metric.first_param_type_code,
-                )
-            } else {
-                None
-            };
-            let resolved_simple_four_arg_passthrough_call_target = if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
-                resolve_known_host_four_arg_i32_extern_symbol_by_hash(
-                    metric.simple_i32_return_call_one_arg_target_id_hash,
-                    metric.first_param_type_code,
-                )
-            } else {
-                None
-            };
-            let resolved_simple_two_arg_literal_first_second_passthrough_call_target = if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
-                resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
-                    metric.simple_i32_return_call_one_arg_target_id_hash,
-                    metric.first_param_type_code,
-                )
-            } else {
-                None
-            };
-            let resolved_simple_one_arg_call_target = if simple_i32_two_arg_uses_first_second_param_passthrough
-                || simple_i32_three_arg_uses_first_second_third_param_passthrough
-                || simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough
-                || simple_i32_two_arg_uses_literal_first_second_param_passthrough
+            let resolved_simple_two_arg_passthrough_call_target =
+                if simple_i32_two_arg_uses_first_second_param_passthrough {
+                    resolve_known_host_two_arg_i32_extern_symbol_by_hash(
+                        metric.simple_i32_return_call_one_arg_target_id_hash,
+                        metric.first_param_type_code,
+                    )
+                } else {
+                    None
+                };
+            let resolved_simple_three_arg_passthrough_call_target =
+                if simple_i32_three_arg_uses_first_second_third_param_passthrough {
+                    resolve_known_host_three_arg_i32_extern_symbol_by_hash(
+                        metric.simple_i32_return_call_one_arg_target_id_hash,
+                        metric.first_param_type_code,
+                    )
+                } else {
+                    None
+                };
+            let resolved_simple_four_arg_passthrough_call_target =
+                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
+                    resolve_known_host_four_arg_i32_extern_symbol_by_hash(
+                        metric.simple_i32_return_call_one_arg_target_id_hash,
+                        metric.first_param_type_code,
+                    )
+                } else {
+                    None
+                };
+            let resolved_simple_two_arg_literal_first_second_passthrough_call_target =
+                if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
+                    resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
+                        metric.simple_i32_return_call_one_arg_target_id_hash,
+                        metric.first_param_type_code,
+                    )
+                } else {
+                    None
+                };
+            let resolved_simple_one_arg_call_target =
+                if simple_i32_two_arg_uses_first_second_param_passthrough
+                    || simple_i32_three_arg_uses_first_second_third_param_passthrough
+                    || simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough
+                    || simple_i32_two_arg_uses_literal_first_second_param_passthrough
+                {
+                    None
+                } else {
+                    resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+                        metric.simple_i32_return_call_one_arg_target_id_hash,
+                        metrics,
+                        if simple_i32_one_arg_uses_first_param_passthrough {
+                            metric.first_param_type_code
+                        } else {
+                            1
+                        },
+                    )
+                };
+            if metric
+                .simple_i32_return_call_one_arg_target_id_hash
+                .is_some()
             {
-                None
-            } else {
-                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-                    metric.simple_i32_return_call_one_arg_target_id_hash,
-                    metrics,
-                    if simple_i32_one_arg_uses_first_param_passthrough {
-                        metric.first_param_type_code
-                    } else {
-                        1
-                    },
-                )
-            };
-            if metric.simple_i32_return_call_one_arg_target_id_hash.is_some() {
                 if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
                     if resolved_simple_four_arg_passthrough_call_target.is_none() {
                         return Err(format!(
@@ -977,7 +985,8 @@ fn build_aot_stub_clif_for_metric(
     if simple_call_four_arg_uses_first_second_third_fourth_param_passthrough {
         if let Some(call_target_symbol) = simple_call_four_arg_target_symbol {
             if function_param_count == 4 {
-                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let first_arg_type =
+                    clif_type_for_stasis_param_code(function_first_param_type_code);
                 let second_arg_type = "i32";
                 let third_arg_type = "i64";
                 let fourth_arg_type = "i64";
@@ -1001,7 +1010,8 @@ fn build_aot_stub_clif_for_metric(
     if simple_call_three_arg_uses_first_second_third_param_passthrough {
         if let Some(call_target_symbol) = simple_call_three_arg_target_symbol {
             if function_param_count == 3 {
-                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let first_arg_type =
+                    clif_type_for_stasis_param_code(function_first_param_type_code);
                 let second_arg_type = "i64";
                 let third_arg_type = "i64";
                 if let Some(delta) = simple_i32_return_call_add_delta {
@@ -1024,7 +1034,8 @@ fn build_aot_stub_clif_for_metric(
     if simple_call_two_arg_uses_first_second_param_passthrough {
         if let Some(call_target_symbol) = simple_call_two_arg_target_symbol {
             if function_param_count == 2 {
-                let first_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let first_arg_type =
+                    clif_type_for_stasis_param_code(function_first_param_type_code);
                 let second_arg_type = "i64";
                 if let Some(delta) = simple_i32_return_call_add_delta {
                     let abs_delta = delta.abs();
@@ -1049,7 +1060,8 @@ fn build_aot_stub_clif_for_metric(
             simple_call_one_arg_i32_literal,
         ) {
             if function_param_count == 1 {
-                let second_arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
+                let second_arg_type =
+                    clif_type_for_stasis_param_code(function_first_param_type_code);
                 if let Some(delta) = simple_i32_return_call_add_delta {
                     let abs_delta = delta.abs();
                     let op = if delta < 0 { "isub" } else { "iadd" };
@@ -2256,13 +2268,9 @@ mod tests {
             None,
             None,
         );
-        assert!(clif.contains(
-            "external host_write_aot_cli_summary(i64, i64, i64) -> i32"
-        ));
+        assert!(clif.contains("external host_write_aot_cli_summary(i64, i64, i64) -> i32"));
         assert!(clif.contains("function %forward3(i64, i64, i64) -> i32"));
-        assert!(clif.contains(
-            "v3 = call %host_write_aot_cli_summary(v0, v1, v2)"
-        ));
+        assert!(clif.contains("v3 = call %host_write_aot_cli_summary(v0, v1, v2)"));
         assert!(clif.contains("return v3"));
         assert!(!clif.contains("iconst.i32 123"));
     }
@@ -2299,13 +2307,9 @@ mod tests {
             None,
             None,
         );
-        assert!(clif.contains(
-            "external host_load_source_file(i64, i32, i64, i64) -> i32"
-        ));
+        assert!(clif.contains("external host_load_source_file(i64, i32, i64, i64) -> i32"));
         assert!(clif.contains("function %forward4(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains(
-            "v4 = call %host_load_source_file(v0, v1, v2, v3)"
-        ));
+        assert!(clif.contains("v4 = call %host_load_source_file(v0, v1, v2, v3)"));
         assert!(clif.contains("return v4"));
         assert!(!clif.contains("iconst.i32 123"));
     }
@@ -2342,13 +2346,9 @@ mod tests {
             None,
             None,
         );
-        assert!(clif.contains(
-            "external host_load_source_file(i64, i32, i64, i64) -> i32"
-        ));
+        assert!(clif.contains("external host_load_source_file(i64, i32, i64, i64) -> i32"));
         assert!(clif.contains("function %forward4_add(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains(
-            "v4 = call %host_load_source_file(v0, v1, v2, v3)"
-        ));
+        assert!(clif.contains("v4 = call %host_load_source_file(v0, v1, v2, v3)"));
         assert!(clif.contains("iconst.i32 2"));
         assert!(clif.contains("isub v4, v5"));
         assert!(clif.contains("return v6"));
@@ -2639,8 +2639,10 @@ mod tests {
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];
-        let resolved =
-            resolve_unique_i32_call_target_symbol_by_hash(caller.simple_i32_return_call_target_id_hash, &metrics);
+        let resolved = resolve_unique_i32_call_target_symbol_by_hash(
+            caller.simple_i32_return_call_target_id_hash,
+            &metrics,
+        );
         assert!(
             resolved.is_none(),
             "no-arg call resolution should reject one-arg candidate signature"
@@ -2717,11 +2719,12 @@ mod tests {
     #[test]
     fn resolve_simple_i32_return_two_arg_literal_first_second_param_passthrough_target_symbol_supports_known_host_extern(
     ) {
-        let resolved = resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
-            Some(hash_identifier("host_cli_arg_value")),
-            0,
-        )
-        .expect("known host cli arg-value literal+param extern should resolve");
+        let resolved =
+            resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
+                Some(hash_identifier("host_cli_arg_value")),
+                0,
+            )
+            .expect("known host cli arg-value literal+param extern should resolve");
         assert_eq!(resolved, "host_cli_arg_value");
     }
 
@@ -2936,8 +2939,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_known_host_two_arg_passthrough_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_known_host_two_arg_passthrough_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -2982,8 +2985,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_known_host_three_arg_passthrough_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_known_host_three_arg_passthrough_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -3028,8 +3032,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_known_host_four_arg_passthrough_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_known_host_four_arg_passthrough_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -3075,8 +3080,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_known_host_two_arg_lit_param_passthrough_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_known_host_two_arg_lit_param_passthrough_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -3359,8 +3365,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_one_arg_paren_lit_expr_direct_call_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_one_arg_paren_lit_expr_direct_call_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -3837,8 +3844,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root =
-            std::env::temp_dir().join(format!("stasis_aot_lowerable_entry_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_lowerable_entry_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let compiler_dir = temp_root.join("compiler");
         fs::create_dir_all(&compiler_dir).expect("create compiler dir");
@@ -4466,7 +4472,10 @@ echo "fake-object" > "$OUT"
                 .arg(&helper)
                 .status()
                 .expect("chmod recording fake helper");
-            assert!(status.success(), "chmod recording fake helper should succeed");
+            assert!(
+                status.success(),
+                "chmod recording fake helper should succeed"
+            );
             helper
         }
     }
@@ -4553,18 +4562,30 @@ echo "signed" > "$1.signed"
         fs::create_dir_all(subset_root.join("src").join("stdlib"))
             .expect("create subset stdlib dir");
         fs::copy(
-            repo_root.join("compiler").join("stasis_aot_cli_entry.stasis"),
-            subset_root.join("compiler").join("stasis_aot_cli_entry.stasis"),
+            repo_root
+                .join("compiler")
+                .join("stasis_aot_cli_entry.stasis"),
+            subset_root
+                .join("compiler")
+                .join("stasis_aot_cli_entry.stasis"),
         )
         .expect("copy stasis_aot_cli_entry");
         fs::copy(
-            repo_root.join("compiler").join("stasis_aot_cli_core.stasis"),
-            subset_root.join("compiler").join("stasis_aot_cli_core.stasis"),
+            repo_root
+                .join("compiler")
+                .join("stasis_aot_cli_core.stasis"),
+            subset_root
+                .join("compiler")
+                .join("stasis_aot_cli_core.stasis"),
         )
         .expect("copy stasis_aot_cli_core");
         fs::copy(
-            repo_root.join("compiler").join("simple_pass_compiler.stasis"),
-            subset_root.join("compiler").join("simple_pass_compiler.stasis"),
+            repo_root
+                .join("compiler")
+                .join("simple_pass_compiler.stasis"),
+            subset_root
+                .join("compiler")
+                .join("simple_pass_compiler.stasis"),
         )
         .expect("copy incremental_compiler");
         fs::copy(
@@ -5695,7 +5716,8 @@ echo "signed" > "$1.signed"
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_real_exe_if_add_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_real_exe_if_add_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let project_dir = temp_root.join("project");
         fs::create_dir_all(&project_dir).expect("create project dir");
@@ -5801,7 +5823,8 @@ echo "signed" > "$1.signed"
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_real_exe_for_sum_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_real_exe_for_sum_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let project_dir = temp_root.join("project");
         fs::create_dir_all(&project_dir).expect("create project dir");
@@ -5907,14 +5930,15 @@ echo "signed" > "$1.signed"
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_real_exe_struct_global_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_self_host_real_exe_struct_global_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let project_dir = temp_root.join("project");
         fs::create_dir_all(&project_dir).expect("create project dir");
         let source = project_dir.join("main.stasis");
         fs::write(
             &source,
-            "struct Enemy { hp: i32; }\nglobal State { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { State.score = 7; return State.score; }\n",
+            "struct Enemy { hp: i32; }\nglobal State { score: i32; first_enemy: Enemy; }\nfunction set_first(): i32 { State.first_enemy.hp = 3; return State.first_enemy.hp; }\nfunction main(): i32 { set_first(); State.first_enemy.hp = 7; return State.first_enemy.hp; }\n",
         )
         .expect("write source");
         let output_exe = temp_root.join("program.exe");
@@ -5930,7 +5954,7 @@ echo "signed" > "$1.signed"
                 assert_eq!(
                     status.code(),
                     Some(7),
-                    "compiled executable should return exit code 7 for struct/global main"
+                    "compiled executable should return exit code 7 for multi-function struct/global main"
                 );
             }
             Err(message)
@@ -6012,7 +6036,10 @@ echo "signed" > "$1.signed"
 
         std::env::set_var("STASIS_CRANELIFT_AOT", &helper_path);
         std::env::set_var("STASIS_AOT_LINKER", &linker_path);
-        std::env::set_var("STASIS_AOT_ENTRY_FILE", "compiler/stasis_aot_cli_entry.stasis");
+        std::env::set_var(
+            "STASIS_AOT_ENTRY_FILE",
+            "compiler/stasis_aot_cli_entry.stasis",
+        );
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6125,7 +6152,10 @@ echo "signed" > "$1.signed"
 
         std::env::set_var("STASIS_CRANELIFT_AOT", &helper_path);
         std::env::set_var("STASIS_AOT_LINKER", &linker_path);
-        std::env::set_var("STASIS_AOT_ENTRY_FILE", "compiler/stasis_aot_cli_entry.stasis");
+        std::env::set_var(
+            "STASIS_AOT_ENTRY_FILE",
+            "compiler/stasis_aot_cli_entry.stasis",
+        );
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6236,7 +6266,8 @@ echo "signed" > "$1.signed"
             stage2_summary_path.display().to_string(),
         ];
         let source_payload = collect_runtime_bridge_source_payload(&subset_root);
-        let cli_snapshot = publish_cli_args_to_env(&stage2_args, Some(stage2_summary_path.as_path()));
+        let cli_snapshot =
+            publish_cli_args_to_env(&stage2_args, Some(stage2_summary_path.as_path()));
         let source_snapshot = publish_source_files_to_env(&source_payload);
         let staged_snapshot = publish_staged_bridge_paths_to_env(
             &stage1_summary.ir_bundle_path,
@@ -6260,12 +6291,13 @@ echo "signed" > "$1.signed"
                         .find(|detail| detail.body_hash == code)
                         .map(|detail| detail.symbol.clone())
                 });
-                let exit_fallback_name_hint = exit_fallback_symbol_hint.as_ref().and_then(|symbol| {
-                    let unsigned_id_hash = parse_aot_symbol_unsigned_id_hash(symbol)?;
-                    function_name_candidates_by_hash
-                        .get(&unsigned_id_hash)
-                        .map(|entries| entries.join(", "))
-                });
+                let exit_fallback_name_hint =
+                    exit_fallback_symbol_hint.as_ref().and_then(|symbol| {
+                        let unsigned_id_hash = parse_aot_symbol_unsigned_id_hash(symbol)?;
+                        function_name_candidates_by_hash
+                            .get(&unsigned_id_hash)
+                            .map(|entries| entries.join(", "))
+                    });
                 assert_eq!(
                     exit_code,
                     Some(0),
@@ -6324,7 +6356,10 @@ echo "signed" > "$1.signed"
             stage1_summary_sidecar.source_file_count,
             stage2_summary.source_file_count
         );
-        assert_eq!(stage1_summary_sidecar.entry_symbol, stage2_summary.entry_symbol);
+        assert_eq!(
+            stage1_summary_sidecar.entry_symbol,
+            stage2_summary.entry_symbol
+        );
         assert_eq!(
             stage1_summary_sidecar.object_file_names,
             stage2_summary.object_file_names
@@ -7139,8 +7174,9 @@ return\n\
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_self_host_runtime_bridge_clif_arg_source_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_self_host_runtime_bridge_clif_arg_source_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
 
         let compile_config = AotCompileConfig {
@@ -7738,7 +7774,9 @@ fn build_self_host_runtime_bridge_key_selector(
             "brif v{eq_id}, block_return_{index}, {next_block}\n"
         ));
         out.push_str(&format!("block_return_{index}:\n"));
-        out.push_str(&format!("v{key_id} = global_value {global_prefix}{index}\n"));
+        out.push_str(&format!(
+            "v{key_id} = global_value {global_prefix}{index}\n"
+        ));
         out.push_str(&format!("return v{key_id}\n"));
     }
 
@@ -7757,7 +7795,8 @@ fn build_self_host_runtime_bridge_clif(cc: &str) -> String {
     source.push_str("global k_summary_key: i8 ; \"STASIS_AOT_SUMMARY_FILE\"\n");
     source.push_str("global k_ir_bundle_key: i8 ; \"STASIS_SELF_HOST_IR_BUNDLE_PATH\"\n");
     source.push_str("global k_object_bundle_key: i8 ; \"STASIS_SELF_HOST_OBJECT_BUNDLE_PATH\"\n");
-    source.push_str("global k_link_template_exe_key: i8 ; \"STASIS_SELF_HOST_LINK_TEMPLATE_EXE\"\n");
+    source
+        .push_str("global k_link_template_exe_key: i8 ; \"STASIS_SELF_HOST_LINK_TEMPLATE_EXE\"\n");
     source.push_str(
         "global k_summary_template_key: i8 ; \"STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE\"\n",
     );
@@ -8678,4 +8717,3 @@ mod self_host_file_selection_tests {
         fs::remove_dir_all(&root).ok();
     }
 }
-

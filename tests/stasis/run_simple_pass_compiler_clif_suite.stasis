@@ -102,11 +102,173 @@ test `simple pass add pair parenthesized emits param iadd`(): bool {
     );
 }
 
-test `simple pass struct global field set get emits iconst`(): bool {
+test `simple pass nested struct global field set get emits direct load store`(): bool {
     let status: i32 = test_emit_main_clif_for_source(
-        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction main(): i32 { State.score = 7; return State.score; }\n"
+        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction main(): i32 { State.enemy.hp = 7; return State.enemy.hp; }\n"
     );
-    return status == 0 && test_clif_contains_iconst(7);
+    return (
+        status == 0 &&
+        ascii_contains(TestClifBuffer, "global sp_global_mem_layout_") &&
+        ascii_contains(TestClifBuffer, "store v3, v2") &&
+        ascii_contains(TestClifBuffer, "load.i32 v2")
+    );
+}
+
+test `simple pass shared arena emits one owner global and import in later function`(): bool {
+    compiler_reset_state();
+    compiler_set_source(
+        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction set_first(): i32 { State.enemy.hp = 3; return State.enemy.hp; }\nfunction set_second(): i32 { State.score = 7; return State.score; }\nfunction main(): i32 { set_first(); return set_second(); }\n"
+    );
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+
+    let first_index: i32 = test_find_function_index_by_name("set_first");
+    let second_index: i32 = test_find_function_index_by_name("set_second");
+    if (first_index < 0 || second_index < 0) {
+        return false;
+    }
+
+    ascii_clear(TestClifBuffer);
+    compiler_emit_function_clif_for_index(first_index, TestClifBuffer);
+    let first_is_owner: bool = (
+        ascii_contains(TestClifBuffer, "global sp_global_mem_layout_") &&
+        !ascii_contains(TestClifBuffer, "global_import sp_global_mem_layout_")
+    );
+
+    ascii_clear(TestClifBuffer);
+    compiler_emit_function_clif_for_index(second_index, TestClifBuffer);
+    let second_is_import: bool = (
+        ascii_contains(TestClifBuffer, "global_import sp_global_mem_layout_") &&
+        !ascii_contains(TestClifBuffer, "global sp_global_mem_layout_")
+    );
+
+    return first_is_owner && second_is_import;
+}
+
+test `simple pass reachability marks root closure and excludes unreachable helper`(): bool {
+    compiler_reset_state();
+    compiler_set_source(
+        "function helper(): i32 { return 9; }\nfunction tick(): void { return; }\nfunction main(): i32 { return 1; }\n"
+    );
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+    let main_index: i32 = test_find_function_index_by_name("main");
+    let tick_index: i32 = test_find_function_index_by_name("tick");
+    let helper_index: i32 = test_find_function_index_by_name("helper");
+    if (main_index < 0 || tick_index < 0 || helper_index < 0) {
+        return false;
+    }
+    return (
+        compiler_is_function_reachable(main_index) &&
+        compiler_is_function_reachable(tick_index) &&
+        !compiler_is_function_reachable(helper_index)
+    );
+}
+
+test `simple pass host required root keeps otherwise unreachable function`(): bool {
+    compiler_reset_state();
+    if (!compiler_add_required_reachability_root_hash(compiler_hash_ascii("bridge_entry"))) {
+        return false;
+    }
+    compiler_set_source(
+        "function bridge_entry(): i32 { return 9; }\nfunction main(): i32 { return 1; }\n"
+    );
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+    let main_index: i32 = test_find_function_index_by_name("main");
+    let bridge_index: i32 = test_find_function_index_by_name("bridge_entry");
+    if (main_index < 0 || bridge_index < 0) {
+        return false;
+    }
+    return (
+        compiler_is_function_reachable(main_index) &&
+        compiler_is_function_reachable(bridge_index)
+    );
+}
+
+test `simple pass cross file reachability marks callee in other file`(): bool {
+    compiler_reset_state();
+    if (!compiler_upsert_file("a.stasis", "function main(): i32 { return helper(); }\n")) {
+        return false;
+    }
+    if (
+        !compiler_upsert_file(
+            "b.stasis",
+            "function helper(): i32 { return 7; }\nfunction dead(): i32 { return 0; }\n"
+        )
+    ) {
+        return false;
+    }
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+    let a_file: i32 = compiler_find_file("a.stasis");
+    let b_file: i32 = compiler_find_file("b.stasis");
+    if (a_file < 0 || b_file < 0) {
+        return false;
+    }
+    let main_index: i32 = compiler_find_file_function_index(a_file, compiler_hash_ascii("main"));
+    let helper_index: i32 = compiler_find_file_function_index(b_file, compiler_hash_ascii("helper"));
+    let dead_index: i32 = compiler_find_file_function_index(b_file, compiler_hash_ascii("dead"));
+    if (main_index < 0 || helper_index < 0 || dead_index < 0) {
+        return false;
+    }
+    return (
+        compiler_file_function_is_reachable(a_file, main_index) &&
+        compiler_file_function_is_reachable(b_file, helper_index) &&
+        !compiler_file_function_is_reachable(b_file, dead_index)
+    );
+}
+
+test `simple pass prunes unreachable struct and global layout metadata`(): bool {
+    compiler_reset_state();
+    compiler_set_source(
+        "struct Live { hp: i32; }\nstruct Dead { value: i32; }\nglobal LiveState { enemy: Live; }\nglobal DeadState { dead: Dead; }\nfunction dead_write(): i32 { DeadState.dead.value = 9; return DeadState.dead.value; }\nfunction main(): i32 { LiveState.enemy.hp = 7; return LiveState.enemy.hp; }\n"
+    );
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+
+    let live_struct_index: i32 = compiler_layout_find_struct_index(compiler_hash_ascii("Live"));
+    let dead_struct_index: i32 = compiler_layout_find_struct_index(compiler_hash_ascii("Dead"));
+    let live_global_index: i32 = compiler_layout_find_global_index(compiler_hash_ascii("LiveState"));
+    let dead_global_index: i32 = compiler_layout_find_global_index(compiler_hash_ascii("DeadState"));
+
+    return (
+        Compiler.layout_struct_count == 1 &&
+        Compiler.layout_global_count == 1 &&
+        live_struct_index == 0 &&
+        dead_struct_index < 0 &&
+        live_global_index == 0 &&
+        dead_global_index < 0 &&
+        Compiler.layout_flat_field_count == 1 &&
+        Compiler.layout_memory_size_bytes == 4
+    );
+}
+
+test `simple pass flattened global field offsets are deterministic`(): bool {
+    compiler_reset_state();
+    compiler_set_source(
+        "struct Enemy { hp: i32; }\nglobal State { score: i32; enemy: Enemy; }\nfunction main(): i32 { State.enemy.hp = 7; return State.enemy.hp; }\n"
+    );
+    if (run_incremental_compiler_with_main_entry() != 0) {
+        return false;
+    }
+
+    let state_hash: i32 = compiler_hash_ascii("State");
+    let score_hash: i32 = compiler_layout_extend_path_hash(state_hash, compiler_hash_ascii("score"));
+    let enemy_hash: i32 = compiler_layout_extend_path_hash(state_hash, compiler_hash_ascii("enemy"));
+    let enemy_hp_hash: i32 = compiler_layout_extend_path_hash(enemy_hash, compiler_hash_ascii("hp"));
+
+    return (
+        Compiler.layout_flat_field_count == 2 &&
+        Compiler.layout_memory_size_bytes == 8 &&
+        compiler_layout_find_flat_field_offset(score_hash) == 0 &&
+        compiler_layout_find_flat_field_offset(enemy_hp_hash) == 4
+    );
 }
 
 test `simple pass bool literal condition emits iconst`(): bool {
