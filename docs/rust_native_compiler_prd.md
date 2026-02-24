@@ -41,6 +41,9 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Simplified backend integration to mode-specific full processes:
 - `backend::jit::JitProcess` runs end-to-end JIT flow for a compile invocation.
 - `backend::aot::AotProcess` runs end-to-end AOT flow for a compile invocation.
+- Added explicit engine-facing split:
+- JIT emits an in-process engine package (`tick`/`render`/optional `on_code_swap` -> code pointers) for runtime embedding.
+- AOT emits an engine bundle (object files + manifest) with required entrypoints validated before output.
 - Removed backend trait indirection from the core compiler trial path.
 - Wired real Cranelift emission in both mode processes for currently supported function bodies:
 - JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
@@ -48,6 +51,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Current body support in backend emission is intentionally narrow: `return <i32 literal>;`, `return <i32 literal op literal>;` (`+ - * / %`), and `return;` (for `void`).
 - JIT path now supports in-memory execution verification in tests by invoking finalized function pointers directly (`noarg -> i32`) after compile.
 - AOT path now supports executable smoke verification in tests (`object -> linked exe -> process exit code`) when a Windows linker is available.
+- AOT defaults to an optimization-oriented profile (`speed`) and supports explicit profile selection.
 - Kept existing compiler host path intact for compatibility while evaluating this approach.
 
 ## Trial Test Coverage Added

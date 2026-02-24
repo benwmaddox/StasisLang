@@ -1,4 +1,5 @@
 use crate::backend::eval_simple_i32_return_expression;
+use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
@@ -8,6 +9,7 @@ use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,15 +25,35 @@ pub struct AotArtifact {
 #[derive(Debug, Default)]
 pub struct AotProcess {
     compiler: Compiler,
+    optimization_profile: AotOptimizationProfile,
     next_object_index: u32,
     next_symbol_seq: u64,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AotEngineBundle {
+    pub output_dir: PathBuf,
+    pub manifest_path: PathBuf,
+    pub object_paths_by_function: BTreeMap<String, PathBuf>,
+    pub optimization_profile: AotOptimizationProfile,
+}
+
 impl AotProcess {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_optimization_profile(AotOptimizationProfile::Speed)
+    }
+
+    pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
+        Self {
+            compiler: Compiler::new(),
+            optimization_profile,
+            next_object_index: 0,
+            next_symbol_seq: 0,
+            artifacts: Vec::new(),
+            object_bytes: Vec::new(),
+        }
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
@@ -39,17 +61,25 @@ impl AotProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
-        let (compiler, next_object_index, next_symbol_seq, artifacts, object_bytes) = (
+        let (
+            compiler,
+            next_object_index,
+            next_symbol_seq,
+            artifacts,
+            object_bytes,
+            optimization_profile,
+        ) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.next_symbol_seq,
             &mut self.artifacts,
             &mut self.object_bytes,
+            self.optimization_profile,
         );
         compiler.compile_with(|meta, hir| {
             let symbol = format!("aot_fn_{}_{}", meta.id, *next_symbol_seq);
             *next_symbol_seq = next_symbol_seq.saturating_add(1);
-            let bytes = compile_function_to_object_bytes(meta, hir, &symbol)?;
+            let bytes = compile_function_to_object_bytes(meta, hir, &symbol, optimization_profile)?;
             let object_index = *next_object_index;
             *next_object_index = next_object_index.saturating_add(1);
             object_bytes.push(bytes);
@@ -68,6 +98,10 @@ impl AotProcess {
 
     pub fn artifacts(&self) -> &[AotArtifact] {
         &self.artifacts
+    }
+
+    pub fn optimization_profile(&self) -> AotOptimizationProfile {
+        self.optimization_profile
     }
 
     pub fn link_executable_for_i32_noarg_function(
@@ -131,16 +165,97 @@ impl AotProcess {
         )?;
         Ok(object_path)
     }
+
+    pub fn write_engine_bundle(
+        &self,
+        entrypoints: &EngineEntrypoints,
+        output_dir: &Path,
+    ) -> Result<AotEngineBundle, String> {
+        fs::create_dir_all(output_dir).map_err(|error| {
+            format!(
+                "failed to create AOT engine bundle directory {}: {error}",
+                output_dir.display()
+            )
+        })?;
+
+        let mut object_paths_by_function: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut manifest_rows: Vec<(String, String, String)> = Vec::new();
+        for artifact in &self.artifacts {
+            let function = self
+                .compiler
+                .functions()
+                .iter()
+                .find(|function| function.id == artifact.function_id)
+                .ok_or_else(|| {
+                    format!(
+                        "function metadata missing for artifact function id {}",
+                        artifact.function_id
+                    )
+                })?;
+            let bytes = self
+                .object_bytes
+                .get(artifact.object_index as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "object bytes missing for function '{}' at object index {}",
+                        function.name, artifact.object_index
+                    )
+                })?;
+            let object_file_name = format!(
+                "{}_{}.obj",
+                sanitize_file_token(&function.name),
+                artifact.object_index
+            );
+            let object_path = output_dir.join(&object_file_name);
+            fs::write(&object_path, bytes).map_err(|error| {
+                format!(
+                    "failed to write object file {}: {error}",
+                    object_path.display()
+                )
+            })?;
+            object_paths_by_function.insert(function.name.clone(), object_path);
+            manifest_rows.push((
+                function.name.clone(),
+                artifact.symbol_name.clone(),
+                object_file_name,
+            ));
+        }
+
+        // Enforce required runtime entrypoints for engine integration.
+        ensure_function_in_bundle(&object_paths_by_function, &entrypoints.tick)?;
+        ensure_function_in_bundle(&object_paths_by_function, &entrypoints.render)?;
+        if let Some(on_code_swap) = entrypoints.on_code_swap.as_ref() {
+            ensure_function_in_bundle(&object_paths_by_function, on_code_swap)?;
+        }
+
+        let manifest_path = output_dir.join("engine_bundle_manifest.json");
+        let manifest =
+            build_engine_bundle_manifest(self.optimization_profile, entrypoints, &manifest_rows);
+        fs::write(&manifest_path, manifest).map_err(|error| {
+            format!(
+                "failed to write engine bundle manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+
+        Ok(AotEngineBundle {
+            output_dir: output_dir.to_path_buf(),
+            manifest_path,
+            object_paths_by_function,
+            optimization_profile: self.optimization_profile,
+        })
+    }
 }
 
 fn compile_function_to_object_bytes(
     meta: &FunctionMeta,
     hir: &FunctionHIR,
     symbol: &str,
+    optimization_profile: AotOptimizationProfile,
 ) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
-        .set("opt_level", "none")
+        .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = cranelift_native::builder()
@@ -204,9 +319,92 @@ fn compile_function_to_object_bytes(
         .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
 }
 
+fn ensure_function_in_bundle(
+    object_paths_by_function: &BTreeMap<String, PathBuf>,
+    function_name: &str,
+) -> Result<(), String> {
+    if object_paths_by_function.contains_key(function_name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "required engine entrypoint '{}' missing from AOT bundle",
+            function_name
+        ))
+    }
+}
+
+fn sanitize_file_token(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "fn".to_string()
+    } else {
+        out
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn build_engine_bundle_manifest(
+    optimization_profile: AotOptimizationProfile,
+    entrypoints: &EngineEntrypoints,
+    rows: &[(String, String, String)],
+) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str(&format!(
+        "  \"optimization_profile\": \"{}\",\n",
+        optimization_profile.as_str()
+    ));
+    out.push_str("  \"entrypoints\": {\n");
+    out.push_str(&format!(
+        "    \"tick\": \"{}\",\n",
+        json_escape(&entrypoints.tick)
+    ));
+    out.push_str(&format!(
+        "    \"render\": \"{}\"",
+        json_escape(&entrypoints.render)
+    ));
+    if let Some(on_code_swap) = entrypoints.on_code_swap.as_ref() {
+        out.push_str(&format!(
+            ",\n    \"on_code_swap\": \"{}\"\n",
+            json_escape(on_code_swap)
+        ));
+    } else {
+        out.push('\n');
+    }
+    out.push_str("  },\n");
+    out.push_str("  \"functions\": [\n");
+    for (index, (name, symbol, object_file)) in rows.iter().enumerate() {
+        let comma = if index + 1 < rows.len() { "," } else { "" };
+        out.push_str(&format!(
+            "    {{\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\"}}{}\n",
+            json_escape(name),
+            json_escape(symbol),
+            json_escape(object_file),
+            comma
+        ));
+    }
+    out.push_str("  ]\n");
+    out.push_str("}\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::EngineEntrypoints;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -283,6 +481,77 @@ mod tests {
         assert_eq!(report.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 1);
         assert!(process.artifacts()[0].object_bytes_len > 0);
+    }
+
+    #[test]
+    fn aot_process_defaults_to_speed_optimization_profile() {
+        let process = AotProcess::new();
+        assert_eq!(
+            process.optimization_profile(),
+            AotOptimizationProfile::Speed
+        );
+    }
+
+    #[test]
+    fn aot_engine_bundle_writes_manifest_and_required_entrypoints() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+        assert!(bundle.manifest_path.exists(), "manifest should exist");
+        assert_eq!(
+            bundle.object_paths_by_function.contains_key("tick"),
+            true,
+            "expected tick object path"
+        );
+        assert_eq!(
+            bundle.object_paths_by_function.contains_key("render"),
+            true,
+            "expected render object path"
+        );
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        assert!(
+            manifest.contains("\"optimization_profile\": \"speed\""),
+            "manifest should include speed optimization profile"
+        );
+        assert!(
+            manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
+            "manifest should include required entrypoints"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_errors_when_required_entrypoint_missing() {
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", "function tick(): void { return; }\n");
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_missing_{stamp}"));
+        let error = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect_err("missing render should fail");
+        assert!(
+            error.contains("required engine entrypoint 'render' missing"),
+            "unexpected message: {error}"
+        );
+        let _ = fs::remove_dir_all(&bundle_dir);
     }
 
     #[cfg(windows)]

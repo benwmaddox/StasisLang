@@ -1,4 +1,5 @@
 use crate::backend::eval_simple_i32_return_expression;
+use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
@@ -6,6 +7,7 @@ use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -21,6 +23,14 @@ pub struct JitProcess {
     next_symbol_seq: u64,
     artifacts: Vec<JitArtifact>,
     modules: Vec<JITModule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitEnginePackage {
+    pub tick_code_ptr: u64,
+    pub render_code_ptr: u64,
+    pub on_code_swap_code_ptr: Option<u64>,
+    pub symbol_code_ptrs: BTreeMap<String, u64>,
 }
 
 impl JitProcess {
@@ -88,6 +98,52 @@ impl JitProcess {
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
         Ok((raw as u32) as i32)
+    }
+
+    pub fn build_engine_package(
+        &self,
+        entrypoints: &EngineEntrypoints,
+    ) -> Result<JitEnginePackage, String> {
+        let tick_code_ptr = self.code_ptr_for_function_name(&entrypoints.tick)?;
+        let render_code_ptr = self.code_ptr_for_function_name(&entrypoints.render)?;
+        let on_code_swap_code_ptr = if let Some(name) = entrypoints.on_code_swap.as_ref() {
+            Some(self.code_ptr_for_function_name(name)?)
+        } else {
+            None
+        };
+
+        let mut symbol_code_ptrs = BTreeMap::new();
+        for function in self.compiler.functions() {
+            if let Some(artifact) = self
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.function_id == function.id)
+            {
+                symbol_code_ptrs.insert(function.name.clone(), artifact.code_ptr);
+            }
+        }
+
+        Ok(JitEnginePackage {
+            tick_code_ptr,
+            render_code_ptr,
+            on_code_swap_code_ptr,
+            symbol_code_ptrs,
+        })
+    }
+
+    fn code_ptr_for_function_name(&self, name: &str) -> Result<u64, String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
+        let artifact = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.function_id == function.id)
+            .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))?;
+        Ok(artifact.code_ptr)
     }
 }
 
@@ -157,6 +213,7 @@ fn compile_function_to_jit_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::EngineEntrypoints;
 
     #[test]
     fn jit_process_runs_full_compile_and_records_slots() {
@@ -271,6 +328,50 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute second"),
             3
+        );
+    }
+
+    #[test]
+    fn jit_engine_package_exposes_required_entrypoints() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+        let package = process
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("engine package");
+        assert_ne!(package.tick_code_ptr, 0);
+        assert_ne!(package.render_code_ptr, 0);
+        assert_eq!(
+            package.on_code_swap_code_ptr.is_some(),
+            true,
+            "expected on_code_swap pointer"
+        );
+        assert_eq!(
+            package.symbol_code_ptrs.contains_key("tick"),
+            true,
+            "expected tick in package symbol map"
+        );
+        assert_eq!(
+            package.symbol_code_ptrs.contains_key("render"),
+            true,
+            "expected render in package symbol map"
+        );
+    }
+
+    #[test]
+    fn jit_engine_package_errors_when_required_entrypoint_missing() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function tick(): void { return; }\n");
+        process.compile().expect("compile");
+        let error = process
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("missing render should fail");
+        assert!(
+            error.contains("required engine entrypoint 'render' not found"),
+            "unexpected message: {error}"
         );
     }
 }
