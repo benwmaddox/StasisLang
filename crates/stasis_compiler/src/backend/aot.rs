@@ -8,12 +8,15 @@ use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
     pub function_id: FunctionId,
     pub object_index: u32,
     pub body_hash: u64,
+    pub symbol_name: String,
     pub object_bytes_len: usize,
 }
 
@@ -56,6 +59,7 @@ impl AotProcess {
                 function_id: meta.id,
                 object_index,
                 body_hash: meta.body_hash,
+                symbol_name: symbol,
                 object_bytes_len,
             });
             Ok(())
@@ -64,6 +68,68 @@ impl AotProcess {
 
     pub fn artifacts(&self) -> &[AotArtifact] {
         &self.artifacts
+    }
+
+    pub fn link_executable_for_i32_noarg_function(
+        &self,
+        name: &str,
+        output_executable: &Path,
+        link_config: &stasis_jit::AotLinkConfig,
+    ) -> Result<PathBuf, String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if function.return_type != TYPE_ID_I32 {
+            return Err(format!(
+                "function '{name}' is not i32-returning (type id {})",
+                function.return_type
+            ));
+        }
+        if !function.params.is_empty() {
+            return Err(format!(
+                "function '{name}' has {} parameters; expected 0 for executable entry smoke",
+                function.params.len()
+            ));
+        }
+        let artifact = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.function_id == function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        let object_bytes = self
+            .object_bytes
+            .get(artifact.object_index as usize)
+            .ok_or_else(|| {
+                format!(
+                    "object bytes missing for function '{name}' at index {}",
+                    artifact.object_index
+                )
+            })?;
+        let object_path = output_executable.with_extension("obj");
+        if let Some(parent) = object_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create output object directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&object_path, object_bytes).map_err(|error| {
+            format!(
+                "failed to write object file {}: {error}",
+                object_path.display()
+            )
+        })?;
+        stasis_jit::link_objects_to_executable(
+            std::slice::from_ref(&object_path),
+            output_executable,
+            &artifact.symbol_name,
+            link_config,
+        )?;
+        Ok(object_path)
     }
 }
 
@@ -141,6 +207,8 @@ fn compile_function_to_object_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn aot_process_runs_full_compile_and_records_objects() {
@@ -215,5 +283,99 @@ mod tests {
         assert_eq!(report.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 1);
         assert!(process.artifacts()[0].object_bytes_len > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_executable_smoke() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 27; }\n");
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_exe_smoke_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join("main_smoke.exe");
+        process
+            .link_executable_for_i32_noarg_function("main", &exe_path, &link_config)
+            .expect("link executable");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        assert_eq!(
+            status.code(),
+            Some(27),
+            "expected executable to return exit code 27"
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_executable_smoke_reflects_incremental_recompile() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 5; }\n");
+        process.compile().expect("first compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_exe_smoke_inc_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let exe_first = temp_root.join("main_first.exe");
+        process
+            .link_executable_for_i32_noarg_function("main", &exe_first, &link_config)
+            .expect("link first executable");
+        let first_status = Command::new(&exe_first)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_first.display()));
+        assert_eq!(first_status.code(), Some(5));
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return 9; }\n");
+        process.compile().expect("second compile");
+        let exe_second = temp_root.join("main_second.exe");
+        process
+            .link_executable_for_i32_noarg_function("main", &exe_second, &link_config)
+            .expect("link second executable");
+        let second_status = Command::new(&exe_second)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_second.display()));
+        assert_eq!(second_status.code(), Some(9));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    fn resolve_link_config_for_smoke() -> Option<stasis_jit::AotLinkConfig> {
+        if let Some(explicit) = std::env::var_os("STASIS_AOT_LINKER") {
+            let explicit = PathBuf::from(explicit);
+            return Some(stasis_jit::AotLinkConfig {
+                linker_path: Some(explicit),
+            });
+        }
+        for candidate in ["lld-link.exe", "link.exe"] {
+            let output = Command::new("where").arg(candidate).output().ok()?;
+            if output.status.success() {
+                return Some(stasis_jit::AotLinkConfig {
+                    linker_path: Some(PathBuf::from(candidate)),
+                });
+            }
+        }
+        eprintln!("skipping AOT executable smoke test: no Windows linker found");
+        None
     }
 }
