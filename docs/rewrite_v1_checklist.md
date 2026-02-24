@@ -593,8 +593,9 @@ It is not part of the steady-state incremental JIT update loop.
 - Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
 - Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
-- 1k functions: cold p50/p95 `8679.478ms`, incremental p50/p95 `4324.059ms`.
-- 5k functions: cold p50/p95 `48217.360ms`, incremental p50/p95 `1.904ms` (completes within 5-minute budget).
+- 1k functions: cold p50/p95 `8767.555ms`, incremental p50/p95 `4434.688ms`.
+- 5k functions: cold p50/p95 `46130.863ms`, incremental p50/p95 `4435.567ms` (completes within 5-minute budget).
+- Benchmark hygiene note: incremental sample generation now forces a real body mutation per sample (no no-op edit timing).
 - Status: `done`
 - Slice CS1: Remove hot-path bootstrap harness process spawning from incremental compile path.
 - Language: `Rust + .stasis`.

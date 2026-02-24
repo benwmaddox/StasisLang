@@ -45,6 +45,19 @@ fn default_addend(seed: u64, function_index: usize) -> i32 {
     ((mixed % 7) as i32) + 1
 }
 
+fn non_default_incremental_addend(default_value: i32, sample: usize) -> i32 {
+    let (first, second) = match default_value {
+        1 => (2, 3),
+        2 => (1, 3),
+        _ => (1, 2),
+    };
+    if sample % 2 == 0 {
+        first
+    } else {
+        second
+    }
+}
+
 fn render_function_line(function_index: usize, addend: i32) -> String {
     if function_index == 0 {
         return format!("function fn_0(): i32 {{ return {addend}; }}\n");
@@ -178,6 +191,7 @@ fn run_scenario(
             format!("failed finding target function {target_function} in file layouts")
         })?;
     let target_layout = layouts[target_layout_index].clone();
+    let target_default_addend = default_addend(seed, target_function);
 
     let mut cold_times = Vec::new();
     for _ in 0..cold_samples {
@@ -190,7 +204,7 @@ fn run_scenario(
 
     let mut incremental_times = Vec::new();
     for sample in 0..incremental_samples {
-        let override_value = (((seed as usize + sample) % 11) + 1) as i32;
+        let override_value = non_default_incremental_addend(target_default_addend, sample);
         let source = render_file_source(
             &target_layout,
             function_count,
@@ -370,7 +384,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_addend, parse_usize_csv, percentile_ms};
+    use super::{default_addend, non_default_incremental_addend, parse_usize_csv, percentile_ms};
     use std::time::Duration;
 
     #[test]
@@ -395,5 +409,16 @@ mod tests {
         ];
         assert_eq!(percentile_ms(&samples, 50), 30.0);
         assert_eq!(percentile_ms(&samples, 95), 40.0);
+    }
+
+    #[test]
+    fn non_default_incremental_addend_differs_from_default() {
+        for default in [1, 2, 3] {
+            let even = non_default_incremental_addend(default, 0);
+            let odd = non_default_incremental_addend(default, 1);
+            assert_ne!(even, default);
+            assert_ne!(odd, default);
+            assert_ne!(even, odd);
+        }
     }
 }
