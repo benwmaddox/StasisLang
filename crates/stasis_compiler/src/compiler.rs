@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 
-use crate::backend::{Backend, BackendFunctionData};
 use crate::frontend::indexer::{hash_text, index_file};
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::ir::hir::{Block, FunctionHIR};
@@ -30,7 +29,6 @@ pub struct FunctionMeta {
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub dirty: bool,
-    pub backend_data: BackendFunctionData,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,25 +66,18 @@ pub struct CompileReport {
     pub emit: EmitPassResult,
 }
 
+#[derive(Debug, Default)]
 pub struct Compiler {
     files: Vec<SourceFile>,
     functions: Vec<FunctionMeta>,
     symbols: SymbolTable,
     deps: DependencyGraph,
     types: TypeTable,
-    backend: Box<dyn Backend>,
 }
 
 impl Compiler {
-    pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self {
-            files: Vec::new(),
-            functions: Vec::new(),
-            symbols: SymbolTable::default(),
-            deps: DependencyGraph,
-            types: TypeTable::new(),
-            backend,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
@@ -106,9 +97,12 @@ impl Compiler {
         });
     }
 
-    pub fn compile(&mut self) -> CompileResult<CompileReport> {
+    pub fn compile_with<F>(&mut self, mut emit_function: F) -> CompileResult<CompileReport>
+    where
+        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+    {
         let index = self.index_pass()?;
-        let emit = self.emit_pass()?;
+        let emit = self.emit_pass_with(&mut emit_function)?;
         Ok(CompileReport { index, emit })
     }
 
@@ -157,7 +151,6 @@ impl Compiler {
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
                     dirty: signature_changed || body_changed,
-                    backend_data: BackendFunctionData::None,
                 });
             }
         }
@@ -193,7 +186,10 @@ impl Compiler {
         })
     }
 
-    pub fn emit_pass(&mut self) -> CompileResult<EmitPassResult> {
+    pub fn emit_pass_with<F>(&mut self, emit_function: &mut F) -> CompileResult<EmitPassResult>
+    where
+        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+    {
         let dirty_ids: Vec<FunctionId> = self
             .functions
             .iter()
@@ -203,15 +199,9 @@ impl Compiler {
         for function_id in &dirty_ids {
             let snapshot = self.functions[*function_id as usize].clone();
             let hir = self.lower_function_to_hir(&snapshot)?;
-            let backend_data = self
-                .backend
-                .compile_function(&snapshot, &hir)
-                .map_err(CompileError::Backend)?;
-            let function = &mut self.functions[*function_id as usize];
-            function.backend_data = backend_data;
-            function.dirty = false;
+            emit_function(&snapshot, &hir).map_err(CompileError::Backend)?;
+            self.functions[*function_id as usize].dirty = false;
         }
-        self.backend.finalize().map_err(CompileError::Backend)?;
         Ok(EmitPassResult {
             emitted_functions: dirty_ids.len(),
         })
@@ -281,7 +271,6 @@ struct PreviousFunctionHashes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::jit::JitBackend;
 
     fn function_by_name<'a>(compiler: &'a Compiler, name: &str) -> &'a FunctionMeta {
         compiler
@@ -293,7 +282,7 @@ mod tests {
 
     #[test]
     fn first_index_marks_all_functions_dirty() {
-        let mut compiler = Compiler::new(Box::new(JitBackend::new()));
+        let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
@@ -307,24 +296,28 @@ mod tests {
 
     #[test]
     fn unchanged_source_emits_nothing_after_initial_emit() {
-        let mut compiler = Compiler::new(Box::new(JitBackend::new()));
+        let mut compiler = Compiler::new();
         compiler.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
-        let first = compiler.compile().expect("first compile");
+        let first = compiler.compile_with(|_, _| Ok(())).expect("first compile");
         assert_eq!(first.emit.emitted_functions, 1);
 
-        let second = compiler.compile().expect("second compile");
+        let second = compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("second compile");
         assert_eq!(second.index.dirty_functions, 0);
         assert_eq!(second.emit.emitted_functions, 0);
     }
 
     #[test]
     fn body_only_change_marks_only_changed_function_dirty() {
-        let mut compiler = Compiler::new(Box::new(JitBackend::new()));
+        let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
         );
-        compiler.compile().expect("initial compile");
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
 
         compiler.upsert_file(
             "sample.stasis",
@@ -335,18 +328,22 @@ mod tests {
         assert!(function_by_name(&compiler, "helper").dirty);
         assert!(!function_by_name(&compiler, "main").dirty);
 
-        let emit = compiler.emit_pass().expect("emit pass");
+        let emit = compiler
+            .emit_pass_with(&mut |_, _| Ok(()))
+            .expect("emit pass");
         assert_eq!(emit.emitted_functions, 1);
     }
 
     #[test]
     fn signature_change_propagates_dirty_to_dependents() {
-        let mut compiler = Compiler::new(Box::new(JitBackend::new()));
+        let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
         );
-        compiler.compile().expect("initial compile");
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
 
         compiler.upsert_file(
             "sample.stasis",
@@ -357,5 +354,32 @@ mod tests {
         assert_eq!(index.dirty_functions, 2);
         assert!(function_by_name(&compiler, "helper").dirty);
         assert!(function_by_name(&compiler, "main").dirty);
+    }
+
+    #[test]
+    fn emit_pass_runs_only_dirty_functions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 2; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        let _ = compiler.index_pass().expect("index pass");
+
+        let mut emitted_names = Vec::new();
+        let _ = compiler
+            .emit_pass_with(&mut |meta, _| {
+                emitted_names.push(meta.name.clone());
+                Ok(())
+            })
+            .expect("emit pass");
+        assert_eq!(emitted_names, vec!["helper".to_string()]);
     }
 }

@@ -38,6 +38,10 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - dependency/dependent graph links
 - signature-change dirty propagation
 - dirty-only emission behavior
+- Simplified backend integration to mode-specific full processes:
+- `backend::jit::JitProcess` runs end-to-end JIT flow for a compile invocation.
+- `backend::aot::AotProcess` runs end-to-end AOT flow for a compile invocation.
+- Removed backend trait indirection from the core compiler trial path.
 - Kept existing compiler host path intact for compatibility while evaluating this approach.
 
 ## Trial Test Coverage Added
