@@ -32,6 +32,8 @@ cranelift-codegen = "0.117"
 cranelift-frontend = "0.117"
 cranelift-jit = "0.117"
 cranelift-module = "0.117"
+cranelift-native = "0.117"
+cranelift-object = "0.117"
 
 winit = "0.29"
 glutin = "0.31"

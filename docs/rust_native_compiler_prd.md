@@ -42,6 +42,10 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - `backend::jit::JitProcess` runs end-to-end JIT flow for a compile invocation.
 - `backend::aot::AotProcess` runs end-to-end AOT flow for a compile invocation.
 - Removed backend trait indirection from the core compiler trial path.
+- Wired real Cranelift emission in both mode processes for currently supported function bodies:
+- JIT: emits machine code through `cranelift-jit` and records finalized code pointers.
+- AOT: emits object bytes through `cranelift-object`.
+- Current body support in backend emission is intentionally narrow: `return <i32 literal>;` (for `i32`) and `return;` (for `void`).
 - Kept existing compiler host path intact for compatibility while evaluating this approach.
 
 ## Trial Test Coverage Added
@@ -53,6 +57,6 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - `frontend::indexer::tests::*`
 
 ## Next Trial Slices
-- Replace placeholder backend behavior with real Cranelift JIT emission.
-- Wire AOT object emission path through `cranelift-object`.
+- Expand backend body support beyond literal-return-only while keeping direct one-pass lowering.
 - Add deterministic compile-time benchmarks for cold/incremental timings against the PRD targets.
+- Add e2e execution validation on emitted JIT/AOT artifacts for a minimal `main` path.

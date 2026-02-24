@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 pub type TypeId = u16;
+pub const TYPE_ID_VOID: TypeId = 0;
+pub const TYPE_ID_I32: TypeId = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeInfo {
@@ -39,7 +41,7 @@ impl TypeTable {
     }
 
     pub fn void_id(&self) -> TypeId {
-        self.resolve("void").unwrap_or(0)
+        self.resolve("void").unwrap_or(TYPE_ID_VOID)
     }
 }
 
