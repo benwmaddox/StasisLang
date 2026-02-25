@@ -192,17 +192,15 @@ impl JitProcess {
             &self.required_emit_roots,
             force_reemit_reachable,
         );
-        let (next_slot, next_symbol_seq, artifacts, modules) = (
-            &mut self.next_slot,
-            &mut self.next_symbol_seq,
-            &mut self.artifacts,
-            &mut self.modules,
-        );
+        let mut next_slot = self.next_slot;
+        let mut next_symbol_seq = self.next_symbol_seq;
+        let mut staged_artifacts = self.artifacts.clone();
+        let mut staged_modules: Vec<JITModule> = Vec::new();
         let emit = self
             .compiler
             .emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
-                let symbol = format!("jit_fn_{}_{}", meta.id, *next_symbol_seq);
-                *next_symbol_seq = next_symbol_seq.saturating_add(1);
+                let symbol = format!("jit_fn_{}_{}", meta.id, next_symbol_seq);
+                next_symbol_seq = next_symbol_seq.saturating_add(1);
                 let (module, code_ptr) = compile_function_to_jit_module(
                     meta,
                     hir,
@@ -214,11 +212,11 @@ impl JitProcess {
                     &analysis.collection_infos,
                     &analysis.extern_symbol_addresses,
                 )?;
-                let slot = *next_slot;
-                *next_slot = next_slot.saturating_add(1);
-                modules.push(module);
-                artifacts.retain(|artifact| artifact.function_id != meta.id);
-                artifacts.push(JitArtifact {
+                let slot = next_slot;
+                next_slot = next_slot.saturating_add(1);
+                staged_modules.push(module);
+                staged_artifacts.retain(|artifact| artifact.function_id != meta.id);
+                staged_artifacts.push(JitArtifact {
                     function_id: meta.id,
                     slot,
                     body_hash: meta.body_hash,
@@ -226,6 +224,10 @@ impl JitProcess {
                 });
                 Ok(())
             })?;
+        self.next_slot = next_slot;
+        self.next_symbol_seq = next_symbol_seq;
+        self.artifacts = staged_artifacts;
+        self.modules.extend(staged_modules);
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
         self.refresh_runtime_dispatch_table();
@@ -9293,6 +9295,65 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute second"),
             102
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_keeps_previous_artifacts_on_partial_emit_failure() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.compile().expect("initial compile");
+        let first_main_ptr = process
+            .symbol_code_ptrs()
+            .get("main")
+            .copied()
+            .expect("main ptr after initial compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute initial main"),
+            1
+        );
+
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { return helper(); }\nfunction helper(): i32 { return missing(); }\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("unknown call target 'missing'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+
+        let second_main_ptr = process
+            .symbol_code_ptrs()
+            .get("main")
+            .copied()
+            .expect("main ptr after failed compile");
+        assert_eq!(second_main_ptr, first_main_ptr);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute preserved main"),
+            1
+        );
+
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { return helper(); }\nfunction helper(): i32 { return 5; }\n",
+        );
+        process.compile().expect("recovery compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute recovered main"),
+            5
         );
     }
 

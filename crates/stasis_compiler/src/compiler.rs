@@ -210,6 +210,7 @@ impl Compiler {
         F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
     {
         let mut emitted_functions = 0usize;
+        let mut emitted_ids: Vec<FunctionId> = Vec::with_capacity(function_ids.len());
         for function_id in function_ids {
             let snapshot = self
                 .functions
@@ -220,8 +221,11 @@ impl Compiler {
                 .clone();
             let hir = self.lower_function_to_hir(&snapshot)?;
             emit_function(&snapshot, &hir).map_err(CompileError::Backend)?;
-            self.functions[*function_id as usize].dirty = false;
+            emitted_ids.push(*function_id);
             emitted_functions += 1;
+        }
+        for function_id in emitted_ids {
+            self.functions[function_id as usize].dirty = false;
         }
         Ok(EmitPassResult { emitted_functions })
     }
@@ -431,6 +435,26 @@ mod tests {
             })
             .expect("emit pass");
         assert_eq!(emitted_names, vec!["helper".to_string()]);
+    }
+
+    #[test]
+    fn emit_pass_failure_keeps_dirty_flags_for_retry() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { return helper(); }\nfunction helper(): i32 { return 1; }\n",
+        );
+        let _ = compiler.index_pass().expect("index pass");
+
+        let error = compiler.emit_pass_with(&mut |meta, _| {
+            if meta.name == "helper" {
+                return Err("forced emit failure".to_string());
+            }
+            Ok(())
+        });
+        assert!(error.is_err(), "expected emit failure");
+        assert!(function_by_name(&compiler, "main").dirty);
+        assert!(function_by_name(&compiler, "helper").dirty);
     }
 
     #[test]

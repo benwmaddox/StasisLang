@@ -88,6 +88,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Brickout probe status (AOT prod path): `samples/brickout_revenge/brickout_revenge_v1.stasis` now compiles and commits successfully for `--ticks 1` with runtime launch + hook + swap commit success.
 - Runtime launcher now falls back to generic `--watch-file` launch for non-scenario fixtures (instead of hard failing unknown scenario mapping), so compiler-slice fixtures can be exercised through runtime launch path as well.
 - Incremental semantic guard for mutating `from_*` conversions now uses block-aware statement splitting and annotation-aware function scanning, removing false-positive rejection on valid `if/else` conversion statements while preserving expression misuse diagnostics.
+- Incremental JIT emit/apply is now transactional for failure paths: dirty flags are cleared only after successful full emit, and JIT artifact/module updates are staged then committed atomically so failed emits preserve prior executable dispatch state for retry.
 
 ### S0 - Workspace Bootstrap
 - Language:
