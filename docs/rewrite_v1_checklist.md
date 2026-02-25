@@ -684,6 +684,9 @@ It is not part of the steady-state incremental JIT update loop.
 - Headless test discovery now uses a cheap prefilter (`test` + backtick) before full parse for non-`.test.stasis` files and skips `.git`/`target` directories during recursion to reduce discovery overhead in repo-root runs.
 - Headless test discovery now also skips `.stasis_cache` directories (local generated cache files were inflating repo-root `.stasis` scan counts by ~3.3k files).
 - CLI test path now supports watch mode: `stasis test --dir <path> --watch [--watch-settle-ms <ms>]` for repeated in-process reruns without process restart overhead.
+- CLI watch test mode now defaults to `watch_settle_ms=0` (no debounce delay) unless explicitly provided.
+- Watch-mode test reruns now persist per-file JIT compile state in-process and skip compile for unchanged source hashes (reuse existing compiled process/image for unchanged files).
+- Startup now performs stale `.stasis_cache` cleanup with a 7-day default TTL (`STASIS_CACHE_TTL_DAYS` override) so cache files are retained for short-term reuse but aged out automatically.
 - Added shared host-boundary test helper module `src/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).
 - Expanded Brickout `.test.stasis` coverage further (`tests_discovered=4`) with explicit assertions for inactive-pointer slot clearing in `refresh_input_model()` and occupied-slot skip behavior in `record_tap_pulses()`.

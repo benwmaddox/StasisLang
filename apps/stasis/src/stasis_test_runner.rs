@@ -1,8 +1,11 @@
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::frontend::indexer::hash_text;
 use stasis_compiler::frontend::parser::{
     parse_top_level_test_declarations, rewrite_top_level_test_declarations, ParsedTestDeclaration,
 };
@@ -16,9 +19,47 @@ pub struct StasisTestRunSummary {
     pub tests_passed: usize,
     pub tests_failed: usize,
     pub failures: Vec<String>,
+    pub timing_discovery_us: u64,
+    pub timing_prepare_us: u64,
+    pub timing_compile_us: u64,
+    pub timing_execute_us: u64,
+    pub timing_total_us: u64,
 }
 
 pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, String> {
+    let mut session = StasisTestRunSession::new();
+    run_jit_tests_in_directory_with_session(root, &mut session)
+}
+
+pub struct StasisTestRunSession {
+    by_path: BTreeMap<PathBuf, CachedTestProcess>,
+}
+
+struct CachedTestProcess {
+    source_hash: u64,
+    process: JitProcess,
+}
+
+impl StasisTestRunSession {
+    pub fn new() -> Self {
+        Self {
+            by_path: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for StasisTestRunSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn run_jit_tests_in_directory_with_session(
+    root: &Path,
+    session: &mut StasisTestRunSession,
+) -> Result<StasisTestRunSummary, String> {
+    let total_started = Instant::now();
+    let discovery_started = Instant::now();
     let mut files = Vec::new();
     collect_stasis_files_recursive(root, &mut files)?;
     files.sort_by(|left, right| {
@@ -27,6 +68,7 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
             &right.to_string_lossy().to_lowercase(),
         )
     });
+    let timing_discovery_us = elapsed_us_u64(discovery_started.elapsed().as_micros());
 
     let mut summary = StasisTestRunSummary {
         files_discovered: files.len(),
@@ -36,9 +78,17 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
         tests_passed: 0,
         tests_failed: 0,
         failures: Vec::new(),
+        timing_discovery_us,
+        timing_prepare_us: 0,
+        timing_compile_us: 0,
+        timing_execute_us: 0,
+        timing_total_us: 0,
     };
+    let mut seen_paths: BTreeSet<PathBuf> = BTreeSet::new();
 
     for file_path in files {
+        seen_paths.insert(file_path.clone());
+        let prepare_started = Instant::now();
         let source = fs::read_to_string(&file_path).map_err(|error| {
             format!(
                 "failed reading test source '{}': {error}",
@@ -46,6 +96,9 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
             )
         })?;
         let (rewritten, tests) = rewrite_top_level_test_declarations(&source)?;
+        summary.timing_prepare_us = summary
+            .timing_prepare_us
+            .saturating_add(elapsed_us_u64(prepare_started.elapsed().as_micros()));
         if tests.is_empty() {
             continue;
         }
@@ -53,29 +106,60 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
         summary.files_with_tests += 1;
         summary.tests_discovered += tests.len();
 
-        let mut process = JitProcess::new();
-        process.upsert_file(file_path.to_string_lossy().to_string(), rewritten);
-        let required_roots: Vec<String> = tests
-            .iter()
-            .map(|test| test.generated_function_name.clone())
-            .collect();
-        process.set_required_emit_roots(&required_roots);
-        if let Err(error) = process.compile() {
-            for test in tests {
-                summary.tests_failed += 1;
-                summary.failures.push(format!(
-                    "{} :: {} :: compile failed: {error:?}",
-                    file_path.display(),
-                    test.display_name
-                ));
+        let source_hash = hash_text(&source);
+        let entry = session
+            .by_path
+            .entry(file_path.clone())
+            .or_insert_with(|| CachedTestProcess {
+                source_hash: 0,
+                process: JitProcess::new(),
+            });
+        let compile_required = entry.source_hash != source_hash;
+        if compile_required {
+            entry
+                .process
+                .upsert_file(file_path.to_string_lossy().to_string(), rewritten);
+            let required_roots: Vec<String> = tests
+                .iter()
+                .map(|test| test.generated_function_name.clone())
+                .collect();
+            entry.process.set_required_emit_roots(&required_roots);
+            let compile_started = Instant::now();
+            if let Err(error) = entry.process.compile() {
+                summary.timing_compile_us = summary
+                    .timing_compile_us
+                    .saturating_add(elapsed_us_u64(compile_started.elapsed().as_micros()));
+                for test in tests {
+                    summary.tests_failed += 1;
+                    summary.failures.push(format!(
+                        "{} :: {} :: compile failed: {error:?}",
+                        file_path.display(),
+                        test.display_name
+                    ));
+                }
+                continue;
             }
-            continue;
+            summary.timing_compile_us = summary
+                .timing_compile_us
+                .saturating_add(elapsed_us_u64(compile_started.elapsed().as_micros()));
+            entry.source_hash = source_hash;
         }
 
-        run_discovered_tests(&process, &tests, &file_path, &mut summary);
+        let execute_started = Instant::now();
+        run_discovered_tests(&entry.process, &tests, &file_path, &mut summary);
+        summary.timing_execute_us = summary
+            .timing_execute_us
+            .saturating_add(elapsed_us_u64(execute_started.elapsed().as_micros()));
     }
+    session.by_path.retain(|path, _| seen_paths.contains(path));
+
+    summary.timing_total_us = elapsed_us_u64(total_started.elapsed().as_micros());
 
     Ok(summary)
+}
+
+fn elapsed_us_u64(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn run_discovered_tests(
@@ -372,6 +456,28 @@ mod tests {
         assert_eq!(summary.tests_run, 2, "{summary:?}");
         assert_eq!(summary.tests_passed, 2, "{summary:?}");
         assert_eq!(summary.tests_failed, 0, "{summary:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_skips_compile_for_unchanged_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_test_runner_session_{stamp}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let fixture = root.join("sample.test.stasis");
+        fs::write(&fixture, "test `ok`(): bool { return true; }\n").expect("write");
+
+        let mut session = StasisTestRunSession::new();
+        let first = run_jit_tests_in_directory_with_session(&root, &mut session).expect("first");
+        assert_eq!(first.tests_passed, 1, "{first:?}");
+        assert!(first.timing_compile_us > 0, "{first:?}");
+        let second = run_jit_tests_in_directory_with_session(&root, &mut session).expect("second");
+        assert_eq!(second.tests_passed, 1, "{second:?}");
+        assert_eq!(second.timing_compile_us, 0, "{second:?}");
 
         fs::remove_dir_all(&root).ok();
     }

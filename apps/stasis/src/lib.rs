@@ -16,7 +16,10 @@ pub use self_host_runtime_bridge::{
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
     stasis_process_env_lock,
 };
-pub use stasis_test_runner::{run_jit_tests_in_directory, StasisTestRunSummary};
+pub use stasis_test_runner::{
+    run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
+    StasisTestRunSummary,
+};
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;

@@ -1,15 +1,16 @@
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::{Duration, Instant};
+use std::time::SystemTime;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
-    publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory,
-    run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
+    publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory_with_session,
+    run_self_host_aot_cli, run_with_default_backend, run_with_real_backend, StasisTestRunSession,
     scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
 };
 use stasis_runner::swap::contracts::TargetMode;
@@ -34,6 +35,12 @@ struct AotCliContractArgs {
     summary_file: Option<PathBuf>,
     entry_file: Option<PathBuf>,
     quality_gate: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CacheCleanupSummary {
+    removed_files: u64,
+    removed_dirs: u64,
 }
 
 fn apply_brickout_revenge_v1_scenario(config: &mut RunnerConfig) {
@@ -163,7 +170,7 @@ fn parse_args() -> CliOptions {
 fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
     let mut directory: Option<PathBuf> = None;
     let mut watch = false;
-    let mut watch_settle_ms: u64 = 150;
+    let mut watch_settle_ms: u64 = 0;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -190,7 +197,7 @@ fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
                     args[i + 1]
                 )
             })?;
-            watch_settle_ms = parsed.max(10);
+            watch_settle_ms = parsed;
             i += 2;
             continue;
         }
@@ -204,6 +211,102 @@ fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
         watch,
         watch_settle_ms,
     })
+}
+
+fn configured_stasis_cache_ttl_days() -> u64 {
+    std::env::var("STASIS_CACHE_TTL_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(7)
+}
+
+fn maybe_cleanup_stale_stasis_cache() {
+    let ttl_days = configured_stasis_cache_ttl_days();
+    if ttl_days == 0 {
+        return;
+    }
+    let ttl = Duration::from_secs(ttl_days.saturating_mul(24 * 60 * 60));
+    let cache_root = Path::new(".stasis_cache");
+    match cleanup_stale_stasis_cache(cache_root, ttl) {
+        Ok(summary) => {
+            if summary.removed_files > 0 || summary.removed_dirs > 0 {
+                println!("cache_cleanup_removed_files={}", summary.removed_files);
+                println!("cache_cleanup_removed_dirs={}", summary.removed_dirs);
+                println!("cache_cleanup_ttl_days={ttl_days}");
+            }
+        }
+        Err(message) => {
+            eprintln!("{message}");
+        }
+    }
+}
+
+fn cleanup_stale_stasis_cache(
+    cache_root: &Path,
+    max_age: Duration,
+) -> Result<CacheCleanupSummary, String> {
+    if !cache_root.exists() {
+        return Ok(CacheCleanupSummary::default());
+    }
+    let now = SystemTime::now();
+    let cutoff = now
+        .checked_sub(max_age)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut summary = CacheCleanupSummary::default();
+    cleanup_stale_stasis_cache_dir(cache_root, cutoff, true, &mut summary)?;
+    Ok(summary)
+}
+
+fn cleanup_stale_stasis_cache_dir(
+    dir: &Path,
+    cutoff: SystemTime,
+    keep_dir: bool,
+    summary: &mut CacheCleanupSummary,
+) -> Result<(), String> {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(dir)
+        .map_err(|error| format!("failed to read cache dir '{}': {error}", dir.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("failed reading cache entry '{}': {error}", dir.display()))?;
+        entries.push(entry.path());
+    }
+    for path in entries {
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("failed to stat cache path '{}': {error}", path.display()))?;
+        if metadata.is_dir() {
+            cleanup_stale_stasis_cache_dir(&path, cutoff, false, summary)?;
+            continue;
+        }
+        if cache_entry_is_stale(&metadata, cutoff) {
+            fs::remove_file(&path)
+                .map_err(|error| format!("failed removing stale cache file '{}': {error}", path.display()))?;
+            summary.removed_files = summary.removed_files.saturating_add(1);
+        }
+    }
+    if keep_dir {
+        return Ok(());
+    }
+    let is_empty = fs::read_dir(dir)
+        .map_err(|error| format!("failed to read cache dir '{}': {error}", dir.display()))?
+        .next()
+        .is_none();
+    if is_empty {
+        fs::remove_dir(dir)
+            .map_err(|error| format!("failed removing stale cache directory '{}': {error}", dir.display()))?;
+        summary.removed_dirs = summary.removed_dirs.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn cache_entry_is_stale(metadata: &fs::Metadata, cutoff: SystemTime) -> bool {
+    let modified = metadata.modified().ok();
+    let accessed = metadata.accessed().ok();
+    match (modified, accessed) {
+        (Some(left), Some(right)) => left.max(right) <= cutoff,
+        (Some(used), None) | (None, Some(used)) => used <= cutoff,
+        (None, None) => false,
+    }
 }
 
 fn try_run_test_subcommand() -> Option<i32> {
@@ -243,23 +346,13 @@ fn try_run_test_subcommand() -> Option<i32> {
 }
 
 fn run_test_dir_once(directory: &Path) -> Result<i32, String> {
-    let started = Instant::now();
-    let summary = run_jit_tests_in_directory(directory)?;
-    println!("test_files_discovered={}", summary.files_discovered);
-    println!("test_files_with_tests={}", summary.files_with_tests);
-    println!("tests_discovered={}", summary.tests_discovered);
-    println!("tests_run={}", summary.tests_run);
-    println!("tests_passed={}", summary.tests_passed);
-    println!("tests_failed={}", summary.tests_failed);
-    for failure in &summary.failures {
-        println!("test_failure={failure}");
-    }
-    println!("elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
-    Ok(if summary.tests_failed > 0 { 1 } else { 0 })
+    let mut session = StasisTestRunSession::new();
+    run_test_dir_once_with_session(directory, &mut session)
 }
 
 fn run_test_watch_loop(parsed: &TestCliArgs) -> Result<i32, String> {
-    let first_exit = run_test_dir_once(&parsed.directory)?;
+    let mut session = StasisTestRunSession::new();
+    let first_exit = run_test_dir_once_with_session(&parsed.directory, &mut session)?;
     println!("watch_mode=1");
     println!("watch_settle_ms={}", parsed.watch_settle_ms);
     println!("watch_last_exit={first_exit}");
@@ -319,9 +412,48 @@ fn run_test_watch_loop(parsed: &TestCliArgs) -> Result<i32, String> {
         }
 
         println!("watch_change=stasis");
-        let exit = run_test_dir_once(&parsed.directory)?;
+        let exit = run_test_dir_once_with_session(&parsed.directory, &mut session)?;
         println!("watch_last_exit={exit}");
     }
+}
+
+fn run_test_dir_once_with_session(
+    directory: &Path,
+    session: &mut StasisTestRunSession,
+) -> Result<i32, String> {
+    let started = Instant::now();
+    let summary = run_jit_tests_in_directory_with_session(directory, session)?;
+    println!("test_files_discovered={}", summary.files_discovered);
+    println!("test_files_with_tests={}", summary.files_with_tests);
+    println!("tests_discovered={}", summary.tests_discovered);
+    println!("tests_run={}", summary.tests_run);
+    println!("tests_passed={}", summary.tests_passed);
+    println!("tests_failed={}", summary.tests_failed);
+    println!(
+        "timing_discovery_ms={:.3}",
+        (summary.timing_discovery_us as f64) / 1000.0
+    );
+    println!(
+        "timing_prepare_ms={:.3}",
+        (summary.timing_prepare_us as f64) / 1000.0
+    );
+    println!(
+        "timing_compile_ms={:.3}",
+        (summary.timing_compile_us as f64) / 1000.0
+    );
+    println!(
+        "timing_execute_ms={:.3}",
+        (summary.timing_execute_us as f64) / 1000.0
+    );
+    println!(
+        "timing_total_ms={:.3}",
+        (summary.timing_total_us as f64) / 1000.0
+    );
+    for failure in &summary.failures {
+        println!("test_failure={failure}");
+    }
+    println!("elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+    Ok(if summary.tests_failed > 0 { 1 } else { 0 })
 }
 
 fn is_stasis_change_event(event: &Event) -> bool {
@@ -531,7 +663,7 @@ mod tests {
         let parsed = parse_test_cli_args(&args).expect("parse should succeed");
         assert_eq!(parsed.directory, PathBuf::from("tests/stasis"));
         assert!(!parsed.watch);
-        assert_eq!(parsed.watch_settle_ms, 150);
+        assert_eq!(parsed.watch_settle_ms, 0);
     }
 
     #[test]
@@ -566,6 +698,56 @@ mod tests {
         ];
         let error = parse_test_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("invalid value for --watch-settle-ms"));
+    }
+
+    #[test]
+    fn cleanup_stale_stasis_cache_removes_files_when_ttl_zero() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis_cache_cleanup_zero_{}",
+            stamp
+        ));
+        let cache_root = root.join(".stasis_cache");
+        let nested = cache_root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let file = nested.join("stale.bin");
+        std::fs::write(&file, "x").expect("write");
+
+        let summary =
+            cleanup_stale_stasis_cache(&cache_root, Duration::from_secs(0)).expect("cleanup");
+        assert!(summary.removed_files >= 1, "{summary:?}");
+        assert!(!file.exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cleanup_stale_stasis_cache_keeps_recent_files_for_large_ttl() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis_cache_cleanup_keep_{}",
+            stamp
+        ));
+        let cache_root = root.join(".stasis_cache");
+        std::fs::create_dir_all(&cache_root).expect("mkdir");
+        let file = cache_root.join("fresh.bin");
+        std::fs::write(&file, "x").expect("write");
+
+        let summary = cleanup_stale_stasis_cache(
+            &cache_root,
+            Duration::from_secs(365 * 24 * 60 * 60),
+        )
+        .expect("cleanup");
+        assert_eq!(summary.removed_files, 0, "{summary:?}");
+        assert!(file.exists());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -687,6 +869,8 @@ mod tests {
 }
 
 fn main() {
+    maybe_cleanup_stale_stasis_cache();
+
     if let Some(exit) = try_run_test_subcommand() {
         std::process::exit(exit);
     }
