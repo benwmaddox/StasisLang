@@ -37,6 +37,7 @@ pub struct JitProcess {
     modules: Vec<JITModule>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
+    compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
 }
 
@@ -58,6 +59,7 @@ impl JitProcess {
             modules: Vec::new(),
             runtime_libraries: Vec::new(),
             runtime_symbol_cache: BTreeMap::new(),
+            compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
         }
     }
@@ -83,31 +85,51 @@ impl JitProcess {
         type_table
             .resolve_or_intern("ascii[]")
             .map_err(crate::compiler::CompileError::Backend)?;
-        let extern_signatures =
-            collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
+        let files_fingerprint = compute_files_fingerprint(self.compiler.files());
+        let cache_miss = self
+            .compile_analysis_cache
+            .as_ref()
+            .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
+        if cache_miss {
+            let extern_signatures =
+                collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+            let (resolved_extern_signatures, extern_symbol_addresses) = self
+                .resolve_extern_call_signatures(&extern_signatures)
                 .map_err(crate::compiler::CompileError::Backend)?;
-        let (resolved_extern_signatures, extern_symbol_addresses) = self
-            .resolve_extern_call_signatures(&extern_signatures)
+            let call_signatures = collect_supported_call_signatures(
+                self.compiler.functions(),
+                &resolved_extern_signatures,
+                &type_table,
+            );
+            let constant_values =
+                collect_top_level_constant_values(self.compiler.files(), &mut type_table)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+            let global_path_types =
+                collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+            let collection_infos = collect_foreach_collection_infos(
+                self.compiler.files(),
+                &mut type_table,
+                &constant_values,
+            )
             .map_err(crate::compiler::CompileError::Backend)?;
-        let call_signatures = collect_supported_call_signatures(
-            self.compiler.functions(),
-            &resolved_extern_signatures,
-            &type_table,
-        );
-        let constant_values =
-            collect_top_level_constant_values(self.compiler.files(), &mut type_table)
-                .map_err(crate::compiler::CompileError::Backend)?;
-        let global_path_types =
-            collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
-                .map_err(crate::compiler::CompileError::Backend)?;
-        seed_fixed_collection_max_length_headers(&global_path_types, &type_table)
+            self.compile_analysis_cache = Some(CompileAnalysisCache {
+                files_fingerprint,
+                call_signatures,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                extern_symbol_addresses,
+            });
+        }
+        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+            crate::compiler::CompileError::Invariant(
+                "jit compile analysis cache missing after refresh".to_string(),
+            )
+        })?;
+        seed_fixed_collection_max_length_headers(&analysis.global_path_types, &type_table)
             .map_err(crate::compiler::CompileError::Backend)?;
-        let collection_infos = collect_foreach_collection_infos(
-            self.compiler.files(),
-            &mut type_table,
-            &constant_values,
-        )
-        .map_err(crate::compiler::CompileError::Backend)?;
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
             self.artifacts(),
@@ -128,12 +150,12 @@ impl JitProcess {
                     meta,
                     hir,
                     &symbol,
-                    &call_signatures,
+                    &analysis.call_signatures,
                     &type_table,
-                    &global_path_types,
-                    &constant_values,
-                    &collection_infos,
-                    &extern_symbol_addresses,
+                    &analysis.global_path_types,
+                    &analysis.constant_values,
+                    &analysis.collection_infos,
+                    &analysis.extern_symbol_addresses,
                 )?;
                 let slot = *next_slot;
                 *next_slot = next_slot.saturating_add(1);
@@ -461,6 +483,16 @@ type ConstantValueMap = BTreeMap<String, ConstantValue>;
 type CollectionInfoMap = BTreeMap<String, ForeachCollectionInfo>;
 type ForeachBindingMap = BTreeMap<String, ForeachBinding>;
 type ExternSymbolAddressMap = BTreeMap<String, usize>;
+
+#[derive(Debug, Clone)]
+struct CompileAnalysisCache {
+    files_fingerprint: u64,
+    call_signatures: CallSignatureMap,
+    global_path_types: GlobalPathTypeMap,
+    constant_values: ConstantValueMap,
+    collection_infos: CollectionInfoMap,
+    extern_symbol_addresses: ExternSymbolAddressMap,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum ConstantValue {
@@ -838,6 +870,27 @@ fn normalize_path_for_compiler_key(path: &Path) -> String {
         Ok(canonical) => canonical.to_string_lossy().to_string(),
         Err(_) => path.to_string_lossy().to_string(),
     }
+}
+
+fn compute_files_fingerprint(files: &[SourceFile]) -> u64 {
+    let mut entries: Vec<(&str, u64)> = files
+        .iter()
+        .map(|file| (file.path.as_str(), file.hash))
+        .collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut hash: u64 = 1469598103934665603;
+    for (path, file_hash) in entries {
+        for byte in path.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(1099511628211);
+        }
+        for byte in file_hash.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1099511628211);
+        }
+    }
+    hash
 }
 
 fn runtime_library_candidate_paths() -> Vec<PathBuf> {
@@ -9064,6 +9117,76 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute second"),
             3
+        );
+    }
+
+    #[test]
+    fn jit_process_keeps_compile_analysis_cache_for_unchanged_sources() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const VALUE: i32 = 5;\nfunction main(): i32 { return VALUE; }\n",
+        );
+
+        process.compile().expect("first compile");
+        let first_fingerprint = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("analysis cache after first compile")
+            .files_fingerprint;
+
+        process.compile().expect("second compile");
+        let second_fingerprint = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("analysis cache after second compile")
+            .files_fingerprint;
+
+        assert_eq!(
+            first_fingerprint, second_fingerprint,
+            "unchanged sources should keep the same compile-analysis cache key"
+        );
+    }
+
+    #[test]
+    fn jit_process_rebuilds_compile_analysis_cache_when_dependency_changes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"stdlib.stasis\";\nfunction main(): i32 { return helper(); }\n",
+        );
+        process.upsert_file("stdlib.stasis", "function helper(): i32 { return 11; }\n");
+
+        process.compile().expect("first compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute first"),
+            11
+        );
+        let first_fingerprint = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("analysis cache after first compile")
+            .files_fingerprint;
+
+        process.upsert_file("stdlib.stasis", "function helper(): i32 { return 27; }\n");
+        process.compile().expect("second compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute second"),
+            27
+        );
+        let second_fingerprint = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("analysis cache after second compile")
+            .files_fingerprint;
+
+        assert_ne!(
+            first_fingerprint, second_fingerprint,
+            "dependency source change should invalidate compile-analysis cache key"
         );
     }
 
