@@ -19,7 +19,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -524,7 +524,7 @@ struct ExternImportKey {
     return_type: TypeId,
 }
 
-type CallSignatureMap = BTreeMap<String, Vec<CallSignature>>;
+type CallSignatureMap = HashMap<String, Vec<CallSignature>>;
 type GlobalPathTypeMap = BTreeMap<String, TypeId>;
 type ConstantValueMap = BTreeMap<String, ConstantValue>;
 type CollectionInfoMap = BTreeMap<String, ForeachCollectionInfo>;
@@ -591,7 +591,7 @@ fn collect_supported_call_signatures(
     extern_signatures: &[ResolvedExternCallSignature],
     type_table: &TypeTable,
 ) -> CallSignatureMap {
-    let mut map: CallSignatureMap = BTreeMap::new();
+    let mut map: CallSignatureMap = HashMap::new();
     for function in functions {
         if !is_supported_call_lane_type(function.return_type, type_table, true) {
             continue;
