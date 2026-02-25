@@ -8306,6 +8306,30 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_foreach_item_and_index_name_collision() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nglobal values: i32[COUNT];\nfunction main(): i32 { foreach (let v, v in values) { } return 0; }\n",
+        );
+        let error = process.compile().expect_err("expected shadowing error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("foreach index binding 'v' shadows existing variable"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn jit_process_rejects_for_loop_missing_init_segment() {
         let mut process = JitProcess::new();
@@ -8356,6 +8380,25 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("for header must include init, condition, and step"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_duplicate_parameter_names() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function add(v: i32, v: i32): i32 { return v; }\n",
+        );
+        let error = process.compile().expect_err("expected shadowing error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("parameter 'v' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
