@@ -649,7 +649,8 @@ function utf8_from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
 
     let i: i32 = 0;
     let limit: i32 = bound - 1;
-    for (i = 0; i < limit; i = i + 1) {
+    let src_limit: i32 = ascii_scan_limit(src);
+    for (i = 0; i < limit && i < src_limit; i = i + 1) {
         let b: u8 = src[i];
         if (b == 0) {
             dst[i] = 0;

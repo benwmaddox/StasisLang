@@ -7504,6 +7504,29 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_stdlib_utf8_from_ascii_respects_source_capacity_without_terminator() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_utf8_from_ascii_src_cap_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[4];\nglobal dst_text: utf8[8];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    ascii_set_len(src_text, 0);\n    let written: i32 = utf8_from_ascii(dst_text, src_text, 8);\n    return written * 100 + length_bytes(dst_text) * 10 + dst_text[4];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 440);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_foreach_struct_array_with_index_alias() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
