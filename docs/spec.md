@@ -155,6 +155,7 @@ let enemy = state.enemies[0]; // inferred from indexed expression when unambiguo
 Rules:
 - If type annotation is omitted, initializer is required.
 - If type annotation is provided, it is authoritative.
+- Local variable bindings must not shadow any already-visible local binding name (including parameters, `for`-init `let` bindings, and `foreach` item/index bindings); shadowing is a compile-time error.
 - Narrow integer types should be explicitly annotated when required by layout/ABI (`u8`, `u16`, etc).
 - Struct/array element expressions can infer local type when source type is uniquely known.
 - Example: `let enemy = state.enemies[0];` infers `Enemy` element view/reference type.
@@ -305,7 +306,7 @@ Rules:
 - `condition` is required, evaluated before each iteration, and must be `bool`.
 - `step` is required and runs after each body execution.
 - A variable declared in `init` is scoped to the loop (condition, step, and body).
-- A variable declared in `init` must not shadow an existing local variable name from an enclosing scope; shadowing is a compile-time error.
+- `init` declarations follow the general no-shadowing local binding rule.
 - Omitting any of `init`, `condition`, or `step` is a compile-time error.
 - `for` lowering is explicit control flow equivalent to:
 - run `init`

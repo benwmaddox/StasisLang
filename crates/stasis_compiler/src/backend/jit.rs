@@ -1774,6 +1774,12 @@ fn compile_function_to_jit_module(
                 meta.params[index],
                 type_table,
             )?;
+            if values_by_name.contains_key(name) {
+                return Err(format!(
+                    "parameter '{}' shadows existing variable",
+                    name
+                ));
+            }
             values_by_name.insert(
                 name.clone(),
                 LocalBinding {
@@ -3609,6 +3615,21 @@ fn emit_extern_call_for_signature(
     }
 }
 
+fn ensure_no_variable_shadowing(
+    name: &str,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    foreach_bindings: &ForeachBindingMap,
+    binding_kind: &str,
+) -> Result<(), String> {
+    if values_by_name.contains_key(name) || foreach_bindings.contains_key(name) {
+        return Err(format!(
+            "{} '{}' shadows existing variable",
+            binding_kind, name
+        ));
+    }
+    Ok(())
+}
+
 fn emit_simple_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
@@ -3631,6 +3652,7 @@ fn emit_simple_statements(
                 type_id,
                 expression,
             } => {
+                ensure_no_variable_shadowing(name, values_by_name, foreach_bindings, "let binding")?;
                 let binding = emit_simple_expression(
                     builder,
                     expression,
@@ -4271,6 +4293,26 @@ fn emit_simple_statements(
                 collection_path,
                 body_statements,
             } => {
+                ensure_no_variable_shadowing(
+                    item_name,
+                    values_by_name,
+                    foreach_bindings,
+                    "foreach item binding",
+                )?;
+                if let Some(index_name) = index_name {
+                    if index_name == item_name {
+                        return Err(format!(
+                            "foreach index binding '{}' shadows existing variable",
+                            index_name
+                        ));
+                    }
+                    ensure_no_variable_shadowing(
+                        index_name,
+                        values_by_name,
+                        foreach_bindings,
+                        "foreach index binding",
+                    )?;
+                }
                 let (collection_info, collection_handle) =
                     if let Some(local_collection) = values_by_name.get(collection_path).copied() {
                         let info = build_local_foreach_collection_info(
@@ -8193,6 +8235,68 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_let_shadowing_parameter() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(value: i32): i32 { let value: i32 = 1; return value; }\n",
+        );
+        let error = process.compile().expect_err("expected shadowing error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("let binding 'value' shadows existing variable"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_for_init_shadowing_outer_local() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let i: i32 = 4; for (let i: i32 = 0; i < 1; i += 1) { } return i; }\n",
+        );
+        let error = process.compile().expect_err("expected shadowing error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("let binding 'i' shadows existing variable"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_foreach_item_shadowing_outer_local() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nglobal values: i32[COUNT];\nfunction main(): i32 { let value: i32 = 0; foreach (let value in values) { value += 1; } return value; }\n",
+        );
+        let error = process.compile().expect_err("expected shadowing error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("foreach item binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
