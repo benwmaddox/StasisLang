@@ -600,14 +600,16 @@ fn select_emit_function_ids(
             reachable.insert(function.id);
         }
     }
-    let compiled: BTreeSet<FunctionId> = artifacts
+    let compiled_body_hashes: BTreeMap<FunctionId, u64> = artifacts
         .iter()
-        .map(|artifact| artifact.function_id)
+        .map(|artifact| (artifact.function_id, artifact.body_hash))
         .collect();
     functions
         .iter()
         .filter(|function| {
-            reachable.contains(&function.id) && (function.dirty || !compiled.contains(&function.id))
+            let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
+            let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
+            reachable.contains(&function.id) && (function.dirty || !artifact_matches_body_hash)
         })
         .map(|function| function.id)
         .collect()
@@ -9117,6 +9119,40 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute second"),
             3
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_recompiles_shifted_function_ids_when_artifact_body_hash_mismatch() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function f0(): i32 { return 1; }\nfunction f1(): i32 { return 2; }\nfunction main(): i32 { return f1() + 100; }\n",
+        );
+        let first = process.compile().expect("first compile");
+        assert_eq!(first.emit.emitted_functions, 2);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute first"),
+            102
+        );
+
+        process.upsert_file(
+            "sample.stasis",
+            "function inserted(): i32 { return 9; }\nfunction f0(): i32 { return 1; }\nfunction f1(): i32 { return 2; }\nfunction main(): i32 { return f1() + 100; }\n",
+        );
+        let second = process.compile().expect("second compile");
+        assert_eq!(
+            second.emit.emitted_functions, 2,
+            "f1 and main should be re-emitted after function-id shift"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute second"),
+            102
         );
     }
 

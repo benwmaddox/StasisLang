@@ -604,6 +604,7 @@ It is not part of the steady-state incremental JIT update loop.
 - In dev/runtime iteration, use in-process JIT compile outputs as the active execution path (`JitEnginePackage`) so edits stay fast.
 - In production/release path, use AOT bundle outputs (`AotEngineBundle`) for packaged/runtime execution.
 - Add deferred engine-overhead benchmark/test (`package/load/swap/render-loop`) and baseline it separately from compiler-only timings.
+- Add deferred engine hot-update latency benchmark for warm edits: measure `watch change -> compile -> commit/swap -> first tick/render with new code` and track p50/p95 in dev JIT mode (target: keep typical warm updates under 100ms on Brickout-scale scenarios).
 - Strengthen Windows executable/runtime parity smokes (JIT + AOT) on Brickout-oriented scenarios.
 - Lane B progress note:
 - Runtime commit path now supports JIT `FnId -> code_ptr` override application sourced from compile results when available (dev path can consume real JIT pointers instead of synthetic placeholder pointer generation).
@@ -689,6 +690,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Watch-mode test reruns now persist per-file JIT compile state in-process and skip compile for unchanged source hashes (reuse existing compiled process/image for unchanged files).
 - Watch-mode test reruns now also perform automatic per-file runtime rebind compile when switching between cached per-file JIT processes, preventing stalled reruns from cross-process runtime table state drift while preserving unchanged-file compile-skip for single-file sessions.
 - Rust-native `JitProcess` now caches expensive compile-analysis metadata (call signatures, extern symbol bindings, constants, global path types, and `foreach` collection info) behind a loaded-file fingerprint key so unchanged stdlib/dependency metadata is reused across compile calls.
+- Incremental JIT emit selection now treats cached artifacts as reusable only when both `function_id` and `body_hash` match, preventing stale artifact reuse after reindex function-id shifts (insert/remove/reorder) and forcing deterministic re-emit of affected reachable functions.
 - Startup now performs stale `.stasis_cache` cleanup with a 7-day default TTL (`STASIS_CACHE_TTL_DAYS` override) so cache files are retained for short-term reuse but aged out automatically.
 - Added shared host-boundary test helper module `src/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).
@@ -759,6 +761,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
 - Tests: gated benchmark and invalidation suites.
 - Engine-overhead benchmark task (separate from compiler-only timing gates): harness command added (`cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`); remaining work is threshold/baseline gating policy integration.
+- Engine hot-update benchmark task (separate from compiler-only timing gates): add an end-to-end watch/update benchmark that records warm edit latency through compile + swap + first updated tick/render for engine scenarios.
 - Done gate: project can reject regressions automatically against PRD v2 targets.
 - Status: `pending`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
