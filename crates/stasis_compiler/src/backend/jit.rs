@@ -4169,6 +4169,230 @@ fn try_emit_global_struct_copy_assignment(
     Ok(true)
 }
 
+fn try_emit_struct_copy_from_indexed_to_global(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    call_signatures: &CallSignatureMap,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<bool, String> {
+    let target_path = match target {
+        AssignTarget::GlobalPath(path) => path.as_str(),
+        AssignTarget::Local(path) => {
+            if values_by_name.contains_key(path) || foreach_bindings.contains_key(path) {
+                return Ok(false);
+            }
+            path.as_str()
+        }
+        AssignTarget::IndexedPath { .. } => return Ok(false),
+    };
+    let SimpleExpr::IndexedPath {
+        collection_path: source_collection,
+        index: source_index,
+        suffix: source_suffix,
+    } = expression
+    else {
+        return Ok(false);
+    };
+    if !source_suffix.is_empty() {
+        return Ok(false);
+    }
+    if values_by_name.contains_key(source_collection)
+        || foreach_bindings.contains_key(source_collection)
+    {
+        return Ok(false);
+    }
+    let Some(source_info) = collection_infos.get(source_collection) else {
+        return Ok(false);
+    };
+    if source_info.field_types.is_empty() {
+        return Ok(false);
+    }
+    if op != AssignOp::Set {
+        return Err(format!(
+            "struct copy assignment from indexed source only supports '=' for '{}'",
+            target_path
+        ));
+    }
+    let target_prefix = format!("{target_path}.");
+    let target_fields: BTreeMap<String, TypeId> = global_path_types
+        .iter()
+        .filter_map(|(path, type_id)| {
+            path.strip_prefix(&target_prefix)
+                .map(|suffix| (suffix.to_string(), *type_id))
+        })
+        .collect();
+    if target_fields.is_empty() {
+        return Ok(false);
+    }
+    if target_fields != source_info.field_types {
+        return Err(format!(
+            "struct copy assignment from indexed source requires matching field layout for '{}' and '{}[...]'",
+            target_path, source_collection
+        ));
+    }
+    for type_id in target_fields.values() {
+        if is_collection_handle_type(*type_id, type_table) {
+            return Err(format!(
+                "struct copy assignment from indexed source currently supports scalar fields only for '{}'",
+                target_path
+            ));
+        }
+    }
+
+    let source_index_binding = emit_simple_expression(
+        builder,
+        source_index,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        foreach_bindings,
+    )?;
+    for (field_name, field_type) in &source_info.field_types {
+        let source_value = emit_indexed_collection_load(
+            builder,
+            runtime_call_refs,
+            type_table,
+            source_collection,
+            source_info,
+            field_name,
+            source_index_binding,
+        )?;
+        let target_field = format!("{target_prefix}{field_name}");
+        emit_global_assignment(
+            builder,
+            runtime_call_refs,
+            type_table,
+            &target_field,
+            *field_type,
+            AssignOp::Set,
+            source_value,
+        )?;
+    }
+    Ok(true)
+}
+
+fn try_emit_struct_copy_from_global_to_indexed(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    call_signatures: &CallSignatureMap,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path: target_collection,
+        index: target_index,
+        suffix: target_suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    if !target_suffix.is_empty() {
+        return Ok(false);
+    }
+    if values_by_name.contains_key(target_collection)
+        || foreach_bindings.contains_key(target_collection)
+    {
+        return Ok(false);
+    }
+    let SimpleExpr::Identifier(source_path) = expression else {
+        return Ok(false);
+    };
+    if values_by_name.contains_key(source_path) || foreach_bindings.contains_key(source_path) {
+        return Ok(false);
+    }
+    let Some(target_info) = collection_infos.get(target_collection) else {
+        return Ok(false);
+    };
+    if target_info.field_types.is_empty() {
+        return Ok(false);
+    }
+    if op != AssignOp::Set {
+        return Err(format!(
+            "struct copy assignment to indexed target only supports '=' for '{}[...]'",
+            target_collection
+        ));
+    }
+    let source_prefix = format!("{source_path}.");
+    let source_fields: BTreeMap<String, TypeId> = global_path_types
+        .iter()
+        .filter_map(|(path, type_id)| {
+            path.strip_prefix(&source_prefix)
+                .map(|suffix| (suffix.to_string(), *type_id))
+        })
+        .collect();
+    if source_fields.is_empty() {
+        return Ok(false);
+    }
+    if source_fields != target_info.field_types {
+        return Err(format!(
+            "struct copy assignment to indexed target requires matching field layout for '{}[...]' and '{}'",
+            target_collection, source_path
+        ));
+    }
+    for type_id in source_fields.values() {
+        if is_collection_handle_type(*type_id, type_table) {
+            return Err(format!(
+                "struct copy assignment to indexed target currently supports scalar fields only for '{}[...]'",
+                target_collection
+            ));
+        }
+    }
+
+    let target_index_binding = emit_simple_expression(
+        builder,
+        target_index,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        foreach_bindings,
+    )?;
+    for (field_name, field_type) in &target_info.field_types {
+        let source_field = format!("{source_prefix}{field_name}");
+        let source_value = emit_global_load(
+            builder,
+            runtime_call_refs,
+            type_table,
+            &source_field,
+            *field_type,
+        )?;
+        emit_indexed_collection_assignment(
+            builder,
+            runtime_call_refs,
+            type_table,
+            target_collection,
+            target_info,
+            field_name,
+            target_index_binding,
+            AssignOp::Set,
+            source_value,
+        )?;
+    }
+    Ok(true)
+}
+
 fn emit_simple_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
@@ -4269,6 +4493,38 @@ fn emit_simple_statements(
                     expression,
                     values_by_name,
                     global_path_types,
+                    foreach_bindings,
+                )? {
+                    continue;
+                }
+                if try_emit_struct_copy_from_indexed_to_global(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    target,
+                    *op,
+                    expression,
+                    values_by_name,
+                    call_signatures,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    foreach_bindings,
+                )? {
+                    continue;
+                }
+                if try_emit_struct_copy_from_global_to_indexed(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    target,
+                    *op,
+                    expression,
+                    values_by_name,
+                    call_signatures,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
                     foreach_bindings,
                 )? {
                     continue;
@@ -8504,6 +8760,44 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 9);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_struct_copy_from_indexed_to_global_path() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal source: Enemy[COUNT];\nglobal target: Enemy;\nfunction main(): i32 {\n    source[1].hp = 6;\n    source[1].speed = 2.75;\n    target = source[1];\n    if (target.speed > 2.7) { return target.hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 6);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_struct_copy_from_global_to_indexed_path() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal source: Enemy;\nglobal target: Enemy[COUNT];\nfunction main(): i32 {\n    source.hp = 8;\n    source.speed = 4.25;\n    target[1] = source;\n    if (target[1].speed > 4.2) { return target[1].hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 8);
     }
 
     #[cfg(windows)]
