@@ -380,6 +380,33 @@ mod tests {
     }
 
     #[test]
+    fn signature_equivalent_formatting_edit_does_not_dirty_or_emit() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(value: i32): i32 { return value; }\nfunction main(): i32 { return helper(7); }\n",
+        );
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper( value : i32 ) : i32 { return value; }\nfunction main(): i32 { return helper(7); }\n",
+        );
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.signature_changed_functions, 0);
+        assert_eq!(index.dirty_functions, 0);
+        assert!(!function_by_name(&compiler, "helper").dirty);
+        assert!(!function_by_name(&compiler, "main").dirty);
+
+        let emit = compiler
+            .emit_pass_with(&mut |_, _| Ok(()))
+            .expect("emit pass");
+        assert_eq!(emit.emitted_functions, 0);
+    }
+
+    #[test]
     fn emit_pass_runs_only_dirty_functions() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
