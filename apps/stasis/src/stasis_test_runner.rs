@@ -265,4 +265,36 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn run_jit_tests_in_directory_isolates_each_file_compile() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_test_runner_isolation_{stamp}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let left = root.join("left.test.stasis");
+        let right = root.join("right.stasis");
+        fs::write(
+            &left,
+            "global value: i32;\nfunction seed(): void { value = 1; }\ntest `left`(): bool { seed(); return value == 1; }\n",
+        )
+        .expect("write left");
+        fs::write(
+            &right,
+            "global value: i32;\nfunction seed(): void { value = 2; }\ntest `right`(): bool { seed(); return value == 2; }\n",
+        )
+        .expect("write right");
+
+        let summary = run_jit_tests_in_directory(&root).expect("run tests");
+        assert_eq!(summary.files_discovered, 2, "{summary:?}");
+        assert_eq!(summary.files_with_tests, 2, "{summary:?}");
+        assert_eq!(summary.tests_discovered, 2, "{summary:?}");
+        assert_eq!(summary.tests_run, 2, "{summary:?}");
+        assert_eq!(summary.tests_passed, 2, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
 }

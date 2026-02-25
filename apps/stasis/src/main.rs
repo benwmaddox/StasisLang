@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use stasis::{
     publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory,
@@ -191,6 +192,7 @@ fn try_run_test_subcommand() -> Option<i32> {
         }
     };
 
+    let started = Instant::now();
     let summary = match run_jit_tests_in_directory(&parsed.directory) {
         Ok(value) => value,
         Err(message) => {
@@ -207,6 +209,7 @@ fn try_run_test_subcommand() -> Option<i32> {
     for failure in &summary.failures {
         println!("test_failure={failure}");
     }
+    println!("elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
     Some(if summary.tests_failed > 0 { 1 } else { 0 })
 }
 
