@@ -46,12 +46,12 @@ function shop_visible_y(ui_y: f32, ui_h: f32): f32 {
 }
 
 function handle_pointer_input_menu(): void {
-    let count: i32 = input_pointer_count();
+    let count: i32 = input_model.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        if (input_pointer_went_down(i)) {
-            let sx: f32 = input_pointer_x_px(i) + state.layout.viewport_x;
-            let sy: f32 = input_pointer_y_px(i) + state.layout.viewport_y;
+        if (input_model.pointers[i].went_down) {
+            let sx: f32 = input_model.pointers[i].x_px + state.layout.viewport_x;
+            let sy: f32 = input_model.pointers[i].y_px + state.layout.viewport_y;
             let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
             if (in_virtual) {
                 let wx: f32 = screen_to_play_x(sx);
@@ -68,15 +68,15 @@ function handle_pointer_input_menu(): void {
 }
 
 function handle_pointer_input_game(): void {
-    let count: i32 = input_pointer_count();
+    let count: i32 = input_model.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let pid: i32 = input_pointer_id(i);
-        let went_down: bool = input_pointer_went_down(i);
-        let went_up: bool = input_pointer_went_up(i);
-        let is_down: bool = input_pointer_is_down(i);
-        let sx: f32 = input_pointer_x_px(i) + state.layout.viewport_x;
-        let sy: f32 = input_pointer_y_px(i) + state.layout.viewport_y;
+        let pid: i32 = input_model.pointers[i].id;
+        let went_down: bool = input_model.pointers[i].went_down;
+        let went_up: bool = input_model.pointers[i].went_up;
+        let is_down: bool = input_model.pointers[i].is_down;
+        let sx: f32 = input_model.pointers[i].x_px + state.layout.viewport_x;
+        let sy: f32 = input_model.pointers[i].y_px + state.layout.viewport_y;
 
         if (state.drag_active != 0) {
             if (pid == state.drag_pointer_id) {

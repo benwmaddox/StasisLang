@@ -671,6 +671,8 @@ It is not part of the steady-state incremental JIT update loop.
 - `for` control segments now accept call-expression init/step and `from_*` conversion init/step statements in the direct parser path (including global-path and indexed-path conversion targets), with deterministic in-memory JIT execution coverage and AOT compile-contract coverage for mixed call+conversion headers.
 - Direct parser/lowering now supports inferred `let` bindings (`let name = expr`) for local declarations, including inferred `for` init declarations (`for (let i = 0; ... )`) and inferred `f32` locals from float literals.
 - Direct parser/lowering now enforces spec condition typing for expression-form conditions: `if (<expr>)` and `for (...; <expr>; ...)` require `<expr>` to be `bool`; numeric truthiness (`i32`/`f32`) is rejected with deterministic diagnostics.
+- Brickout v1 input path now uses a per-tick Stasis snapshot model (`input_model`) refreshed once in `tick()` and consumed by gameplay/UI logic (`record_tap_pulses`, `handle_pointer_input_*`) instead of scattered direct input function reads.
+- Rust-native JIT now seeds fixed-collection `max_length` metadata into both header lanes and `.max_length` path slots for fixed arrays/`ascii[N]`/`utf8[N]`, and stdlib ASCII scan helpers now use explicit bounded loop limits (`ascii_scan_limit`) instead of literal-condition infinite loops.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.

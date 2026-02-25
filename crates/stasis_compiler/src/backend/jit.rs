@@ -94,6 +94,8 @@ impl JitProcess {
         let global_path_types =
             collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        seed_fixed_collection_max_length_headers(&global_path_types, &type_table)
+            .map_err(crate::compiler::CompileError::Backend)?;
         let collection_infos = collect_foreach_collection_infos(
             self.compiler.files(),
             &mut type_table,
@@ -2656,7 +2658,7 @@ fn parse_for_statement(
 
     let init = parse_for_control_segment(init_text, type_table)?;
     let condition = if condition_text.is_empty() {
-        SimpleCondition::Expr(SimpleExpr::Int(1))
+        SimpleCondition::Expr(SimpleExpr::Bool(true))
     } else {
         parse_simple_condition(condition_text)?
     };
@@ -6608,6 +6610,78 @@ fn hash_string_literal(value: &str) -> i32 {
     hash_global_path(value)
 }
 
+fn seed_fixed_collection_max_length_headers(
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    for (path, type_id) in global_path_types {
+        let Some(type_info) = type_table.type_info(*type_id) else {
+            continue;
+        };
+        match type_info.category {
+            TypeCategory::AsciiFixed => {
+                let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
+                    continue;
+                };
+                let max_length = i32::try_from(payload_bytes).map_err(|_| {
+                    format!(
+                        "ascii max_length overflow for '{}' (payload bytes {})",
+                        path, payload_bytes
+                    )
+                })?;
+                seed_collection_max_length(path, -8, max_length);
+            }
+            TypeCategory::Utf8Fixed => {
+                let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
+                    continue;
+                };
+                let max_length = i32::try_from(payload_bytes).map_err(|_| {
+                    format!(
+                        "utf8 max_length overflow for '{}' (payload bytes {})",
+                        path, payload_bytes
+                    )
+                })?;
+                seed_collection_max_length(path, -12, max_length);
+            }
+            TypeCategory::ArrayFixed => {
+                let Some(max_length) = fixed_array_extent_from_type_name(&type_info.name) else {
+                    continue;
+                };
+                seed_collection_max_length(path, -4, max_length);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn fixed_array_extent_from_type_name(type_name: &str) -> Option<i32> {
+    let (_, extent_text) = parse_array_type_parts(type_name)?;
+    if extent_text.is_empty() {
+        return None;
+    }
+    extent_text.parse::<i32>().ok()
+}
+
+fn seed_collection_max_length(path: &str, header_start_index: i32, max_length: i32) {
+    let collection_hash = hash_global_path(path);
+    seed_i32_header_word(collection_hash, 0, header_start_index, max_length);
+    let max_length_path = format!("{path}.max_length");
+    stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&max_length_path), max_length);
+}
+
+fn seed_i32_header_word(collection_hash: i32, field_hash: i32, start_index: i32, value: i32) {
+    let bytes = value.to_le_bytes();
+    for (offset, byte) in bytes.iter().enumerate() {
+        stasis_dynload::stasis_jit_global_i32_array_store(
+            collection_hash,
+            field_hash,
+            start_index + offset as i32,
+            i32::from(*byte),
+        );
+    }
+}
+
 fn emit_simple_condition(
     builder: &mut FunctionBuilder<'_>,
     condition: &SimpleCondition,
@@ -6689,8 +6763,8 @@ fn emit_simple_condition(
                 return Ok(builder.ins().icmp_imm(IntCC::NotEqual, binding.value, 0));
             }
             Err(format!(
-                "condition expression must be bool in current jit path; found type {}",
-                binding.type_id
+                "condition expression must be bool in current jit path; found type {} for expression {:?}",
+                binding.type_id, expression
             ))
         }
         SimpleCondition::And(lhs, rhs) => {
@@ -7273,6 +7347,25 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_initializes_string_max_length_headers() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global a: ascii[32];\nglobal u: utf8[64];\nfunction main(): i32 {\n    let a_max: i32 = a[-8] + a[-7] * 256 + a[-6] * 65536 + a[-5] * 16777216;\n    let u_max: i32 = u[-12] + u[-11] * 256 + u[-10] * 65536 + u[-9] * 16777216;\n    return a_max + u_max;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 96);
     }
 
     #[cfg(windows)]
