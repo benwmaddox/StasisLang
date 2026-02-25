@@ -7458,6 +7458,52 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_stdlib_ascii_set_len_clamps_to_max_length() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_ascii_set_len_clamp_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    ascii_set_len(text, 99);\n    return length(text);\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_stdlib_utf8_set_len_ascii_clamps_to_max_length() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_utf8_set_len_clamp_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: utf8[4];\nfunction main(): i32 {\n    utf8_set_len_ascii(text, 99);\n    return length_bytes(text) * 10 + length_chars(text);\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 44);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_foreach_struct_array_with_index_alias() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();

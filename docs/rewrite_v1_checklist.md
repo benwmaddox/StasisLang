@@ -676,6 +676,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added runtime regression coverage for fixed-array `max_length` initialization parity (header bytes + `.max_length` path): `crates/stasis_compiler::backend::jit::tests::jit_process_initializes_fixed_array_max_length_header_and_path`.
 - Added imported-stdlib bounded-string regression coverage in rust-native JIT path: `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_ascii_copy_truncates_to_destination_capacity` and `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_ascii_recount_is_bounded_by_capacity`.
 - UTF-8 stdlib copy path now clamps by header capacity (`utf8_max_length`) in addition to caller-provided bound, with rust-native JIT regression coverage: `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_utf8_from_ascii_clamps_to_header_capacity`.
+- String length setters/getters in stdlib now clamp to header capacity (`ascii_set_len`/`length`, `utf8_set_byte_len`/`utf8_set_char_len`/`length_bytes`/`length_chars`), with rust-native JIT regression coverage: `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_ascii_set_len_clamps_to_max_length` and `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_utf8_set_len_ascii_clamps_to_max_length`.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
