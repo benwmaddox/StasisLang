@@ -7008,6 +7008,12 @@ fn resolve_local_collection_value_type(
             )
         })?;
     if suffix.is_empty() {
+        if named_struct_field_types.contains_key(&element_type) {
+            return Err(
+                "local indexed collection access requires field path for struct elements"
+                    .to_string(),
+            );
+        }
         return Ok(element_type);
     }
     let Some(field_types) = named_struct_field_types.get(&element_type) else {
@@ -8910,6 +8916,32 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 14);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_local_indexed_struct_element_without_field_suffix() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction bad(arr: Enemy[2]): i32 { let value = arr[0]; return 0; }\nfunction main(): i32 { return bad(enemies); }\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains(
+                        "local indexed collection access requires field path for struct elements"
+                    ),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
