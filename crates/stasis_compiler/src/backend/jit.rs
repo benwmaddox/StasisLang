@@ -7370,6 +7370,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_initializes_fixed_array_max_length_header_and_path() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global values: i32[12];\nfunction main(): i32 {\n    let header_max: i32 = values[-4] + values[-3] * 256 + values[-2] * 65536 + values[-1] * 16777216;\n    return header_max + values.max_length;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 24);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_foreach_struct_array_with_index_alias() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
