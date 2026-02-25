@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
 
 #[cfg(windows)]
 use std::ffi::{c_char, c_void, CString, OsStr};
@@ -85,6 +87,23 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     }
 }
 
+pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn() = unsafe { std::mem::transmute(address) };
+        callback();
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = address;
+        Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+    }
+}
+
 pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i32, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
@@ -103,6 +122,171 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
                 .to_string(),
         )
     }
+}
+
+// ============================================================
+// stasis_graphics host API (dev in-process runner)
+// ============================================================
+
+pub struct StasisGraphicsApi {
+    _lib: Library,
+    stasis_init_window: usize,
+    stasis_host_get_frame: usize,
+    stasis_host_bulk_apply_requests: usize,
+    stasis_gfx_submit_u8: usize,
+    stasis_sleep_ms: usize,
+}
+
+impl StasisGraphicsApi {
+    pub fn load_default() -> Result<Self, String> {
+        for candidate in runtime_library_candidate_paths() {
+            if !candidate.exists() {
+                continue;
+            }
+            if let Ok(api) = Self::load(&candidate) {
+                return Ok(api);
+            }
+        }
+        Err("failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string())
+    }
+
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let lib = Library::load(path)?;
+        let stasis_init_window = lib.symbol_address("stasis_init_window")?;
+        let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
+        let stasis_host_bulk_apply_requests = lib.symbol_address("stasis_host_bulk_apply_requests")?;
+        let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
+        Ok(Self {
+            _lib: lib,
+            stasis_init_window,
+            stasis_host_get_frame,
+            stasis_host_bulk_apply_requests,
+            stasis_gfx_submit_u8,
+            stasis_sleep_ms,
+        })
+    }
+
+    pub fn init_window(&self, width: i32, height: i32, title: &str) -> Result<bool, String> {
+        #[cfg(windows)]
+        {
+            let title = CString::new(title)
+                .map_err(|_| "window title contains interior NUL byte".to_string())?;
+            let callback: extern "system" fn(i32, i32, *const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_init_window) };
+            let rc = callback(width, height, title.as_ptr());
+            return Ok(rc != 0);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = width;
+            let _ = height;
+            let _ = title;
+            Err("stasis_graphics init_window is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+
+    pub fn host_get_frame(&self, out_i32: &mut [i32], out_f32: &mut [f32]) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*mut i32, *mut f32) =
+                unsafe { std::mem::transmute(self.stasis_host_get_frame) };
+            callback(out_i32.as_mut_ptr(), out_f32.as_mut_ptr());
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = out_i32;
+            let _ = out_f32;
+            Err("stasis_graphics host_get_frame is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+
+    pub fn host_bulk_apply_requests(
+        &self,
+        host_req_seq: &i32,
+        host_req_flags: &i32,
+        host_req_window_w_px: &i32,
+        host_req_window_h_px: &i32,
+    ) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const i32, *const i32, *const i32, *const i32) =
+                unsafe { std::mem::transmute(self.stasis_host_bulk_apply_requests) };
+            callback(
+                host_req_seq as *const i32,
+                host_req_flags as *const i32,
+                host_req_window_w_px as *const i32,
+                host_req_window_h_px as *const i32,
+            );
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = host_req_seq;
+            let _ = host_req_flags;
+            let _ = host_req_window_w_px;
+            let _ = host_req_window_h_px;
+            Err("stasis_graphics host_bulk_apply_requests is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+
+    pub fn gfx_submit_u8(&self, cmd_i32: &[i32], cmd_f32: &[f32], cmd_u8: &[u8]) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const i32, *const f32, *const u8) =
+                unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
+            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = cmd_i32;
+            let _ = cmd_f32;
+            let _ = cmd_u8;
+            Err("stasis_graphics gfx_submit_u8 is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+
+    pub fn sleep_ms(&self, ms: i32) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32) =
+                unsafe { std::mem::transmute(self.stasis_sleep_ms) };
+            callback(ms);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = ms;
+            Err("stasis_graphics sleep_ms is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+}
+
+fn runtime_library_candidate_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
+        out.push(PathBuf::from(configured));
+    }
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    out.push(
+        repo_root
+            .join("runtime")
+            .join("build")
+            .join("bin")
+            .join("Release")
+            .join("stasis_graphics.dll"),
+    );
+    out.push(
+        repo_root
+            .join("runtime")
+            .join("build")
+            .join("bin")
+            .join("Debug")
+            .join("stasis_graphics.dll"),
+    );
+    out
 }
 
 pub fn replace_jit_i32_dispatch_table(entries: &[(u32, u8, usize)]) {
@@ -146,6 +330,67 @@ pub fn upsert_jit_string_literal(id: i32, value: &str) {
         .lock()
         .expect("jit string literal table mutex poisoned");
     guard.insert(id, value.to_string());
+}
+
+// ============================================================
+// Registered global memory (in-process engine)
+// ============================================================
+
+type ArrayKey = (i32, i32); // (collection_hash, field_hash)
+
+fn registered_i32_ptrs() -> &'static Mutex<HashMap<i32, usize>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, usize>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_f32_ptrs() -> &'static Mutex<HashMap<i32, usize>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, usize>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_f32_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
+    let table = registered_i32_ptrs();
+    let mut guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+    guard.insert(path_hash, ptr as usize);
+}
+
+pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
+    let table = registered_f32_ptrs();
+    let mut guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+    guard.insert(path_hash, ptr as usize);
+}
+
+pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
+    let table = registered_i32_arrays();
+    let mut guard = table.lock().expect("registered i32 array table mutex poisoned");
+    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
+    let table = registered_f32_arrays();
+    let mut guard = table.lock().expect("registered f32 array table mutex poisoned");
+    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
+    let table = registered_u8_arrays();
+    let mut guard = table.lock().expect("registered u8 array table mutex poisoned");
+    guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
 pub extern "C" fn stasis_jit_print_i32(value: i32) {
@@ -420,24 +665,96 @@ pub extern "C" fn stasis_jit_call_f32_i32_1(fn_id_raw: i32, arg0: i32) -> f32 {
 }
 
 pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
+    {
+        let table = registered_i32_ptrs();
+        let guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            return unsafe { *(ptr as *mut i32) };
+        }
+    }
     let table = jit_i32_global_table();
     let guard = table.lock().expect("jit global table mutex poisoned");
     guard.get(&path_hash).copied().unwrap_or_default()
 }
 
 pub extern "C" fn stasis_jit_global_i32_store(path_hash: i32, value: i32) {
+    {
+        let table = registered_i32_ptrs();
+        let guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            unsafe { *(ptr as *mut i32) = value };
+            return;
+        }
+    }
     let table = jit_i32_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.insert(path_hash, value);
 }
 
+fn fnv1a_extend_u32(mut hash: u32, suffix: &[u8]) -> u32 {
+    for byte in suffix {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+
+fn stasis_meta_suffix_bytes(meta_kind: i32) -> Option<&'static [u8]> {
+    // NOTE: These are intentionally hardcoded so Stasis can access collection header-like
+    // fields (length/max_length/char_length) via a simple i32 handle (the base path hash)
+    // without exposing negative indexing in Stasis source.
+    match meta_kind {
+        1 => Some(b".length"),
+        2 => Some(b".max_length"),
+        3 => Some(b".char_length"),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_collection_i32_load(collection_hash: i32, meta_kind: i32) -> i32 {
+    let Some(suffix) = stasis_meta_suffix_bytes(meta_kind) else {
+        return 0;
+    };
+    let derived = fnv1a_extend_u32(collection_hash as u32, suffix) as i32;
+    stasis_jit_global_i32_load(derived)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_collection_i32_store(collection_hash: i32, meta_kind: i32, value: i32) {
+    let Some(suffix) = stasis_meta_suffix_bytes(meta_kind) else {
+        return;
+    };
+    let derived = fnv1a_extend_u32(collection_hash as u32, suffix) as i32;
+    stasis_jit_global_i32_store(derived, value);
+}
+
 pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
+    {
+        let table = registered_f32_ptrs();
+        let guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            return unsafe { *(ptr as *mut f32) };
+        }
+    }
     let table = jit_f32_global_table();
     let guard = table.lock().expect("jit global table mutex poisoned");
     guard.get(&path_hash).copied().unwrap_or_default()
 }
 
 pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
+    {
+        let table = registered_f32_ptrs();
+        let guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            unsafe { *(ptr as *mut f32) = value };
+            return;
+        }
+    }
     let table = jit_f32_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.insert(path_hash, value);
@@ -448,6 +765,37 @@ pub extern "C" fn stasis_jit_global_i32_array_load(
     field_hash: i32,
     index: i32,
 ) -> i32 {
+    if index < 0 {
+        return 0;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_i32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered i32 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                return unsafe { *((ptr as *mut i32).add(idx)) };
+            }
+            return 0;
+        }
+    }
+    {
+        let table = registered_u8_arrays();
+        let guard = table
+            .lock()
+            .expect("registered u8 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                return i32::from(unsafe { *((ptr as *mut u8).add(idx)) });
+            }
+            return 0;
+        }
+    }
     let table = jit_i32_array_global_table();
     let guard = table.lock().expect("jit global table mutex poisoned");
     guard
@@ -462,6 +810,37 @@ pub extern "C" fn stasis_jit_global_i32_array_store(
     index: i32,
     value: i32,
 ) {
+    if index < 0 {
+        return;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_i32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered i32 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                unsafe { *((ptr as *mut i32).add(idx)) = value };
+            }
+            return;
+        }
+    }
+    {
+        let table = registered_u8_arrays();
+        let guard = table
+            .lock()
+            .expect("registered u8 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                unsafe { *((ptr as *mut u8).add(idx)) = value as u8 };
+            }
+            return;
+        }
+    }
     let table = jit_i32_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.insert((collection_hash, field_hash, index), value);
@@ -472,6 +851,24 @@ pub extern "C" fn stasis_jit_global_f32_array_load(
     field_hash: i32,
     index: i32,
 ) -> f32 {
+    if index < 0 {
+        return 0.0;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_f32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f32 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                return unsafe { *((ptr as *mut f32).add(idx)) };
+            }
+            return 0.0;
+        }
+    }
     let table = jit_f32_array_global_table();
     let guard = table.lock().expect("jit global table mutex poisoned");
     guard
@@ -486,6 +883,24 @@ pub extern "C" fn stasis_jit_global_f32_array_store(
     index: i32,
     value: f32,
 ) {
+    if index < 0 {
+        return;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_f32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f32 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                unsafe { *((ptr as *mut f32).add(idx)) = value };
+            }
+            return;
+        }
+    }
     let table = jit_f32_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.insert((collection_hash, field_hash, index), value);

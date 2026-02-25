@@ -180,15 +180,11 @@ function ascii_from_hex(d: i32): u8 {
 }
 
 function length(s: ascii[]): i32 {
-    let b0: i32 = u8_to_i32(s[-4]);
-    let b1: i32 = u8_to_i32(s[-3]);
-    let b2: i32 = u8_to_i32(s[-2]);
-    let b3: i32 = u8_to_i32(s[-1]);
-    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    let value: i32 = s.length;
     if (value < 0) {
         return 0;
     }
-    let max_len: i32 = ascii_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         return max_len;
     }
@@ -196,11 +192,7 @@ function length(s: ascii[]): i32 {
 }
 
 function ascii_max_length(s: ascii[]): i32 {
-    let b0: i32 = u8_to_i32(s[-8]);
-    let b1: i32 = u8_to_i32(s[-7]);
-    let b2: i32 = u8_to_i32(s[-6]);
-    let b3: i32 = u8_to_i32(s[-5]);
-    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    let value: i32 = s.max_length;
     if (value < 0) {
         return 0;
     }
@@ -224,18 +216,11 @@ function ascii_set_len(s: ascii[], len: i32) {
     if (value < 0) {
         value = 0;
     }
-    let max_len: i32 = ascii_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         value = max_len;
     }
-    let b0: i32 = value % 256;
-    let b1: i32 = (value / 256) % 256;
-    let b2: i32 = (value / 65536) % 256;
-    let b3: i32 = (value / 16777216) % 256;
-    s[-4] = i32_to_u8_trunc(b0);
-    s[-3] = i32_to_u8_trunc(b1);
-    s[-2] = i32_to_u8_trunc(b2);
-    s[-1] = i32_to_u8_trunc(b3);
+    s.length = value;
 }
 
 function ascii_is_empty(s: ascii[]): bool {
@@ -546,11 +531,7 @@ function mem_cmp(a: u8[], b: u8[], count: i32): i32 {
 // `char_length == byte_length`.
 
 function utf8_max_length(s: utf8[]): i32 {
-    let b0: i32 = u8_to_i32(s[-12]);
-    let b1: i32 = u8_to_i32(s[-11]);
-    let b2: i32 = u8_to_i32(s[-10]);
-    let b3: i32 = u8_to_i32(s[-9]);
-    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    let value: i32 = s.max_length;
     if (value < 0) {
         return 0;
     }
@@ -558,15 +539,11 @@ function utf8_max_length(s: utf8[]): i32 {
 }
 
 function length_bytes(s: utf8[]): i32 {
-    let b0: i32 = u8_to_i32(s[-8]);
-    let b1: i32 = u8_to_i32(s[-7]);
-    let b2: i32 = u8_to_i32(s[-6]);
-    let b3: i32 = u8_to_i32(s[-5]);
-    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    let value: i32 = s.length;
     if (value < 0) {
         return 0;
     }
-    let max_len: i32 = utf8_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         return max_len;
     }
@@ -574,15 +551,11 @@ function length_bytes(s: utf8[]): i32 {
 }
 
 function length_chars(s: utf8[]): i32 {
-    let b0: i32 = u8_to_i32(s[-4]);
-    let b1: i32 = u8_to_i32(s[-3]);
-    let b2: i32 = u8_to_i32(s[-2]);
-    let b3: i32 = u8_to_i32(s[-1]);
-    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    let value: i32 = s.char_length;
     if (value < 0) {
         return 0;
     }
-    let max_len: i32 = utf8_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         return max_len;
     }
@@ -594,18 +567,11 @@ function utf8_set_byte_len(s: utf8[], len: i32): void {
     if (value < 0) {
         value = 0;
     }
-    let max_len: i32 = utf8_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         value = max_len;
     }
-    let b0: i32 = value % 256;
-    let b1: i32 = (value / 256) % 256;
-    let b2: i32 = (value / 65536) % 256;
-    let b3: i32 = (value / 16777216) % 256;
-    s[-8] = i32_to_u8_trunc(b0);
-    s[-7] = i32_to_u8_trunc(b1);
-    s[-6] = i32_to_u8_trunc(b2);
-    s[-5] = i32_to_u8_trunc(b3);
+    s.length = value;
 }
 
 function utf8_set_char_len(s: utf8[], len: i32): void {
@@ -613,18 +579,11 @@ function utf8_set_char_len(s: utf8[], len: i32): void {
     if (value < 0) {
         value = 0;
     }
-    let max_len: i32 = utf8_max_length(s);
+    let max_len: i32 = s.max_length;
     if (max_len > 0 && value > max_len) {
         value = max_len;
     }
-    let b0: i32 = value % 256;
-    let b1: i32 = (value / 256) % 256;
-    let b2: i32 = (value / 65536) % 256;
-    let b3: i32 = (value / 16777216) % 256;
-    s[-4] = i32_to_u8_trunc(b0);
-    s[-3] = i32_to_u8_trunc(b1);
-    s[-2] = i32_to_u8_trunc(b2);
-    s[-1] = i32_to_u8_trunc(b3);
+    s.char_length = value;
 }
 
 function utf8_set_len_ascii(s: utf8[], len: i32): void {

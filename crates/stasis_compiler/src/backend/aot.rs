@@ -245,6 +245,62 @@ impl AotProcess {
             optimization_profile: self.optimization_profile,
         })
     }
+
+    pub fn write_object_files(
+        &self,
+        output_dir: &Path,
+    ) -> Result<BTreeMap<String, (String, PathBuf)>, String> {
+        fs::create_dir_all(output_dir).map_err(|error| {
+            format!(
+                "failed to create AOT object output directory {}: {error}",
+                output_dir.display()
+            )
+        })?;
+
+        let mut out = BTreeMap::new();
+        for artifact in &self.artifacts {
+            let function = self
+                .compiler
+                .functions()
+                .iter()
+                .find(|function| function.id == artifact.function_id)
+                .ok_or_else(|| {
+                    format!(
+                        "function metadata missing for artifact function id {}",
+                        artifact.function_id
+                    )
+                })?;
+            let bytes = self
+                .object_bytes
+                .get(artifact.object_index as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "object bytes missing for function '{}' at object index {}",
+                        function.name, artifact.object_index
+                    )
+                })?;
+
+            let extension = if cfg!(windows) { "obj" } else { "o" };
+            let object_file_name = format!(
+                "{}_{}.{}",
+                sanitize_file_token(&function.name),
+                artifact.object_index,
+                extension
+            );
+            let object_path = output_dir.join(object_file_name);
+            fs::write(&object_path, bytes).map_err(|error| {
+                format!(
+                    "failed to write object file {}: {error}",
+                    object_path.display()
+                )
+            })?;
+            out.insert(
+                function.name.clone(),
+                (artifact.symbol_name.clone(), object_path),
+            );
+        }
+        Ok(out)
+    }
 }
 
 fn compile_function_to_object_bytes(

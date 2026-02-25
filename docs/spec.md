@@ -82,6 +82,10 @@ String-like storage is fixed-layout and deterministic.
 - header `max_length: i32`
 - payload `elements[N]`
 
+Header access:
+- Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
+- Negative indices are not allowed in source-level collection indexing.
+
 `Type[]` call-site compatibility:
 - A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).
 - The storage header still carries `max_length` so bounds metadata remains available at runtime.

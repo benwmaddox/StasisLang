@@ -10,8 +10,8 @@ use std::time::SystemTime;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
     publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory_with_session,
-    run_self_host_aot_cli, run_with_default_backend, run_with_real_backend, StasisTestRunSession,
-    scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
+    run_play_in_process, run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
+    StasisTestRunSession, RunnerConfig,
 };
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -37,26 +37,97 @@ struct AotCliContractArgs {
     quality_gate: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlayCliArgs {
+    watch_file: PathBuf,
+    watch_dir: Option<PathBuf>,
+    tick_sleep_micros: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CacheCleanupSummary {
     removed_files: u64,
     removed_dirs: u64,
 }
 
-fn apply_brickout_revenge_v1_scenario(config: &mut RunnerConfig) {
-    let previous = config.clone();
-    let mut scenario = brickout_revenge_v1_runner_config(previous.max_ticks);
-    // Keep explicit CLI/runtime policy flags stable regardless of arg order.
-    scenario.tick_sleep_micros = previous.tick_sleep_micros;
-    scenario.watch_directory = previous.watch_directory;
-    scenario.target_mode = previous.target_mode;
-    scenario.fail_compile = previous.fail_compile;
-    scenario.disable_on_code_swap_hook = previous.disable_on_code_swap_hook;
-    scenario.hook_failure_reason = previous.hook_failure_reason;
-    scenario.swap_failure_reason = previous.swap_failure_reason;
-    scenario.runtime_launch = previous.runtime_launch;
-    scenario.aot_probe_loadability = previous.aot_probe_loadability;
-    *config = scenario;
+fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
+    let mut watch_file: Option<PathBuf> = None;
+    let mut watch_dir: Option<PathBuf> = None;
+    let mut tick_sleep_micros: u64 = 16000;
+    let mut i: usize = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--watch-file" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --watch-file".to_string());
+            }
+            watch_file = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--watch-dir" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --watch-dir".to_string());
+            }
+            watch_dir = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--tick-sleep-us" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --tick-sleep-us".to_string());
+            }
+            tick_sleep_micros = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --tick-sleep-us: {error}"))?;
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    let Some(watch_file) = watch_file else {
+        return Err("missing required --watch-file <path>".to_string());
+    };
+    Ok(PlayCliArgs {
+        watch_file,
+        watch_dir,
+        tick_sleep_micros,
+    })
+}
+
+fn try_run_play_subcommand() -> Option<i32> {
+    let mut args = env::args().skip(1);
+    let first = args.next()?;
+    if first != "play" {
+        return None;
+    }
+    let arg_list: Vec<String> = args.collect();
+    let parsed = match parse_play_cli_args(&arg_list) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+
+    let watch_dir = parsed.watch_dir.clone().or_else(|| {
+        parsed
+            .watch_file
+            .parent()
+            .map(|parent| parent.to_path_buf())
+    });
+
+    match run_play_in_process(
+        &parsed.watch_file,
+        watch_dir.as_deref(),
+        parsed.tick_sleep_micros,
+    ) {
+        Ok(()) => Some(0),
+        Err(message) => {
+            eprintln!("{message}");
+            Some(1)
+        }
+    }
 }
 
 fn parse_args() -> CliOptions {
@@ -146,14 +217,6 @@ fn parse_args() -> CliOptions {
                 if let Some(value) = args.next() {
                     emit_events_jsonl = true;
                     events_jsonl_file = Some(PathBuf::from(value));
-                }
-            }
-            "--scenario" => {
-                if let Some(value) = args.next() {
-                    if value == "brickout-revenge-v1" {
-                        apply_brickout_revenge_v1_scenario(&mut config);
-                        config.runtime_launch = true;
-                    }
                 }
             }
             _ => {}
@@ -796,12 +859,12 @@ mod tests {
             "--out".to_string(),
             "bin.exe".to_string(),
             "--entry-file".to_string(),
-            "brickout_revenge_v1.stasis".to_string(),
+            "entry.stasis".to_string(),
         ];
         let parsed = parse_aot_cli_contract_args(&args).expect("parse should succeed");
         assert_eq!(
             parsed.entry_file,
-            Some(PathBuf::from("brickout_revenge_v1.stasis"))
+            Some(PathBuf::from("entry.stasis"))
         );
         assert!(!parsed.quality_gate);
     }
@@ -824,36 +887,6 @@ mod tests {
         let args = vec!["--project-dir".to_string(), "proj".to_string()];
         let error = parse_aot_cli_contract_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing required --out"));
-    }
-
-    #[test]
-    fn scenario_apply_preserves_preparsed_runtime_flags() {
-        let mut config = RunnerConfig::default();
-        config.max_ticks = 777;
-        config.tick_sleep_micros = 333;
-        config.watch_directory = Some(PathBuf::from("samples"));
-        config.target_mode = TargetMode::AotProd;
-        config.fail_compile = true;
-        config.disable_on_code_swap_hook = true;
-        config.hook_failure_reason = Some("hook failed".to_string());
-        config.swap_failure_reason = Some("swap failed".to_string());
-
-        apply_brickout_revenge_v1_scenario(&mut config);
-
-        assert_eq!(config.max_ticks, 777);
-        assert_eq!(config.tick_sleep_micros, 333);
-        assert_eq!(config.watch_directory, Some(PathBuf::from("samples")));
-        assert_eq!(config.target_mode, TargetMode::AotProd);
-        assert!(config.fail_compile);
-        assert!(config.disable_on_code_swap_hook);
-        assert_eq!(config.hook_failure_reason.as_deref(), Some("hook failed"));
-        assert_eq!(config.swap_failure_reason.as_deref(), Some("swap failed"));
-        assert_eq!(
-            config.inject_file_change,
-            Some(PathBuf::from(
-                "samples/brickout_revenge/brickout_revenge_v1.stasis"
-            ))
-        );
     }
 
     #[test]
@@ -885,12 +918,11 @@ fn main() {
     if let Some(exit) = try_run_aot_cli_subcommand() {
         std::process::exit(exit);
     }
+    if let Some(exit) = try_run_play_subcommand() {
+        std::process::exit(exit);
+    }
 
     let options = parse_args();
-    let is_brickout_profile = options.runner.inject_file_change.as_ref()
-        == Some(&PathBuf::from(
-            "samples/brickout_revenge/brickout_revenge_v1.stasis",
-        ));
     let use_simulated = options.runner.fail_compile
         || options.runner.hook_failure_reason.is_some()
         || options.runner.swap_failure_reason.is_some();
@@ -965,8 +997,6 @@ fn main() {
             window.height,
             window.is_vertical()
         );
-    } else if is_brickout_profile {
-        println!("window_profile=brickout_revenge_v1 <unset>");
     }
     for diagnostic in &summary.compile_diagnostics {
         println!("compile_diagnostic={diagnostic}");

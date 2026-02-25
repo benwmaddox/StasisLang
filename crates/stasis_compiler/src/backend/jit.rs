@@ -1,4 +1,4 @@
-use crate::backend::EngineEntrypoints;
+﻿use crate::backend::EngineEntrypoints;
 use crate::compiler::{
     CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
 };
@@ -60,6 +60,19 @@ pub struct JitEnginePackage {
 
 impl JitProcess {
     pub fn new() -> Self {
+        #[cfg(test)]
+        let _test_guard = acquire_jit_process_test_guard();
+        #[cfg(test)]
+        {
+            // Many unit tests manipulate process-global JIT tables. Keep them isolated and
+            // deterministic by clearing under the test guard.
+            stasis_dynload::clear_jit_i32_global_table();
+            stasis_dynload::clear_jit_f32_global_table();
+            stasis_dynload::clear_jit_i32_array_global_table();
+            stasis_dynload::clear_jit_f32_array_global_table();
+            stasis_dynload::clear_jit_string_literal_table();
+        }
+
         Self {
             compiler: Compiler::new(),
             next_slot: 0,
@@ -74,7 +87,7 @@ impl JitProcess {
             compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
             #[cfg(test)]
-            _test_guard: acquire_jit_process_test_guard(),
+            _test_guard,
         }
     }
 
@@ -580,7 +593,7 @@ fn acquire_jit_process_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("jit process test lock poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1066,6 +1079,8 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "stasis_jit_global_i32_store" => stasis_dynload::stasis_jit_global_i32_store as usize,
         "stasis_jit_global_f32_load" => stasis_dynload::stasis_jit_global_f32_load as usize,
         "stasis_jit_global_f32_store" => stasis_dynload::stasis_jit_global_f32_store as usize,
+        "stasis_jit_collection_i32_load" => stasis_dynload::stasis_jit_collection_i32_load as usize,
+        "stasis_jit_collection_i32_store" => stasis_dynload::stasis_jit_collection_i32_store as usize,
         "sys_memcpy_u8" | "stasis_sys_memcpy_u8" | "stasis_jit_sys_memcpy_u8" => {
             stasis_dynload::stasis_jit_sys_memcpy_u8 as usize
         }
@@ -1922,6 +1937,14 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_global_f32_store as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_collection_i32_load",
+        stasis_dynload::stasis_jit_collection_i32_load as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_collection_i32_store",
+        stasis_dynload::stasis_jit_collection_i32_store as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_global_i32_array_load",
         stasis_dynload::stasis_jit_global_i32_array_load as *const u8,
     );
@@ -2028,6 +2051,8 @@ fn compile_function_to_jit_module(
             &mut module,
             "stasis_jit_global_f32_array_store",
         )?,
+        collection_i32_load: declare_i32_call_import(&mut module, "stasis_jit_collection_i32_load", 2)?,
+        collection_i32_store: declare_void_call_import(&mut module, "stasis_jit_collection_i32_store", 3)?,
         extern_calls: declare_extern_call_imports(&mut module, call_signatures, type_table)?,
     };
 
@@ -2094,6 +2119,10 @@ fn compile_function_to_jit_module(
                 .declare_func_in_func(runtime_call_imports.global_f32_array_load, builder.func),
             global_f32_array_store: module
                 .declare_func_in_func(runtime_call_imports.global_f32_array_store, builder.func),
+            collection_i32_load: module
+                .declare_func_in_func(runtime_call_imports.collection_i32_load, builder.func),
+            collection_i32_store: module
+                .declare_func_in_func(runtime_call_imports.collection_i32_store, builder.func),
             extern_calls: runtime_call_imports
                 .extern_calls
                 .iter()
@@ -2227,6 +2256,8 @@ struct RuntimeCallImportIds {
     global_i32_array_store: FuncId,
     global_f32_array_load: FuncId,
     global_f32_array_store: FuncId,
+    collection_i32_load: FuncId,
+    collection_i32_store: FuncId,
     extern_calls: BTreeMap<ExternImportKey, FuncId>,
 }
 
@@ -2271,6 +2302,8 @@ struct RuntimeCallRefs {
     global_i32_array_store: FuncRef,
     global_f32_array_load: FuncRef,
     global_f32_array_store: FuncRef,
+    collection_i32_load: FuncRef,
+    collection_i32_store: FuncRef,
     extern_calls: BTreeMap<ExternImportKey, FuncRef>,
 }
 
@@ -2284,6 +2317,24 @@ struct ValueBinding {
 struct LocalBinding {
     var: Variable,
     type_id: TypeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CollectionMetaKind {
+    Length = 1,
+    MaxLength = 2,
+    CharLength = 3,
+}
+
+fn collection_meta_kind_from_suffix(suffix: &str) -> Option<CollectionMetaKind> {
+    match suffix {
+        "length" => Some(CollectionMetaKind::Length),
+        "max_length" => Some(CollectionMetaKind::MaxLength),
+        "char_length" => Some(CollectionMetaKind::CharLength),
+        // Alias: treat byte_length as length (read-only in source-level semantics for now).
+        "byte_length" => Some(CollectionMetaKind::Length),
+        _ => None,
+    }
 }
 
 fn declare_i32_call_import(
@@ -2923,6 +2974,14 @@ fn parse_assignment_target(source: &str, cursor: usize) -> Result<(AssignTarget,
                 ));
             }
             index_expr = Some(parse_simple_expression(index_text)?);
+            if let Some(const_i64) = eval_const_i64(index_expr.as_ref().expect("index expr set")) {
+                if const_i64 < 0 {
+                    return Err(
+                        "negative collection indices are unsupported (use .length/.max_length)"
+                            .to_string(),
+                    );
+                }
+            }
             next = close + 1;
             continue;
         }
@@ -4790,6 +4849,66 @@ fn emit_simple_statements(
                             )?;
                             continue;
                         }
+                        if let Some((base, suffix)) = path.rsplit_once('.') {
+                            if let Some(local) = values_by_name.get(base).copied() {
+                                if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
+                                    if suffix == "max_length" {
+                                        return Err(format!(
+                                            "assignment target '{}.{}' is read-only in current jit path",
+                                            base, suffix
+                                        ));
+                                    }
+                                    if suffix == "byte_length" {
+                                        return Err(format!(
+                                            "assignment target '{}.{}' is read-only (assign to '{}.length') in current jit path",
+                                            base, suffix, base
+                                        ));
+                                    }
+                                    if !is_collection_handle_type(local.type_id, type_table) {
+                                        return Err(format!(
+                                            "assignment target '{}.{}' requires collection handle base in current jit path",
+                                            base, suffix
+                                        ));
+                                    }
+                                    if rhs.type_id != TYPE_ID_I32 {
+                                        return Err(format!(
+                                            "assignment type mismatch for '{}.{}': expected i32 expression but found {}",
+                                            base, suffix, rhs.type_id
+                                        ));
+                                    }
+
+                                    let base_value = builder.use_var(local.var);
+                                    let kind_value = builder
+                                        .ins()
+                                        .iconst(types::I32, i64::from(kind as i32));
+
+                                    let value = match op {
+                                        AssignOp::Set => rhs.value,
+                                        AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
+                                            let current = builder.ins().call(
+                                                runtime_call_refs.collection_i32_load,
+                                                &[base_value, kind_value],
+                                            );
+                                            let current_value = builder.inst_results(current)[0];
+                                            match op {
+                                                AssignOp::Add => builder.ins().iadd(current_value, rhs.value),
+                                                AssignOp::Sub => builder.ins().isub(current_value, rhs.value),
+                                                AssignOp::Mul => builder.ins().imul(current_value, rhs.value),
+                                                AssignOp::Div => builder.ins().sdiv(current_value, rhs.value),
+                                                AssignOp::Mod => builder.ins().srem(current_value, rhs.value),
+                                                AssignOp::Set => unreachable!(),
+                                            }
+                                        }
+                                    };
+
+                                    builder.ins().call(
+                                        runtime_call_refs.collection_i32_store,
+                                        &[base_value, kind_value, value],
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         let Some(path_type) = global_path_types.get(path).copied() else {
                             return Err(format!(
                                 "unknown global path '{}' in current jit path",
@@ -5501,6 +5620,37 @@ enum SimpleExpr {
     },
 }
 
+fn eval_const_i64(expression: &SimpleExpr) -> Option<i64> {
+    match expression {
+        SimpleExpr::Int(value) => Some(*value),
+        SimpleExpr::Binary { lhs, op, rhs } => {
+            let lhs = eval_const_i64(lhs)?;
+            let rhs = eval_const_i64(rhs)?;
+            match *op {
+                '+' => lhs.checked_add(rhs),
+                '-' => lhs.checked_sub(rhs),
+                '*' => lhs.checked_mul(rhs),
+                '/' => {
+                    if rhs == 0 {
+                        None
+                    } else {
+                        lhs.checked_div(rhs)
+                    }
+                }
+                '%' => {
+                    if rhs == 0 {
+                        None
+                    } else {
+                        lhs.checked_rem(rhs)
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn parse_simple_expression(expression: &str) -> Result<SimpleExpr, String> {
     let tokens = tokenize_simple_expression(expression)?;
     let mut parser = ExprParser {
@@ -5910,6 +6060,14 @@ impl ExprParser<'_> {
                 }
                 self.cursor += 1;
                 let expression = self.parse_precedence(0)?;
+                if let Some(const_i64) = eval_const_i64(&expression) {
+                    if const_i64 < 0 {
+                        return Err(
+                            "negative collection indices are unsupported (use .length/.max_length)"
+                                .to_string(),
+                        );
+                    }
+                }
                 match self.tokens.get(self.cursor) {
                     Some(ExprToken::RBracket) => {
                         self.cursor += 1;
@@ -6041,6 +6199,26 @@ fn emit_simple_expression(
             })
         }
         SimpleExpr::Identifier(name) => {
+            if let Some((base, suffix)) = name.rsplit_once('.') {
+                if let Some(local) = values_by_name.get(base).copied() {
+                    if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
+                        if is_collection_handle_type(local.type_id, type_table) {
+                            let base_value = builder.use_var(local.var);
+                            let kind_value = builder
+                                .ins()
+                                .iconst(types::I32, i64::from(kind as i32));
+                            let call = builder.ins().call(
+                                runtime_call_refs.collection_i32_load,
+                                &[base_value, kind_value],
+                            );
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: TYPE_ID_I32,
+                            });
+                        }
+                    }
+                }
+            }
             if let Some(local) = values_by_name.get(name).copied() {
                 Ok(ValueBinding {
                     value: builder.use_var(local.var),
@@ -7710,7 +7888,7 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, -8, max_length);
+                seed_collection_max_length(path, max_length);
             }
             TypeCategory::Utf8Fixed => {
                 let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
@@ -7722,13 +7900,13 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, -12, max_length);
+                seed_collection_max_length(path, max_length);
             }
             TypeCategory::ArrayFixed => {
                 let Some(max_length) = fixed_array_extent_from_type_name(&type_info.name) else {
                     continue;
                 };
-                seed_collection_max_length(path, -4, max_length);
+                seed_collection_max_length(path, max_length);
             }
             _ => {}
         }
@@ -7744,23 +7922,9 @@ fn fixed_array_extent_from_type_name(type_name: &str) -> Option<i32> {
     extent_text.parse::<i32>().ok()
 }
 
-fn seed_collection_max_length(path: &str, header_start_index: i32, max_length: i32) {
-    let collection_hash = hash_global_path(path);
-    seed_i32_header_word(collection_hash, 0, header_start_index, max_length);
+fn seed_collection_max_length(path: &str, max_length: i32) {
     let max_length_path = format!("{path}.max_length");
     stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&max_length_path), max_length);
-}
-
-fn seed_i32_header_word(collection_hash: i32, field_hash: i32, start_index: i32, value: i32) {
-    let bytes = value.to_le_bytes();
-    for (offset, byte) in bytes.iter().enumerate() {
-        stasis_dynload::stasis_jit_global_i32_array_store(
-            collection_hash,
-            field_hash,
-            start_index + offset as i32,
-            i32::from(*byte),
-        );
-    }
 }
 
 fn emit_simple_condition(
@@ -8054,8 +8218,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_global_path_set_and_read() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8071,8 +8233,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_call_expression_statement() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8088,8 +8248,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_void_function_body_and_call_statement() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8105,8 +8263,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_void_call_with_mixed_f32_i32_arguments() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8122,7 +8278,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_print_string_literal_statement() {
-        stasis_dynload::clear_jit_string_literal_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8138,7 +8293,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_string_constant_identifier_argument() {
-        stasis_dynload::clear_jit_string_literal_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8154,7 +8308,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_accepts_utf8_literal_for_ascii_parameter_call() {
-        stasis_dynload::clear_jit_string_literal_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8170,11 +8323,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_accepts_non_ascii_utf8_string_literal_argument() {
-        stasis_dynload::clear_jit_string_literal_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function take_text(value: utf8[]): i32 { return 9; }\nfunction main(): i32 { return take_text(\"café ☕\"); }\n",
+            "function take_text(value: utf8[]): i32 { return 9; }\nfunction main(): i32 { return take_text(\"cafÃ© â˜•\"); }\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -8201,7 +8353,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_accepts_string_literal_with_semicolon_in_call_statement() {
-        stasis_dynload::clear_jit_string_literal_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8353,8 +8504,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_global_path_compound_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8370,10 +8519,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_typed_f32_global_path_set_and_read() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8389,8 +8534,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_global_path_from_i32_conversion_target() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8406,10 +8549,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_collection_handle_rebind_with_set_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8425,10 +8564,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_typed_ascii_view_let_binding() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8444,10 +8579,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_collection_handle_compound_assignment_for_local() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8468,10 +8599,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_indexed_path_from_i32_conversion_target() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8487,8 +8614,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_string_header_length_path() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8504,14 +8629,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_initializes_string_max_length_headers() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "global a: ascii[32];\nglobal u: utf8[64];\nfunction main(): i32 {\n    let a_max: i32 = a[-8] + a[-7] * 256 + a[-6] * 65536 + a[-5] * 16777216;\n    let u_max: i32 = u[-12] + u[-11] * 256 + u[-10] * 65536 + u[-9] * 16777216;\n    return a_max + u_max;\n}\n",
+            "global a: ascii[32];\nglobal u: utf8[64];\nfunction main(): i32 {\n    return a.max_length + u.max_length;\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -8523,29 +8644,21 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_initializes_fixed_array_max_length_header_and_path() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "global values: i32[12];\nfunction main(): i32 {\n    let header_max: i32 = values[-4] + values[-3] * 256 + values[-2] * 65536 + values[-1] * 16777216;\n    return header_max + values.max_length;\n}\n",
+            "global values: i32[12];\nfunction main(): i32 {\n    return values.max_length;\n}\n",
         );
         process.compile().expect("compile");
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
-        assert_eq!(value, 24);
+        assert_eq!(value, 12);
     }
 
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_ascii_copy_truncates_to_destination_capacity() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8565,10 +8678,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_ascii_recount_is_bounded_by_capacity() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8588,10 +8697,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_utf8_from_ascii_clamps_to_header_capacity() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8611,10 +8716,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_ascii_set_len_clamps_to_max_length() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8634,10 +8735,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_utf8_set_len_ascii_clamps_to_max_length() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8657,10 +8754,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_stdlib_utf8_from_ascii_respects_source_capacity_without_terminator() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8680,10 +8773,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_foreach_struct_array_with_index_alias() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8699,10 +8788,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_foreach_struct_array_without_let_header_style() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8725,10 +8810,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_foreach_over_local_fixed_array_parameter() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8744,10 +8825,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_foreach_over_local_fixed_array_without_let_header_style() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8770,10 +8847,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_foreach_struct_array_f32_fields() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8789,10 +8862,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_tick_from_stasis_fixture_with_input_snapshot() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
 
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -8845,10 +8914,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_indexed_i32_array_access() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8864,10 +8929,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_indexed_i32_array_parameter_access() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8883,10 +8944,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_indexed_struct_array_parameter_field_access() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8902,10 +8959,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_indexed_struct_array_view_parameter_field_access() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8921,10 +8974,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_local_indexed_struct_element_without_field_suffix() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8947,10 +8996,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_foreach_over_local_struct_array_parameter() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8966,10 +9011,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_indexed_struct_field_access() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -8985,10 +9026,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_indexed_struct_value_copy_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9004,10 +9041,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_indexed_struct_value_copy_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9023,10 +9056,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_local_indexed_struct_value_copy_assignment_for_view_param() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9042,10 +9071,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_local_indexed_struct_copy_assignment_for_mismatched_layouts() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9070,10 +9095,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_local_indexed_struct_copy_compound_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9096,10 +9117,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_global_struct_path_value_copy_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9115,10 +9132,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_global_block_nested_struct_path_copy_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9134,10 +9147,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_struct_copy_from_indexed_to_global_path() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9153,10 +9162,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_struct_copy_from_global_to_indexed_path() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9172,10 +9177,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_struct_copy_from_indexed_to_global_on_layout_mismatch() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9196,10 +9197,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_struct_copy_from_global_to_indexed_on_layout_mismatch() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9220,10 +9217,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_evaluates_struct_copy_indices_once_each() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9239,10 +9232,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_indexed_struct_copy_assignment_for_mismatched_layouts() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9263,10 +9252,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_global_struct_copy_assignment_with_collection_fields() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9287,10 +9272,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_global_struct_path_copy_compound_assignment() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9311,10 +9292,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_indexed_named_field_assignment_from_enum_variant() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9330,10 +9307,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_named_type_let_binding() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9409,10 +9382,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_i32_call_with_five_arguments() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9428,10 +9397,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_bool_return_call_with_f32_arguments() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9447,10 +9412,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_f32_return_call_with_four_arguments() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9496,10 +9457,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_bool_return_condition_expression() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9530,7 +9487,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_extern_keyword_function_call() {
-        stasis_dynload::clear_jit_i32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9546,7 +9502,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_annotated_extern_function_call() {
-        stasis_dynload::clear_jit_i32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9562,7 +9517,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_sys_memcpy_i32_extern_call() {
-        stasis_dynload::clear_jit_i32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9578,8 +9532,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_supports_global_block_style_path_set_and_read() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9881,10 +9833,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_foreach_item_shadowing_outer_local() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -9905,10 +9853,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_rejects_foreach_item_and_index_name_collision() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -10273,10 +10217,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_for_loop_call_init_and_conversion_step() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -10292,10 +10232,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_for_loop_global_init_and_indexed_conversion_step() {
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",

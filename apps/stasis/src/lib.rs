@@ -3,14 +3,14 @@
 mod compiler_backend;
 mod events;
 mod runtime_exec;
-pub mod scenarios;
 mod self_host_runtime_bridge;
 mod stasis_test_runner;
 mod watch;
+mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
 pub use events::RunnerEvent;
-pub use scenarios::WindowConfig;
+pub use window_config::WindowConfig;
 pub use self_host_runtime_bridge::{
     publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
@@ -23,6 +23,8 @@ pub use stasis_test_runner::{
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
+use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
@@ -143,6 +145,213 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
     };
 
     run_with_backend(config, backend)
+}
+
+fn hash_global_path(path: &str) -> i32 {
+    // Must match `crates/stasis_compiler/src/backend/jit.rs::hash_global_path`.
+    let mut hash: u32 = 2166136261;
+    for byte in path.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash as i32
+}
+
+pub fn run_play_in_process(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    tick_sleep_micros: u64,
+) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Err("in-process play runner currently supports Windows only".to_string());
+    }
+
+    let watch_dir = watch_dir
+        .or_else(|| watch_file.parent())
+        .ok_or_else(|| "play runner requires a watch directory".to_string())?;
+
+    let mut watcher = WatchService::start(watch_dir)
+        .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
+
+    let root_path = watch_file
+        .canonicalize()
+        .unwrap_or_else(|_| watch_file.to_path_buf());
+    let root_path_str = root_path.to_string_lossy().to_string();
+
+    let mut watch_dependency_paths =
+        collect_watch_dependency_paths(&root_path).ok();
+
+    // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
+    let mut host_i32: Vec<i32> = vec![0; 768];
+    let mut host_f32: Vec<f32> = vec![0.0; 64];
+    let mut gfx_cmd_i32: Vec<i32> = vec![0; 34848];
+    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 92292];
+    let mut gfx_cmd_u8: Vec<u8> = vec![0; 65536];
+
+    let mut host_req_seq: i32 = 0;
+    let mut host_req_flags: i32 = 0;
+    let mut host_req_window_w_px: i32 = 0;
+    let mut host_req_window_h_px: i32 = 0;
+
+    stasis_dynload::register_global_i32_array(
+        hash_global_path("host_i32"),
+        0,
+        host_i32.as_mut_ptr(),
+        host_i32.len(),
+    );
+    stasis_dynload::register_global_f32_array(
+        hash_global_path("host_f32"),
+        0,
+        host_f32.as_mut_ptr(),
+        host_f32.len(),
+    );
+    stasis_dynload::register_global_i32_array(
+        hash_global_path("gfx_cmd_i32"),
+        0,
+        gfx_cmd_i32.as_mut_ptr(),
+        gfx_cmd_i32.len(),
+    );
+    stasis_dynload::register_global_f32_array(
+        hash_global_path("gfx_cmd_f32"),
+        0,
+        gfx_cmd_f32.as_mut_ptr(),
+        gfx_cmd_f32.len(),
+    );
+    stasis_dynload::register_global_u8_array(
+        hash_global_path("gfx_cmd_u8"),
+        0,
+        gfx_cmd_u8.as_mut_ptr(),
+        gfx_cmd_u8.len(),
+    );
+
+    stasis_dynload::register_global_i32_ptr(hash_global_path("host_req_seq"), &mut host_req_seq);
+    stasis_dynload::register_global_i32_ptr(
+        hash_global_path("host_req_flags"),
+        &mut host_req_flags,
+    );
+    stasis_dynload::register_global_i32_ptr(
+        hash_global_path("host_req_window_w_px"),
+        &mut host_req_window_w_px,
+    );
+    stasis_dynload::register_global_i32_ptr(
+        hash_global_path("host_req_window_h_px"),
+        &mut host_req_window_h_px,
+    );
+
+    let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    let title = watch_file
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "stasis".to_string());
+    // Create a small default window up-front so runtime calls (fonts/sprites) succeed during guest main().
+    // Guest `init_window(...)` requests will be applied immediately after main returns.
+    let _ = gfx.init_window(800, 600, &title)?;
+
+    let mut jit = JitProcess::new();
+    let root_source = fs::read_to_string(&root_path)
+        .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
+    jit.upsert_file(root_path_str.clone(), root_source);
+    let _ = jit
+        .compile()
+        .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    let package = jit
+        .build_engine_package(&EngineEntrypoints::runtime_default())
+        .map_err(|error| format!("failed to build engine package: {error}"))?;
+
+    // Run guest startup once.
+    let main_rc = jit
+        .execute_i32_noarg_by_name("main")
+        .map_err(|error| format!("guest main() failed: {error}"))?;
+    if main_rc != 0 {
+        return Err(format!("guest main() returned non-zero status {main_rc}"));
+    }
+
+    // Apply any initial window requests emitted during guest main().
+    gfx.host_bulk_apply_requests(
+        &host_req_seq,
+        &host_req_flags,
+        &host_req_window_w_px,
+        &host_req_window_h_px,
+    )?;
+
+    let mut tick_code_ptr = package.tick_code_ptr;
+    let mut render_code_ptr = package.render_code_ptr;
+    let mut on_code_swap_code_ptr = package.on_code_swap_code_ptr;
+    let _ = on_code_swap_code_ptr;
+
+    loop {
+        // Drain file events and recompile at tick boundaries (all-or-nothing).
+        let mut needs_recompile = false;
+        for event in watcher.drain_stasis_changes() {
+            if should_submit_watch_event(
+                &event,
+                Some(&root_path),
+                watch_dependency_paths.as_ref(),
+            ) {
+                needs_recompile = true;
+            }
+        }
+        if needs_recompile {
+            // Ensure the root file is refreshed (imports are pulled by the JIT process).
+            if let Ok(next_root_source) = fs::read_to_string(&root_path) {
+                jit.upsert_file(root_path_str.clone(), next_root_source);
+            }
+            let _ = jit.refresh_imported_sources_from_disk(&root_path_str);
+            match jit.compile() {
+                Ok(_) => {
+                    if let Ok(next_package) =
+                        jit.build_engine_package(&EngineEntrypoints::runtime_default())
+                    {
+                        tick_code_ptr = next_package.tick_code_ptr;
+                        render_code_ptr = next_package.render_code_ptr;
+                        on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+                        if let Some(hook) = on_code_swap_code_ptr {
+                            let _ = stasis_dynload::invoke_noarg_void(hook as usize);
+                        }
+                    }
+
+                    if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
+                        watch_dependency_paths = Some(next_graph);
+                    }
+                }
+                Err(_error) => {
+                    // Keep running the last known-good code/data if compilation fails.
+                }
+            }
+        }
+
+        gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
+        if host_i32.get(9).copied().unwrap_or(0) != 0 {
+            break;
+        }
+        gfx.host_bulk_apply_requests(
+            &host_req_seq,
+            &host_req_flags,
+            &host_req_window_w_px,
+            &host_req_window_h_px,
+        )?;
+
+        let tick_raw = stasis_dynload::invoke_noarg_u64(tick_code_ptr as usize)?;
+        let tick_rc = (tick_raw as u32) as i32;
+        if tick_rc != 0 {
+            break;
+        }
+        let render_raw = stasis_dynload::invoke_noarg_u64(render_code_ptr as usize)?;
+        let render_rc = (render_raw as u32) as i32;
+        if render_rc != 0 {
+            break;
+        }
+
+        gfx.gfx_submit_u8(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        if tick_sleep_micros > 0 {
+            let ms = (tick_sleep_micros / 1000) as i32;
+            if ms > 0 {
+                gfx.sleep_ms(ms)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
@@ -287,7 +496,6 @@ fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf>
     }
 
     for preferred in [
-        "brickout_revenge_v1.stasis",
         "main.stasis",
         "game.stasis",
         "app.stasis",
@@ -913,7 +1121,6 @@ fn format_diagnostic(diagnostic: &Diagnostic) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenarios::{brickout_revenge_v1_runner_config, BRICKOUT_REVENGE_V1_WINDOW};
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1470,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_initial_source_file_infers_brickout_entry_from_watch_dir() {
+    fn resolve_initial_source_file_infers_entry_from_watch_dir() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -1480,7 +1687,7 @@ mod tests {
         fs::write(temp_root.join("helper.stasis"), "function util(): i32 { return 1; }\n")
             .expect("write helper");
         fs::write(
-            temp_root.join("brickout_revenge_v1.stasis"),
+            temp_root.join("main.stasis"),
             "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
         )
         .expect("write entry");
@@ -1501,7 +1708,7 @@ mod tests {
         };
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
-        assert_eq!(resolved, temp_root.join("brickout_revenge_v1.stasis"));
+        assert_eq!(resolved, temp_root.join("main.stasis"));
 
         fs::remove_dir_all(&temp_root).ok();
     }
@@ -1700,26 +1907,6 @@ mod tests {
         assert_eq!(summary.retired_aot_linked_images, 0);
     }
 
-    #[test]
-    fn brickout_revenge_profile_is_vertical() {
-        assert!(BRICKOUT_REVENGE_V1_WINDOW.is_vertical());
-    }
-
-    #[test]
-    fn brickout_revenge_profile_runs_incremental_swap_loop() {
-        let config = brickout_revenge_v1_runner_config(200);
-        let summary = run_with_default_backend(config);
-        assert_eq!(summary.compile_successes, 1);
-        assert_eq!(summary.compile_failures, 0);
-        assert_eq!(summary.swap_commit_successes, 1);
-        assert_eq!(summary.swap_commit_failures, 0);
-        assert_eq!(summary.swap_indicator_armed_count, 1);
-        assert_eq!(summary.window, Some(BRICKOUT_REVENGE_V1_WINDOW));
-        assert!(summary.window.expect("window should exist").is_vertical());
-        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
-        assert!(!summary.has_in_flight_work);
-    }
-
     #[cfg(windows)]
     #[test]
     fn real_backend_smoke_compiles_and_commits_literal_main() {
@@ -1834,7 +2021,7 @@ mod tests {
         let config = RunnerConfig {
             max_ticks: 7000,
             tick_sleep_micros: 1000,
-            window: Some(BRICKOUT_REVENGE_V1_WINDOW),
+            window: None,
             inject_file_change: Some(fixture),
             watch_directory: None,
             target_mode: TargetMode::JitDev,
@@ -1852,7 +2039,6 @@ mod tests {
         assert_eq!(summary.swap_commit_successes, 1);
         assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
-        assert_eq!(summary.window, Some(BRICKOUT_REVENGE_V1_WINDOW));
         assert!(!summary.has_in_flight_work);
     }
 }

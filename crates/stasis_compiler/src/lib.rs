@@ -482,6 +482,31 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             None
         };
         let simple_i32_return_expr = expression.as_ref().and_then(convert_eval_expr_to_simple);
+        let (
+            simple_i32_return_call_target_id_hash,
+            simple_i32_return_call_add_delta,
+            simple_i32_return_call_one_arg_target_id_hash,
+            simple_i32_return_call_one_arg_i32_literal,
+            simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            simple_i32_return_two_call_left_target_id_hash,
+            simple_i32_return_two_call_right_target_id_hash,
+            simple_i32_return_two_call_op_code,
+        ) = if let Some(expr) = expression.as_ref() {
+            analyze_simple_i32_return_call_metadata(expr)
+        } else {
+            (None, None, None, None, None, None, None, None)
+        };
+
+        let (
+            simple_void_print_i32_literal,
+            simple_void_print_i32_call_target_id_hash,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            simple_void_print_i32_call_add_delta,
+        ) = if function.return_type_name == "void" {
+            analyze_simple_void_print_i32_metadata(body_text)
+        } else {
+            (None, None, None, None)
+        };
 
         let parsed_index = parsed_functions.len();
         parsed_functions.push(ParsedFunction {
@@ -494,18 +519,18 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
             first_param_type_code,
             simple_i32_return_expr,
-            simple_i32_return_call_target_id_hash: None,
-            simple_i32_return_call_add_delta: None,
-            simple_i32_return_call_one_arg_target_id_hash: None,
-            simple_i32_return_call_one_arg_i32_literal: None,
-            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
-            simple_i32_return_two_call_left_target_id_hash: None,
-            simple_i32_return_two_call_right_target_id_hash: None,
-            simple_i32_return_two_call_op_code: None,
-            simple_void_print_i32_literal: None,
-            simple_void_print_i32_call_target_id_hash: None,
-            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
-            simple_void_print_i32_call_add_delta: None,
+            simple_i32_return_call_target_id_hash,
+            simple_i32_return_call_add_delta,
+            simple_i32_return_call_one_arg_target_id_hash,
+            simple_i32_return_call_one_arg_i32_literal,
+            simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            simple_i32_return_two_call_left_target_id_hash,
+            simple_i32_return_two_call_right_target_id_hash,
+            simple_i32_return_two_call_op_code,
+            simple_void_print_i32_literal,
+            simple_void_print_i32_call_target_id_hash,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            simple_void_print_i32_call_add_delta,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
         });
@@ -565,7 +590,7 @@ enum EvalExpr {
     Mul(Box<EvalExpr>, Box<EvalExpr>),
     Div(Box<EvalExpr>, Box<EvalExpr>),
     Mod(Box<EvalExpr>, Box<EvalExpr>),
-    Call(String),
+    Call(String, Vec<EvalExpr>),
 }
 
 fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, String> {
@@ -887,6 +912,192 @@ fn parse_return_expression(body_text: &str) -> Option<EvalExpr> {
     parse_eval_expression(expression)
 }
 
+fn simple_call0_name(expression: &EvalExpr) -> Option<&str> {
+    match expression {
+        EvalExpr::Call(name, args) if args.is_empty() => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn simple_i32_literal(expression: &EvalExpr) -> Option<i32> {
+    match expression {
+        EvalExpr::Literal(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn analyze_simple_i32_return_call_metadata(
+    expression: &EvalExpr,
+) -> (
+    Option<i32>, // call_target_id_hash
+    Option<i32>, // call_add_delta
+    Option<i32>, // call_one_arg_target_id_hash
+    Option<i32>, // call_one_arg_i32_literal
+    Option<i32>, // call_one_arg_arg_call_target_id_hash
+    Option<i32>, // two_call_left_target_id_hash
+    Option<i32>, // two_call_right_target_id_hash
+    Option<i32>, // two_call_op_code (1 add, 2 sub)
+) {
+    // direct call0()
+    if let Some(name) = simple_call0_name(expression) {
+        return (
+            Some(hash_identifier(name)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    // call0() +/- literal
+    match expression {
+        EvalExpr::Add(lhs, rhs) | EvalExpr::Sub(lhs, rhs) => {
+            let op_is_sub = matches!(expression, EvalExpr::Sub(_, _));
+            if let (Some(call_name), Some(lit)) = (simple_call0_name(lhs), simple_i32_literal(rhs))
+            {
+                let delta = if op_is_sub { -lit } else { lit };
+                return (
+                    Some(hash_identifier(call_name)),
+                    Some(delta),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            if let (Some(lit), Some(call_name)) = (simple_i32_literal(lhs), simple_call0_name(rhs))
+            {
+                // literal +/- call0(): only representable as call0 + delta when op is add.
+                if !op_is_sub {
+                    return (
+                        Some(hash_identifier(call_name)),
+                        Some(lit),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            // two call0 ops
+            if let (Some(left), Some(right)) = (simple_call0_name(lhs), simple_call0_name(rhs)) {
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(hash_identifier(left)),
+                    Some(hash_identifier(right)),
+                    Some(if op_is_sub { 2 } else { 1 }),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    // call(args...)
+    if let EvalExpr::Call(name, args) = expression {
+        if args.is_empty() {
+            return (
+                Some(hash_identifier(name)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        let mut call_one_arg_i32_literal: Option<i32> = None;
+        let mut call_one_arg_arg_call_target_id_hash: Option<i32> = None;
+        if let Some(first) = args.first() {
+            if let Some(value) = simple_i32_literal(first) {
+                call_one_arg_i32_literal = Some(value);
+            } else if let Some(arg_call_name) = simple_call0_name(first) {
+                call_one_arg_arg_call_target_id_hash = Some(hash_identifier(arg_call_name));
+            }
+        }
+        return (
+            None,
+            None,
+            Some(hash_identifier(name)),
+            call_one_arg_i32_literal,
+            call_one_arg_arg_call_target_id_hash,
+            None,
+            None,
+            None,
+        );
+    }
+
+    (None, None, None, None, None, None, None, None)
+}
+
+fn analyze_simple_void_print_i32_metadata(
+    body_text: &str,
+) -> (
+    Option<i32>, // literal
+    Option<i32>, // call_target_id_hash
+    Option<i32>, // call_one_arg_arg_call_target_id_hash
+    Option<i32>, // call_add_delta
+) {
+    // Very small, statement-level matcher for:
+    // - print_i32(<literal>);
+    // - print_i32(<call0>());
+    // - print_i32(<call0>() +/- <literal>);
+    let cleaned = strip_comments_for_from_conversion_scan(body_text);
+    let trimmed = cleaned.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return (None, None, None, None);
+    }
+    let inner = trimmed[1..trimmed.len().saturating_sub(1)].trim();
+    for statement in split_top_level_statements(inner) {
+        let stmt = statement.trim();
+        let Some(call) = stmt.strip_prefix("print_i32") else {
+            continue;
+        };
+        let call = call.trim_start();
+        if !call.starts_with('(') {
+            continue;
+        }
+        let Some(close) = call.rfind(')') else {
+            continue;
+        };
+        let arg_text = call[1..close].trim();
+        if arg_text.is_empty() {
+            continue;
+        }
+        let Some(expr) = parse_eval_expression(arg_text) else {
+            continue;
+        };
+
+        if let Some(value) = simple_i32_literal(&expr) {
+            return (Some(value), None, None, None);
+        }
+        if let Some(name) = simple_call0_name(&expr) {
+            return (None, Some(hash_identifier(name)), None, None);
+        }
+        if let EvalExpr::Add(lhs, rhs) | EvalExpr::Sub(lhs, rhs) = &expr {
+            let op_is_sub = matches!(&expr, EvalExpr::Sub(_, _));
+            if let (Some(call_name), Some(lit)) = (simple_call0_name(lhs), simple_i32_literal(rhs))
+            {
+                let delta = if op_is_sub { -lit } else { lit };
+                return (None, Some(hash_identifier(call_name)), None, Some(delta));
+            }
+        }
+    }
+    (None, None, None, None)
+}
+
 fn split_top_level_statements(body: &str) -> Vec<&str> {
     let bytes = body.as_bytes();
     let mut depth_paren = 0i32;
@@ -1014,12 +1225,29 @@ impl<'a> EvalExpressionParser<'a> {
                     return None;
                 }
                 self.cursor += 1;
-                self.skip_ws();
-                if self.peek_byte() != Some(b')') {
-                    return None;
+                let mut args = Vec::new();
+                loop {
+                    self.skip_ws();
+                    if self.peek_byte() == Some(b')') {
+                        self.cursor += 1;
+                        break;
+                    }
+                    let arg = self.parse_expression()?;
+                    args.push(arg);
+                    self.skip_ws();
+                    match self.peek_byte()? {
+                        b',' => {
+                            self.cursor += 1;
+                            continue;
+                        }
+                        b')' => {
+                            self.cursor += 1;
+                            break;
+                        }
+                        _ => return None,
+                    }
                 }
-                self.cursor += 1;
-                Some(EvalExpr::Call(identifier))
+                Some(EvalExpr::Call(identifier, args))
             }
             b'(' => {
                 self.cursor += 1;
@@ -1093,7 +1321,7 @@ fn convert_eval_expr_to_simple(expression: &EvalExpr) -> Option<SimpleI32ReturnE
             Box::new(convert_eval_expr_to_simple(lhs)?),
             Box::new(convert_eval_expr_to_simple(rhs)?),
         )),
-        EvalExpr::Call(_) => None,
+        EvalExpr::Call(_, _) => None,
     }
 }
 
@@ -1170,7 +1398,10 @@ fn evaluate_expr_i32(
                     .wrapping_rem(divisor),
             )
         }
-        EvalExpr::Call(name) => {
+        EvalExpr::Call(name, args) => {
+            if !args.is_empty() {
+                return None;
+            }
             let candidates = by_name.get(name)?;
             let mut selected = None;
             for candidate in candidates {
