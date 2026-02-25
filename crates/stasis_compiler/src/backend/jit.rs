@@ -164,6 +164,9 @@ impl JitProcess {
                 &constant_values,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
+            let named_struct_field_types =
+                collect_named_struct_field_types(self.compiler.files(), &mut type_table)
+                    .map_err(crate::compiler::CompileError::Backend)?;
             let next_cache = CompileAnalysisCache {
                 files_fingerprint,
                 call_signatures,
@@ -171,6 +174,7 @@ impl JitProcess {
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 extern_symbol_addresses,
             };
             if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
@@ -210,6 +214,7 @@ impl JitProcess {
                     &analysis.global_path_types,
                     &analysis.constant_values,
                     &analysis.collection_infos,
+                    &analysis.named_struct_field_types,
                     &analysis.extern_symbol_addresses,
                 )?;
                 let slot = next_slot;
@@ -613,6 +618,7 @@ type CallSignatureMap = HashMap<String, Vec<CallSignature>>;
 type GlobalPathTypeMap = BTreeMap<String, TypeId>;
 type ConstantValueMap = BTreeMap<String, ConstantValue>;
 type CollectionInfoMap = BTreeMap<String, ForeachCollectionInfo>;
+type NamedStructFieldTypeMap = BTreeMap<TypeId, BTreeMap<String, TypeId>>;
 type ForeachBindingMap = BTreeMap<String, ForeachBinding>;
 type ExternSymbolAddressMap = BTreeMap<String, usize>;
 
@@ -624,6 +630,7 @@ struct CompileAnalysisCache {
     global_path_types: GlobalPathTypeMap,
     constant_values: ConstantValueMap,
     collection_infos: CollectionInfoMap,
+    named_struct_field_types: NamedStructFieldTypeMap,
     extern_symbol_addresses: ExternSymbolAddressMap,
 }
 
@@ -998,6 +1005,7 @@ fn compile_analysis_requires_reemit(
         || previous.constant_values != next.constant_values
         || previous.global_path_types != next.global_path_types
         || previous.collection_infos != next.collection_infos
+        || previous.named_struct_field_types != next.named_struct_field_types
 }
 
 fn compute_files_fingerprint(files: &[SourceFile]) -> u64 {
@@ -1506,6 +1514,49 @@ fn collect_foreach_collection_infos(
     Ok(out)
 }
 
+fn collect_named_struct_field_types(
+    files: &[SourceFile],
+    type_table: &mut TypeTable,
+) -> Result<NamedStructFieldTypeMap, String> {
+    let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
+    for file in files {
+        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level type layout in {}: {error}",
+                file.path
+            )
+        })?;
+        for parsed_struct in parsed.structs {
+            if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
+                if existing != &parsed_struct.fields {
+                    return Err(format!(
+                        "conflicting struct definition for '{}'",
+                        parsed_struct.name
+                    ));
+                }
+            } else {
+                struct_fields_by_name.insert(parsed_struct.name, parsed_struct.fields);
+            }
+        }
+    }
+
+    let mut out = NamedStructFieldTypeMap::new();
+    for struct_name in struct_fields_by_name.keys() {
+        let struct_type_id = type_table.resolve_or_intern(struct_name)?;
+        let mut field_types = BTreeMap::new();
+        collect_struct_primitive_leaf_fields(
+            "",
+            struct_name,
+            &struct_fields_by_name,
+            type_table,
+            &mut field_types,
+            &mut Vec::new(),
+        )?;
+        out.insert(struct_type_id, field_types);
+    }
+    Ok(out)
+}
+
 fn collect_foreach_collections_from_type(
     path: &str,
     type_name: &str,
@@ -1721,6 +1772,7 @@ fn compile_function_to_jit_module(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     extern_symbol_addresses: &ExternSymbolAddressMap,
 ) -> Result<(JITModule, u64), String> {
     let mut jit_builder = JITBuilder::new(default_libcall_names())
@@ -2105,6 +2157,7 @@ fn compile_function_to_jit_module(
             global_path_types,
             constant_values,
             collection_infos,
+            named_struct_field_types,
             &empty_foreach_bindings,
             meta.return_type,
             &mut next_variable,
@@ -3809,6 +3862,7 @@ fn emit_host_print_call_statement(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<bool, String> {
     if target != "print_i32"
@@ -3835,6 +3889,7 @@ fn emit_host_print_call_statement(
         global_path_types,
         constant_values,
         collection_infos,
+        named_struct_field_types,
         foreach_bindings,
     )?;
     if !is_i32_abi_compatible_type(argument.type_id, type_table) {
@@ -3971,6 +4026,7 @@ fn try_emit_indexed_struct_copy_assignment(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<bool, String> {
     let AssignTarget::IndexedPath {
@@ -4033,6 +4089,7 @@ fn try_emit_indexed_struct_copy_assignment(
         global_path_types,
         constant_values,
         collection_infos,
+        named_struct_field_types,
         foreach_bindings,
     )?;
     let source_index_binding = emit_simple_expression(
@@ -4045,6 +4102,7 @@ fn try_emit_indexed_struct_copy_assignment(
         global_path_types,
         constant_values,
         collection_infos,
+        named_struct_field_types,
         foreach_bindings,
     )?;
 
@@ -4181,6 +4239,7 @@ fn try_emit_struct_copy_from_indexed_to_global(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<bool, String> {
     let target_path = match target {
@@ -4257,6 +4316,7 @@ fn try_emit_struct_copy_from_indexed_to_global(
         global_path_types,
         constant_values,
         collection_infos,
+        named_struct_field_types,
         foreach_bindings,
     )?;
     for (field_name, field_type) in &source_info.field_types {
@@ -4295,6 +4355,7 @@ fn try_emit_struct_copy_from_global_to_indexed(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<bool, String> {
     let AssignTarget::IndexedPath {
@@ -4367,6 +4428,7 @@ fn try_emit_struct_copy_from_global_to_indexed(
         global_path_types,
         constant_values,
         collection_infos,
+        named_struct_field_types,
         foreach_bindings,
     )?;
     for (field_name, field_type) in &target_info.field_types {
@@ -4403,6 +4465,7 @@ fn emit_simple_statements(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
     expected_return_type: TypeId,
     next_variable: &mut u32,
@@ -4431,6 +4494,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 let local_type_id = if let Some(declared_type_id) = *type_id {
@@ -4480,6 +4544,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )? {
                     continue;
@@ -4509,6 +4574,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )? {
                     continue;
@@ -4525,6 +4591,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )? {
                     continue;
@@ -4539,6 +4606,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 match target {
@@ -4707,12 +4775,14 @@ fn emit_simple_statements(
                                 global_path_types,
                                 constant_values,
                                 collection_infos,
+                                named_struct_field_types,
                                 foreach_bindings,
                             )?;
                             emit_local_indexed_collection_assignment(
                                 builder,
                                 runtime_call_refs,
                                 type_table,
+                                named_struct_field_types,
                                 collection_path,
                                 local_collection,
                                 suffix,
@@ -4738,6 +4808,7 @@ fn emit_simple_statements(
                             global_path_types,
                             constant_values,
                             collection_infos,
+                            named_struct_field_types,
                             foreach_bindings,
                         )?;
                         emit_indexed_collection_assignment(
@@ -4769,6 +4840,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 match target {
@@ -4842,6 +4914,7 @@ fn emit_simple_statements(
                             global_path_types,
                             constant_values,
                             collection_infos,
+                            named_struct_field_types,
                             foreach_bindings,
                         )?;
                         emit_indexed_collection_assignment(
@@ -4871,6 +4944,7 @@ fn emit_simple_statements(
                         global_path_types,
                         constant_values,
                         collection_infos,
+                        named_struct_field_types,
                         foreach_bindings,
                     )?;
                     if handled {
@@ -4889,6 +4963,7 @@ fn emit_simple_statements(
                             global_path_types,
                             constant_values,
                             collection_infos,
+                            named_struct_field_types,
                             foreach_bindings,
                         )?;
                         arg_values.push(binding.value);
@@ -4926,6 +5001,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
             }
@@ -4940,6 +5016,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 if !are_assignment_types_compatible(
@@ -4977,6 +5054,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 let then_block = builder.create_block();
@@ -4999,6 +5077,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                     expected_return_type,
                     next_variable,
@@ -5021,6 +5100,7 @@ fn emit_simple_statements(
                         global_path_types,
                         constant_values,
                         collection_infos,
+                        named_struct_field_types,
                         foreach_bindings,
                         expected_return_type,
                         next_variable,
@@ -5055,6 +5135,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                     expected_return_type,
                     next_variable,
@@ -5078,6 +5159,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 builder
@@ -5096,6 +5178,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                     expected_return_type,
                     next_variable,
@@ -5116,6 +5199,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                     expected_return_type,
                     next_variable,
@@ -5158,6 +5242,7 @@ fn emit_simple_statements(
                             collection_path,
                             local_collection.type_id,
                             type_table,
+                            named_struct_field_types,
                         )?;
                         (
                             info,
@@ -5236,6 +5321,7 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     &loop_foreach_bindings,
                     expected_return_type,
                     next_variable,
@@ -5305,6 +5391,7 @@ fn emit_for_control_statement(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
     expected_return_type: TypeId,
     next_variable: &mut u32,
@@ -5325,6 +5412,7 @@ fn emit_for_control_statement(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
                 expected_return_type,
                 next_variable,
@@ -5850,6 +5938,7 @@ fn emit_simple_expression(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<ValueBinding, String> {
     match expression {
@@ -5892,6 +5981,7 @@ fn emit_simple_expression(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let one = builder.ins().iconst(types::I32, 1_i64);
@@ -5937,12 +6027,14 @@ fn emit_simple_expression(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 return emit_local_indexed_collection_load(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_path,
                     local_collection,
                     suffix,
@@ -5965,6 +6057,7 @@ fn emit_simple_expression(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             emit_indexed_collection_load(
@@ -5991,6 +6084,7 @@ fn emit_simple_expression(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    named_struct_field_types,
                     foreach_bindings,
                 )?;
                 arg_values.push(binding.value);
@@ -6407,6 +6501,7 @@ fn emit_simple_expression(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let rhs_value = emit_simple_expression(
@@ -6419,6 +6514,7 @@ fn emit_simple_expression(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             if is_i32_numeric_type(lhs_value.type_id, type_table)
@@ -6544,6 +6640,7 @@ fn build_local_foreach_collection_info(
     collection_path: &str,
     collection_type: TypeId,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<ForeachCollectionInfo, String> {
     let len = type_table
         .fixed_collection_len(collection_type)
@@ -6561,6 +6658,13 @@ fn build_local_foreach_collection_info(
                 collection_path, collection_type
             )
         })?;
+    if let Some(field_types) = named_struct_field_types.get(&element_type) {
+        return Ok(ForeachCollectionInfo {
+            len,
+            element_type: None,
+            field_types: field_types.clone(),
+        });
+    }
     Ok(ForeachCollectionInfo {
         len,
         element_type: Some(element_type),
@@ -6845,34 +6949,47 @@ fn resolve_local_collection_value_type(
     collection_type: TypeId,
     suffix: &str,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<TypeId, String> {
-    if !suffix.is_empty() {
-        return Err(format!(
-            "local indexed collection access does not support field path '{}'",
-            suffix
-        ));
-    }
-    type_table
+    let element_type = type_table
         .indexed_element_type_id(collection_type)
         .ok_or_else(|| {
             format!(
                 "local indexed collection access is unsupported for type {}",
                 collection_type
             )
-        })
+        })?;
+    if suffix.is_empty() {
+        return Ok(element_type);
+    }
+    let Some(field_types) = named_struct_field_types.get(&element_type) else {
+        return Err(format!(
+            "local indexed collection access does not support field path '{}'",
+            suffix
+        ));
+    };
+    field_types
+        .get(suffix)
+        .copied()
+        .ok_or_else(|| format!("unknown local indexed collection field path '{}'", suffix))
 }
 
 fn emit_local_indexed_collection_load(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     collection_name: &str,
     collection_binding: LocalBinding,
     suffix: &str,
     index_binding: ValueBinding,
 ) -> Result<ValueBinding, String> {
-    let resolved =
-        resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
+    let resolved = resolve_local_collection_value_type(
+        collection_binding.type_id,
+        suffix,
+        type_table,
+        named_struct_field_types,
+    )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
@@ -6908,6 +7025,7 @@ fn emit_local_indexed_collection_assignment(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     collection_name: &str,
     collection_binding: LocalBinding,
     suffix: &str,
@@ -6915,8 +7033,12 @@ fn emit_local_indexed_collection_assignment(
     op: AssignOp,
     rhs: ValueBinding,
 ) -> Result<(), String> {
-    let path_type =
-        resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
+    let path_type = resolve_local_collection_value_type(
+        collection_binding.type_id,
+        suffix,
+        type_table,
+        named_struct_field_types,
+    )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     if !are_assignment_types_compatible(path_type, rhs.type_id, type_table) {
         return Err(format!(
@@ -6937,6 +7059,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -6950,6 +7073,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -6963,6 +7087,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -6976,6 +7101,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -6989,6 +7115,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -7030,6 +7157,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -7043,6 +7171,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -7056,6 +7185,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -7069,6 +7199,7 @@ fn emit_local_indexed_collection_assignment(
                     builder,
                     runtime_call_refs,
                     type_table,
+                    named_struct_field_types,
                     collection_name,
                     collection_binding,
                     suffix,
@@ -7588,6 +7719,7 @@ fn emit_simple_condition(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
 ) -> Result<Value, String> {
     match condition {
@@ -7602,6 +7734,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let rhs = emit_simple_expression(
@@ -7614,6 +7747,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             if is_i32_abi_compatible_type(lhs.type_id, type_table)
@@ -7653,6 +7787,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             if binding.type_id == TYPE_ID_BOOL {
@@ -7674,6 +7809,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let rhs_block = builder.create_block();
@@ -7697,6 +7833,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             builder.ins().jump(merge_block, &[rhs_value]);
@@ -7720,6 +7857,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let true_block = builder.create_block();
@@ -7747,6 +7885,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             builder.ins().jump(merge_block, &[rhs_value]);
@@ -7766,6 +7905,7 @@ fn emit_simple_condition(
                 global_path_types,
                 constant_values,
                 collection_infos,
+                named_struct_field_types,
                 foreach_bindings,
             )?;
             let true_block = builder.create_block();
@@ -8684,6 +8824,44 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 20);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_local_indexed_struct_array_parameter_field_access() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal enemies: Enemy[COUNT];\nfunction mutate(arr: Enemy[3], idx: i32): i32 {\n    arr[idx].hp = 10;\n    arr[idx + 1].hp = arr[idx].hp + 4;\n    return arr[idx + 1].hp;\n}\nfunction main(): i32 { return mutate(enemies, 0); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 14);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_foreach_over_local_struct_array_parameter() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal enemies: Enemy[COUNT];\nfunction sum_fill(arr: Enemy[3]): i32 {\n    foreach (let enemy, i in arr) { enemy.hp = i + 2; }\n    let total: i32 = 0;\n    foreach (let enemy in arr) { total += enemy.hp; }\n    return total;\n}\nfunction main(): i32 { return sum_fill(enemies); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 9);
     }
 
     #[cfg(windows)]

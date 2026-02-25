@@ -98,6 +98,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added regression coverage for nested global-block struct roots and operator gating on struct-path copy (`jit_process_executes_global_block_nested_struct_path_copy_assignment`, `jit_process_rejects_global_struct_path_copy_compound_assignment`).
 - Struct-copy lowering now also covers cross-shape assignments between global struct roots and indexed struct elements (`target = source[i]`, `target[i] = source`) for scalar-only layouts, with deterministic runtime parity coverage (`jit_process_executes_struct_copy_from_indexed_to_global_path`, `jit_process_executes_struct_copy_from_global_to_indexed_path`).
 - Added mismatch diagnostics coverage for both cross-shape struct-copy directions (`jit_process_rejects_struct_copy_from_indexed_to_global_on_layout_mismatch`, `jit_process_rejects_struct_copy_from_global_to_indexed_on_layout_mismatch`).
+- Local struct-array parameter paths now use named-struct field-type metadata in emit/lowering, enabling deterministic `arr[idx].field` and local `foreach` struct-array parameter behavior with runtime parity coverage (`jit_process_executes_local_indexed_struct_array_parameter_field_access`, `jit_process_executes_foreach_over_local_struct_array_parameter`).
 
 ### S0 - Workspace Bootstrap
 - Language:
