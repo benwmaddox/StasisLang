@@ -528,10 +528,22 @@ function mem_cmp(a: u8[], b: u8[], count: i32): i32 {
 // UTF-8 string buffer helpers.
 //
 // Layout (see `docs/spec.md`):
-// - `utf8[N]`: [byte_length: i32][char_length: i32][data: u8[N]]
+// - `utf8[N]`: [byte_length: i32][max_length: i32][char_length: i32][data: u8[N]]
 //
 // Note: `utf8_set_len_ascii` assumes the payload contains only ASCII bytes, so
 // `char_length == byte_length`.
+
+function utf8_max_length(s: utf8[]): i32 {
+    let b0: i32 = u8_to_i32(s[-12]);
+    let b1: i32 = u8_to_i32(s[-11]);
+    let b2: i32 = u8_to_i32(s[-10]);
+    let b3: i32 = u8_to_i32(s[-9]);
+    let value: i32 = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+    if (value < 0) {
+        return 0;
+    }
+    return value;
+}
 
 function length_bytes(s: utf8[]): i32 {
     let b0: i32 = u8_to_i32(s[-8]);
@@ -590,12 +602,17 @@ function utf8_clear_ascii(s: utf8[]): void {
 }
 
 function utf8_from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
-    if (dst_max <= 0) {
+    let bound: i32 = dst_max;
+    let cap: i32 = utf8_max_length(dst);
+    if (cap > 0 && bound > cap) {
+        bound = cap;
+    }
+    if (bound <= 0) {
         return 0;
     }
 
     let i: i32 = 0;
-    let limit: i32 = dst_max - 1;
+    let limit: i32 = bound - 1;
     for (i = 0; i < limit; i = i + 1) {
         let b: u8 = src[i];
         if (b == 0) {
