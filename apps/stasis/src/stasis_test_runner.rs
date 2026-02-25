@@ -216,7 +216,7 @@ fn collect_stasis_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> Result
         .map_err(|error| format!("failed to stat '{}': {error}", root.display()))?;
     if metadata.is_file() {
         if should_include_stasis_test_file(root)? {
-            out.push(root.to_path_buf());
+            out.push(normalize_runner_path(root));
         }
         return Ok(());
     }
@@ -247,10 +247,14 @@ fn collect_stasis_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> Result
             }
             collect_stasis_files_recursive(&path, out)?;
         } else if should_include_stasis_test_file(&path)? {
-            out.push(path);
+            out.push(normalize_runner_path(&path));
         }
     }
     Ok(())
+}
+
+fn normalize_runner_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn should_skip_discovery_directory(path: &Path) -> bool {
