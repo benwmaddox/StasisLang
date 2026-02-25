@@ -475,6 +475,33 @@ mod tests {
     }
 
     #[test]
+    fn run_jit_tests_in_directory_resolves_imported_helper_functions() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_test_runner_imports_{stamp}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let helper = root.join("helper.stasis");
+        let fixture = root.join("sample.test.stasis");
+        fs::write(&helper, "function helper(): i32 { return 7; }\n").expect("write helper");
+        fs::write(
+            &fixture,
+            "import \"helper.stasis\";\ntest `imports helper`(): bool { return helper() == 7; }\n",
+        )
+        .expect("write fixture");
+
+        let summary = run_jit_tests_in_directory(&root).expect("run tests");
+        assert_eq!(summary.files_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_run, 1, "{summary:?}");
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn session_skips_compile_for_unchanged_files() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
