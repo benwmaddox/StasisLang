@@ -156,7 +156,10 @@ fn should_skip_discovery_directory(path: &Path) -> bool {
     let Some(name) = path.file_name() else {
         return false;
     };
-    matches!(name.to_string_lossy().as_ref(), ".git" | "target")
+    matches!(
+        name.to_string_lossy().as_ref(),
+        ".git" | "target" | ".stasis_cache"
+    )
 }
 
 fn should_include_stasis_test_file(path: &Path) -> Result<bool, String> {
@@ -245,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn run_jit_tests_in_directory_skips_target_and_git_dirs() {
+    fn run_jit_tests_in_directory_skips_target_git_and_stasis_cache_dirs() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -253,9 +256,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("stasis_test_runner_skipdirs_{stamp}"));
         let target_dir = root.join("target");
         let git_dir = root.join(".git");
+        let stasis_cache_dir = root.join(".stasis_cache");
         let suite_dir = root.join("suite");
         fs::create_dir_all(&target_dir).expect("mkdir target");
         fs::create_dir_all(&git_dir).expect("mkdir git");
+        fs::create_dir_all(&stasis_cache_dir).expect("mkdir stasis cache");
         fs::create_dir_all(&suite_dir).expect("mkdir suite");
         fs::write(
             target_dir.join("bad.test.stasis"),
@@ -267,6 +272,11 @@ mod tests {
             "test `bad2`(): bool { return false; }\n",
         )
         .expect("write git test");
+        fs::write(
+            stasis_cache_dir.join("bad3.test.stasis"),
+            "test `bad3`(): bool { return false; }\n",
+        )
+        .expect("write stasis cache test");
         fs::write(
             suite_dir.join("good.test.stasis"),
             "test `good`(): bool { return true; }\n",

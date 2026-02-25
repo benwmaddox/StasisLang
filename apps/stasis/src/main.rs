@@ -3,8 +3,10 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
     publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory,
     run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
@@ -21,6 +23,8 @@ struct CliOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TestCliArgs {
     directory: PathBuf,
+    watch: bool,
+    watch_settle_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +162,8 @@ fn parse_args() -> CliOptions {
 
 fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
     let mut directory: Option<PathBuf> = None;
+    let mut watch = false;
+    let mut watch_settle_ms: u64 = 150;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -169,12 +175,35 @@ fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
             i += 2;
             continue;
         }
+        if arg == "--watch" {
+            watch = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--watch-settle-ms" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --watch-settle-ms".to_string());
+            }
+            let parsed = args[i + 1].parse::<u64>().map_err(|error| {
+                format!(
+                    "invalid value for --watch-settle-ms '{}': {error}",
+                    args[i + 1]
+                )
+            })?;
+            watch_settle_ms = parsed.max(10);
+            i += 2;
+            continue;
+        }
         i += 1;
     }
     let Some(directory) = directory else {
         return Err("missing required --dir <path>".to_string());
     };
-    Ok(TestCliArgs { directory })
+    Ok(TestCliArgs {
+        directory,
+        watch,
+        watch_settle_ms,
+    })
 }
 
 fn try_run_test_subcommand() -> Option<i32> {
@@ -192,14 +221,30 @@ fn try_run_test_subcommand() -> Option<i32> {
         }
     };
 
-    let started = Instant::now();
-    let summary = match run_jit_tests_in_directory(&parsed.directory) {
-        Ok(value) => value,
+    if parsed.watch {
+        let exit = match run_test_watch_loop(&parsed) {
+            Ok(code) => code,
+            Err(message) => {
+                eprintln!("{message}");
+                1
+            }
+        };
+        return Some(exit);
+    }
+
+    let exit = match run_test_dir_once(&parsed.directory) {
+        Ok(code) => code,
         Err(message) => {
             eprintln!("{message}");
-            return Some(1);
+            1
         }
     };
+    Some(exit)
+}
+
+fn run_test_dir_once(directory: &Path) -> Result<i32, String> {
+    let started = Instant::now();
+    let summary = run_jit_tests_in_directory(directory)?;
     println!("test_files_discovered={}", summary.files_discovered);
     println!("test_files_with_tests={}", summary.files_with_tests);
     println!("tests_discovered={}", summary.tests_discovered);
@@ -210,7 +255,87 @@ fn try_run_test_subcommand() -> Option<i32> {
         println!("test_failure={failure}");
     }
     println!("elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
-    Some(if summary.tests_failed > 0 { 1 } else { 0 })
+    Ok(if summary.tests_failed > 0 { 1 } else { 0 })
+}
+
+fn run_test_watch_loop(parsed: &TestCliArgs) -> Result<i32, String> {
+    let first_exit = run_test_dir_once(&parsed.directory)?;
+    println!("watch_mode=1");
+    println!("watch_settle_ms={}", parsed.watch_settle_ms);
+    println!("watch_last_exit={first_exit}");
+
+    let (tx, rx) = channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        Config::default(),
+    )
+    .map_err(|error| format!("failed to create test watcher: {error}"))?;
+    watcher
+        .watch(&parsed.directory, RecursiveMode::Recursive)
+        .map_err(|error| {
+            format!(
+                "failed to watch test directory '{}': {error}",
+                parsed.directory.display()
+            )
+        })?;
+
+    let settle = Duration::from_millis(parsed.watch_settle_ms);
+    loop {
+        let mut saw_stasis_change = false;
+        while !saw_stasis_change {
+            let event = rx
+                .recv()
+                .map_err(|_| "test watch channel disconnected".to_string())?;
+            let Ok(event) = event else {
+                continue;
+            };
+            if is_stasis_change_event(&event) {
+                saw_stasis_change = true;
+            }
+        }
+
+        let mut last_change_at = Instant::now();
+        loop {
+            let remaining = settle
+                .checked_sub(last_change_at.elapsed())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(Ok(event)) => {
+                    if is_stasis_change_event(&event) {
+                        last_change_at = Instant::now();
+                    }
+                }
+                Ok(Err(_)) => {}
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("test watch channel disconnected".to_string());
+                }
+            }
+        }
+
+        println!("watch_change=stasis");
+        let exit = run_test_dir_once(&parsed.directory)?;
+        println!("watch_last_exit={exit}");
+    }
+}
+
+fn is_stasis_change_event(event: &Event) -> bool {
+    let is_change_kind = matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    );
+    if !is_change_kind {
+        return false;
+    }
+    event.paths.iter().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("stasis"))
+    })
 }
 
 fn write_events_jsonl(
@@ -405,6 +530,8 @@ mod tests {
         let args = vec!["--dir".to_string(), "tests/stasis".to_string()];
         let parsed = parse_test_cli_args(&args).expect("parse should succeed");
         assert_eq!(parsed.directory, PathBuf::from("tests/stasis"));
+        assert!(!parsed.watch);
+        assert_eq!(parsed.watch_settle_ms, 150);
     }
 
     #[test]
@@ -412,6 +539,33 @@ mod tests {
         let args = vec!["--ticks".to_string(), "10".to_string()];
         let error = parse_test_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing required --dir"));
+    }
+
+    #[test]
+    fn parse_test_cli_args_accepts_watch_options() {
+        let args = vec![
+            "--dir".to_string(),
+            "tests/stasis".to_string(),
+            "--watch".to_string(),
+            "--watch-settle-ms".to_string(),
+            "250".to_string(),
+        ];
+        let parsed = parse_test_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.directory, PathBuf::from("tests/stasis"));
+        assert!(parsed.watch);
+        assert_eq!(parsed.watch_settle_ms, 250);
+    }
+
+    #[test]
+    fn parse_test_cli_args_rejects_invalid_watch_settle_value() {
+        let args = vec![
+            "--dir".to_string(),
+            "tests/stasis".to_string(),
+            "--watch-settle-ms".to_string(),
+            "invalid".to_string(),
+        ];
+        let error = parse_test_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("invalid value for --watch-settle-ms"));
     }
 
     #[test]
