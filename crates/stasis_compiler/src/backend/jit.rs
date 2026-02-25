@@ -7679,6 +7679,57 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_tick_from_stasis_fixture_with_input_snapshot() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("rust_native_tick_input_snapshot.stasis");
+        let source = std::fs::read_to_string(&fixture_path)
+            .expect("read rust_native_tick_input_snapshot.stasis fixture");
+
+        let mut process = JitProcess::new();
+        process.upsert_file(fixture_path.to_string_lossy().to_string(), source);
+        process.compile().expect("compile");
+
+        let snapshot_mode_hash = hash_global_path("snapshot_mode");
+        stasis_dynload::stasis_jit_global_i32_store(snapshot_mode_hash, 1);
+
+        let tick_value = process
+            .execute_i32_noarg_by_name("tick")
+            .expect("execute tick");
+        assert_eq!(tick_value, 1);
+
+        let pointer_count = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_pointer_count"));
+        let escape_down = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_escape_down"));
+        let first_went_down =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_first_went_down"));
+        let first_x = stasis_dynload::stasis_jit_global_f32_load(hash_global_path("model_first_x_px"));
+        let latched = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
+        assert_eq!(pointer_count, 1);
+        assert_eq!(escape_down, 1);
+        assert_eq!(first_went_down, 1);
+        assert!(first_x > 12.0);
+        assert_eq!(latched, 1);
+
+        stasis_dynload::stasis_jit_global_i32_store(snapshot_mode_hash, 2);
+
+        let quit_tick = process
+            .execute_i32_noarg_by_name("tick")
+            .expect("execute quit tick");
+        assert_eq!(quit_tick, -1);
+        let quit_latched = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
+        assert_eq!(quit_latched, -1);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_indexed_i32_array_access() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();

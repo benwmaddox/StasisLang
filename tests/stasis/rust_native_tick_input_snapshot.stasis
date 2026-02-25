@@ -1,0 +1,67 @@
+import "../../src/host_frame.stasis";
+
+global last_tick_code: i32;
+global snapshot_mode: i32;
+global model_pointer_count: i32;
+global model_escape_down: bool;
+global model_first_went_down: bool;
+global model_first_x_px: f32;
+
+function apply_test_snapshot(): void {
+    if (snapshot_mode == 1) {
+        host_i32[HOST_I_QUIT_REQUESTED] = 0;
+        host_i32[HOST_I_POINTER_COUNT] = 1;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 0] = 17;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 2] = 1;
+        host_i32[HOST_I_KEY_BASE + 41] = 1;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 12.25;
+        return;
+    }
+    if (snapshot_mode == 2) {
+        host_i32[HOST_I_QUIT_REQUESTED] = 1;
+        return;
+    }
+    return;
+}
+
+function refresh_input_model_for_test(): void {
+    model_pointer_count = host_pointer_count();
+    model_escape_down = host_key_down(41);
+    model_first_went_down = false;
+    model_first_x_px = 0.0;
+    if (model_pointer_count > 0) {
+        model_first_went_down = host_pointer_went_down(0);
+        model_first_x_px = host_pointer_x_px(0);
+    }
+    return;
+}
+
+function tick(): i32 {
+    apply_test_snapshot();
+    refresh_input_model_for_test();
+    if (host_quit_requested()) {
+        last_tick_code = -1;
+        return last_tick_code;
+    }
+    if (model_escape_down && model_first_went_down && model_first_x_px > 9.5) {
+        last_tick_code = 1;
+        return last_tick_code;
+    }
+    last_tick_code = 0;
+    return last_tick_code;
+}
+
+function input_model_signature(): i32 {
+    let out: i32 = model_pointer_count * 100;
+    if (model_escape_down) {
+        out += 10;
+    }
+    if (model_first_went_down) {
+        out += 1;
+    }
+    return out;
+}
+
+function tick_result(): i32 {
+    return last_tick_code;
+}
