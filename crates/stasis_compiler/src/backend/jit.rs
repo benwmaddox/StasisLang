@@ -8802,6 +8802,54 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_rejects_struct_copy_from_indexed_to_global_on_layout_mismatch() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 1;\nstruct Src { hp: i32; armor: i32; }\nstruct Dst { hp: i32; }\nglobal source: Src[COUNT];\nglobal target: Dst;\nfunction main(): i32 {\n    target = source[0];\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("struct copy assignment from indexed source requires matching field layout"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_struct_copy_from_global_to_indexed_on_layout_mismatch() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 1;\nstruct Src { hp: i32; }\nstruct Dst { hp: i32; armor: i32; }\nglobal source: Src;\nglobal target: Dst[COUNT];\nfunction main(): i32 {\n    target[0] = source;\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("struct copy assignment to indexed target requires matching field layout"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_evaluates_struct_copy_indices_once_each() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
