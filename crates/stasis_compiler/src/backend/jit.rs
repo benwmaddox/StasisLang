@@ -7389,6 +7389,52 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_stdlib_ascii_copy_truncates_to_destination_capacity() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_ascii_copy_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[8];\nglobal dst_text: ascii[4];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    src_text[4] = 69;\n    src_text[5] = 0;\n    ascii_set_len(src_text, 5);\n    ascii_copy(dst_text, src_text);\n    return length(dst_text) * 10 + dst_text[3];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 30);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_stdlib_ascii_recount_is_bounded_by_capacity() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_ascii_recount_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    text[0] = 65;\n    text[1] = 66;\n    text[2] = 67;\n    text[3] = 68;\n    ascii_set_len(text, 0);\n    return ascii_recount(text);\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_foreach_struct_array_with_index_alias() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();

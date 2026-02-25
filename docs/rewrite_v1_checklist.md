@@ -674,6 +674,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Brickout v1 input path now uses a per-tick Stasis snapshot model (`input_model`) refreshed once in `tick()` and consumed by gameplay/UI logic (`record_tap_pulses`, `handle_pointer_input_*`) instead of scattered direct input function reads.
 - Rust-native JIT now seeds fixed-collection `max_length` metadata into both header lanes and `.max_length` path slots for fixed arrays/`ascii[N]`/`utf8[N]`, and stdlib ASCII scan helpers now use explicit bounded loop limits (`ascii_scan_limit`) instead of literal-condition infinite loops.
 - Added runtime regression coverage for fixed-array `max_length` initialization parity (header bytes + `.max_length` path): `crates/stasis_compiler::backend::jit::tests::jit_process_initializes_fixed_array_max_length_header_and_path`.
+- Added imported-stdlib bounded-string regression coverage in rust-native JIT path: `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_ascii_copy_truncates_to_destination_capacity` and `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_ascii_recount_is_bounded_by_capacity`.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
