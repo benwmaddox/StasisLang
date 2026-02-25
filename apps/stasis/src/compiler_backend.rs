@@ -469,6 +469,7 @@ impl IncrementalCompilerBackend {
         let mut aot_linked_image_size_bytes: Option<u64> = None;
         let mut aot_linked_image_sha256: Option<String> = None;
         let mut manifest_rows: Vec<EngineBundleManifestFunctionRow> = Vec::new();
+        let mut jit_emitted_function_names: Option<BTreeSet<String>> = None;
 
         match request.target_mode {
             TargetMode::JitDev => {
@@ -485,6 +486,10 @@ impl IncrementalCompilerBackend {
                             column: None,
                         }],
                     );
+                }
+                if let Some(package) = self.last_jit_engine_package.as_ref() {
+                    jit_emitted_function_names =
+                        Some(package.symbol_code_ptrs.keys().cloned().collect());
                 }
             }
             TargetMode::AotProd => {
@@ -568,6 +573,11 @@ impl IncrementalCompilerBackend {
         let mut hook_fn_id: Option<FnId> = None;
         let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
         for entry in &function_entries {
+            if let Some(emitted_names) = jit_emitted_function_names.as_ref() {
+                if !emitted_names.contains(&entry.name) {
+                    continue;
+                }
+            }
             let key = format!("rust_native::{}::{}", entry.path, entry.name);
             let fn_id = match self.fn_id_for_key(&key) {
                 Ok(id) => id,
@@ -605,6 +615,20 @@ impl IncrementalCompilerBackend {
                 hook_fn_id = Some(fn_id);
             }
             functions.push(FunctionPatch { fn_id });
+        }
+        if functions.is_empty() {
+            return CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message:
+                        "engine contract compile produced no emitted function mapping for patch set"
+                            .to_string(),
+                    path: request.changed_files.first().cloned(),
+                    line: None,
+                    column: None,
+                }],
+            );
         }
 
         let aot_function_symbols = if request.target_mode == TargetMode::AotProd {
@@ -3412,6 +3436,34 @@ mod tests {
         assert!(package.on_code_swap_code_ptr.is_some());
         assert!(backend.last_aot_engine_bundle().is_none());
         fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_dev_brickout_v1_builds_engine_package_with_render_pointer() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_120),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let package = backend
+            .last_jit_engine_package()
+            .expect("jit engine package should be present");
+        assert!(package.tick_code_ptr != 0);
+        assert!(package.render_code_ptr != 0);
+        assert!(
+            package.symbol_code_ptrs.contains_key("render"),
+            "expected render symbol in JIT engine package"
+        );
     }
 
     #[test]

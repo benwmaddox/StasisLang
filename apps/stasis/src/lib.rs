@@ -31,6 +31,7 @@ use stasis_runner::swap::contracts::{
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -149,11 +150,95 @@ pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
     run_with_backend(config, backend)
 }
 
+fn is_stasis_source_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
+}
+
+fn is_test_stasis_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".test.stasis"))
+}
+
+fn contains_entry_function(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.contains("function main(")
+        || content.contains("function tick(")
+        || content.contains("function @inline main(")
+        || content.contains("function @inline tick(")
+}
+
+fn collect_stasis_sources_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_stasis_sources_recursive(&path, out);
+        } else if is_stasis_source_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf> {
+    if !watch_directory.is_dir() {
+        return None;
+    }
+
+    for preferred in [
+        "brickout_revenge_v1.stasis",
+        "main.stasis",
+        "game.stasis",
+        "app.stasis",
+    ] {
+        let candidate = watch_directory.join(preferred);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let mut sources: Vec<PathBuf> = Vec::new();
+    collect_stasis_sources_recursive(watch_directory, &mut sources);
+    sources.retain(|path| !is_test_stasis_file(path));
+    if sources.is_empty() {
+        return None;
+    }
+    if sources.len() == 1 {
+        return Some(sources[0].clone());
+    }
+
+    let entry_candidates: Vec<PathBuf> = sources
+        .iter()
+        .filter(|path| contains_entry_function(path))
+        .cloned()
+        .collect();
+    if !entry_candidates.is_empty() {
+        return Some(entry_candidates[0].clone());
+    }
+    Some(sources[0].clone())
+}
+
+fn resolve_initial_source_file(config: &RunnerConfig) -> Option<PathBuf> {
+    if let Some(explicit) = config.inject_file_change.as_ref() {
+        return Some(explicit.clone());
+    }
+    let watch_directory = config.watch_directory.as_deref()?;
+    infer_watch_directory_entry_source(watch_directory)
+}
+
 pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) -> RunnerSummary {
     let mut watcher = config
         .watch_directory
         .as_deref()
         .and_then(|dir| WatchService::start(dir).ok());
+    let initial_source_file = resolve_initial_source_file(&config);
     let window = config.window;
 
     let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, config.target_mode);
@@ -190,7 +275,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
 
     let mut runtime_launcher = config
         .runtime_launch
-        .then(|| config.inject_file_change.clone().map(RuntimeLauncher::new))
+        .then(|| initial_source_file.clone().map(RuntimeLauncher::new))
         .flatten();
     let mut runtime_launch_failures: u32 = 0;
     let mut runtime_launch_failure_reasons: Vec<String> = Vec::new();
@@ -203,7 +288,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
 
     for tick in 0..config.max_ticks {
         if !file_change_sent {
-            if let Some(path) = &config.inject_file_change {
+            if let Some(path) = &initial_source_file {
                 let event = FileChangeEvent::new(
                     path.clone(),
                     u64::from(tick) + 1,
@@ -1149,6 +1234,64 @@ mod tests {
     }
 
     #[test]
+    fn resolve_initial_source_file_prefers_explicit_watch_file() {
+        let config = RunnerConfig {
+            max_ticks: 1,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: Some(PathBuf::from("samples/explicit.stasis")),
+            watch_directory: Some(PathBuf::from("samples/brickout_revenge")),
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: true,
+            aot_probe_loadability: false,
+        };
+
+        let resolved = resolve_initial_source_file(&config).expect("resolved source file");
+        assert_eq!(resolved, PathBuf::from("samples/explicit.stasis"));
+    }
+
+    #[test]
+    fn resolve_initial_source_file_infers_brickout_entry_from_watch_dir() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_watch_entry_infer_{}", stamp));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        fs::write(temp_root.join("helper.stasis"), "function util(): i32 { return 1; }\n")
+            .expect("write helper");
+        fs::write(
+            temp_root.join("brickout_revenge_v1.stasis"),
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write entry");
+
+        let config = RunnerConfig {
+            max_ticks: 1,
+            tick_sleep_micros: 0,
+            window: None,
+            inject_file_change: None,
+            watch_directory: Some(temp_root.clone()),
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: true,
+            aot_probe_loadability: false,
+        };
+
+        let resolved = resolve_initial_source_file(&config).expect("resolved source file");
+        assert_eq!(resolved, temp_root.join("brickout_revenge_v1.stasis"));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn aot_probe_loadability_rejects_missing_linked_image() {
         let missing_linked_image = std::env::temp_dir().join(format!(
             "stasis_missing_probe_{}.dll",
@@ -1384,6 +1527,40 @@ mod tests {
         assert_eq!(summary.swap_commit_successes, 1);
         assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert!(!summary.has_in_flight_work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_smoke_compiles_and_commits_brickout_v1() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+        let config = RunnerConfig {
+            max_ticks: 7000,
+            tick_sleep_micros: 1000,
+            window: Some(BRICKOUT_REVENGE_V1_WINDOW),
+            inject_file_change: Some(fixture),
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_real_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
+        assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
+        assert_eq!(summary.window, Some(BRICKOUT_REVENGE_V1_WINDOW));
         assert!(!summary.has_in_flight_work);
     }
 }

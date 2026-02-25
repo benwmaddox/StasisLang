@@ -2785,5 +2785,16 @@ function tick(): i32 {
     return 0;
 }
 
+function render(): i32 {
+    if (state.running != 1) {
+        return 1;
+    }
+
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
+    draw_frame();
+    end_frame();
+    return 0;
+}
 
 
