@@ -4036,7 +4036,15 @@ fn emit_simple_statements(
                                     name, local.type_id, rhs.type_id
                                 ));
                             }
-                            let value = if is_i32_scalar_lane_type(local.type_id, type_table) {
+                            let value = if is_collection_handle_type(local.type_id, type_table) {
+                                if *op != AssignOp::Set {
+                                    return Err(format!(
+                                        "collection handle assignment only supports '=' in current jit path for '{}'",
+                                        name
+                                    ));
+                                }
+                                rhs.value
+                            } else if is_i32_scalar_lane_type(local.type_id, type_table) {
                                 match op {
                                     AssignOp::Set => rhs.value,
                                     AssignOp::Add => {
@@ -7681,6 +7689,49 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 8);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_local_collection_handle_rebind_with_set_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view = left;\n    view[0] = 65;\n    view = right;\n    view[0] = 66;\n    return left[0] * 100 + right[0];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 6566);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_collection_handle_compound_assignment_for_local() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view = left;\n    view += right;\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("collection handle assignment only supports '='"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
