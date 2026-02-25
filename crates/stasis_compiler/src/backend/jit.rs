@@ -4073,6 +4073,102 @@ fn try_emit_indexed_struct_copy_assignment(
     Ok(true)
 }
 
+fn try_emit_global_struct_copy_assignment(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    global_path_types: &GlobalPathTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<bool, String> {
+    let target_path = match target {
+        AssignTarget::GlobalPath(path) => path.as_str(),
+        AssignTarget::Local(path) => {
+            if values_by_name.contains_key(path) || foreach_bindings.contains_key(path) {
+                return Ok(false);
+            }
+            path.as_str()
+        }
+        AssignTarget::IndexedPath { .. } => return Ok(false),
+    };
+    let SimpleExpr::Identifier(source_path) = expression else {
+        return Ok(false);
+    };
+    if values_by_name.contains_key(source_path) || foreach_bindings.contains_key(source_path) {
+        return Ok(false);
+    }
+    if global_path_types.contains_key(target_path) || global_path_types.contains_key(source_path) {
+        return Ok(false);
+    }
+
+    let target_prefix = format!("{target_path}.");
+    let source_prefix = format!("{source_path}.");
+    let mut fields: Vec<(String, TypeId)> = global_path_types
+        .iter()
+        .filter_map(|(path, type_id)| {
+            path.strip_prefix(&target_prefix)
+                .map(|suffix| (suffix.to_string(), *type_id))
+        })
+        .collect();
+    if fields.is_empty() {
+        return Ok(false);
+    }
+    if op != AssignOp::Set {
+        return Err(format!(
+            "struct path copy assignment only supports '=' for '{}'",
+            target_path
+        ));
+    }
+    fields.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (suffix, target_type) in &fields {
+        if is_collection_handle_type(*target_type, type_table) {
+            return Err(format!(
+                "struct path copy assignment currently supports scalar fields only for '{}'",
+                target_path
+            ));
+        }
+        let source_field = format!("{source_prefix}{suffix}");
+        let Some(source_type) = global_path_types.get(&source_field).copied() else {
+            return Err(format!(
+                "struct path copy assignment requires matching field path '{}'",
+                source_field
+            ));
+        };
+        if source_type != *target_type {
+            return Err(format!(
+                "struct path copy assignment type mismatch at field '{}': target {} source {}",
+                suffix, target_type, source_type
+            ));
+        }
+    }
+
+    for (suffix, field_type) in fields {
+        let source_field = format!("{source_prefix}{suffix}");
+        let target_field = format!("{target_prefix}{suffix}");
+        let source_value = emit_global_load(
+            builder,
+            runtime_call_refs,
+            type_table,
+            &source_field,
+            field_type,
+        )?;
+        emit_global_assignment(
+            builder,
+            runtime_call_refs,
+            type_table,
+            &target_field,
+            field_type,
+            AssignOp::Set,
+            source_value,
+        )?;
+    }
+    Ok(true)
+}
+
 fn emit_simple_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
@@ -4160,6 +4256,19 @@ fn emit_simple_statements(
                     global_path_types,
                     constant_values,
                     collection_infos,
+                    foreach_bindings,
+                )? {
+                    continue;
+                }
+                if try_emit_global_struct_copy_assignment(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    target,
+                    *op,
+                    expression,
+                    values_by_name,
+                    global_path_types,
                     foreach_bindings,
                 )? {
                     continue;
@@ -8361,6 +8470,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_global_struct_path_value_copy_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pos { x: f32; y: f32; }\nstruct Enemy { hp: i32; pos: Pos; }\nglobal src: Enemy;\nglobal dst: Enemy;\nfunction main(): i32 {\n    src.hp = 13;\n    src.pos.x = 4.5;\n    src.pos.y = 2.0;\n    dst = src;\n    if (dst.pos.x > 4.4) { return dst.hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 13);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_evaluates_struct_copy_indices_once_each() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
@@ -8395,6 +8523,30 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("struct indexed copy assignment requires matching field layout"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_global_struct_copy_assignment_with_collection_fields() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Player { hp: i32; name: ascii[8]; }\nglobal left: Player;\nglobal right: Player;\nfunction main(): i32 {\n    left = right;\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("struct path copy assignment currently supports scalar fields only"),
                     "unexpected message: {message}"
                 );
             }
