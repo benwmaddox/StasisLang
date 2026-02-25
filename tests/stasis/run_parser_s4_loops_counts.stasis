@@ -2,7 +2,7 @@
 
 function main(): i32 {
     compiler_reset_state();
-    compiler_set_source("function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; i < 3; i += 1) { sum += i; } foreach (value in values) { sum += value; } foreach (index, value in values) { if (index >= 0) { sum += value; } } return sum; }");
+    compiler_set_source("function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; i < 3; i += 1) { sum += i; } foreach (let value in values) { sum += value; } foreach (let value, index in values) { if (index >= 0) { sum += value; } } return sum; }");
 
     return run_incremental_compiler();
 }

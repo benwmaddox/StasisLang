@@ -2719,14 +2719,15 @@ fn parse_foreach_statement(
     let header_close = find_matching_delimiter(source, header_open, b'(', b')')
         .ok_or_else(|| "missing ')' for foreach-header".to_string())?;
     let header = source[header_open + 1..header_close].trim();
-    let mut header_body = header;
-    let mut uses_let_header = false;
-    if starts_with_keyword(header, 0, "let") {
-        uses_let_header = true;
-        header_body = header
-            .strip_prefix("let")
-            .ok_or_else(|| format!("invalid foreach header '{}'", header))?;
+    if !starts_with_keyword(header, 0, "let") {
+        return Err(format!(
+            "foreach header must start with 'let': '{}'",
+            header
+        ));
     }
+    let header_body = header
+        .strip_prefix("let")
+        .ok_or_else(|| format!("invalid foreach header '{}'", header))?;
     let mut header_cursor = skip_ascii_whitespace(header_body, 0);
     let (first_identifier, next) = parse_identifier(header_body, header_cursor)?;
     header_cursor = skip_ascii_whitespace(header_body, next);
@@ -2737,15 +2738,8 @@ fn parse_foreach_statement(
         header_cursor += 1;
         header_cursor = skip_ascii_whitespace(header_body, header_cursor);
         let (second_identifier, next) = parse_identifier(header_body, header_cursor)?;
-        if uses_let_header {
-            // Legacy header style: `foreach (let value, index in collection)`.
-            item_name = first_identifier.to_string();
-            index_name = Some(second_identifier.to_string());
-        } else {
-            // Spec header style: `foreach (index, value in collection)`.
-            index_name = Some(first_identifier.to_string());
-            item_name = second_identifier.to_string();
-        }
+        item_name = first_identifier.to_string();
+        index_name = Some(second_identifier.to_string());
         header_cursor = skip_ascii_whitespace(header_body, next);
     }
     if !starts_with_keyword(header_body, header_cursor, "in") {
@@ -7555,7 +7549,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_executes_foreach_struct_array_without_let_header_style() {
+    fn jit_process_rejects_foreach_struct_array_without_let_header_style() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
         stasis_dynload::clear_jit_i32_array_global_table();
@@ -7565,11 +7559,16 @@ mod tests {
             "sample.stasis",
             "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal state: Enemy[COUNT];\nfunction main(): i32 {\n    foreach (i, enemy in state) { enemy.hp = i + 1; }\n    let sum: i32 = 0;\n    foreach (enemy in state) { sum += enemy.hp; }\n    return sum;\n}\n",
         );
-        process.compile().expect("compile");
-        let value = process
-            .execute_i32_noarg_by_name("main")
-            .expect("execute main");
-        assert_eq!(value, 6);
+        let error = process.compile().expect_err("compile should reject non-let foreach");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("foreach header must start with 'let'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
@@ -7589,6 +7588,30 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 10);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_foreach_over_local_fixed_array_without_let_header_style() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 4;\nglobal nums: i32[COUNT];\nfunction init(arr: i32[4]): i32 {\n    foreach (i, v in arr) { arr[i] = i + 1; }\n    let sum: i32 = 0;\n    foreach (v in arr) { sum += v; }\n    return sum;\n}\nfunction main(): i32 { return init(nums); }\n",
+        );
+        let error = process.compile().expect_err("compile should reject non-let foreach");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("foreach header must start with 'let'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
