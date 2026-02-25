@@ -95,6 +95,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Indexed struct-value copy assignment now lowers directly in Rust-native JIT for `arr[target] = arr[source]` by emitting deterministic field-wise copy across SoA field paths, with mismatch diagnostics + regression coverage (`jit_process_executes_indexed_struct_value_copy_assignment`, `jit_process_rejects_indexed_struct_copy_assignment_for_mismatched_layouts`).
 - Added regression coverage to lock index-evaluation semantics for struct copy (`jit_process_evaluates_struct_copy_indices_once_each`): source/target index expressions are evaluated once per assignment, not once per copied field.
 - Global struct-path value copy now lowers in Rust-native JIT for scalar-only layouts (`dst = src` on flattened struct roots), with explicit rejection when copied struct paths include collection/string handle fields (`jit_process_executes_global_struct_path_value_copy_assignment`, `jit_process_rejects_global_struct_copy_assignment_with_collection_fields`).
+- Added regression coverage for nested global-block struct roots and operator gating on struct-path copy (`jit_process_executes_global_block_nested_struct_path_copy_assignment`, `jit_process_rejects_global_struct_path_copy_compound_assignment`).
 
 ### S0 - Workspace Bootstrap
 - Language:

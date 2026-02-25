@@ -8489,6 +8489,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_global_block_nested_struct_path_copy_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal state { src: Enemy; dst: Enemy; }\nfunction main(): i32 {\n    state.src.hp = 9;\n    state.src.speed = 3.25;\n    state.dst = state.src;\n    if (state.dst.speed > 3.2) { return state.dst.hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 9);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_evaluates_struct_copy_indices_once_each() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
@@ -8547,6 +8566,30 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("struct path copy assignment currently supports scalar fields only"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_global_struct_path_copy_compound_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal a: Enemy;\nglobal b: Enemy;\nfunction main(): i32 {\n    b += a;\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("struct path copy assignment only supports '='"),
                     "unexpected message: {message}"
                 );
             }
