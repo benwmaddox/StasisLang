@@ -7735,6 +7735,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_typed_ascii_view_let_binding() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global text: ascii[4];\nfunction main(): i32 {\n    let view: ascii[] = text;\n    view[0] = 90;\n    return text[0];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 90);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_rejects_collection_handle_compound_assignment_for_local() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
