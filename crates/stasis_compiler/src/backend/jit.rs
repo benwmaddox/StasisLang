@@ -22,6 +22,8 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -43,6 +45,8 @@ pub struct JitProcess {
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
+    #[cfg(test)]
+    _test_guard: MutexGuard<'static, ()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +71,8 @@ impl JitProcess {
             import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
+            #[cfg(test)]
+            _test_guard: acquire_jit_process_test_guard(),
         }
     }
 
@@ -563,6 +569,14 @@ impl Default for JitProcess {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(test)]
+fn acquire_jit_process_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("jit process test lock poisoned")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8467,10 +8481,18 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let i: i32 = 0; let sum: i32 = 0; for (; i < 4; i += 1) { sum += i; } return sum; }\n",
         );
-        let report = process.compile().expect("jit compile");
-        assert_eq!(report.index.parsed_functions, 1);
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert!(process.artifacts()[0].code_ptr != 0);
+        let error = process
+            .compile()
+            .expect_err("expected missing init segment to be rejected");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("for header must include init, condition, and step"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8480,10 +8502,18 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let i: i32 = 0; let sum: i32 = 0; for (; i < 4; ) { sum += i; i += 1; } return sum; }\n",
         );
-        let report = process.compile().expect("jit compile");
-        assert_eq!(report.index.parsed_functions, 1);
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert!(process.artifacts()[0].code_ptr != 0);
+        let error = process
+            .compile()
+            .expect_err("expected missing step segment to be rejected");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("for header must include init, condition, and step"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8604,7 +8634,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { let i = 2; for (; i; i -= 1) { return 1; } return 0; }\n",
+            "function main(): i32 { let i = 2; for (i -= 0; i; i -= 1) { return 1; } return 0; }\n",
         );
         let error = process
             .compile()
