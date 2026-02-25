@@ -2092,7 +2092,8 @@ fn compile_function_to_jit_module(
             );
         }
 
-        let statements = parse_simple_statements(hir, type_table)?;
+        let mut parse_type_table = type_table.clone();
+        let statements = parse_simple_statements(hir, &mut parse_type_table)?;
         let empty_foreach_bindings = ForeachBindingMap::new();
         let terminated = emit_simple_statements(
             &mut builder,
@@ -2100,7 +2101,7 @@ fn compile_function_to_jit_module(
             &mut values_by_name,
             &runtime_call_refs,
             call_signatures,
-            type_table,
+            &parse_type_table,
             global_path_types,
             constant_values,
             collection_infos,
@@ -2577,7 +2578,7 @@ enum ComparisonOp {
 
 fn parse_simple_statements(
     hir: &FunctionHIR,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<Vec<SimpleStmt>, String> {
     let body = extract_function_body(hir)?;
     parse_simple_statements_from_block(body, type_table)
@@ -2592,7 +2593,7 @@ fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
 
 fn parse_simple_statements_from_block(
     block_text: &str,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<Vec<SimpleStmt>, String> {
     let trimmed = block_text.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
@@ -2678,7 +2679,7 @@ fn parse_simple_statements_from_block(
     Ok(statements)
 }
 
-fn parse_let_statement(statement_text: &str, type_table: &TypeTable) -> Result<SimpleStmt, String> {
+fn parse_let_statement(statement_text: &str, type_table: &mut TypeTable) -> Result<SimpleStmt, String> {
     let after_let = statement_text
         .strip_prefix("let")
         .ok_or_else(|| format!("invalid let statement '{statement_text}'"))?;
@@ -2689,22 +2690,14 @@ fn parse_let_statement(statement_text: &str, type_table: &TypeTable) -> Result<S
         Some(b':') => {
             cursor += 1;
             cursor = skip_ascii_whitespace(after_let, cursor);
-            let (type_name, next) = parse_identifier(after_let, cursor)?;
-            let resolved_type_id = type_table.resolve(type_name).ok_or_else(|| {
+            let (type_name, initializer) = split_type_annotation_and_initializer(after_let, cursor)?;
+            let resolved_type_id = type_table.resolve_or_intern(type_name).map_err(|_| {
                 format!(
                     "unsupported let type '{}' in statement '{}'",
                     type_name, statement_text
                 )
             })?;
-            cursor = skip_ascii_whitespace(after_let, next);
-            let expression = if cursor < after_let.len() && after_let.as_bytes()[cursor] == b'=' {
-                cursor += 1;
-                let expression_text = after_let[cursor..].trim();
-                if expression_text.is_empty() {
-                    return Err(format!(
-                        "missing expression in let statement '{statement_text}'"
-                    ));
-                }
+            let expression = if let Some(expression_text) = initializer {
                 parse_value_expression(expression_text)?
             } else if resolved_type_id == TYPE_ID_I32 || resolved_type_id == TYPE_ID_BOOL {
                 SimpleExpr::Int(0)
@@ -2736,6 +2729,36 @@ fn parse_let_statement(statement_text: &str, type_table: &TypeTable) -> Result<S
         type_id,
         expression,
     })
+}
+
+fn split_type_annotation_and_initializer<'a>(
+    source: &'a str,
+    type_start: usize,
+) -> Result<(&'a str, Option<&'a str>), String> {
+    if type_start >= source.len() {
+        return Err("missing type annotation in let statement".to_string());
+    }
+    let bytes = source.as_bytes();
+    let mut cursor = type_start;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'=' {
+            let type_name = source[type_start..cursor].trim();
+            if type_name.is_empty() {
+                return Err("missing type annotation in let statement".to_string());
+            }
+            let initializer = source[cursor + 1..].trim();
+            if initializer.is_empty() {
+                return Err("missing expression in let statement".to_string());
+            }
+            return Ok((type_name, Some(initializer)));
+        }
+        cursor += 1;
+    }
+    let type_name = source[type_start..].trim();
+    if type_name.is_empty() {
+        return Err("missing type annotation in let statement".to_string());
+    }
+    Ok((type_name, None))
 }
 
 fn parse_assignment_statement(statement_text: &str) -> Result<SimpleStmt, String> {
@@ -2948,7 +2971,7 @@ fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt, String> {
 fn parse_for_statement(
     source: &str,
     start: usize,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<(SimpleStmt, usize), String> {
     let mut cursor = start + "for".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
@@ -2994,7 +3017,7 @@ fn parse_for_statement(
 
 fn parse_for_control_segment(
     segment_text: &str,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<SimpleStmt, String> {
     let trimmed = segment_text.trim();
     if trimmed.is_empty() {
@@ -3021,7 +3044,7 @@ fn parse_for_control_segment(
 fn parse_foreach_statement(
     source: &str,
     start: usize,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<(SimpleStmt, usize), String> {
     let mut cursor = start + "foreach".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
@@ -3093,7 +3116,7 @@ fn parse_foreach_statement(
 fn parse_if_statement(
     source: &str,
     start: usize,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
 ) -> Result<(SimpleStmt, usize), String> {
     let mut cursor = start + "if".len();
     cursor = skip_ascii_whitespace_and_comments(source, cursor);
@@ -7701,7 +7724,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view = left;\n    view[0] = 65;\n    view = right;\n    view[0] = 66;\n    return left[0] * 100 + right[0];\n}\n",
+            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view: i32[] = left;\n    view[0] = 65;\n    view = right;\n    view[0] = 66;\n    return left[0] * 100 + right[0];\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -7720,7 +7743,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view = left;\n    view += right;\n    return 0;\n}\n",
+            "global left: i32[4];\nglobal right: i32[4];\nfunction main(): i32 {\n    let view: i32[] = left;\n    view += right;\n    return 0;\n}\n",
         );
         let error = process.compile().expect_err("expected compile failure");
         match error {

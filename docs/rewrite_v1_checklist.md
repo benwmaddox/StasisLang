@@ -90,6 +90,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Incremental semantic guard for mutating `from_*` conversions now uses block-aware statement splitting and annotation-aware function scanning, removing false-positive rejection on valid `if/else` conversion statements while preserving expression misuse diagnostics.
 - Incremental JIT emit/apply is now transactional for failure paths: dirty flags are cleared only after successful full emit, and JIT artifact/module updates are staged then committed atomically so failed emits preserve prior executable dispatch state for retry.
 - Rust-native JIT local assignments now treat collection/view handles as reference values with `=` support and explicit rejection of compound assignment operators, preserving simple alias/rebind semantics without numeric-handle arithmetic.
+- Typed `let` annotations in Rust-native JIT now parse full type text (including `Type[]`/array forms) instead of identifier-only tokens, so view-typed local bindings lower correctly without falling back to inferred-only declarations.
 
 ### S0 - Workspace Bootstrap
 - Language:
