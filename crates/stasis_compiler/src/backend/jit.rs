@@ -8361,6 +8361,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_evaluates_struct_copy_indices_once_each() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal enemies: Enemy[COUNT];\nglobal target_calls: i32;\nglobal source_calls: i32;\nfunction next_target(): i32 { target_calls += 1; return 1; }\nfunction next_source(): i32 { source_calls += 1; return 0; }\nfunction main(): i32 {\n    enemies[0].hp = 9;\n    enemies[0].speed = 3.5;\n    enemies[next_target()] = enemies[next_source()];\n    if (enemies[1].speed > 3.4) { return target_calls * 100 + source_calls * 10 + enemies[1].hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 119);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_rejects_indexed_struct_copy_assignment_for_mismatched_layouts() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
