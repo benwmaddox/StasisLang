@@ -90,6 +90,7 @@ impl JitProcess {
             .compile_analysis_cache
             .as_ref()
             .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
+        let mut force_reemit_reachable = false;
         if cache_miss {
             let extern_signatures =
                 collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
@@ -114,14 +115,20 @@ impl JitProcess {
                 &constant_values,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            self.compile_analysis_cache = Some(CompileAnalysisCache {
+            let next_cache = CompileAnalysisCache {
                 files_fingerprint,
                 call_signatures,
+                resolved_extern_signatures,
                 global_path_types,
                 constant_values,
                 collection_infos,
                 extern_symbol_addresses,
-            });
+            };
+            if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
+                force_reemit_reachable =
+                    compile_analysis_requires_reemit(previous_cache, &next_cache);
+            }
+            self.compile_analysis_cache = Some(next_cache);
         }
         let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
@@ -134,6 +141,7 @@ impl JitProcess {
             self.compiler.functions(),
             self.artifacts(),
             &self.required_emit_roots,
+            force_reemit_reachable,
         );
         let (next_slot, next_symbol_seq, artifacts, modules) = (
             &mut self.next_slot,
@@ -446,7 +454,7 @@ impl Default for JitProcess {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CallSignature {
     function_id: Option<FunctionId>,
     extern_symbol: Option<String>,
@@ -462,7 +470,7 @@ struct ExternCallSignature {
     return_type: TypeId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedExternCallSignature {
     name: String,
     symbol: String,
@@ -488,6 +496,7 @@ type ExternSymbolAddressMap = BTreeMap<String, usize>;
 struct CompileAnalysisCache {
     files_fingerprint: u64,
     call_signatures: CallSignatureMap,
+    resolved_extern_signatures: Vec<ResolvedExternCallSignature>,
     global_path_types: GlobalPathTypeMap,
     constant_values: ConstantValueMap,
     collection_infos: CollectionInfoMap,
@@ -588,6 +597,7 @@ fn select_emit_function_ids(
     functions: &[FunctionMeta],
     artifacts: &[JitArtifact],
     required_emit_roots: &[String],
+    force_reemit_reachable: bool,
 ) -> Vec<FunctionId> {
     let mut reachable = collect_reachable_function_ids(functions, required_emit_roots);
     let reachable_names: BTreeSet<String> = functions
@@ -607,6 +617,9 @@ fn select_emit_function_ids(
     functions
         .iter()
         .filter(|function| {
+            if force_reemit_reachable {
+                return reachable.contains(&function.id);
+            }
             let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
             let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
             reachable.contains(&function.id) && (function.dirty || !artifact_matches_body_hash)
@@ -872,6 +885,17 @@ fn normalize_path_for_compiler_key(path: &Path) -> String {
         Ok(canonical) => canonical.to_string_lossy().to_string(),
         Err(_) => path.to_string_lossy().to_string(),
     }
+}
+
+fn compile_analysis_requires_reemit(
+    previous: &CompileAnalysisCache,
+    next: &CompileAnalysisCache,
+) -> bool {
+    previous.resolved_extern_signatures != next.resolved_extern_signatures
+        || previous.extern_symbol_addresses != next.extern_symbol_addresses
+        || previous.constant_values != next.constant_values
+        || previous.global_path_types != next.global_path_types
+        || previous.collection_infos != next.collection_infos
 }
 
 fn compute_files_fingerprint(files: &[SourceFile]) -> u64 {
@@ -9223,6 +9247,38 @@ mod tests {
         assert_ne!(
             first_fingerprint, second_fingerprint,
             "dependency source change should invalidate compile-analysis cache key"
+        );
+    }
+
+    #[test]
+    fn jit_process_reemits_reachable_functions_when_imported_constant_changes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"constants.stasis\";\nfunction main(): i32 { return VALUE; }\n",
+        );
+        process.upsert_file("constants.stasis", "const VALUE: i32 = 11;\n");
+
+        let first = process.compile().expect("first compile");
+        assert_eq!(first.emit.emitted_functions, 1);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute first"),
+            11
+        );
+
+        process.upsert_file("constants.stasis", "const VALUE: i32 = 27;\n");
+        let second = process.compile().expect("second compile");
+        assert_eq!(
+            second.emit.emitted_functions, 1,
+            "main should be re-emitted when imported constants change"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute second"),
+            27
         );
     }
 
