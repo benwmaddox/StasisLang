@@ -3959,6 +3959,120 @@ fn ensure_no_variable_shadowing(
     Ok(())
 }
 
+fn try_emit_indexed_struct_copy_assignment(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    call_signatures: &CallSignatureMap,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path: target_collection,
+        index: target_index,
+        suffix: target_suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    if !target_suffix.is_empty() {
+        return Ok(false);
+    }
+    let SimpleExpr::IndexedPath {
+        collection_path: source_collection,
+        index: source_index,
+        suffix: source_suffix,
+    } = expression
+    else {
+        return Ok(false);
+    };
+    if !source_suffix.is_empty() {
+        return Ok(false);
+    }
+
+    if values_by_name.contains_key(target_collection) || values_by_name.contains_key(source_collection)
+    {
+        return Ok(false);
+    }
+
+    let Some(target_info) = collection_infos.get(target_collection) else {
+        return Ok(false);
+    };
+    let Some(source_info) = collection_infos.get(source_collection) else {
+        return Ok(false);
+    };
+    if target_info.field_types.is_empty() || source_info.field_types.is_empty() {
+        return Ok(false);
+    }
+    if op != AssignOp::Set {
+        return Err(format!(
+            "struct indexed copy assignment only supports '=' for '{}[...]'",
+            target_collection
+        ));
+    }
+    if target_info.field_types != source_info.field_types {
+        return Err(format!(
+            "struct indexed copy assignment requires matching field layout for '{}[...]' and '{}[...]'",
+            target_collection, source_collection
+        ));
+    }
+
+    let target_index_binding = emit_simple_expression(
+        builder,
+        target_index,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        foreach_bindings,
+    )?;
+    let source_index_binding = emit_simple_expression(
+        builder,
+        source_index,
+        values_by_name,
+        runtime_call_refs,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        foreach_bindings,
+    )?;
+
+    for field_name in target_info.field_types.keys() {
+        let source_value = emit_indexed_collection_load(
+            builder,
+            runtime_call_refs,
+            type_table,
+            source_collection,
+            source_info,
+            field_name,
+            source_index_binding,
+        )?;
+        emit_indexed_collection_assignment(
+            builder,
+            runtime_call_refs,
+            type_table,
+            target_collection,
+            target_info,
+            field_name,
+            target_index_binding,
+            AssignOp::Set,
+            source_value,
+        )?;
+    }
+    Ok(true)
+}
+
 fn emit_simple_statements(
     builder: &mut FunctionBuilder<'_>,
     statements: &[SimpleStmt],
@@ -4034,6 +4148,22 @@ fn emit_simple_statements(
                 op,
                 expression,
             } => {
+                if try_emit_indexed_struct_copy_assignment(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    target,
+                    *op,
+                    expression,
+                    values_by_name,
+                    call_signatures,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    foreach_bindings,
+                )? {
+                    continue;
+                }
                 let rhs = emit_simple_expression(
                     builder,
                     expression,
@@ -8208,6 +8338,49 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_indexed_struct_value_copy_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal enemies: Enemy[COUNT];\nfunction main(): i32 {\n    enemies[0].hp = 11;\n    enemies[0].speed = 2.5;\n    enemies[1] = enemies[0];\n    if (enemies[1].speed > 2.4) { return enemies[1].hp; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 11);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_indexed_struct_copy_assignment_for_mismatched_layouts() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 1;\nstruct One { hp: i32; }\nstruct Two { hp: i32; armor: i32; }\nglobal a: One[COUNT];\nglobal b: Two[COUNT];\nfunction main(): i32 {\n    a[0] = b[0];\n    return 0;\n}\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("struct indexed copy assignment requires matching field layout"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
