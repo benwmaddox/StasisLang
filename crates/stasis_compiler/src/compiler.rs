@@ -405,4 +405,50 @@ mod tests {
             .expect("emit pass");
         assert_eq!(emitted_names, vec!["helper".to_string()]);
     }
+
+    #[test]
+    fn signature_change_propagates_dirty_to_fan_out_dependents() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 1; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+        );
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(seed: i32): i32 { return seed; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+        );
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.signature_changed_functions, 1);
+        assert_eq!(index.dirty_functions, 3);
+        assert!(function_by_name(&compiler, "helper").dirty);
+        assert!(function_by_name(&compiler, "left").dirty);
+        assert!(function_by_name(&compiler, "right").dirty);
+    }
+
+    #[test]
+    fn signature_change_propagates_dirty_through_multi_level_chain() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 1; }\nfunction mid(): i32 { return leaf(); }\nfunction top(): i32 { return mid(); }\n",
+        );
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function leaf(seed: i32): i32 { return seed; }\nfunction mid(): i32 { return leaf(); }\nfunction top(): i32 { return mid(); }\n",
+        );
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.signature_changed_functions, 1);
+        assert_eq!(index.dirty_functions, 3);
+        assert!(function_by_name(&compiler, "leaf").dirty);
+        assert!(function_by_name(&compiler, "mid").dirty);
+        assert!(function_by_name(&compiler, "top").dirty);
+    }
 }
