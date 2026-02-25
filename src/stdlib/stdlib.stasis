@@ -18,6 +18,107 @@ function print_utf8(value: utf8[]): void {
     print_string(value);
 }
 
+function u8_to_i32(value: u8): i32 {
+    return value;
+}
+
+function i32_to_u8_trunc(value: i32): u8 {
+    let out: i32 = value % 256;
+    if (out < 0) {
+        out += 256;
+    }
+    return out;
+}
+
+function char_is_digit(b: u8): bool {
+    return b >= 48 && b <= 57;
+}
+
+function char_is_upper(b: u8): bool {
+    return b >= 65 && b <= 90;
+}
+
+function char_is_lower(b: u8): bool {
+    return b >= 97 && b <= 122;
+}
+
+function char_is_alpha(b: u8): bool {
+    return char_is_upper(b) || char_is_lower(b);
+}
+
+function char_is_alnum(b: u8): bool {
+    return char_is_alpha(b) || char_is_digit(b);
+}
+
+function char_is_space(b: u8): bool {
+    return b == 32 || b == 9 || b == 10 || b == 13;
+}
+
+function char_is_hex(b: u8): bool {
+    if (char_is_digit(b)) {
+        return true;
+    }
+    if (b >= 65 && b <= 70) {
+        return true;
+    }
+    return b >= 97 && b <= 102;
+}
+
+function char_is_print(b: u8): bool {
+    return b >= 32 && b <= 126;
+}
+
+function char_to_upper(b: u8): u8 {
+    if (char_is_lower(b)) {
+        return b - 32;
+    }
+    return b;
+}
+
+function char_to_lower(b: u8): u8 {
+    if (char_is_upper(b)) {
+        return b + 32;
+    }
+    return b;
+}
+
+function char_to_digit(b: u8): i32 {
+    if (!char_is_digit(b)) {
+        return -1;
+    }
+    return b - 48;
+}
+
+function char_from_digit(d: i32): u8 {
+    if (d < 0 || d > 9) {
+        return 48;
+    }
+    return 48 + d;
+}
+
+function char_to_hex(b: u8): i32 {
+    if (char_is_digit(b)) {
+        return b - 48;
+    }
+    if (b >= 65 && b <= 70) {
+        return 10 + (b - 65);
+    }
+    if (b >= 97 && b <= 102) {
+        return 10 + (b - 97);
+    }
+    return -1;
+}
+
+function char_from_hex(d: i32): u8 {
+    if (d < 0 || d > 15) {
+        return 48;
+    }
+    if (d < 10) {
+        return 48 + d;
+    }
+    return 65 + (d - 10);
+}
+
 function ascii_is_digit(b: u8): bool {
     return char_is_digit(b);
 }

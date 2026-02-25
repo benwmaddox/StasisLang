@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::IncrementalCompilerHost;
 
 const DEFAULT_FUNCTION_COUNTS: [usize; 1] = [1000];
@@ -10,9 +11,26 @@ const DEFAULT_CHUNK_SIZE: usize = 500;
 const DEFAULT_SEED: u64 = 1337;
 const DEFAULT_COLD_SAMPLES: usize = 1;
 const DEFAULT_INCREMENTAL_SAMPLES: usize = 1;
+const DEFAULT_MODE: BenchMode = BenchMode::Jit;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchMode {
+    Analysis,
+    Jit,
+}
+
+impl BenchMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Analysis => "analysis",
+            Self::Jit => "jit",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct BenchConfig {
+    mode: BenchMode,
     function_counts: Vec<usize>,
     chunk_size: usize,
     seed: u64,
@@ -22,6 +40,7 @@ struct BenchConfig {
 
 #[derive(Debug, Clone)]
 struct ScenarioResult {
+    mode: BenchMode,
     function_count: usize,
     file_count: usize,
     chunk_size: usize,
@@ -58,13 +77,28 @@ fn non_default_incremental_addend(default_value: i32, sample: usize) -> i32 {
     }
 }
 
-fn render_function_line(function_index: usize, addend: i32) -> String {
-    if function_index == 0 {
-        return format!("function fn_0(): i32 {{ return {addend}; }}\n");
+fn is_export_function(function_index: usize, function_count: usize) -> bool {
+    if function_count < 10 {
+        return true;
     }
+    function_index % 10 != 0
+}
+
+fn select_export_target(function_count: usize) -> usize {
+    for index in (0..function_count).rev() {
+        if is_export_function(index, function_count) {
+            return index;
+        }
+    }
+    0
+}
+
+fn render_function_line(function_index: usize, addend: i32, is_export: bool) -> String {
+    let scale = (function_index % 5) as i32 + 2;
+    let bias = (function_index % 3) as i32 - 1;
+    let keyword = if is_export { "export " } else { "" };
     format!(
-        "function fn_{function_index}(): i32 {{ return fn_{}() + {addend}; }}\n",
-        function_index - 1
+        "{keyword}function fn_{function_index}(): i32 {{ return ({addend} * {scale}) + {bias}; }}\n"
     )
 }
 
@@ -85,12 +119,17 @@ fn render_file_source(
         } else {
             default_addend(seed, function_index)
         };
-        out.push_str(&render_function_line(function_index, addend));
+        out.push_str(&render_function_line(
+            function_index,
+            addend,
+            is_export_function(function_index, function_count),
+        ));
     }
     if layout.has_main {
+        let target_function = select_export_target(function_count);
         out.push_str(&format!(
             "function main(): i32 {{ return fn_{}(); }}\n",
-            function_count.saturating_sub(1)
+            target_function
         ));
     }
     out
@@ -168,7 +207,33 @@ fn timed_compile(
     Ok(elapsed)
 }
 
-fn run_scenario(
+fn compile_error_message(error: stasis_compiler::compiler::CompileError) -> String {
+    match error {
+        stasis_compiler::compiler::CompileError::Frontend(message)
+        | stasis_compiler::compiler::CompileError::Backend(message)
+        | stasis_compiler::compiler::CompileError::Invariant(message) => message,
+    }
+}
+
+fn timed_compile_jit(process: &mut JitProcess, expected_functions: usize) -> Result<Duration, String> {
+    let start = Instant::now();
+    process
+        .compile()
+        .map_err(compile_error_message)?;
+    let elapsed = start.elapsed();
+    if process.artifacts().len() != expected_functions {
+        return Err(format!(
+            "jit compile artifact count mismatch: expected {expected_functions}, got {}",
+            process.artifacts().len()
+        ));
+    }
+    if process.artifacts().iter().any(|artifact| artifact.code_ptr == 0) {
+        return Err("jit compile produced zero code pointer artifact".to_string());
+    }
+    Ok(elapsed)
+}
+
+fn run_scenario_analysis(
     function_count: usize,
     chunk_size: usize,
     seed: u64,
@@ -183,7 +248,9 @@ fn run_scenario(
     let layouts = write_project_fixture(&temp_root, function_count, chunk_size, seed)?;
     let all_paths: Vec<PathBuf> = layouts.iter().map(|layout| layout.path.clone()).collect();
 
-    let target_function = std::cmp::max(1, function_count / 2);
+    // Edit the function referenced by main so incremental timing reflects one changed reachable
+    // function without chain-dependent ripple.
+    let target_function = select_export_target(function_count);
     let target_layout_index = layouts
         .iter()
         .position(|layout| target_function >= layout.start_fn && target_function < layout.end_fn)
@@ -226,6 +293,7 @@ fn run_scenario(
     fs::remove_dir_all(&temp_root).ok();
 
     Ok(ScenarioResult {
+        mode: BenchMode::Analysis,
         function_count,
         file_count: layouts.len(),
         chunk_size,
@@ -235,6 +303,118 @@ fn run_scenario(
         incremental_ms_p50: percentile_ms(&incremental_times, 50),
         incremental_ms_p95: percentile_ms(&incremental_times, 95),
     })
+}
+
+fn run_scenario_jit(
+    function_count: usize,
+    chunk_size: usize,
+    seed: u64,
+    cold_samples: usize,
+    incremental_samples: usize,
+) -> Result<ScenarioResult, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock error: {error}"))?
+        .as_nanos();
+    let temp_root =
+        env::temp_dir().join(format!("stasis_compiler_bench_jit_{function_count}_{stamp}"));
+    let layouts = write_project_fixture(&temp_root, function_count, chunk_size, seed)?;
+    let expected_functions = function_count + 1; // generated fns + main
+
+    let mut source_by_path: Vec<(PathBuf, String)> = Vec::with_capacity(layouts.len());
+    for layout in &layouts {
+        let source = fs::read_to_string(&layout.path).map_err(|error| {
+            format!(
+                "failed reading generated fixture {}: {error}",
+                layout.path.display()
+            )
+        })?;
+        source_by_path.push((layout.path.clone(), source));
+    }
+
+    let target_function = select_export_target(function_count);
+    let target_layout_index = layouts
+        .iter()
+        .position(|layout| target_function >= layout.start_fn && target_function < layout.end_fn)
+        .ok_or_else(|| {
+            format!("failed finding target function {target_function} in file layouts")
+        })?;
+    let target_layout = layouts[target_layout_index].clone();
+    let target_default_addend = default_addend(seed, target_function);
+
+    let mut cold_times = Vec::new();
+    for _ in 0..cold_samples {
+        let mut process = JitProcess::new();
+        for (path, source) in &source_by_path {
+            process.upsert_file(path.to_string_lossy().to_string(), source.clone());
+        }
+        cold_times.push(timed_compile_jit(&mut process, expected_functions)?);
+    }
+
+    let mut process = JitProcess::new();
+    for (path, source) in &source_by_path {
+        process.upsert_file(path.to_string_lossy().to_string(), source.clone());
+    }
+    timed_compile_jit(&mut process, expected_functions)?;
+
+    let mut incremental_times = Vec::new();
+    for sample in 0..incremental_samples {
+        let override_value = non_default_incremental_addend(target_default_addend, sample);
+        let updated_source = render_file_source(
+            &target_layout,
+            function_count,
+            seed,
+            Some((target_function, override_value)),
+        );
+        fs::write(&target_layout.path, &updated_source).map_err(|error| {
+            format!(
+                "failed writing incremental fixture {}: {error}",
+                target_layout.path.display()
+            )
+        })?;
+        source_by_path[target_layout_index].1 = updated_source.clone();
+        process.upsert_file(
+            target_layout.path.to_string_lossy().to_string(),
+            updated_source,
+        );
+        incremental_times.push(timed_compile_jit(&mut process, expected_functions)?);
+    }
+
+    fs::remove_dir_all(&temp_root).ok();
+
+    Ok(ScenarioResult {
+        mode: BenchMode::Jit,
+        function_count,
+        file_count: layouts.len(),
+        chunk_size,
+        seed,
+        cold_ms_p50: percentile_ms(&cold_times, 50),
+        cold_ms_p95: percentile_ms(&cold_times, 95),
+        incremental_ms_p50: percentile_ms(&incremental_times, 50),
+        incremental_ms_p95: percentile_ms(&incremental_times, 95),
+    })
+}
+
+fn run_scenario(
+    mode: BenchMode,
+    function_count: usize,
+    chunk_size: usize,
+    seed: u64,
+    cold_samples: usize,
+    incremental_samples: usize,
+) -> Result<ScenarioResult, String> {
+    match mode {
+        BenchMode::Analysis => run_scenario_analysis(
+            function_count,
+            chunk_size,
+            seed,
+            cold_samples,
+            incremental_samples,
+        ),
+        BenchMode::Jit => {
+            run_scenario_jit(function_count, chunk_size, seed, cold_samples, incremental_samples)
+        }
+    }
 }
 
 fn parse_usize_csv(value: &str) -> Result<Vec<usize>, String> {
@@ -257,6 +437,7 @@ fn parse_usize_csv(value: &str) -> Result<Vec<usize>, String> {
 
 fn parse_args() -> Result<BenchConfig, String> {
     let mut config = BenchConfig {
+        mode: DEFAULT_MODE,
         function_counts: DEFAULT_FUNCTION_COUNTS.to_vec(),
         chunk_size: DEFAULT_CHUNK_SIZE,
         seed: DEFAULT_SEED,
@@ -267,6 +448,20 @@ fn parse_args() -> Result<BenchConfig, String> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--mode" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--mode requires a value".to_string())?;
+                config.mode = match value.as_str() {
+                    "analysis" => BenchMode::Analysis,
+                    "jit" => BenchMode::Jit,
+                    _ => {
+                        return Err(format!(
+                            "invalid --mode value '{value}' (expected: analysis|jit)"
+                        ))
+                    }
+                };
+            }
             "--functions" => {
                 let value = args
                     .next()
@@ -307,6 +502,7 @@ fn parse_args() -> Result<BenchConfig, String> {
             }
             "--help" | "-h" => {
                 println!("stasis compiler benchmark");
+                println!("  --mode <analysis|jit>        default: jit");
                 println!("  --functions <csv>            default: 1000");
                 println!("  --chunk-size <n>             default: 500");
                 println!("  --seed <u64>                 default: 1337");
@@ -345,7 +541,8 @@ fn main() {
 
     println!("STASIS_COMPILER_BENCH_V1");
     println!(
-        "config functions={:?} chunk_size={} seed={} cold_samples={} incremental_samples={}",
+        "config mode={} functions={:?} chunk_size={} seed={} cold_samples={} incremental_samples={}",
+        config.mode.as_str(),
         config.function_counts,
         config.chunk_size,
         config.seed,
@@ -355,6 +552,7 @@ fn main() {
 
     for function_count in &config.function_counts {
         let result = match run_scenario(
+            config.mode,
             *function_count,
             config.chunk_size,
             config.seed,
@@ -369,7 +567,8 @@ fn main() {
         };
 
         println!(
-            "BENCH_RESULT {{\"functions\":{},\"files\":{},\"chunk_size\":{},\"seed\":{},\"cold_ms_p50\":{:.3},\"cold_ms_p95\":{:.3},\"incremental_ms_p50\":{:.3},\"incremental_ms_p95\":{:.3}}}",
+            "BENCH_RESULT {{\"mode\":\"{}\",\"functions\":{},\"files\":{},\"chunk_size\":{},\"seed\":{},\"cold_ms_p50\":{:.3},\"cold_ms_p95\":{:.3},\"incremental_ms_p50\":{:.3},\"incremental_ms_p95\":{:.3}}}",
+            result.mode.as_str(),
             result.function_count,
             result.file_count,
             result.chunk_size,
@@ -384,7 +583,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_addend, non_default_incremental_addend, parse_usize_csv, percentile_ms};
+    use super::{
+        default_addend, is_export_function, non_default_incremental_addend, parse_usize_csv,
+        percentile_ms, select_export_target,
+    };
     use std::time::Duration;
 
     #[test]
@@ -419,6 +621,27 @@ mod tests {
             assert_ne!(even, default);
             assert_ne!(odd, default);
             assert_ne!(even, odd);
+        }
+    }
+
+    #[test]
+    fn export_ratio_is_ninety_ten_for_thousand_and_five_thousand() {
+        for function_count in [1000usize, 5000usize] {
+            let exported = (0..function_count)
+                .filter(|index| is_export_function(*index, function_count))
+                .count();
+            let non_exported = function_count - exported;
+            assert_eq!(exported * 10, function_count * 9);
+            assert_eq!(non_exported * 10, function_count);
+        }
+    }
+
+    #[test]
+    fn selected_incremental_target_is_exported() {
+        for function_count in [1usize, 10usize, 1000usize, 5000usize] {
+            let target = select_export_target(function_count);
+            assert!(is_export_function(target, function_count));
+            assert!(target < function_count);
         }
     }
 }

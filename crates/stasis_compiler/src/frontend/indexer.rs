@@ -25,11 +25,11 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
         let mut params = Vec::with_capacity(function.params.len());
         let mut param_names = Vec::with_capacity(function.params.len());
         for param in &function.params {
-            let type_id = types.resolve_or_intern(&param.type_name);
+            let type_id = types.resolve_or_intern(&param.type_name)?;
             param_names.push(param.name.clone());
             params.push(type_id);
         }
-        let return_type = types.resolve_or_intern(&function.return_type_name);
+        let return_type = types.resolve_or_intern(&function.return_type_name)?;
         let name_hash = hash_text(&function.name);
         let signature_hash = hash_signature(name_hash, &params, return_type);
         let body_text = source
@@ -93,7 +93,7 @@ fn collect_dependency_hashes(body_text: &str) -> Result<Vec<u64>, String> {
 }
 
 fn is_call_keyword(identifier: &str) -> bool {
-    matches!(identifier, "if" | "for" | "while" | "return" | "function")
+    matches!(identifier, "if" | "for" | "foreach" | "return" | "function")
 }
 
 #[cfg(test)]
@@ -109,10 +109,7 @@ mod tests {
         assert_eq!(indexed[0].name, "main");
         assert_eq!(indexed[0].param_names, vec!["value".to_string()]);
         assert_eq!(indexed[0].params.len(), 1);
-        assert_eq!(
-            indexed[0].return_type,
-            types.resolve("i32").unwrap_or_default()
-        );
+        assert_eq!(indexed[0].return_type, types.resolve("i32").unwrap_or_default());
     }
 
     #[test]

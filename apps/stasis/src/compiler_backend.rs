@@ -4,7 +4,9 @@ use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::parse_top_level_functions;
-use stasis_compiler::{IncrementalCompilerHost, SimpleI32Condition, SimpleI32ReturnExpr};
+use stasis_compiler::IncrementalCompilerHost;
+#[cfg(test)]
+use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
     compile_clif_to_object, link_objects_to_dynamic_library, link_objects_to_executable,
     AotCompileConfig, AotLinkConfig,
@@ -687,6 +689,9 @@ impl IncrementalCompilerBackend {
         let mut hook_fn_id: Option<FnId> = None;
         let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
         for entry in &function_entries {
+            if !symbol_code_ptrs.contains_key(&entry.name) {
+                continue;
+            }
             let key = format!("rust_native::{}::{}", entry.path, entry.name);
             let fn_id = self.fn_id_for_key(&key)?;
             if let Some(previous) = fn_id_by_name.insert(entry.name.clone(), fn_id) {
@@ -701,6 +706,12 @@ impl IncrementalCompilerBackend {
                 hook_fn_id = Some(fn_id);
             }
             functions.push(FunctionPatch { fn_id });
+        }
+        if functions.is_empty() {
+            return Err(
+                "non-engine JIT compile requires at least one emitted function code pointer"
+                    .to_string(),
+            );
         }
 
         let mut jit_code_ptr_overrides = Vec::new();
@@ -1394,6 +1405,7 @@ fn build_aot_stub_clif(
     )
 }
 
+#[cfg(test)]
 fn clif_type_for_stasis_param_code(type_code: i32) -> &'static str {
     if type_code == 1 {
         "i32"
@@ -1402,6 +1414,7 @@ fn clif_type_for_stasis_param_code(type_code: i32) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn build_aot_stub_clif_for_metric(
     function_name: &str,
     return_type: &str,
@@ -1859,6 +1872,7 @@ fn resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_ha
     None
 }
 
+#[cfg(test)]
 fn emit_clif_for_simple_expr(
     expr: &SimpleI32ReturnExpr,
     temp_counter: &mut u32,
@@ -1900,6 +1914,7 @@ fn emit_clif_for_simple_expr(
     }
 }
 
+#[cfg(test)]
 fn emit_clif_condition(
     condition: &SimpleI32Condition,
     temp_counter: &mut u32,
@@ -1944,6 +1959,7 @@ fn emit_clif_condition(
     out
 }
 
+#[cfg(test)]
 fn emit_clif_condition_branch_blocks(
     condition: &SimpleI32Condition,
     current_label: &str,
@@ -2060,6 +2076,7 @@ fn emit_clif_condition_branch_blocks(
     }
 }
 
+#[cfg(test)]
 fn emit_clif_comparison_branch_block(
     predicate: &str,
     left: &SimpleI32ReturnExpr,
@@ -2081,6 +2098,7 @@ fn emit_clif_comparison_branch_block(
     (current_label.to_string(), lines)
 }
 
+#[cfg(test)]
 fn emit_clif_binary_expr(
     opcode: &str,
     left: &SimpleI32ReturnExpr,
@@ -3397,6 +3415,161 @@ mod tests {
     }
 
     #[test]
+    fn jit_dev_non_engine_accepts_for_loop_decrement_step() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_non_engine_for_sub_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 5; i > 0; i -= 2) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_104),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics for for-loop decrement-step compile"
+        );
+        let overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit code pointer overrides should be present");
+        assert_eq!(overrides.len(), 1, "expected one compiled function");
+        assert!(
+            overrides.iter().all(|entry| entry.code_ptr != 0),
+            "jit overrides should carry non-zero pointers"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_non_engine_accepts_if_else_if_else_shape() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_jit_non_engine_if_else_if_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 2; if (value == 0) { return 1; } else if (value == 2) { return 5; } else { return 9; } }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_105),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics for if/else-if/else compile"
+        );
+        let overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit code pointer overrides should be present");
+        assert_eq!(overrides.len(), 1, "expected one compiled function");
+        assert!(
+            overrides.iter().all(|entry| entry.code_ptr != 0),
+            "jit overrides should carry non-zero pointers"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_non_engine_accepts_logical_condition_shape() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_jit_non_engine_logical_condition_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 2; if ((value > 1 && value < 4) || !(value == 2)) { return 11; } return 0; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_106),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics for logical condition compile"
+        );
+        let overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit code pointer overrides should be present");
+        assert_eq!(overrides.len(), 1, "expected one compiled function");
+        assert!(
+            overrides.iter().all(|entry| entry.code_ptr != 0),
+            "jit overrides should carry non-zero pointers"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_non_engine_accepts_for_loop_logical_condition_shape() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_jit_non_engine_for_logical_condition_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; (i < 5) && !(i == 3); i += 1) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_107),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expected no diagnostics for for-loop logical condition compile"
+        );
+        let overrides = result
+            .jit_code_ptr_overrides
+            .as_ref()
+            .expect("jit code pointer overrides should be present");
+        assert_eq!(overrides.len(), 1, "expected one compiled function");
+        assert!(
+            overrides.iter().all(|entry| entry.code_ptr != 0),
+            "jit overrides should carry non-zero pointers"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn jit_dev_non_engine_rejects_duplicate_function_names_without_legacy_fallback() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4122,6 +4295,627 @@ mod tests {
                 .iter()
                 .any(|detail| detail.id_hash == hash_identifier("main")),
             "one-arg parenthesized literal-expression direct-call lowering should not fall back for main()"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_for_loop_decrement_step_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_for_loop_decrement_step_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 5; i > 0; i -= 2) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(150),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for the non-engine AOT fixture"
+        );
+
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_if_else_if_else_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_if_else_if_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 2; if (value == 0) { return 1; } else if (value == 2) { return 5; } else { return 9; } }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(151),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for if/else-if/else fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_logical_condition_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_logical_condition_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 2; if ((value > 1 && value < 4) || !(value == 2)) { return 11; } return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(152),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for logical-condition fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_for_loop_logical_condition_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_for_loop_logical_condition_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0; (i < 5) && !(i == 3); i += 1) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(153),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for for-loop logical-condition fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_for_loop_call_init_and_conversion_step_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_for_loop_call_init_conversion_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "global State { init_calls: i32; }\nfunction mark_init(): void { State.init_calls += 1; return; }\nfunction main(): i32 { let i: f32 = 0.0; let sum: i32 = 0; for (mark_init(); i < 3.0; i.from_i32(sum)) { sum += 1; } return sum + State.init_calls; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(159),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            2,
+            "expected two patched functions for for-loop call+conversion fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_for_loop_global_init_and_indexed_conversion_step_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_for_loop_global_indexed_conversion_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "const COUNT: i32 = 2;\nstruct Node { value: f32; }\nglobal nodes: Node[COUNT];\nglobal State { snap: f32; }\nfunction main(): i32 { let sum: i32 = 0; for (State.snap.from_i32(0); sum < 2; nodes[1].value.from_i32(sum)) { sum += 1; } let out: i32 = 0; out.from_f32(nodes[1].value); return out; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(160),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for for-loop global/indexed conversion fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_inferred_let_and_for_init_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_inferred_let_for_init_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum = 0; for (let i = 0; i < 4; i += 1) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(161),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for inferred-let for-init fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_bool_condition_expression_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_bool_condition_expression_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let ready = true; if (ready) { return 1; } return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(162),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert_eq!(
+            patch_set.functions.len(),
+            1,
+            "expected one patched function for bool-condition expression fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_utf8_literal_call_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_utf8_literal_call_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function take_text(value: utf8[]): i32 { return 9; }\nfunction main(): i32 { return take_text(\"café ☕\"); }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(154),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert!(
+            !patch_set.functions.is_empty(),
+            "expected at least one patched function for utf8 literal call fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_block_comment_between_statements_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_block_comment_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 2; /* block comment */ value += 5; return value; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(155),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert!(
+            !patch_set.functions.is_empty(),
+            "expected at least one patched function for block-comment fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_string_literal_with_semicolon_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_string_semicolon_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { print_string(\"alpha; beta {x}\"); return 1; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(156),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert!(
+            !patch_set.functions.is_empty(),
+            "expected at least one patched function for string-literal semicolon fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_comments_inside_expression_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_expression_comment_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let value: i32 = 1 /* plus */ + 2; if (value /*lhs*/ == /*rhs*/ 3) { return 1; } return 0; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(157),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert!(
+            !patch_set.functions.is_empty(),
+            "expected at least one patched function for expression-comment fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_accepts_for_header_comment_semicolon_contract() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir()
+            .join(format!("stasis_aot_for_header_comment_semicolon_contract_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("sample.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { let sum: i32 = 0; for (let i: i32 = 0 /* ; in comment */; i < 4; i += 1) { sum += i; } return sum; }\n",
+        )
+        .expect("write source");
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(158),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let patch_set = result
+            .fn_patch_set
+            .as_ref()
+            .expect("patch set should be present for successful AOT compile");
+        assert!(
+            !patch_set.functions.is_empty(),
+            "expected at least one patched function for for-header comment fixture"
+        );
+        let manifest_path = artifact_root.join("last_patch_manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "expected AOT manifest to be written for successful compile"
         );
 
         fs::remove_dir_all(&temp_root).ok();

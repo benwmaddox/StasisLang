@@ -198,15 +198,32 @@ impl Compiler {
             .filter(|function| function.dirty)
             .map(|function| function.id)
             .collect();
-        for function_id in &dirty_ids {
-            let snapshot = self.functions[*function_id as usize].clone();
+        self.emit_pass_for_ids_with(&dirty_ids, emit_function)
+    }
+
+    pub fn emit_pass_for_ids_with<F>(
+        &mut self,
+        function_ids: &[FunctionId],
+        emit_function: &mut F,
+    ) -> CompileResult<EmitPassResult>
+    where
+        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+    {
+        let mut emitted_functions = 0usize;
+        for function_id in function_ids {
+            let snapshot = self
+                .functions
+                .get(*function_id as usize)
+                .ok_or_else(|| {
+                    CompileError::Invariant(format!("invalid function id {}", function_id))
+                })?
+                .clone();
             let hir = self.lower_function_to_hir(&snapshot)?;
             emit_function(&snapshot, &hir).map_err(CompileError::Backend)?;
             self.functions[*function_id as usize].dirty = false;
+            emitted_functions += 1;
         }
-        Ok(EmitPassResult {
-            emitted_functions: dirty_ids.len(),
-        })
+        Ok(EmitPassResult { emitted_functions })
     }
 
     pub fn files(&self) -> &[SourceFile] {
@@ -215,6 +232,10 @@ impl Compiler {
 
     pub fn functions(&self) -> &[FunctionMeta] {
         &self.functions
+    }
+
+    pub fn types(&self) -> &TypeTable {
+        &self.types
     }
 
     fn capture_previous_hashes(&self) -> HashMap<(u32, u64), PreviousFunctionHashes> {

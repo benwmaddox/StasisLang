@@ -41,12 +41,15 @@ Note: this requires elevated/admin PowerShell and does not override WDAC/AppLock
 
 - `STASIS_AOT_SIGN_TOOL` signs AOT-produced executables.
 - `STASIS_COMPILER_ANALYSIS_SIGN_TOOL` signs blocked compiler-analysis artifacts (for example `.stasis_cache\run\*.dll`) and retries once automatically.
+- Cargo execution in this repo now runs through `.cargo\stasis-sign-and-run.cmd` on Windows and will sign each launched executable first when `STASIS_AOT_SIGN_TOOL` is set.
+- Set `STASIS_REQUIRE_SIGNED_EXECUTION=1` to fail fast if the signer tool is missing.
 
 Example (PowerShell):
 
 ```powershell
 $env:STASIS_AOT_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
 $env:STASIS_COMPILER_ANALYSIS_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
+$env:STASIS_REQUIRE_SIGNED_EXECUTION = "1"
 ```
 
 Signer contract: tool is invoked as `<tool> <artifact_path>` and must return exit code `0` on success.

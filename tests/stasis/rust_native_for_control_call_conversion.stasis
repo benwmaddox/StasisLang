@@ -1,0 +1,15 @@
+global State { init_calls: i32; }
+
+function mark_init(): void {
+    State.init_calls += 1;
+    return;
+}
+
+function main(): i32 {
+    let i: f32 = 0.0;
+    let sum: i32 = 0;
+    for (mark_init(); i < 3.0; i.from_i32(sum)) {
+        sum += 1;
+    }
+    return sum + State.init_calls;
+}

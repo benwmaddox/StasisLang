@@ -67,23 +67,14 @@ impl RuntimeLauncher {
                 stasis_exe.display()
             ));
         }
-        let scenario = if self
-            .source_file
-            .to_string_lossy()
-            .contains("brickout_revenge_v1")
-        {
-            "brickout-revenge-v1"
-        } else {
-            return Err(format!(
-                "runtime launch scenario mapping is not defined for {}",
-                self.source_file.display()
-            ));
-        };
 
         let mut command = Command::new(stasis_exe);
+        if let Some(scenario) = runtime_launch_scenario_for_source(&self.source_file) {
+            command.arg("--scenario").arg(scenario);
+        } else {
+            command.arg("--watch-file").arg(&self.source_file);
+        }
         command
-            .arg("--scenario")
-            .arg(scenario)
             .arg("--ticks")
             .arg("1000000")
             .arg("--tick-sleep-us")
@@ -98,6 +89,16 @@ impl RuntimeLauncher {
             .spawn()
             .map_err(|error| format!("failed to launch runtime process: {error}"))
     }
+}
+
+fn runtime_launch_scenario_for_source(source_file: &Path) -> Option<&'static str> {
+    if source_file
+        .to_string_lossy()
+        .contains("brickout_revenge_v1")
+    {
+        return Some("brickout-revenge-v1");
+    }
+    None
 }
 
 impl Drop for RuntimeLauncher {
@@ -124,5 +125,21 @@ mod tests {
                 .replace('\\', "/")
                 .contains("/StasisLang")
         );
+    }
+
+    #[test]
+    fn runtime_launch_scenario_is_selected_for_brickout_fixture() {
+        let scenario = runtime_launch_scenario_for_source(Path::new(
+            "samples/brickout_revenge/brickout_revenge_v1.stasis",
+        ));
+        assert_eq!(scenario, Some("brickout-revenge-v1"));
+    }
+
+    #[test]
+    fn runtime_launch_scenario_is_not_required_for_generic_fixture() {
+        let scenario = runtime_launch_scenario_for_source(Path::new(
+            "tests/stasis/rust_native_block_comment_between_statements.stasis",
+        ));
+        assert_eq!(scenario, None);
     }
 }

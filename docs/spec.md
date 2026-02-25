@@ -78,12 +78,22 @@ u8 u16 u32 i32 f32 f64 bool void
 
 String-like storage is fixed-layout and deterministic.
 
+`Type[N]` layout:
+- header `max_length: i32`
+- payload `elements[N]`
+
+`Type[]` call-site compatibility:
+- A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).
+- The storage header still carries `max_length` so bounds metadata remains available at runtime.
+
 `ascii[N]` layout:
 - header `byte_length: i32`
+- header `max_length: i32`
 - payload `bytes[N]`
 
 `utf8[N]` layout:
 - header `byte_length: i32`
+- header `max_length: i32`
 - header `char_length: i32`
 - payload `bytes[N]`
 

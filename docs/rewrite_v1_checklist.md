@@ -66,6 +66,28 @@ It is not part of the steady-state incremental JIT update loop.
 - Simple-pass compiler now builds a root-based function reachability set in `.stasis` (`main`, `tick`, `on_code_swap`) and emits reachable functions only through host analysis harness output (current call-edge discovery uses direct identifier-call tokens; files with no roots keep all functions reachable to avoid helper-file drops in current per-file host analysis flow).
 - Ownership enforcement: compiler frontend semantics are routed through `.stasis` (`compiler/simple_pass_compiler.stasis`), and Rust is constrained to host/runtime glue.
 - Rust semantic analyzer paths were removed from `crates/stasis_compiler`; ownership guard test now enforces zero reintroduction (`tests/compiler_logic_ownership_guard.rs`).
+- Rust-native JIT now resolves typed global paths from top-level declarations (`struct`, `global name: Type`, and `global Name { ... }`) and emits typed runtime global loads/stores (`i32` and `f32`) without implicit `i32` fallback.
+- Rust-native JIT now resolves top-level `const` identifiers (`i32`/`f32`/`bool`) and enum variant identifiers (`Enum.Variant`, including explicit enum discriminants) as immediate values during expression lowering.
+- Brickout probe progress: fixed-size `foreach` and explicit indexed path expressions/assignments (`collection[index]`, `collection[index].field`) now lower in Rust-native JIT, including enum-typed field assignment/comparison in indexed paths.
+- Rust-native JIT call dispatch now supports `i32`/`bool` return functions with uniform `f32` argument lanes (arity `1..8`) in addition to existing `i32` lanes.
+- Statement parser/lowering now supports call-expression statements (`callee(...);`) in addition to assignment/conversion/flow-control statements.
+- Rust-native JIT now supports:
+- top-level extern declaration parsing (`extern function ...` and `@extern("...")`) and direct extern call emission
+- string constants in top-level `const` declarations
+- conversion statements targeting locals, global paths, and indexed paths
+- mixed-ABI call lowering fallback through exact-signature indirect call emission
+- local indexed collection load/store for fixed/view array bindings
+- local `foreach` over fixed-size local array bindings
+- `for` headers with empty init/step segments (`for (; cond; step)` and `for (; cond; )`)
+- Reachability-gated emission now compiles roots (`main`, `tick`, `render`, `on_code_swap`) plus reachable callees; same-name overload siblings are included to preserve receiver overload behavior.
+- Non-engine JIT contract assembly now consumes only emitted symbol code pointers (unemitted, unreachable functions are excluded from override patch emission).
+- Host memory intrinsics used by stdlib/gfx paths are now real externs with Rust-native bindings:
+- `sys_memcpy_u8/i32/f32`
+- `sys_memmove_u8/i32/f32`
+- Brickout probe status (Rust-native JIT): `samples/brickout_revenge/brickout_revenge_v1.stasis` compiles and commits successfully for `--ticks 1` with runtime launch + hook + swap commit success.
+- Brickout probe status (AOT prod path): `samples/brickout_revenge/brickout_revenge_v1.stasis` now compiles and commits successfully for `--ticks 1` with runtime launch + hook + swap commit success.
+- Runtime launcher now falls back to generic `--watch-file` launch for non-scenario fixtures (instead of hard failing unknown scenario mapping), so compiler-slice fixtures can be exercised through runtime launch path as well.
+- Incremental semantic guard for mutating `from_*` conversions now uses block-aware statement splitting and annotation-aware function scanning, removing false-positive rejection on valid `if/else` conversion statements while preserving expression misuse diagnostics.
 
 ### S0 - Workspace Bootstrap
 - Language:
@@ -602,6 +624,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Keep `.stasis` as compiler logic owner; Rust remains host/runtime glue only.
 - Keep compiler data flat and fixed-cap where practical (`ascii[n]`, fixed arrays, index-based adjacency); avoid new per-function heap allocations.
 - Avoid new parser-shape fallback expansion; prefer direct parse/emit and delete non-conforming paths when touched.
+- Windows policy hardening: keep executable signing in the default execution path for local `cargo run/test` on Windows via repo runner hook, with strict mode available (`STASIS_REQUIRE_SIGNED_EXECUTION=1`).
 - Slice CS0: Add deterministic compile-time benchmark harness and baselines.
 - Language: `Rust + .stasis` (measurement only; no policy ownership shift).
 - Scope: add repeatable benchmark fixtures for 1k/5k function projects and emit p50/p95 timings for cold/incremental runs.
@@ -610,6 +633,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
 - Current progress:
 - Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
+- Benchmark executable now supports explicit mode selection: `--mode analysis` (in-process analysis only) and `--mode jit` (Cranelift machine-code generation via rust-native `JitProcess`).
 - Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
 - 1k functions: cold p50/p95 `4390.080ms`, incremental p50/p95 `4280.470ms`.
@@ -634,6 +658,19 @@ It is not part of the steady-state incremental JIT update loop.
 - Rust-native JIT now supports direct `i32` call expressions with `0..2` arguments via in-process dispatch symbols (`callee()`, `callee(x)`, `callee(x,y)`) and validates these through in-memory execution tests.
 - Rust-native JIT now supports receiver-form calls (`receiver.method(...)`) lowered as function-form calls (`method(receiver, ...)`) with compile-time signature-based target selection.
 - Rust-native type interning now keeps user type names in signature metadata so overload resolution can distinguish same method names by receiver type.
+- Rust-native JIT statement lowering now supports spec-defined compound assignment operators (`-=`, `*=`, `/=`, `%=`) in both regular statements and `for`-loop step clauses; non-spec loop keyword `while` remains rejected in this path.
+- Rust-native JIT statement lowering now supports spec-defined `if/else if/else` chains (including deterministic branch execution verification via in-memory JIT tests) and keeps non-spec loop keywords rejected.
+- Rust-native JIT condition lowering now supports spec-defined logical composition in control flow (`&&`, `||`, `!`, parenthesized grouping) for both `if` branches and `for` conditions, with deterministic in-memory verification.
+- Rust-native JIT expression/statement lowering now supports dotted-path i32 global access through real runtime imports (`load/store`) so assignments/reads like `state.rng_state = ...; return state.rng_state;` compile in-process without external analysis fallback.
+- Rust-native JIT now has initial non-i32 path support in the same pipeline: `f32`/`bool` signature lowering, float literals/arithmetic/comparisons, and conversion statements (`from_i32`, `from_f32`) for local bindings.
+- Rust-native JIT parser now skips line comments (`// ...`) inside function bodies in the direct statement parser path.
+- Rust-native JIT parser now also skips block comments (`/* ... */`) between statements in the direct statement parser path, with regression coverage in both in-memory JIT execution and AOT compile contract tests.
+- Statement terminator + delimiter matching are now comment/string-aware in the direct parse path, preventing false statement splits on `;`/braces inside string literals or comments and allowing control-flow comments near delimiters (`if/*...*/(...)`, `for (...) /*...*/ { ... }`).
+- Direct expression tokenization now skips both line and block comments inside expressions/conditions, enabling shapes like `let x = 1 /*a*/ + 2;` and `if (x /*lhs*/ == /*rhs*/ 3)` without parse failures.
+- Condition and `for`-header top-level operator/segment scans now ignore comment payload, so operator-like tokens and `;` text inside comments do not affect parse boundaries (`/* || */`, `/* == */`, `/* ; */`).
+- `for` control segments now accept call-expression init/step and `from_*` conversion init/step statements in the direct parser path (including global-path and indexed-path conversion targets), with deterministic in-memory JIT execution coverage and AOT compile-contract coverage for mixed call+conversion headers.
+- Direct parser/lowering now supports inferred `let` bindings (`let name = expr`) for local declarations, including inferred `for` init declarations (`for (let i = 0; ... )`) and inferred `f32` locals from float literals.
+- Direct parser/lowering now enforces spec condition typing for expression-form conditions: `if (<expr>)` and `for (...; <expr>; ...)` require `<expr>` to be `bool`; numeric truthiness (`i32`/`f32`) is rejected with deterministic diagnostics.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
@@ -674,7 +711,17 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: O(1) type identity checks in parse/emit path.
 - Tests: type interning determinism, unknown-type diagnostics, and unchanged behavior on current fixtures.
 - Done gate: hot path has no repeated string type comparisons for resolved types.
-- Status: `pending`
+- Current progress:
+- Rust-native frontend type interning now canonicalizes `Type[]` and `Type[N]` into structured interned `TypeId`s instead of raw type-name strings.
+- Array storage layout metadata now models `max_length` header semantics (`Type[N]` carries header words + payload sizing metadata); view forms (`Type[]`) are represented as distinct interned types to support mixed-capacity call compatibility.
+- `ascii`/`utf8` layout metadata now includes explicit header-word counts aligned with current runtime contract (`ascii`: `byte_length + max_length`; `utf8`: `byte_length + max_length + char_length`).
+- `string` now canonicalizes as an alias of `utf8[]` (`string[N]` -> `utf8[N]`) in type interning.
+- Type compatibility rules are now explicit in the interned type table (`argument -> parameter`): `Type[N]` is compatible with `Type[]` when element type matches; same for `ascii[N] -> ascii[]` and `utf8[N] -> utf8[]`, while cross-family string compatibility remains rejected by default.
+- Rust-native JIT call overload matching now uses interned type-compatibility checks instead of raw `TypeId` equality only.
+- Rust-native expression tokenization now accepts UTF-8 string literal codepoints (not ASCII-only), so non-ASCII literals compile in direct JIT parse/emit paths.
+- Added targeted coverage for this shape in both paths: `crates/stasis_compiler::backend::jit::tests::jit_process_accepts_non_ascii_utf8_string_literal_argument` and `apps/stasis::compiler_backend::tests::aot_compile_accepts_utf8_literal_call_contract`.
+- Added deterministic unit coverage in `crates/stasis_compiler/src/frontend/types.rs` for array/string interning and layout metadata.
+- Status: `in_progress`
 - Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
 - Language: `.stasis`.
 - Scope: emit CLIF directly during dirty-function body parse with compact scratch reuse; keep only real supported paths.

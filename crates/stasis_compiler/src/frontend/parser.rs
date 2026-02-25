@@ -17,6 +17,67 @@ pub struct ParsedFunctionSignature {
     pub body_range: Range<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedExternFunctionDeclaration {
+    pub name: String,
+    pub symbol_name: String,
+    pub explicit_symbol: bool,
+    pub params: Vec<ParsedParam>,
+    pub return_type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedField {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedStructDefinition {
+    pub name: String,
+    pub fields: Vec<ParsedField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedEnumDefinition {
+    pub name: String,
+    pub variants: Vec<ParsedEnumVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedEnumVariant {
+    pub name: String,
+    pub value: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedGlobalDefinition {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedGlobalBlockDefinition {
+    pub name: String,
+    pub fields: Vec<ParsedField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConstDefinition {
+    pub name: String,
+    pub type_name: String,
+    pub value_text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedTypeLayout {
+    pub enums: Vec<ParsedEnumDefinition>,
+    pub structs: Vec<ParsedStructDefinition>,
+    pub globals: Vec<ParsedGlobalDefinition>,
+    pub global_blocks: Vec<ParsedGlobalBlockDefinition>,
+    pub constants: Vec<ParsedConstDefinition>,
+}
+
 pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSignature>, String> {
     let tokens = lex(source)?;
     let mut out = Vec::new();
@@ -28,6 +89,7 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
         }
         let signature_start = tokens[cursor].start;
         cursor += 1;
+        cursor = skip_function_annotations(source, &tokens, cursor)?;
         let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
         cursor += 1;
         expect(&tokens, cursor, TokenKind::LParen)?;
@@ -42,9 +104,8 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
             cursor += 1;
             expect(&tokens, cursor, TokenKind::Colon)?;
             cursor += 1;
-            let type_name =
-                token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
-            cursor += 1;
+            let (type_name, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            cursor = next_cursor;
             params.push(ParsedParam {
                 name: param_name,
                 type_name,
@@ -65,10 +126,19 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
             .is_some_and(|token| token.kind == TokenKind::Colon)
         {
             cursor += 1;
-            return_type_name =
-                token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
-            cursor += 1;
+            let (parsed_return_type, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            return_type_name = parsed_return_type;
+            cursor = next_cursor;
         }
+
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            cursor += 1;
+            continue;
+        }
+
         let signature_end = tokens
             .get(cursor)
             .map_or(source.len(), |token| token.start)
@@ -90,8 +160,563 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
     Ok(out)
 }
 
+pub fn parse_top_level_extern_functions(
+    source: &str,
+) -> Result<Vec<ParsedExternFunctionDeclaration>, String> {
+    let tokens = lex(source)?;
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        let mut has_extern_prefix = false;
+        if tokens
+            .get(cursor)
+            .copied()
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+            && token_text(source, tokens[cursor]) == "extern"
+            && tokens
+                .get(cursor + 1)
+                .is_some_and(|token| token.kind == TokenKind::FunctionKw)
+        {
+            has_extern_prefix = true;
+            cursor += 1;
+        }
+
+        if tokens
+            .get(cursor)
+            .is_none_or(|token| token.kind != TokenKind::FunctionKw)
+        {
+            cursor += 1;
+            continue;
+        }
+
+        cursor += 1;
+        let (after_annotations, annotation_symbol) =
+            parse_function_annotations(source, &tokens, cursor)?;
+        cursor = after_annotations;
+        let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
+        cursor += 1;
+        expect(&tokens, cursor, TokenKind::LParen)?;
+        cursor += 1;
+        let mut params = Vec::new();
+        while tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind != TokenKind::RParen)
+        {
+            let param_name =
+                token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
+            cursor += 1;
+            expect(&tokens, cursor, TokenKind::Colon)?;
+            cursor += 1;
+            let (type_name, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            cursor = next_cursor;
+            params.push(ParsedParam {
+                name: param_name,
+                type_name,
+            });
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token.kind == TokenKind::Comma)
+            {
+                cursor += 1;
+            }
+        }
+        expect(&tokens, cursor, TokenKind::RParen)?;
+        cursor += 1;
+
+        let mut return_type_name = "void".to_string();
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::Colon)
+        {
+            cursor += 1;
+            let (parsed_return_type, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            return_type_name = parsed_return_type;
+            cursor = next_cursor;
+        }
+
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            if has_extern_prefix || annotation_symbol.is_some() {
+                let explicit_symbol = annotation_symbol.is_some();
+                let symbol_name = annotation_symbol.unwrap_or_else(|| name.clone());
+                out.push(ParsedExternFunctionDeclaration {
+                    name,
+                    symbol_name,
+                    explicit_symbol,
+                    params,
+                    return_type_name,
+                });
+            }
+            cursor += 1;
+            continue;
+        }
+
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::LBrace)
+        {
+            cursor += 1;
+            let body_end_token_index = find_matching_rbrace(&tokens, cursor, 1)?;
+            cursor = body_end_token_index + 1;
+            continue;
+        }
+
+        cursor += 1;
+    }
+    Ok(out)
+}
+
+pub fn parse_top_level_type_layout(source: &str) -> Result<ParsedTypeLayout, String> {
+    let tokens = lex(source)?;
+    let mut out = ParsedTypeLayout::default();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < tokens.len() {
+        let token = tokens[cursor];
+        match token.kind {
+            TokenKind::LBrace => {
+                depth = depth.saturating_add(1);
+                cursor += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                continue;
+            }
+            TokenKind::Identifier if depth == 0 => {
+                let keyword = token_text(source, token);
+                if keyword == "struct" {
+                    let (parsed, next_cursor) = parse_struct_definition(source, &tokens, cursor)?;
+                    out.structs.push(parsed);
+                    cursor = next_cursor;
+                    continue;
+                }
+                if keyword == "enum" {
+                    let (parsed, next_cursor) = parse_enum_definition(source, &tokens, cursor)?;
+                    out.enums.push(parsed);
+                    cursor = next_cursor;
+                    continue;
+                }
+                if keyword == "global" {
+                    let (parsed, next_cursor) = parse_global_definition(source, &tokens, cursor)?;
+                    match parsed {
+                        ParsedGlobalTopLevel::TypedGlobal(global) => out.globals.push(global),
+                        ParsedGlobalTopLevel::GlobalBlock(block) => out.global_blocks.push(block),
+                    }
+                    cursor = next_cursor;
+                    continue;
+                }
+                if keyword == "const" {
+                    let (parsed, next_cursor) = parse_const_definition(source, &tokens, cursor)?;
+                    out.constants.push(parsed);
+                    cursor = next_cursor;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedGlobalTopLevel {
+    TypedGlobal(ParsedGlobalDefinition),
+    GlobalBlock(ParsedGlobalBlockDefinition),
+}
+
+fn parse_struct_definition(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedStructDefinition, usize), String> {
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let body_open = expect(tokens, cursor + 2, TokenKind::LBrace)?;
+    let (fields, mut next_cursor) = parse_braced_fields(source, tokens, body_open, cursor + 2)?;
+    if tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_cursor += 1;
+    }
+    Ok((
+        ParsedStructDefinition {
+            name: token_text(source, name_token).to_string(),
+            fields,
+        },
+        next_cursor,
+    ))
+}
+
+fn parse_enum_definition(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedEnumDefinition, usize), String> {
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let name = token_text(source, name_token).to_string();
+    let open_cursor = cursor + 2;
+    let open_token = expect(tokens, open_cursor, TokenKind::LBrace)?;
+    if open_token.kind != TokenKind::LBrace {
+        return Err("internal parser error: expected '{' token for enum block".to_string());
+    }
+    let mut variants = Vec::new();
+    let mut next_cursor = open_cursor + 1;
+    while tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind != TokenKind::RBrace)
+    {
+        let variant = expect(tokens, next_cursor, TokenKind::Identifier)?;
+        let variant_name = token_text(source, variant).to_string();
+        next_cursor += 1;
+        let mut explicit_value = None;
+        if tokens
+            .get(next_cursor)
+            .copied()
+            .is_some_and(|token| token_is_other_char(source, token, b'='))
+        {
+            next_cursor += 1;
+            let mut sign: i32 = 1;
+            if tokens
+                .get(next_cursor)
+                .copied()
+                .is_some_and(|token| token_is_other_char(source, token, b'-'))
+            {
+                sign = -1;
+                next_cursor += 1;
+            }
+            let value_token = expect(tokens, next_cursor, TokenKind::Integer)?;
+            let value_text = token_text(source, value_token);
+            let value = value_text
+                .parse::<i32>()
+                .map_err(|error| format!("invalid enum discriminant '{value_text}': {error}"))?;
+            explicit_value = Some(value.saturating_mul(sign));
+            next_cursor += 1;
+        }
+        variants.push(ParsedEnumVariant {
+            name: variant_name,
+            value: explicit_value,
+        });
+        if tokens
+            .get(next_cursor)
+            .copied()
+            .is_some_and(|token| token.kind == TokenKind::Comma)
+        {
+            next_cursor += 1;
+        }
+    }
+    expect(tokens, next_cursor, TokenKind::RBrace)?;
+    next_cursor += 1;
+    if tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_cursor += 1;
+    }
+    Ok((ParsedEnumDefinition { name, variants }, next_cursor))
+}
+
+fn parse_global_definition(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedGlobalTopLevel, usize), String> {
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let name = token_text(source, name_token).to_string();
+    let mut next_cursor = cursor + 2;
+    let Some(next_token) = tokens.get(next_cursor).copied() else {
+        return Err(format!("incomplete global declaration near '{name}'"));
+    };
+    if next_token.kind == TokenKind::Colon {
+        next_cursor += 1;
+        let (type_name, after_type) = parse_type_name(source, tokens, next_cursor)?;
+        next_cursor = after_type;
+        expect(tokens, next_cursor, TokenKind::Semicolon)?;
+        next_cursor += 1;
+        return Ok((
+            ParsedGlobalTopLevel::TypedGlobal(ParsedGlobalDefinition { name, type_name }),
+            next_cursor,
+        ));
+    }
+    if next_token.kind == TokenKind::LBrace {
+        let (fields, mut after_block) = parse_braced_fields(source, tokens, next_token, next_cursor)?;
+        if tokens
+            .get(after_block)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            after_block += 1;
+        }
+        return Ok((
+            ParsedGlobalTopLevel::GlobalBlock(ParsedGlobalBlockDefinition { name, fields }),
+            after_block,
+        ));
+    }
+    Err(format!(
+        "unsupported global declaration near '{}': expected ':' or '{{'",
+        name
+    ))
+}
+
+fn parse_const_definition(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedConstDefinition, usize), String> {
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let name = token_text(source, name_token).to_string();
+    let mut next_cursor = cursor + 2;
+    expect(tokens, next_cursor, TokenKind::Colon)?;
+    next_cursor += 1;
+    let (type_name, after_type) = parse_type_name(source, tokens, next_cursor)?;
+    next_cursor = after_type;
+    let equals = tokens
+        .get(next_cursor)
+        .copied()
+        .ok_or_else(|| format!("incomplete const declaration near '{name}'"))?;
+    if !token_is_other_char(source, equals, b'=') {
+        return Err(format!(
+            "const declaration for '{}' must include '=' initializer",
+            name
+        ));
+    }
+    next_cursor += 1;
+    let value_start = tokens
+        .get(next_cursor)
+        .map_or(equals.end, |token| token.start);
+    let mut semicolon_cursor = next_cursor;
+    while tokens
+        .get(semicolon_cursor)
+        .is_some_and(|token| token.kind != TokenKind::Semicolon)
+    {
+        if tokens
+            .get(semicolon_cursor)
+            .is_some_and(|token| token.kind == TokenKind::Eof)
+        {
+            return Err(format!(
+                "const declaration for '{}' is missing ';'",
+                name
+            ));
+        }
+        semicolon_cursor += 1;
+    }
+    let semicolon = expect(tokens, semicolon_cursor, TokenKind::Semicolon)?;
+    let value_text = source
+        .get(value_start..semicolon.start)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    next_cursor = semicolon_cursor + 1;
+    Ok((
+        ParsedConstDefinition {
+            name,
+            type_name,
+            value_text,
+        },
+        next_cursor,
+    ))
+}
+
+fn parse_braced_fields(
+    source: &str,
+    tokens: &[Token],
+    open_token: Token,
+    open_cursor: usize,
+) -> Result<(Vec<ParsedField>, usize), String> {
+    if open_token.kind != TokenKind::LBrace {
+        return Err("internal parser error: expected '{' token for field block".to_string());
+    }
+    let mut fields = Vec::new();
+    let mut cursor = open_cursor + 1;
+    while tokens
+        .get(cursor)
+        .is_some_and(|token| token.kind != TokenKind::RBrace)
+    {
+        let field_name_token = expect(tokens, cursor, TokenKind::Identifier)?;
+        let field_name = token_text(source, field_name_token).to_string();
+        cursor += 1;
+        expect(tokens, cursor, TokenKind::Colon)?;
+        cursor += 1;
+        let (type_name, next_cursor) = parse_type_name(source, tokens, cursor)?;
+        cursor = next_cursor;
+        expect(tokens, cursor, TokenKind::Semicolon)?;
+        cursor += 1;
+        fields.push(ParsedField {
+            name: field_name,
+            type_name,
+        });
+    }
+    expect(tokens, cursor, TokenKind::RBrace)?;
+    cursor += 1;
+    Ok((fields, cursor))
+}
+
+fn skip_function_annotations(source: &str, tokens: &[Token], cursor: usize) -> Result<usize, String> {
+    let (next_cursor, _) = parse_function_annotations(source, tokens, cursor)?;
+    Ok(next_cursor)
+}
+
+fn parse_function_annotations(
+    source: &str,
+    tokens: &[Token],
+    mut cursor: usize,
+) -> Result<(usize, Option<String>), String> {
+    let mut extern_symbol: Option<String> = None;
+    while tokens
+        .get(cursor)
+        .copied()
+        .is_some_and(|token| token_is_other_char(source, token, b'@'))
+    {
+        cursor += 1;
+        let name = expect(tokens, cursor, TokenKind::Identifier)?;
+        let annotation_name = token_text(source, name);
+        cursor += 1;
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+        {
+            if annotation_name == "extern" {
+                let parsed = parse_extern_symbol_annotation(source, tokens, cursor)?;
+                if parsed.is_some() {
+                    extern_symbol = parsed;
+                }
+            }
+            cursor = skip_parenthesized_tokens(tokens, cursor)?;
+        }
+    }
+    Ok((cursor, extern_symbol))
+}
+
+fn parse_extern_symbol_annotation(
+    source: &str,
+    tokens: &[Token],
+    open_paren_cursor: usize,
+) -> Result<Option<String>, String> {
+    let Some(first) = tokens.get(open_paren_cursor + 1).copied() else {
+        return Ok(None);
+    };
+    if first.kind == TokenKind::RParen {
+        return Ok(None);
+    }
+    if first.kind != TokenKind::StringLiteral {
+        return Err("extern annotation expects string symbol literal".to_string());
+    }
+    let literal_text = token_text(source, first);
+    let symbol = parse_string_literal_text(literal_text)?;
+    Ok(Some(symbol))
+}
+
+fn parse_string_literal_text(literal_text: &str) -> Result<String, String> {
+    let bytes = literal_text.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || *bytes.last().unwrap_or(&0) != b'"' {
+        return Err(format!("invalid string literal token '{}'", literal_text));
+    }
+    let mut out = String::new();
+    let mut index = 1usize;
+    while index + 1 < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            let Some(escaped) = bytes.get(index + 1).copied() else {
+                return Err("unterminated escape sequence in string literal".to_string());
+            };
+            let decoded = match escaped {
+                b'\\' => '\\',
+                b'"' => '"',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                b'0' => '\0',
+                other => {
+                    return Err(format!(
+                        "unsupported escape sequence '\\{}' in string literal",
+                        other as char
+                    ))
+                }
+            };
+            out.push(decoded);
+            index += 2;
+            continue;
+        }
+        out.push(byte as char);
+        index += 1;
+    }
+    Ok(out)
+}
+
+fn skip_parenthesized_tokens(tokens: &[Token], open_cursor: usize) -> Result<usize, String> {
+    if tokens
+        .get(open_cursor)
+        .is_none_or(|token| token.kind != TokenKind::LParen)
+    {
+        return Err("internal parser error: expected '(' for annotation".to_string());
+    }
+    let mut depth = 1i32;
+    let mut cursor = open_cursor + 1;
+    while cursor < tokens.len() {
+        match tokens[cursor].kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(cursor + 1);
+                }
+            }
+            TokenKind::Eof => break,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Err("missing closing ')' in function annotation".to_string())
+}
+
+fn parse_type_name(source: &str, tokens: &[Token], cursor: usize) -> Result<(String, usize), String> {
+    let base = expect(tokens, cursor, TokenKind::Identifier)?;
+    let mut next = cursor + 1;
+    let mut end = base.end;
+    while let Some(open) = tokens.get(next).copied() {
+        if !token_is_other_char(source, open, b'[') {
+            break;
+        }
+        let mut depth = 1i32;
+        let mut scan = next + 1;
+        while scan < tokens.len() {
+            let token = tokens[scan];
+            if token_is_other_char(source, token, b'[') {
+                depth += 1;
+            } else if token_is_other_char(source, token, b']') {
+                depth -= 1;
+                if depth == 0 {
+                    end = token.end;
+                    next = scan + 1;
+                    break;
+                }
+            } else if token.kind == TokenKind::Eof {
+                return Err("missing closing ']' in type annotation".to_string());
+            }
+            scan += 1;
+        }
+        if depth != 0 {
+            return Err("missing closing ']' in type annotation".to_string());
+        }
+    }
+    Ok((source[base.start..end].to_string(), next))
+}
+
 fn token_text<'a>(source: &'a str, token: Token) -> &'a str {
     &source[token.start..token.end]
+}
+
+fn token_is_other_char(source: &str, token: Token, byte: u8) -> bool {
+    token.kind == TokenKind::Other
+        && token.end == token.start + 1
+        && source
+            .as_bytes()
+            .get(token.start)
+            .copied()
+            .is_some_and(|value| value == byte)
 }
 
 fn expect(tokens: &[Token], cursor: usize, kind: TokenKind) -> Result<Token, String> {
@@ -151,5 +776,136 @@ mod tests {
             source[parsed[0].body_range.clone()].contains("return 0"),
             "expected full outer body capture"
         );
+    }
+
+    #[test]
+    fn supports_function_inline_annotation_before_name() {
+        let source = "function @inline fast_path(): i32 { return 1; }\n";
+        let parsed = parse_top_level_functions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "fast_path");
+        assert_eq!(parsed[0].return_type_name, "i32");
+    }
+
+    #[test]
+    fn supports_function_annotation_with_arguments_and_extern_declaration() {
+        let source = "function @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nfunction main(): i32 { return 0; }\n";
+        let parsed = parse_top_level_functions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "main");
+    }
+
+    #[test]
+    fn supports_array_type_annotations_in_params_and_return_type() {
+        let source =
+            "function copy_ascii(src: ascii[], dst: ascii[]): i32[120] { return 0; }\n";
+        let parsed = parse_top_level_functions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].params.len(), 2);
+        assert_eq!(parsed[0].params[0].type_name, "ascii[]");
+        assert_eq!(parsed[0].params[1].type_name, "ascii[]");
+        assert_eq!(parsed[0].return_type_name, "i32[120]");
+    }
+
+    #[test]
+    fn parses_top_level_structs_globals_and_global_blocks() {
+        let source = "struct Enemy { hp: i32; speed: f32; }\nglobal state: Enemy;\nglobal State { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { return State.score; }\n";
+        let parsed = parse_top_level_type_layout(source).expect("parse");
+        assert_eq!(parsed.enums.len(), 0);
+        assert_eq!(parsed.structs.len(), 1);
+        assert_eq!(parsed.structs[0].name, "Enemy");
+        assert_eq!(parsed.structs[0].fields.len(), 2);
+        assert_eq!(parsed.structs[0].fields[0].name, "hp");
+        assert_eq!(parsed.structs[0].fields[0].type_name, "i32");
+        assert_eq!(parsed.globals.len(), 1);
+        assert_eq!(parsed.globals[0].name, "state");
+        assert_eq!(parsed.globals[0].type_name, "Enemy");
+        assert_eq!(parsed.global_blocks.len(), 1);
+        assert_eq!(parsed.global_blocks[0].name, "State");
+        assert_eq!(parsed.global_blocks[0].fields.len(), 2);
+        assert_eq!(parsed.global_blocks[0].fields[1].name, "first_enemy");
+        assert_eq!(parsed.global_blocks[0].fields[1].type_name, "Enemy");
+    }
+
+    #[test]
+    fn parses_array_type_annotations_in_struct_and_global_fields() {
+        let source = "struct Buffer { samples: f32[512]; }\nglobal audio: Buffer;\nglobal debug_text: ascii[64];\n";
+        let parsed = parse_top_level_type_layout(source).expect("parse");
+        assert_eq!(parsed.structs.len(), 1);
+        assert_eq!(parsed.structs[0].fields[0].type_name, "f32[512]");
+        assert_eq!(parsed.globals.len(), 2);
+        assert_eq!(parsed.globals[0].type_name, "Buffer");
+        assert_eq!(parsed.globals[1].type_name, "ascii[64]");
+    }
+
+    #[test]
+    fn parses_top_level_constants_with_type_and_initializer_text() {
+        let source = "const GAME_H: f32 = 624.0;\nconst BENCH_WARMUP_FRAMES: i32 = 200;\n";
+        let parsed = parse_top_level_type_layout(source).expect("parse");
+        assert_eq!(parsed.constants.len(), 2);
+        assert_eq!(parsed.constants[0].name, "GAME_H");
+        assert_eq!(parsed.constants[0].type_name, "f32");
+        assert_eq!(parsed.constants[0].value_text, "624.0");
+        assert_eq!(parsed.constants[1].name, "BENCH_WARMUP_FRAMES");
+        assert_eq!(parsed.constants[1].type_name, "i32");
+        assert_eq!(parsed.constants[1].value_text, "200");
+    }
+
+    #[test]
+    fn parses_top_level_enums_with_variants() {
+        let source = "enum BrickType { Basic, Armored, Reflector }\n";
+        let parsed = parse_top_level_type_layout(source).expect("parse");
+        assert_eq!(parsed.enums.len(), 1);
+        assert_eq!(parsed.enums[0].name, "BrickType");
+        assert_eq!(
+            parsed.enums[0]
+                .variants
+                .iter()
+                .map(|variant| variant.name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "Basic".to_string(),
+                "Armored".to_string(),
+                "Reflector".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_top_level_enum_variant_explicit_values() {
+        let source = "enum Scancode { A = 4, Return = 40, Escape = 41 }\n";
+        let parsed = parse_top_level_type_layout(source).expect("parse");
+        assert_eq!(parsed.enums.len(), 1);
+        assert_eq!(parsed.enums[0].name, "Scancode");
+        assert_eq!(parsed.enums[0].variants.len(), 3);
+        assert_eq!(parsed.enums[0].variants[0].name, "A");
+        assert_eq!(parsed.enums[0].variants[0].value, Some(4));
+        assert_eq!(parsed.enums[0].variants[1].name, "Return");
+        assert_eq!(parsed.enums[0].variants[1].value, Some(40));
+        assert_eq!(parsed.enums[0].variants[2].name, "Escape");
+        assert_eq!(parsed.enums[0].variants[2].value, Some(41));
+    }
+
+    #[test]
+    fn parses_extern_keyword_function_declaration() {
+        let source = "extern function host_cli_arg_count(): i32;\nfunction main(): i32 { return 0; }\n";
+        let parsed = parse_top_level_extern_functions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "host_cli_arg_count");
+        assert_eq!(parsed[0].symbol_name, "host_cli_arg_count");
+        assert!(!parsed[0].explicit_symbol);
+        assert_eq!(parsed[0].return_type_name, "i32");
+    }
+
+    #[test]
+    fn parses_annotated_extern_function_declaration() {
+        let source = "function @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\n";
+        let parsed = parse_top_level_extern_functions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "gfx_cache_text");
+        assert_eq!(parsed[0].symbol_name, "stasis_gfx_cache_text");
+        assert!(parsed[0].explicit_symbol);
+        assert_eq!(parsed[0].params.len(), 2);
+        assert_eq!(parsed[0].params[1].type_name, "string");
     }
 }
