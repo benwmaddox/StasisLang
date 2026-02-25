@@ -9022,6 +9022,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_local_indexed_struct_value_copy_assignment_for_view_param() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal enemies: Enemy[COUNT];\nfunction copy_local(arr: Enemy[]): i32 {\n    arr[0].hp = 11;\n    arr[0].speed = 2.5;\n    arr[1] = arr[0];\n    if (arr[1].speed > 2.4) { return arr[1].hp; }\n    return 0;\n}\nfunction main(): i32 { return copy_local(enemies); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 11);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_rejects_local_indexed_struct_copy_assignment_for_mismatched_layouts() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
