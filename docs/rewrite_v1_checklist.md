@@ -100,6 +100,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added mismatch diagnostics coverage for both cross-shape struct-copy directions (`jit_process_rejects_struct_copy_from_indexed_to_global_on_layout_mismatch`, `jit_process_rejects_struct_copy_from_global_to_indexed_on_layout_mismatch`).
 - Local struct-array parameter paths now use named-struct field-type metadata in emit/lowering, enabling deterministic `arr[idx].field` and local `foreach` struct-array parameter behavior with runtime parity coverage (`jit_process_executes_local_indexed_struct_array_parameter_field_access`, `jit_process_executes_foreach_over_local_struct_array_parameter`).
 - Added explicit local struct-array view parameter coverage for indexed field read/write (`jit_process_executes_local_indexed_struct_array_view_parameter_field_access`) to lock `Type[]` parity with fixed-array parameter behavior in current JIT lowering.
+- Indexed struct value-copy lowering now also covers local collection bindings (`arr[target] = arr[source]`) with deterministic runtime parity and mismatch diagnostics (`jit_process_executes_local_indexed_struct_value_copy_assignment`, `jit_process_rejects_local_indexed_struct_copy_assignment_for_mismatched_layouts`).
 
 ### S0 - Workspace Bootstrap
 - Language:

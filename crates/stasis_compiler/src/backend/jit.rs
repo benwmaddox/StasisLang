@@ -4052,30 +4052,10 @@ fn try_emit_indexed_struct_copy_assignment(
         return Ok(false);
     }
 
-    if values_by_name.contains_key(target_collection) || values_by_name.contains_key(source_collection)
-    {
-        return Ok(false);
-    }
-
-    let Some(target_info) = collection_infos.get(target_collection) else {
-        return Ok(false);
-    };
-    let Some(source_info) = collection_infos.get(source_collection) else {
-        return Ok(false);
-    };
-    if target_info.field_types.is_empty() || source_info.field_types.is_empty() {
-        return Ok(false);
-    }
     if op != AssignOp::Set {
         return Err(format!(
             "struct indexed copy assignment only supports '=' for '{}[...]'",
             target_collection
-        ));
-    }
-    if target_info.field_types != source_info.field_types {
-        return Err(format!(
-            "struct indexed copy assignment requires matching field layout for '{}[...]' and '{}[...]'",
-            target_collection, source_collection
         ));
     }
 
@@ -4105,6 +4085,74 @@ fn try_emit_indexed_struct_copy_assignment(
         named_struct_field_types,
         foreach_bindings,
     )?;
+
+    let local_target = values_by_name.get(target_collection).copied();
+    let local_source = values_by_name.get(source_collection).copied();
+    if let (Some(target_local), Some(source_local)) = (local_target, local_source) {
+        let Some(target_element_type) = type_table.indexed_element_type_id(target_local.type_id) else {
+            return Ok(false);
+        };
+        let Some(source_element_type) = type_table.indexed_element_type_id(source_local.type_id) else {
+            return Ok(false);
+        };
+        let Some(target_fields) = named_struct_field_types.get(&target_element_type) else {
+            return Ok(false);
+        };
+        let Some(source_fields) = named_struct_field_types.get(&source_element_type) else {
+            return Ok(false);
+        };
+        if target_fields != source_fields {
+            return Err(format!(
+                "struct indexed copy assignment requires matching field layout for '{}[...]' and '{}[...]'",
+                target_collection, source_collection
+            ));
+        }
+        for field_name in target_fields.keys() {
+            let source_value = emit_local_indexed_collection_load(
+                builder,
+                runtime_call_refs,
+                type_table,
+                named_struct_field_types,
+                source_collection,
+                source_local,
+                field_name,
+                source_index_binding,
+            )?;
+            emit_local_indexed_collection_assignment(
+                builder,
+                runtime_call_refs,
+                type_table,
+                named_struct_field_types,
+                target_collection,
+                target_local,
+                field_name,
+                target_index_binding,
+                AssignOp::Set,
+                source_value,
+            )?;
+        }
+        return Ok(true);
+    }
+
+    if local_target.is_some() || local_source.is_some() {
+        return Ok(false);
+    }
+
+    let Some(target_info) = collection_infos.get(target_collection) else {
+        return Ok(false);
+    };
+    let Some(source_info) = collection_infos.get(source_collection) else {
+        return Ok(false);
+    };
+    if target_info.field_types.is_empty() || source_info.field_types.is_empty() {
+        return Ok(false);
+    }
+    if target_info.field_types != source_info.field_types {
+        return Err(format!(
+            "struct indexed copy assignment requires matching field layout for '{}[...]' and '{}[...]'",
+            target_collection, source_collection
+        ));
+    }
 
     for field_name in target_info.field_types.keys() {
         let source_value = emit_indexed_collection_load(
@@ -8919,6 +8967,53 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 11);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_local_indexed_struct_value_copy_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 2;\nstruct Enemy { hp: i32; speed: f32; }\nglobal enemies: Enemy[COUNT];\nfunction copy_local(arr: Enemy[2]): i32 {\n    arr[0].hp = 11;\n    arr[0].speed = 2.5;\n    arr[1] = arr[0];\n    if (arr[1].speed > 2.4) { return arr[1].hp; }\n    return 0;\n}\nfunction main(): i32 { return copy_local(enemies); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 11);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_local_indexed_struct_copy_assignment_for_mismatched_layouts() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct A { hp: i32; }\nstruct B { hp: i32; speed: f32; }\nglobal lhs: A[2];\nglobal rhs: B[2];\nfunction copy(arr_lhs: A[2], arr_rhs: B[2]): i32 { arr_rhs[0] = arr_lhs[0]; return 0; }\nfunction main(): i32 { return copy(lhs, rhs); }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("compile should reject local mismatched indexed struct copy assignment");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains(
+                        "struct indexed copy assignment requires matching field layout for 'arr_rhs[...]' and 'arr_lhs[...]'"
+                    ),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
