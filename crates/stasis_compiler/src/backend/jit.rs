@@ -2661,13 +2661,15 @@ fn parse_for_statement(
     let init_text = header_parts[0].trim();
     let condition_text = header_parts[1].trim();
     let step_text = header_parts[2].trim();
+    if init_text.is_empty() || condition_text.is_empty() || step_text.is_empty() {
+        return Err(format!(
+            "for header must include init, condition, and step: '{}'",
+            header
+        ));
+    }
 
     let init = parse_for_control_segment(init_text, type_table)?;
-    let condition = if condition_text.is_empty() {
-        SimpleCondition::Expr(SimpleExpr::Bool(true))
-    } else {
-        parse_simple_condition(condition_text)?
-    };
+    let condition = parse_simple_condition(condition_text)?;
     let step = parse_for_control_segment(step_text, type_table)?;
 
     cursor = skip_ascii_whitespace_and_comments(source, header_close + 1);
@@ -8297,6 +8299,63 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("foreach item binding 'value' shadows existing variable"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_for_loop_missing_init_segment() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let sum: i32 = 0; for (; sum < 3; sum += 1) { } return sum; }\n",
+        );
+        let error = process.compile().expect_err("expected for header segment error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("for header must include init, condition, and step"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_for_loop_missing_condition_segment() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let sum: i32 = 0; for (sum = 0; ; sum += 1) { } return sum; }\n",
+        );
+        let error = process.compile().expect_err("expected for header segment error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("for header must include init, condition, and step"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_for_loop_missing_step_segment() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let sum: i32 = 0; for (sum = 0; sum < 3; ) { } return sum; }\n",
+        );
+        let error = process.compile().expect_err("expected for header segment error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("for header must include init, condition, and step"),
                     "unexpected message: {message}"
                 );
             }
