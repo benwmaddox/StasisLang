@@ -683,6 +683,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Headless test command path keeps test-mode emit roots explicit from discovered declarations and supports recursive discovery for both `*.test.stasis` and `*.stasis` files containing top-level `test` declarations.
 - Added shared host-boundary test helper module `src/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).
+- Expanded Brickout `.test.stasis` coverage further (`tests_discovered=4`) with explicit assertions for inactive-pointer slot clearing in `refresh_input_model()` and occupied-slot skip behavior in `record_tap_pulses()`.
+- Added pure-core Brickout `.test.stasis` coverage file (`samples/brickout_revenge/brickout_revenge_v1_core.test.stasis`) for deterministic gameplay helpers (`brickout_can_buy`, `brickout_shop_anim_step`, `brickout_level_reset`), bringing sample-dir headless coverage to `tests_discovered=7`.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.

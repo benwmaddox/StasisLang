@@ -41,3 +41,49 @@ test `brickout record tap pulse uses refreshed input model`(): bool {
     if (state.tap_pulses[0].y < 69.9 || state.tap_pulses[0].y > 70.1) { return false; }
     return true;
 }
+
+test `brickout refresh input model clears inactive pointer slots`(): bool {
+    input_testkit_reset();
+    input_testkit_set_pointer_count(1);
+    input_testkit_set_pointer(0, 7, true, false, false, 11.0, 12.0);
+
+    input_model.pointers[1].id = 999;
+    input_model.pointers[1].is_down = true;
+    input_model.pointers[1].went_down = true;
+    input_model.pointers[1].went_up = true;
+    input_model.pointers[1].x_px = 123.0;
+    input_model.pointers[1].y_px = 456.0;
+
+    refresh_input_model();
+
+    if (input_model.pointers[1].id != -1) { return false; }
+    if (input_model.pointers[1].is_down) { return false; }
+    if (input_model.pointers[1].went_down) { return false; }
+    if (input_model.pointers[1].went_up) { return false; }
+    if (input_model.pointers[1].x_px != 0.0) { return false; }
+    if (input_model.pointers[1].y_px != 0.0) { return false; }
+    return true;
+}
+
+test `brickout record tap pulse skips occupied slot`(): bool {
+    input_testkit_reset();
+    input_testkit_set_pointer_count(1);
+    input_testkit_set_pointer(0, 33, true, true, false, 5.0, 6.0);
+
+    state.layout.viewport_x = 0.0;
+    state.layout.viewport_y = 0.0;
+    state.tap_pulses[0].active = 1;
+    state.tap_pulses[0].x = 1000.0;
+    state.tap_pulses[0].y = 1000.0;
+    state.tap_pulses[1].active = 0;
+
+    refresh_input_model();
+    record_tap_pulses();
+
+    if (state.tap_pulses[0].x != 1000.0) { return false; }
+    if (state.tap_pulses[0].y != 1000.0) { return false; }
+    if (state.tap_pulses[1].active != 1) { return false; }
+    if (state.tap_pulses[1].x < 4.9 || state.tap_pulses[1].x > 5.1) { return false; }
+    if (state.tap_pulses[1].y < 5.9 || state.tap_pulses[1].y > 6.1) { return false; }
+    return true;
+}
