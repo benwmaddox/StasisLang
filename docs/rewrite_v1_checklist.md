@@ -701,6 +701,7 @@ It is not part of the steady-state incremental JIT update loop.
 - JIT import-graph loading now caches parsed top-level import lists by `(file path, source hash)` and reuses them across unchanged compiles; cache entries refresh deterministically when source hash/import sets change.
 - Rust-native JIT unit tests are now process-serialized via a test-only global `JitProcess` guard to avoid cross-test global runtime table races; full `backend::jit::tests` module now runs stable in one pass.
 - JIT shape tests now align with spec-enforced `for` header semantics (`init`, `condition`, and `step` all required); empty-segment shapes are asserted as deterministic compile errors.
+- JIT runtime dispatch/code-pointer assembly now uses an internal `FunctionId -> artifact` index map (rebuilt after emit pass) so execution lookups and dispatch-table refresh avoid repeated linear artifact scans.
 - Startup now performs stale `.stasis_cache` cleanup with a 7-day default TTL (`STASIS_CACHE_TTL_DAYS` override) so cache files are retained for short-term reuse but aged out automatically.
 - Added shared host-boundary test helper module `src/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).

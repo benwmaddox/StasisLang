@@ -38,6 +38,7 @@ pub struct JitProcess {
     next_slot: u32,
     next_symbol_seq: u64,
     artifacts: Vec<JitArtifact>,
+    artifact_index: HashMap<FunctionId, usize>,
     modules: Vec<JITModule>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
@@ -64,6 +65,7 @@ impl JitProcess {
             next_slot: 0,
             next_symbol_seq: 0,
             artifacts: Vec::new(),
+            artifact_index: HashMap::new(),
             modules: Vec::new(),
             runtime_libraries: Vec::new(),
             runtime_symbol_cache: BTreeMap::new(),
@@ -225,6 +227,7 @@ impl JitProcess {
                 Ok(())
             })?;
         let report = CompileReport { index, emit };
+        self.rebuild_artifact_index();
         self.refresh_runtime_dispatch_table();
         Ok(report)
     }
@@ -243,9 +246,7 @@ impl JitProcess {
             .functions()
             .iter()
             .find(|function| function.name == name)?;
-        self.artifacts
-            .iter()
-            .find(|artifact| artifact.function_id == function.id)
+        self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.slot)
     }
 
@@ -263,9 +264,7 @@ impl JitProcess {
             ));
         }
         let artifact = self
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.function_id == function.id)
+            .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
         Ok((raw as u32) as i32)
@@ -291,9 +290,7 @@ impl JitProcess {
             ));
         }
         let artifact = self
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.function_id == function.id)
+            .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
         Ok((raw as u32) != 0)
@@ -324,9 +321,7 @@ impl JitProcess {
             ));
         }
         let artifact = self
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.function_id == function.id)
+            .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         stasis_dynload::invoke_i32_i32_to_i32(artifact.code_ptr as usize, left, right)
     }
@@ -334,11 +329,7 @@ impl JitProcess {
     pub fn symbol_code_ptrs(&self) -> BTreeMap<String, u64> {
         let mut symbol_code_ptrs = BTreeMap::new();
         for function in self.compiler.functions() {
-            if let Some(artifact) = self
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.function_id == function.id)
-            {
+            if let Some(artifact) = self.artifact_for_function_id(function.id) {
                 symbol_code_ptrs.insert(function.name.clone(), artifact.code_ptr);
             }
         }
@@ -373,9 +364,7 @@ impl JitProcess {
             .find(|function| function.name == name)
             .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
         let artifact = self
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.function_id == function.id)
+            .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))?;
         Ok(artifact.code_ptr)
     }
@@ -392,11 +381,7 @@ impl JitProcess {
             if arity > 8 {
                 continue;
             }
-            let Some(artifact) = self
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.function_id == function.id)
-            else {
+            let Some(artifact) = self.artifact_for_function_id(function.id) else {
                 continue;
             };
             code_ptr_entries.push((function.id, artifact.code_ptr as usize));
@@ -427,6 +412,18 @@ impl JitProcess {
         stasis_dynload::replace_jit_i32_dispatch_table(&i32_entries);
         stasis_dynload::replace_jit_f32_dispatch_table(&f32_entries);
         stasis_dynload::replace_jit_code_ptr_table(&code_ptr_entries);
+    }
+
+    fn rebuild_artifact_index(&mut self) {
+        self.artifact_index.clear();
+        for (index, artifact) in self.artifacts.iter().enumerate() {
+            self.artifact_index.insert(artifact.function_id, index);
+        }
+    }
+
+    fn artifact_for_function_id(&self, function_id: FunctionId) -> Option<&JitArtifact> {
+        let index = self.artifact_index.get(&function_id).copied()?;
+        self.artifacts.get(index)
     }
 
     fn resolve_extern_call_signatures(
