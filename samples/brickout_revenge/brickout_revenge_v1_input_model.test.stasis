@@ -87,3 +87,22 @@ test `brickout record tap pulse skips occupied slot`(): bool {
     if (state.tap_pulses[1].y < 5.9 || state.tap_pulses[1].y > 6.1) { return false; }
     return true;
 }
+
+test `brickout refresh input model clamps negative pointer count`(): bool {
+    input_testkit_reset();
+    input_testkit_set_pointer_count_raw(-5);
+    refresh_input_model();
+    if (input_model.pointer_count != 0) { return false; }
+    return true;
+}
+
+test `brickout refresh input model clamps oversized pointer count`(): bool {
+    input_testkit_reset();
+    input_testkit_set_pointer_count_raw(999);
+    input_testkit_set_pointer(7, 77, true, true, false, 1.0, 2.0);
+    refresh_input_model();
+    if (input_model.pointer_count != MAX_INPUT_POINTERS) { return false; }
+    if (input_model.pointers[7].id != 77) { return false; }
+    if (!input_model.pointers[7].is_down) { return false; }
+    return true;
+}

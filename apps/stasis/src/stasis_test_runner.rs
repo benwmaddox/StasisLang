@@ -141,12 +141,22 @@ fn collect_stasis_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> Result
         let kind = fs::metadata(&path)
             .map_err(|error| format!("failed to stat '{}': {error}", path.display()))?;
         if kind.is_dir() {
+            if should_skip_discovery_directory(&path) {
+                continue;
+            }
             collect_stasis_files_recursive(&path, out)?;
         } else if should_include_stasis_test_file(&path)? {
             out.push(path);
         }
     }
     Ok(())
+}
+
+fn should_skip_discovery_directory(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    matches!(name.to_string_lossy().as_ref(), ".git" | "target")
 }
 
 fn should_include_stasis_test_file(path: &Path) -> Result<bool, String> {
@@ -162,8 +172,15 @@ fn should_include_stasis_test_file(path: &Path) -> Result<bool, String> {
     }
     let source = fs::read_to_string(path)
         .map_err(|error| format!("failed reading '{}': {error}", path.display()))?;
+    if !looks_like_test_declaration_source(&source) {
+        return Ok(false);
+    }
     let tests = parse_top_level_test_declarations(&source)?;
     Ok(!tests.is_empty())
+}
+
+fn looks_like_test_declaration_source(source: &str) -> bool {
+    source.contains("test") && source.contains('`')
 }
 
 fn natural_path_cmp(left: &str, right: &str) -> Ordering {
@@ -213,6 +230,57 @@ fn parse_number(bytes: &[u8], start: usize) -> (u64, usize) {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn looks_like_test_declaration_source_prefilter() {
+        assert!(!looks_like_test_declaration_source(
+            "function tick(): i32 { return 0; }\n"
+        ));
+        assert!(!looks_like_test_declaration_source(
+            "// Stress test fixture only; no declarations.\n"
+        ));
+        assert!(looks_like_test_declaration_source(
+            "test `smoke`(): bool { return true; }\n"
+        ));
+    }
+
+    #[test]
+    fn run_jit_tests_in_directory_skips_target_and_git_dirs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_test_runner_skipdirs_{stamp}"));
+        let target_dir = root.join("target");
+        let git_dir = root.join(".git");
+        let suite_dir = root.join("suite");
+        fs::create_dir_all(&target_dir).expect("mkdir target");
+        fs::create_dir_all(&git_dir).expect("mkdir git");
+        fs::create_dir_all(&suite_dir).expect("mkdir suite");
+        fs::write(
+            target_dir.join("bad.test.stasis"),
+            "test `bad`(): bool { return false; }\n",
+        )
+        .expect("write target test");
+        fs::write(
+            git_dir.join("bad2.test.stasis"),
+            "test `bad2`(): bool { return false; }\n",
+        )
+        .expect("write git test");
+        fs::write(
+            suite_dir.join("good.test.stasis"),
+            "test `good`(): bool { return true; }\n",
+        )
+        .expect("write suite test");
+
+        let summary = run_jit_tests_in_directory(&root).expect("run tests");
+        assert_eq!(summary.files_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn run_jit_tests_in_directory_executes_nested_stasis_tests() {

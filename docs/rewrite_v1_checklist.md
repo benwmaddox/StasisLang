@@ -681,10 +681,12 @@ It is not part of the steady-state incremental JIT update loop.
 - UTF-8 from-ASCII conversion now also bounds source reads by ASCII capacity (`ascii_scan_limit`) so unterminated source buffers cannot overrun reads, with rust-native JIT regression coverage: `crates/stasis_compiler::backend::jit::tests::jit_process_stdlib_utf8_from_ascii_respects_source_capacity_without_terminator`.
 - Rust-native frontend parser now owns top-level `test` declaration discovery and rewrite (`parse_top_level_test_declarations`, `rewrite_top_level_test_declarations`), removing duplicate scanner logic from `apps/stasis`.
 - Headless test command path keeps test-mode emit roots explicit from discovered declarations and supports recursive discovery for both `*.test.stasis` and `*.stasis` files containing top-level `test` declarations.
+- Headless test discovery now uses a cheap prefilter (`test` + backtick) before full parse for non-`.test.stasis` files and skips `.git`/`target` directories during recursion to reduce discovery overhead in repo-root runs.
 - Added shared host-boundary test helper module `src/input_testkit.stasis` and first Brickout `.test.stasis` fixture (`samples/brickout_revenge/brickout_revenge_v1_input_model.test.stasis`) so game tests set domain input/state without direct host-frame layout writes.
 - Expanded Brickout `.test.stasis` coverage to include gameplay-side `record_tap_pulses()` assertions sourced from `input_testkit` snapshot input (`tests_discovered=2` in `samples/brickout_revenge` test dir).
 - Expanded Brickout `.test.stasis` coverage further (`tests_discovered=4`) with explicit assertions for inactive-pointer slot clearing in `refresh_input_model()` and occupied-slot skip behavior in `record_tap_pulses()`.
-- Added pure-core Brickout `.test.stasis` coverage file (`samples/brickout_revenge/brickout_revenge_v1_core.test.stasis`) for deterministic gameplay helpers (`brickout_can_buy`, `brickout_shop_anim_step`, `brickout_level_reset`), bringing sample-dir headless coverage to `tests_discovered=7`.
+- Added pure-core Brickout `.test.stasis` coverage file (`samples/brickout_revenge/brickout_revenge_v1_core.test.stasis`) for deterministic gameplay helpers (`brickout_can_buy`, `brickout_shop_anim_step`, `brickout_level_reset`) and level-sequencing behavior (`brickout_level_consume_spawns`).
+- Added Brickout input-model clamp edge-case tests (negative/oversized raw pointer count via `input_testkit_set_pointer_count_raw`) and brought sample-dir headless coverage to `tests_discovered=11`.
 - Status: `done`
 - Slice CS2: Split compiler flow into explicit fast index pass and dirty-function emit pass.
 - Language: `.stasis`.
