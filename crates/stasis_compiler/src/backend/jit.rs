@@ -2719,37 +2719,46 @@ fn parse_foreach_statement(
     let header_close = find_matching_delimiter(source, header_open, b'(', b')')
         .ok_or_else(|| "missing ')' for foreach-header".to_string())?;
     let header = source[header_open + 1..header_close].trim();
-    if !starts_with_keyword(header, 0, "let") {
-        return Err(format!(
-            "foreach header must start with 'let': '{}'",
-            header
-        ));
+    let mut header_body = header;
+    let mut uses_let_header = false;
+    if starts_with_keyword(header, 0, "let") {
+        uses_let_header = true;
+        header_body = header
+            .strip_prefix("let")
+            .ok_or_else(|| format!("invalid foreach header '{}'", header))?;
     }
-    let after_let = header
-        .strip_prefix("let")
-        .ok_or_else(|| format!("invalid foreach header '{}'", header))?;
-    let mut header_cursor = skip_ascii_whitespace(after_let, 0);
-    let (item_name, next) = parse_identifier(after_let, header_cursor)?;
-    header_cursor = skip_ascii_whitespace(after_let, next);
+    let mut header_cursor = skip_ascii_whitespace(header_body, 0);
+    let (first_identifier, next) = parse_identifier(header_body, header_cursor)?;
+    header_cursor = skip_ascii_whitespace(header_body, next);
+
+    let mut item_name = first_identifier.to_string();
     let mut index_name: Option<String> = None;
-    if after_let.as_bytes().get(header_cursor).copied() == Some(b',') {
+    if header_body.as_bytes().get(header_cursor).copied() == Some(b',') {
         header_cursor += 1;
-        header_cursor = skip_ascii_whitespace(after_let, header_cursor);
-        let (index_identifier, next) = parse_identifier(after_let, header_cursor)?;
-        index_name = Some(index_identifier.to_string());
-        header_cursor = skip_ascii_whitespace(after_let, next);
+        header_cursor = skip_ascii_whitespace(header_body, header_cursor);
+        let (second_identifier, next) = parse_identifier(header_body, header_cursor)?;
+        if uses_let_header {
+            // Legacy header style: `foreach (let value, index in collection)`.
+            item_name = first_identifier.to_string();
+            index_name = Some(second_identifier.to_string());
+        } else {
+            // Spec header style: `foreach (index, value in collection)`.
+            index_name = Some(first_identifier.to_string());
+            item_name = second_identifier.to_string();
+        }
+        header_cursor = skip_ascii_whitespace(header_body, next);
     }
-    if !starts_with_keyword(after_let, header_cursor, "in") {
+    if !starts_with_keyword(header_body, header_cursor, "in") {
         return Err(format!(
             "foreach header must include 'in <collection>' segment: '{}'",
             header
         ));
     }
     header_cursor += "in".len();
-    header_cursor = skip_ascii_whitespace(after_let, header_cursor);
-    let (collection_path, next) = parse_identifier_path(after_let, header_cursor)?;
-    header_cursor = skip_ascii_whitespace(after_let, next);
-    if header_cursor != after_let.len() {
+    header_cursor = skip_ascii_whitespace(header_body, header_cursor);
+    let (collection_path, next) = parse_identifier_path(header_body, header_cursor)?;
+    header_cursor = skip_ascii_whitespace(header_body, next);
+    if header_cursor != header_body.len() {
         return Err(format!(
             "unexpected trailing tokens in foreach header '{}'",
             header
@@ -2767,7 +2776,7 @@ fn parse_foreach_statement(
 
     Ok((
         SimpleStmt::Foreach {
-            item_name: item_name.to_string(),
+            item_name,
             index_name,
             collection_path,
             body_statements,

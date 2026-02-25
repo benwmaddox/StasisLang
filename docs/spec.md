@@ -319,7 +319,7 @@ Rules:
 Value-only form:
 
 ```stasis
-foreach (enemy in enemies) {
+foreach (let enemy in enemies) {
     enemy.hp -= 1;
 }
 ```
@@ -327,7 +327,7 @@ foreach (enemy in enemies) {
 Primitive example:
 
 ```stasis
-foreach (value in scores) {
+foreach (let value in scores) {
     value += 1;
 }
 ```
@@ -343,7 +343,7 @@ Rules:
 Indexed form:
 
 ```stasis
-foreach (i, enemy in enemies) {
+foreach (let enemy, i in enemies) {
     if (i == focusIndex) {
         enemy.hp -= 10;
     }
@@ -373,7 +373,7 @@ For struct arrays lowered to SoA, field access inside `foreach` maps to field ar
 Example source:
 
 ```stasis
-foreach (i, enemy in enemies) {
+foreach (let enemy, i in enemies) {
     enemy.hp -= 1;
     enemy.transform.position.x += 2.0;
 }
