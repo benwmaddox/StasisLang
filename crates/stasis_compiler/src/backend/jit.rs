@@ -2,6 +2,7 @@ use crate::backend::EngineEntrypoints;
 use crate::compiler::{
     CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
 };
+use crate::frontend::indexer::hash_text;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
     ParsedField,
@@ -20,6 +21,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -37,6 +39,7 @@ pub struct JitProcess {
     modules: Vec<JITModule>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
+    source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
 }
@@ -59,6 +62,7 @@ impl JitProcess {
             modules: Vec::new(),
             runtime_libraries: Vec::new(),
             runtime_symbol_cache: BTreeMap::new(),
+            source_disk_probe_cache: BTreeMap::new(),
             compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
         }
@@ -71,6 +75,41 @@ impl JitProcess {
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
+    }
+
+    pub fn refresh_imported_sources_from_disk(&mut self, root_source_path: &str) -> bool {
+        let tracked: Vec<(String, u64)> = self
+            .compiler
+            .files()
+            .iter()
+            .filter(|file| file.path != root_source_path)
+            .map(|file| (file.path.clone(), file.hash))
+            .collect();
+        let tracked_paths: BTreeSet<String> = tracked.iter().map(|(path, _)| path.clone()).collect();
+        self.source_disk_probe_cache
+            .retain(|path, _| tracked_paths.contains(path));
+
+        let mut changed = false;
+        for (path, known_hash) in tracked {
+            let disk_path = Path::new(&path);
+            let Some(probe) = probe_disk_source(disk_path) else {
+                continue;
+            };
+            if self.source_disk_probe_cache.get(&path) == Some(&probe) {
+                continue;
+            }
+
+            let Ok(content) = std::fs::read_to_string(disk_path) else {
+                continue;
+            };
+            let disk_hash = hash_text(&content);
+            self.source_disk_probe_cache.insert(path.clone(), probe);
+            if disk_hash != known_hash {
+                self.compiler.upsert_file(path, content);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
@@ -501,6 +540,21 @@ struct CompileAnalysisCache {
     constant_values: ConstantValueMap,
     collection_infos: CollectionInfoMap,
     extern_symbol_addresses: ExternSymbolAddressMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceDiskProbe {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn probe_disk_source(path: &Path) -> Option<SourceDiskProbe> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok();
+    Some(SourceDiskProbe {
+        len: metadata.len(),
+        modified,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]

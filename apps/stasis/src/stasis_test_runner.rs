@@ -115,7 +115,10 @@ pub fn run_jit_tests_in_directory_with_session(
                 source_hash: 0,
                 process: JitProcess::new(),
             });
-        let compile_required = entry.source_hash != source_hash;
+        let dependency_changed = entry
+            .process
+            .refresh_imported_sources_from_disk(&file_path.to_string_lossy());
+        let compile_required = entry.source_hash != source_hash || dependency_changed;
         let runtime_rebind_required = !compile_required
             && session
                 .last_active_path
@@ -586,6 +589,38 @@ mod tests {
             run_jit_tests_in_directory_with_session(&root, &mut session).expect("second run");
         assert_eq!(second.tests_passed, 2, "{second:?}");
         assert_eq!(second.tests_failed, 0, "{second:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_recompiles_when_imported_dependency_changes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("stasis_test_runner_dependency_change_{stamp}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let helper = root.join("helper.stasis");
+        let fixture = root.join("sample.test.stasis");
+        fs::write(&helper, "function helper(): i32 { return 7; }\n").expect("write helper");
+        fs::write(
+            &fixture,
+            "import \"helper.stasis\";\ntest `dependency-sensitive`(): bool { return helper() == 7; }\n",
+        )
+        .expect("write fixture");
+
+        let mut session = StasisTestRunSession::new();
+        let first = run_jit_tests_in_directory_with_session(&root, &mut session).expect("first");
+        assert_eq!(first.tests_passed, 1, "{first:?}");
+        assert_eq!(first.tests_failed, 0, "{first:?}");
+
+        fs::write(&helper, "function helper(): i32 { return 8; }\n").expect("rewrite helper");
+        let second = run_jit_tests_in_directory_with_session(&root, &mut session).expect("second");
+        assert_eq!(second.tests_run, 1, "{second:?}");
+        assert_eq!(second.tests_passed, 0, "{second:?}");
+        assert_eq!(second.tests_failed, 1, "{second:?}");
 
         fs::remove_dir_all(&root).ok();
     }
