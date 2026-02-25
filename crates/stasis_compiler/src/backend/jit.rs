@@ -7555,6 +7555,25 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_foreach_struct_array_without_let_header_style() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal state: Enemy[COUNT];\nfunction main(): i32 {\n    foreach (i, enemy in state) { enemy.hp = i + 1; }\n    let sum: i32 = 0;\n    foreach (enemy in state) { sum += enemy.hp; }\n    return sum;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 6);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_foreach_over_local_fixed_array_parameter() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
