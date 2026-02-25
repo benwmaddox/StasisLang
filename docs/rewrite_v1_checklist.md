@@ -102,6 +102,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added explicit local struct-array view parameter coverage for indexed field read/write (`jit_process_executes_local_indexed_struct_array_view_parameter_field_access`) to lock `Type[]` parity with fixed-array parameter behavior in current JIT lowering.
 - Indexed struct value-copy lowering now also covers local collection bindings (`arr[target] = arr[source]`) for both fixed and view params (`jit_process_executes_local_indexed_struct_value_copy_assignment`, `jit_process_executes_local_indexed_struct_value_copy_assignment_for_view_param`) with mismatch diagnostics (`jit_process_rejects_local_indexed_struct_copy_assignment_for_mismatched_layouts`).
 - Local indexed struct element access without field suffix now fails explicitly in JIT lowering (`jit_process_rejects_local_indexed_struct_element_without_field_suffix`) to prevent accidental scalar-lane fallback behavior.
+- Local indexed struct copy now has explicit operator gating coverage (`jit_process_rejects_local_indexed_struct_copy_compound_assignment`) so only `=` is accepted for struct value-copy assignment.
 
 ### S0 - Workspace Bootstrap
 - Language:

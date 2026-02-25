@@ -9069,6 +9069,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_rejects_local_indexed_struct_copy_compound_assignment() {
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+        stasis_dynload::clear_jit_f32_array_global_table();
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction bad(arr: Enemy[2]): i32 { arr[1] += arr[0]; return 0; }\nfunction main(): i32 { return bad(enemies); }\n",
+        );
+        let error = process.compile().expect_err("expected compile failure");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains(
+                        "struct indexed copy assignment only supports '=' for 'arr[...]'"
+                    ),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_global_struct_path_value_copy_assignment() {
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
