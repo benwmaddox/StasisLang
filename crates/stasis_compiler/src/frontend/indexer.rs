@@ -109,7 +109,10 @@ mod tests {
         assert_eq!(indexed[0].name, "main");
         assert_eq!(indexed[0].param_names, vec!["value".to_string()]);
         assert_eq!(indexed[0].params.len(), 1);
-        assert_eq!(indexed[0].return_type, types.resolve("i32").unwrap_or_default());
+        assert_eq!(
+            indexed[0].return_type,
+            types.resolve("i32").unwrap_or_default()
+        );
     }
 
     #[test]

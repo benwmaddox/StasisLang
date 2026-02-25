@@ -3536,8 +3536,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_jit_non_engine_for_logical_condition_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_jit_non_engine_for_logical_condition_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("game_logic.stasis");
         fs::write(
@@ -4452,8 +4453,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_for_loop_logical_condition_contract_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_for_loop_logical_condition_contract_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4500,8 +4502,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_for_loop_call_init_conversion_contract_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_for_loop_call_init_conversion_contract_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4548,8 +4551,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_for_loop_global_indexed_conversion_contract_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_for_loop_global_indexed_conversion_contract_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4644,8 +4648,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_bool_condition_expression_contract_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_bool_condition_expression_contract_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4786,8 +4791,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_string_semicolon_contract_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_string_semicolon_contract_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4833,8 +4838,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_expression_comment_contract_{stamp}"));
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_aot_expression_comment_contract_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(
@@ -4880,8 +4885,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root = std::env::temp_dir()
-            .join(format!("stasis_aot_for_header_comment_semicolon_contract_{stamp}"));
+        let temp_root = std::env::temp_dir().join(format!(
+            "stasis_aot_for_header_comment_semicolon_contract_{stamp}"
+        ));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let source = temp_root.join("sample.stasis");
         fs::write(

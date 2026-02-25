@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
+use stasis_runner::swap::contracts::{CodeGeneration, FnId, FunctionPatchSet, JitCodePtrOverride};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use stasis_runner::swap::contracts::{CodeGeneration, FnId, FunctionPatchSet, JitCodePtrOverride};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CodePtr(pub u64);
@@ -316,7 +316,12 @@ pub fn compile_clif_to_object(
         .arg("--opt-level")
         .arg(&config.opt_level)
         .output()
-        .map_err(|e| format!("failed to execute AOT helper {}: {e}", helper_path.display()))?;
+        .map_err(|e| {
+            format!(
+                "failed to execute AOT helper {}: {e}",
+                helper_path.display()
+            )
+        })?;
 
     let _ = fs::remove_file(&temp_input);
 
@@ -350,9 +355,7 @@ fn resolve_aot_helper_path(config: &AotCompileConfig) -> Result<PathBuf, String>
         }
     }
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     Ok(repo_root
         .join("tools")
         .join("cranelift-aot")
@@ -475,9 +478,12 @@ fn latest_child_dir(root: &Path) -> Option<PathBuf> {
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to execute {mode} linker {}: {error}", linker.display()))?;
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to execute {mode} linker {}: {error}",
+            linker.display()
+        )
+    })?;
     if !output.status.success() {
         return Err(format!(
             "{mode} failed (status {:?})\nstdout:\n{}\nstderr:\n{}",
@@ -543,7 +549,9 @@ mod tests {
         assert_eq!(table.generation(), CodeGeneration(1));
 
         let ptr_7 = table.code_ptr(FnId(7)).expect("missing fn 7 code pointer");
-        let ptr_11 = table.code_ptr(FnId(11)).expect("missing fn 11 code pointer");
+        let ptr_11 = table
+            .code_ptr(FnId(11))
+            .expect("missing fn 11 code pointer");
         assert_eq!(ptr_7, CodePtr((1_u64 << 32) | 7));
         assert_eq!(ptr_11, CodePtr((1_u64 << 32) | 11));
     }
@@ -552,10 +560,14 @@ mod tests {
     fn repeated_commit_rewrites_code_ptr_for_same_fn_id() {
         let mut table = FunctionPointerTable::new();
         table.commit_patch_set(&patch_set(&[3]));
-        let before = table.code_ptr(FnId(3)).expect("expected first code pointer");
+        let before = table
+            .code_ptr(FnId(3))
+            .expect("expected first code pointer");
 
         let outcome = table.commit_patch_set(&patch_set(&[3]));
-        let after = table.code_ptr(FnId(3)).expect("expected rewritten code pointer");
+        let after = table
+            .code_ptr(FnId(3))
+            .expect("expected rewritten code pointer");
 
         assert_eq!(outcome.new_generation, CodeGeneration(2));
         assert_ne!(before, after);
@@ -685,9 +697,7 @@ echo "fake-shared" > "$OUT"
     #[cfg(windows)]
     #[test]
     fn aot_helper_compiles_minimal_clif_to_object() {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let helper = repo_root
             .join("tools")
             .join("cranelift-aot")

@@ -116,15 +116,14 @@ mod tests {
 
     #[test]
     fn launcher_keeps_runner_repo_root() {
-        let launcher =
-            RuntimeLauncher::new(PathBuf::from("samples/brickout_revenge/brickout_revenge_v1.stasis"));
-        assert!(
-            launcher
-                .repo_root
-                .to_string_lossy()
-                .replace('\\', "/")
-                .contains("/StasisLang")
-        );
+        let launcher = RuntimeLauncher::new(PathBuf::from(
+            "samples/brickout_revenge/brickout_revenge_v1.stasis",
+        ));
+        assert!(launcher
+            .repo_root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/StasisLang"));
     }
 
     #[test]

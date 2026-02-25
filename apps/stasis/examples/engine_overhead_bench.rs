@@ -75,9 +75,7 @@ fn parse_mode(value: &str) -> Result<ModeArg, String> {
         "jit" => Ok(ModeArg::Jit),
         "aot" => Ok(ModeArg::Aot),
         "both" => Ok(ModeArg::Both),
-        _ => Err(format!(
-            "invalid --mode '{value}' (expected jit|aot|both)"
-        )),
+        _ => Err(format!("invalid --mode '{value}' (expected jit|aot|both)")),
     }
 }
 

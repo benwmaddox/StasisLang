@@ -78,6 +78,144 @@ pub struct ParsedTypeLayout {
     pub constants: Vec<ParsedConstDefinition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTestDeclaration {
+    pub display_name: String,
+    pub generated_function_name: String,
+    pub declaration_range: Range<usize>,
+    pub body_range: Range<usize>,
+}
+
+pub fn parse_top_level_test_declarations(
+    source: &str,
+) -> Result<Vec<ParsedTestDeclaration>, String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_comment_or_string(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let byte = bytes[cursor];
+        if byte == b'{' {
+            depth = depth.saturating_add(1);
+            cursor += 1;
+            continue;
+        }
+        if byte == b'}' {
+            depth = depth.saturating_sub(1);
+            cursor += 1;
+            continue;
+        }
+        if depth == 0 && starts_with_keyword(source, cursor, "test") {
+            let declaration_start = cursor;
+            cursor += "test".len();
+            cursor = skip_ascii_whitespace_and_comments(source, cursor);
+
+            if bytes.get(cursor).copied() != Some(b'`') {
+                return Err(format!(
+                    "test declaration missing backtick name near '{}'",
+                    snippet_from(source, declaration_start)
+                ));
+            }
+            let name_start = cursor + 1;
+            let mut name_end = name_start;
+            while name_end < bytes.len() && bytes[name_end] != b'`' {
+                name_end += 1;
+            }
+            if name_end >= bytes.len() {
+                return Err("unterminated test name (missing closing backtick)".to_string());
+            }
+            let display_name = source[name_start..name_end].to_string();
+            cursor = name_end + 1;
+            cursor = skip_ascii_whitespace_and_comments(source, cursor);
+
+            if bytes.get(cursor).copied() != Some(b'(') {
+                return Err(format!(
+                    "test '{}' missing parameter list '()'",
+                    display_name
+                ));
+            }
+            let params_close = find_matching_delimiter(source, cursor, b'(', b')')
+                .ok_or_else(|| format!("test '{}' missing ')'", display_name))?;
+            let params = source[cursor + 1..params_close].trim();
+            if !params.is_empty() {
+                return Err(format!(
+                    "test '{}' must not declare parameters",
+                    display_name
+                ));
+            }
+            cursor = params_close + 1;
+            cursor = skip_ascii_whitespace_and_comments(source, cursor);
+
+            if bytes.get(cursor).copied() != Some(b':') {
+                return Err(format!(
+                    "test '{}' missing ': bool' return type",
+                    display_name
+                ));
+            }
+            cursor += 1;
+            cursor = skip_ascii_whitespace_and_comments(source, cursor);
+            let (return_type, after_return_type) = parse_identifier(source, cursor)?;
+            if return_type != "bool" {
+                return Err(format!(
+                    "test '{}' return type must be bool, found '{}'",
+                    display_name, return_type
+                ));
+            }
+            cursor = skip_ascii_whitespace_and_comments(source, after_return_type);
+
+            if bytes.get(cursor).copied() != Some(b'{') {
+                return Err(format!("test '{}' missing body block", display_name));
+            }
+            let body_start = cursor;
+            let body_close = find_matching_delimiter(source, body_start, b'{', b'}')
+                .ok_or_else(|| format!("test '{}' missing closing '}}'", display_name))?;
+            let body_end = body_close + 1;
+            let declaration_end = body_end;
+            out.push(ParsedTestDeclaration {
+                display_name,
+                generated_function_name: format!("__stasis_test_{}", out.len()),
+                declaration_range: declaration_start..declaration_end,
+                body_range: body_start..body_end,
+            });
+            cursor = declaration_end;
+            continue;
+        }
+        cursor += 1;
+    }
+    Ok(out)
+}
+
+pub fn rewrite_top_level_test_declarations(
+    source: &str,
+) -> Result<(String, Vec<ParsedTestDeclaration>), String> {
+    let declarations = parse_top_level_test_declarations(source)?;
+    if declarations.is_empty() {
+        return Ok((source.to_string(), Vec::new()));
+    }
+    let mut rewritten = String::with_capacity(source.len() + declarations.len() * 32);
+    let mut cursor = 0usize;
+    for declaration in &declarations {
+        if declaration.declaration_range.start < cursor
+            || declaration.declaration_range.end > source.len()
+        {
+            return Err("invalid test declaration bounds during rewrite".to_string());
+        }
+        rewritten.push_str(&source[cursor..declaration.declaration_range.start]);
+        let body = &source[declaration.body_range.clone()];
+        rewritten.push_str(&format!(
+            "function {}(): bool {}",
+            declaration.generated_function_name, body
+        ));
+        cursor = declaration.declaration_range.end;
+    }
+    rewritten.push_str(&source[cursor..]);
+    Ok((rewritten, declarations))
+}
+
 pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSignature>, String> {
     let tokens = lex(source)?;
     let mut out = Vec::new();
@@ -443,7 +581,8 @@ fn parse_global_definition(
         ));
     }
     if next_token.kind == TokenKind::LBrace {
-        let (fields, mut after_block) = parse_braced_fields(source, tokens, next_token, next_cursor)?;
+        let (fields, mut after_block) =
+            parse_braced_fields(source, tokens, next_token, next_cursor)?;
         if tokens
             .get(after_block)
             .is_some_and(|token| token.kind == TokenKind::Semicolon)
@@ -496,10 +635,7 @@ fn parse_const_definition(
             .get(semicolon_cursor)
             .is_some_and(|token| token.kind == TokenKind::Eof)
         {
-            return Err(format!(
-                "const declaration for '{}' is missing ';'",
-                name
-            ));
+            return Err(format!("const declaration for '{}' is missing ';'", name));
         }
         semicolon_cursor += 1;
     }
@@ -554,7 +690,11 @@ fn parse_braced_fields(
     Ok((fields, cursor))
 }
 
-fn skip_function_annotations(source: &str, tokens: &[Token], cursor: usize) -> Result<usize, String> {
+fn skip_function_annotations(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<usize, String> {
     let (next_cursor, _) = parse_function_annotations(source, tokens, cursor)?;
     Ok(next_cursor)
 }
@@ -672,7 +812,11 @@ fn skip_parenthesized_tokens(tokens: &[Token], open_cursor: usize) -> Result<usi
     Err("missing closing ')' in function annotation".to_string())
 }
 
-fn parse_type_name(source: &str, tokens: &[Token], cursor: usize) -> Result<(String, usize), String> {
+fn parse_type_name(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(String, usize), String> {
     let base = expect(tokens, cursor, TokenKind::Identifier)?;
     let mut next = cursor + 1;
     let mut end = base.end;
@@ -703,6 +847,158 @@ fn parse_type_name(source: &str, tokens: &[Token], cursor: usize) -> Result<(Str
         }
     }
     Ok((source[base.start..end].to_string(), next))
+}
+
+fn parse_identifier(source: &str, start: usize) -> Result<(&str, usize), String> {
+    let bytes = source.as_bytes();
+    if start >= bytes.len() {
+        return Err("expected identifier but reached end of source".to_string());
+    }
+    let first = bytes[start];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(format!(
+            "expected identifier near '{}'",
+            snippet_from(source, start)
+        ));
+    }
+    let mut end = start + 1;
+    while end < bytes.len() {
+        let byte = bytes[end];
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            end += 1;
+            continue;
+        }
+        break;
+    }
+    Ok((&source[start..end], end))
+}
+
+fn starts_with_keyword(source: &str, cursor: usize, keyword: &str) -> bool {
+    let Some(tail) = source.get(cursor..) else {
+        return false;
+    };
+    if !tail.starts_with(keyword) {
+        return false;
+    }
+    let before_ok = if cursor == 0 {
+        true
+    } else {
+        !is_identifier_char(source.as_bytes()[cursor - 1])
+    };
+    if !before_ok {
+        return false;
+    }
+    let end = cursor + keyword.len();
+    if end >= source.len() {
+        return true;
+    }
+    !is_identifier_char(source.as_bytes()[end])
+}
+
+fn is_identifier_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_ascii_whitespace_and_comments(source: &str, mut cursor: usize) -> usize {
+    let bytes = source.as_bytes();
+    loop {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
+            cursor += 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+            continue;
+        }
+        if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            cursor += 2;
+            while cursor + 1 < bytes.len() {
+                if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+                    cursor += 2;
+                    break;
+                }
+                cursor += 1;
+            }
+            continue;
+        }
+        return cursor;
+    }
+}
+
+fn skip_comment_or_string(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if cursor >= bytes.len() {
+        return None;
+    }
+    if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
+        let mut next = cursor + 2;
+        while next < bytes.len() && bytes[next] != b'\n' {
+            next += 1;
+        }
+        return Some(next);
+    }
+    if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+        let mut next = cursor + 2;
+        while next + 1 < bytes.len() {
+            if bytes[next] == b'*' && bytes[next + 1] == b'/' {
+                return Some(next + 2);
+            }
+            next += 1;
+        }
+        return Some(bytes.len());
+    }
+    if bytes[cursor] == b'"' {
+        let mut next = cursor + 1;
+        while next < bytes.len() {
+            if bytes[next] == b'\\' {
+                next = next.saturating_add(2);
+                continue;
+            }
+            if bytes[next] == b'"' {
+                return Some(next + 1);
+            }
+            next += 1;
+        }
+        return Some(bytes.len());
+    }
+    None
+}
+
+fn find_matching_delimiter(source: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if start >= bytes.len() || bytes[start] != open {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_comment_or_string(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let byte = bytes[cursor];
+        if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(cursor);
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn snippet_from(source: &str, start: usize) -> String {
+    source
+        .get(start..)
+        .unwrap_or("")
+        .chars()
+        .take(64)
+        .collect::<String>()
 }
 
 fn token_text<'a>(source: &'a str, token: Token) -> &'a str {
@@ -797,8 +1093,7 @@ mod tests {
 
     #[test]
     fn supports_array_type_annotations_in_params_and_return_type() {
-        let source =
-            "function copy_ascii(src: ascii[], dst: ascii[]): i32[120] { return 0; }\n";
+        let source = "function copy_ascii(src: ascii[], dst: ascii[]): i32[120] { return 0; }\n";
         let parsed = parse_top_level_functions(source).expect("parse");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].params.len(), 2);
@@ -888,7 +1183,8 @@ mod tests {
 
     #[test]
     fn parses_extern_keyword_function_declaration() {
-        let source = "extern function host_cli_arg_count(): i32;\nfunction main(): i32 { return 0; }\n";
+        let source =
+            "extern function host_cli_arg_count(): i32;\nfunction main(): i32 { return 0; }\n";
         let parsed = parse_top_level_extern_functions(source).expect("parse");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "host_cli_arg_count");
@@ -907,5 +1203,39 @@ mod tests {
         assert!(parsed[0].explicit_symbol);
         assert_eq!(parsed[0].params.len(), 2);
         assert_eq!(parsed[0].params[1].type_name, "string");
+    }
+
+    #[test]
+    fn parses_top_level_test_declarations() {
+        let source = "global x: i32;\ntest `alpha`(): bool { return true; }\nfunction main(): i32 { return 0; }\n";
+        let parsed = parse_top_level_test_declarations(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].display_name, "alpha");
+        assert_eq!(parsed[0].generated_function_name, "__stasis_test_0");
+        assert_eq!(&source[parsed[0].body_range.clone()], "{ return true; }");
+    }
+
+    #[test]
+    fn rewrites_top_level_test_declarations_to_functions() {
+        let source = "test `alpha`(): bool { return true; }\n";
+        let (rewritten, parsed) = rewrite_top_level_test_declarations(source).expect("rewrite");
+        assert_eq!(parsed.len(), 1);
+        assert!(rewritten.contains("function __stasis_test_0(): bool { return true; }"));
+        assert!(!rewritten.contains("test `alpha`(): bool"));
+    }
+
+    #[test]
+    fn rejects_non_bool_test_return_type() {
+        let source = "test `alpha`(): i32 { return 1; }";
+        let error = parse_top_level_test_declarations(source).expect_err("expected error");
+        assert!(error.contains("return type must be bool"));
+    }
+
+    #[test]
+    fn ignores_nested_test_keyword_inside_function_body() {
+        let source =
+            "function demo(): i32 { /* test `inner`(): bool { return false; } */ return 0; }\n";
+        let parsed = parse_top_level_test_declarations(source).expect("parse");
+        assert_eq!(parsed.len(), 0);
     }
 }

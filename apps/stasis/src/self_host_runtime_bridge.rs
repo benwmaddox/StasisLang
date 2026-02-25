@@ -35,10 +35,7 @@ pub fn stasis_process_env_lock() -> &'static Mutex<()> {
     PROCESS_ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-pub fn publish_cli_args_to_env(
-    args: &[String],
-    summary_file: Option<&Path>,
-) -> CliArgsEnvSnapshot {
+pub fn publish_cli_args_to_env(args: &[String], summary_file: Option<&Path>) -> CliArgsEnvSnapshot {
     let mut keys = vec![ARG_COUNT_KEY.to_string(), SUMMARY_KEY.to_string()];
     keys.extend(collect_indexed_env_keys(ARG_PREFIX));
     let saved = capture_env_values(&keys);
@@ -205,7 +202,10 @@ mod tests {
         std::env::set_var(format!("{SOURCE_PATH_PREFIX}0"), "before_path");
         std::env::set_var(format!("{SOURCE_TEXT_PREFIX}0"), "before_text");
 
-        let payload = vec![("a.stasis".to_string(), "function main(): i32 { return 7; }\n".to_string())];
+        let payload = vec![(
+            "a.stasis".to_string(),
+            "function main(): i32 { return 7; }\n".to_string(),
+        )];
         let snapshot = publish_source_files_to_env(&payload);
 
         assert_eq!(std::env::var(SOURCE_COUNT_KEY).ok().as_deref(), Some("1"));

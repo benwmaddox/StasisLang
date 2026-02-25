@@ -1,8 +1,10 @@
 use crate::backend::EngineEntrypoints;
-use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile};
+use crate::compiler::{
+    CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
+};
 use crate::frontend::parser::{
-    parse_top_level_extern_functions, parse_top_level_type_layout,
-    ParsedExternFunctionDeclaration, ParsedField,
+    parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
+    ParsedField,
 };
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32, TYPE_ID_VOID,
@@ -11,11 +13,7 @@ use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::Ieee32,
-    types,
-    AbiParam,
-    FuncRef,
-    InstBuilder,
-    Value,
+    types, AbiParam, FuncRef, InstBuilder, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -39,6 +37,7 @@ pub struct JitProcess {
     modules: Vec<JITModule>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
+    required_emit_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +58,7 @@ impl JitProcess {
             modules: Vec::new(),
             runtime_libraries: Vec::new(),
             runtime_symbol_cache: BTreeMap::new(),
+            required_emit_roots: Vec::new(),
         }
     }
 
@@ -66,9 +66,15 @@ impl JitProcess {
         self.compiler.upsert_file(path, content);
     }
 
+    pub fn set_required_emit_roots(&mut self, roots: &[String]) {
+        self.required_emit_roots.clear();
+        self.required_emit_roots.extend_from_slice(roots);
+    }
+
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
         stasis_dynload::clear_jit_string_literal_table();
-        load_import_graph_sources(&mut self.compiler).map_err(crate::compiler::CompileError::Backend)?;
+        load_import_graph_sources(&mut self.compiler)
+            .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
         type_table
@@ -80,9 +86,9 @@ impl JitProcess {
         let extern_signatures =
             collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
-        let (resolved_extern_signatures, extern_symbol_addresses) =
-            self.resolve_extern_call_signatures(&extern_signatures)
-                .map_err(crate::compiler::CompileError::Backend)?;
+        let (resolved_extern_signatures, extern_symbol_addresses) = self
+            .resolve_extern_call_signatures(&extern_signatures)
+            .map_err(crate::compiler::CompileError::Backend)?;
         let call_signatures = collect_supported_call_signatures(
             self.compiler.functions(),
             &resolved_extern_signatures,
@@ -90,7 +96,7 @@ impl JitProcess {
         );
         let constant_values =
             collect_top_level_constant_values(self.compiler.files(), &mut type_table)
-            .map_err(crate::compiler::CompileError::Backend)?;
+                .map_err(crate::compiler::CompileError::Backend)?;
         let global_path_types =
             collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
                 .map_err(crate::compiler::CompileError::Backend)?;
@@ -102,17 +108,20 @@ impl JitProcess {
             &constant_values,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
-        let emit_function_ids =
-            select_emit_function_ids(self.compiler.functions(), self.artifacts());
+        let emit_function_ids = select_emit_function_ids(
+            self.compiler.functions(),
+            self.artifacts(),
+            &self.required_emit_roots,
+        );
         let (next_slot, next_symbol_seq, artifacts, modules) = (
             &mut self.next_slot,
             &mut self.next_symbol_seq,
             &mut self.artifacts,
             &mut self.modules,
         );
-        let emit = self.compiler.emit_pass_for_ids_with(
-            &emit_function_ids,
-            &mut |meta, hir| {
+        let emit = self
+            .compiler
+            .emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
                 let symbol = format!("jit_fn_{}_{}", meta.id, *next_symbol_seq);
                 *next_symbol_seq = next_symbol_seq.saturating_add(1);
                 let (module, code_ptr) = compile_function_to_jit_module(
@@ -137,8 +146,7 @@ impl JitProcess {
                     code_ptr,
                 });
                 Ok(())
-            },
-        )?;
+            })?;
         let report = CompileReport { index, emit };
         self.refresh_runtime_dispatch_table();
         Ok(report)
@@ -168,6 +176,34 @@ impl JitProcess {
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
         Ok((raw as u32) as i32)
+    }
+
+    pub fn execute_bool_noarg_by_name(&self, name: &str) -> Result<bool, String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if function.return_type != TYPE_ID_BOOL {
+            return Err(format!(
+                "function '{name}' is not bool-returning (type id {})",
+                function.return_type
+            ));
+        }
+        if !function.params.is_empty() {
+            return Err(format!(
+                "function '{name}' is not a no-argument function (param count {})",
+                function.params.len()
+            ));
+        }
+        let artifact = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.function_id == function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
+        Ok((raw as u32) != 0)
     }
 
     pub fn execute_i32_twoarg_by_name(
@@ -276,13 +312,19 @@ impl JitProcess {
                     .params
                     .iter()
                     .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table))
-                    || function.params.iter().all(|type_id| *type_id == TYPE_ID_F32))
+                    || function
+                        .params
+                        .iter()
+                        .all(|type_id| *type_id == TYPE_ID_F32))
             {
                 i32_entries.push((function.id, arity, artifact.code_ptr as usize));
             } else if function.return_type == TYPE_ID_VOID && function.params.is_empty() {
                 i32_entries.push((function.id, arity, artifact.code_ptr as usize));
             } else if function.return_type == TYPE_ID_F32
-                && (function.params.iter().all(|type_id| *type_id == TYPE_ID_F32)
+                && (function
+                    .params
+                    .iter()
+                    .all(|type_id| *type_id == TYPE_ID_F32)
                     || (function.params.len() == 1
                         && is_i32_abi_compatible_type(function.params[0], type_table)))
             {
@@ -330,13 +372,15 @@ impl JitProcess {
             return Some(existing);
         }
         if let Some(address) = builtin_host_symbol_address(symbol) {
-            self.runtime_symbol_cache.insert(symbol.to_string(), address);
+            self.runtime_symbol_cache
+                .insert(symbol.to_string(), address);
             return Some(address);
         }
         self.ensure_runtime_libraries_loaded();
         for library in &self.runtime_libraries {
             if let Ok(address) = library.symbol_address(symbol) {
-                self.runtime_symbol_cache.insert(symbol.to_string(), address);
+                self.runtime_symbol_cache
+                    .insert(symbol.to_string(), address);
                 return Some(address);
             }
         }
@@ -492,8 +536,12 @@ fn is_supported_call_lane_type(type_id: TypeId, type_table: &TypeTable, allow_vo
     type_id == TYPE_ID_F32 || is_i32_abi_compatible_type(type_id, type_table)
 }
 
-fn select_emit_function_ids(functions: &[FunctionMeta], artifacts: &[JitArtifact]) -> Vec<FunctionId> {
-    let mut reachable = collect_reachable_function_ids(functions);
+fn select_emit_function_ids(
+    functions: &[FunctionMeta],
+    artifacts: &[JitArtifact],
+    required_emit_roots: &[String],
+) -> Vec<FunctionId> {
+    let mut reachable = collect_reachable_function_ids(functions, required_emit_roots);
     let reachable_names: BTreeSet<String> = functions
         .iter()
         .filter(|function| reachable.contains(&function.id))
@@ -504,7 +552,10 @@ fn select_emit_function_ids(functions: &[FunctionMeta], artifacts: &[JitArtifact
             reachable.insert(function.id);
         }
     }
-    let compiled: BTreeSet<FunctionId> = artifacts.iter().map(|artifact| artifact.function_id).collect();
+    let compiled: BTreeSet<FunctionId> = artifacts
+        .iter()
+        .map(|artifact| artifact.function_id)
+        .collect();
     functions
         .iter()
         .filter(|function| {
@@ -514,13 +565,24 @@ fn select_emit_function_ids(functions: &[FunctionMeta], artifacts: &[JitArtifact
         .collect()
 }
 
-fn collect_reachable_function_ids(functions: &[FunctionMeta]) -> BTreeSet<FunctionId> {
+fn collect_reachable_function_ids(
+    functions: &[FunctionMeta],
+    required_emit_roots: &[String],
+) -> BTreeSet<FunctionId> {
     let mut roots: Vec<FunctionId> = Vec::new();
     for root_name in ["tick", "main", "render", "on_code_swap"] {
         roots.extend(
             functions
                 .iter()
                 .filter(|function| function.name == root_name)
+                .map(|function| function.id),
+        );
+    }
+    for root_name in required_emit_roots {
+        roots.extend(
+            functions
+                .iter()
+                .filter(|function| function.name == *root_name)
                 .map(|function| function.id),
         );
     }
@@ -656,7 +718,11 @@ fn is_i32_numeric_type(type_id: TypeId, type_table: &TypeTable) -> bool {
     matches!(type_info.category, TypeCategory::Named)
 }
 
-fn are_assignment_types_compatible(target_type: TypeId, expression_type: TypeId, type_table: &TypeTable) -> bool {
+fn are_assignment_types_compatible(
+    target_type: TypeId,
+    expression_type: TypeId,
+    type_table: &TypeTable,
+) -> bool {
     if target_type == expression_type {
         return true;
     }
@@ -665,8 +731,16 @@ fn are_assignment_types_compatible(target_type: TypeId, expression_type: TypeId,
 }
 
 fn load_import_graph_sources(compiler: &mut Compiler) -> Result<(), String> {
-    let mut known_paths: BTreeSet<String> = compiler.files().iter().map(|file| file.path.clone()).collect();
-    let mut queue: Vec<String> = compiler.files().iter().map(|file| file.path.clone()).collect();
+    let mut known_paths: BTreeSet<String> = compiler
+        .files()
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    let mut queue: Vec<String> = compiler
+        .files()
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
 
     while let Some(path) = queue.pop() {
         let Some(source) = compiler
@@ -778,7 +852,9 @@ fn runtime_library_candidate_paths() -> Vec<PathBuf> {
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
     let address = match symbol {
         "print_i32" | "stasis_jit_print_i32" => stasis_dynload::stasis_jit_print_i32 as usize,
-        "print_string" | "stasis_jit_print_string" => stasis_dynload::stasis_jit_print_string as usize,
+        "print_string" | "stasis_jit_print_string" => {
+            stasis_dynload::stasis_jit_print_string as usize
+        }
         "sin_fast" | "stasis_jit_sin_fast" => stasis_dynload::stasis_jit_sin_fast as usize,
         "cos_fast" | "stasis_jit_cos_fast" => stasis_dynload::stasis_jit_cos_fast as usize,
         "stasis_jit_global_i32_load" => stasis_dynload::stasis_jit_global_i32_load as usize,
@@ -818,8 +894,12 @@ fn collect_global_path_types(
     let mut global_blocks: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
 
     for file in files {
-        let parsed = parse_top_level_type_layout(&file.content)
-            .map_err(|error| format!("failed parsing top-level type layout in {}: {error}", file.path))?;
+        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level type layout in {}: {error}",
+                file.path
+            )
+        })?;
         for parsed_struct in parsed.structs {
             if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
                 if existing != &parsed_struct.fields {
@@ -967,8 +1047,13 @@ fn resolve_global_path_type_id(
         if extent_text.is_empty() || extent_text.bytes().all(|byte| byte.is_ascii_digit()) {
             return type_table.resolve_or_intern(trimmed);
         }
-        let resolved_extent = resolve_fixed_array_extent(extent_text, constant_values)
-            .ok_or_else(|| format!("unsupported array extent '{}' in type '{}'", extent_text, type_name))?;
+        let resolved_extent =
+            resolve_fixed_array_extent(extent_text, constant_values).ok_or_else(|| {
+                format!(
+                    "unsupported array extent '{}' in type '{}'",
+                    extent_text, type_name
+                )
+            })?;
         if resolved_extent < 0 {
             return Err(format!(
                 "negative array extent {} in type '{}'",
@@ -996,8 +1081,12 @@ fn collect_top_level_constant_values(
 ) -> Result<ConstantValueMap, String> {
     let mut out = ConstantValueMap::new();
     for file in files {
-        let parsed = parse_top_level_type_layout(&file.content)
-            .map_err(|error| format!("failed parsing top-level constants in {}: {error}", file.path))?;
+        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level constants in {}: {error}",
+                file.path
+            )
+        })?;
         for parsed_enum in parsed.enums {
             let enum_type_id = type_table.resolve(&parsed_enum.name).unwrap_or(TYPE_ID_I32);
             let mut next_value: i32 = 0;
@@ -1033,7 +1122,8 @@ fn collect_top_level_constant_values(
                 &constant.type_name,
                 &constant.value_text,
                 type_table,
-            )? else {
+            )?
+            else {
                 continue;
             };
             if let Some(existing) = out.get(&constant.name) {
@@ -1103,8 +1193,12 @@ fn parse_top_level_constant_literal(
 }
 
 fn parse_constant_string_initializer(name: &str, initializer: &str) -> Result<String, String> {
-    let tokens = tokenize_simple_expression(initializer)
-        .map_err(|error| format!("invalid string initializer for constant '{}': {error}", name))?;
+    let tokens = tokenize_simple_expression(initializer).map_err(|error| {
+        format!(
+            "invalid string initializer for constant '{}': {error}",
+            name
+        )
+    })?;
     if tokens.len() != 1 {
         return Err(format!(
             "constant '{}' string initializer must be a single literal",
@@ -1130,8 +1224,12 @@ fn collect_foreach_collection_infos(
     let mut global_blocks: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
 
     for file in files {
-        let parsed = parse_top_level_type_layout(&file.content)
-            .map_err(|error| format!("failed parsing top-level type layout in {}: {error}", file.path))?;
+        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level type layout in {}: {error}",
+                file.path
+            )
+        })?;
         for parsed_struct in parsed.structs {
             if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
                 if existing != &parsed_struct.fields {
@@ -1337,7 +1435,10 @@ fn collect_struct_primitive_leaf_fields(
     let Some(fields) = struct_fields_by_name.get(struct_name) else {
         return Ok(());
     };
-    if visiting_structs.iter().any(|existing| existing == struct_name) {
+    if visiting_structs
+        .iter()
+        .any(|existing| existing == struct_name)
+    {
         return Err(format!(
             "recursive struct field expansion is unsupported for '{}'",
             struct_name
@@ -1398,7 +1499,10 @@ fn parse_array_type_parts(type_name: &str) -> Option<(&str, &str)> {
     Some((element, extent))
 }
 
-fn resolve_fixed_array_extent(extent_text: &str, constant_values: &ConstantValueMap) -> Option<i32> {
+fn resolve_fixed_array_extent(
+    extent_text: &str,
+    constant_values: &ConstantValueMap,
+) -> Option<i32> {
     if extent_text.is_empty() {
         return None;
     }
@@ -1602,12 +1706,13 @@ fn compile_function_to_jit_module(
             .push(AbiParam::new(clif_param_type));
     }
     if meta.return_type != TYPE_ID_VOID {
-        let clif_return_type = clif_type_for_type_id(meta.return_type, type_table).map_err(|_| {
-            format!(
-                "unsupported JIT return type id {} for function {}",
-                meta.return_type, meta.name
-            )
-        })?;
+        let clif_return_type =
+            clif_type_for_type_id(meta.return_type, type_table).map_err(|_| {
+                format!(
+                    "unsupported JIT return type id {} for function {}",
+                    meta.return_type, meta.name
+                )
+            })?;
         context
             .func
             .signature
@@ -1654,7 +1759,10 @@ fn compile_function_to_jit_module(
         global_i32_load: declare_i32_call_import(&mut module, "stasis_jit_global_i32_load", 1)?,
         global_i32_store: declare_void_call_import(&mut module, "stasis_jit_global_i32_store", 2)?,
         global_f32_load: declare_f32_global_load_import(&mut module, "stasis_jit_global_f32_load")?,
-        global_f32_store: declare_f32_global_store_import(&mut module, "stasis_jit_global_f32_store")?,
+        global_f32_store: declare_f32_global_store_import(
+            &mut module,
+            "stasis_jit_global_f32_store",
+        )?,
         global_i32_array_load: declare_i32_array_load_import(
             &mut module,
             "stasis_jit_global_i32_array_load",
@@ -1715,7 +1823,8 @@ fn compile_function_to_jit_module(
             call_f32_i32_1: module
                 .declare_func_in_func(runtime_call_imports.call_f32_i32_1, builder.func),
             print_i32: module.declare_func_in_func(runtime_call_imports.print_i32, builder.func),
-            print_string: module.declare_func_in_func(runtime_call_imports.print_string, builder.func),
+            print_string: module
+                .declare_func_in_func(runtime_call_imports.print_string, builder.func),
             lookup_code_ptr: module
                 .declare_func_in_func(runtime_call_imports.lookup_code_ptr, builder.func),
             sin_fast: module.declare_func_in_func(runtime_call_imports.sin_fast, builder.func),
@@ -1775,10 +1884,7 @@ fn compile_function_to_jit_module(
                 type_table,
             )?;
             if values_by_name.contains_key(name) {
-                return Err(format!(
-                    "parameter '{}' shadows existing variable",
-                    name
-                ));
+                return Err(format!("parameter '{}' shadows existing variable", name));
             }
             values_by_name.insert(
                 name.clone(),
@@ -2056,10 +2162,7 @@ fn declare_i32_array_load_import(module: &mut JITModule, symbol: &str) -> Result
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-fn declare_i32_array_store_import(
-    module: &mut JITModule,
-    symbol: &str,
-) -> Result<FuncId, String> {
+fn declare_i32_array_store_import(module: &mut JITModule, symbol: &str) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
@@ -2081,10 +2184,7 @@ fn declare_f32_array_load_import(module: &mut JITModule, symbol: &str) -> Result
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-fn declare_f32_array_store_import(
-    module: &mut JITModule,
-    symbol: &str,
-) -> Result<FuncId, String> {
+fn declare_f32_array_store_import(module: &mut JITModule, symbol: &str) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
@@ -2123,7 +2223,10 @@ fn declare_extern_call_imports(
             if signature.return_type != TYPE_ID_VOID {
                 clif_signature
                     .returns
-                    .push(AbiParam::new(clif_type_for_type_id(signature.return_type, type_table)?));
+                    .push(AbiParam::new(clif_type_for_type_id(
+                        signature.return_type,
+                        type_table,
+                    )?));
             }
             let func_id = module
                 .declare_function(symbol, Linkage::Import, &clif_signature)
@@ -2692,7 +2795,10 @@ fn parse_for_statement(
     ))
 }
 
-fn parse_for_control_segment(segment_text: &str, type_table: &TypeTable) -> Result<SimpleStmt, String> {
+fn parse_for_control_segment(
+    segment_text: &str,
+    type_table: &TypeTable,
+) -> Result<SimpleStmt, String> {
     let trimmed = segment_text.trim();
     if trimmed.is_empty() {
         return Ok(SimpleStmt::Noop);
@@ -3329,9 +3435,7 @@ fn find_statement_terminator(source: &str, start: usize) -> Result<usize, String
             b'}' => brace_depth -= 1,
             b'[' => bracket_depth += 1,
             b']' => bracket_depth -= 1,
-            b';' if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 => {
-                return Ok(index)
-            }
+            b';' if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 => return Ok(index),
             _ => {}
         }
         index += 1;
@@ -3538,9 +3642,9 @@ fn emit_indirect_call_for_signature(
     arg_values: &[Value],
     type_table: &TypeTable,
 ) -> Result<Option<Value>, String> {
-    let function_id = signature.function_id.ok_or_else(|| {
-        "internal dispatch requested for extern call signature".to_string()
-    })?;
+    let function_id = signature
+        .function_id
+        .ok_or_else(|| "internal dispatch requested for extern call signature".to_string())?;
     let function_id_i32 = i32::try_from(function_id).map_err(|_| {
         format!(
             "function id {} out of i32 range for indirect call",
@@ -3558,23 +3662,30 @@ fn emit_indirect_call_for_signature(
     for param_type in &signature.params {
         indirect_signature
             .params
-            .push(AbiParam::new(clif_type_for_type_id(*param_type, type_table)?));
+            .push(AbiParam::new(clif_type_for_type_id(
+                *param_type,
+                type_table,
+            )?));
     }
     if signature.return_type != TYPE_ID_VOID {
         indirect_signature
             .returns
-            .push(AbiParam::new(clif_type_for_type_id(signature.return_type, type_table)?));
+            .push(AbiParam::new(clif_type_for_type_id(
+                signature.return_type,
+                type_table,
+            )?));
     }
     let signature_ref = builder.func.import_signature(indirect_signature);
-    let call = builder.ins().call_indirect(signature_ref, code_ptr, arg_values);
+    let call = builder
+        .ins()
+        .call_indirect(signature_ref, code_ptr, arg_values);
     if signature.return_type == TYPE_ID_VOID {
         Ok(None)
     } else {
-        let result = builder
-            .inst_results(call)
-            .first()
-            .copied()
-            .ok_or_else(|| "indirect call expected value result but produced none".to_string())?;
+        let result =
+            builder.inst_results(call).first().copied().ok_or_else(|| {
+                "indirect call expected value result but produced none".to_string()
+            })?;
         Ok(Some(result))
     }
 }
@@ -3603,16 +3714,12 @@ fn emit_extern_call_for_signature(
     if signature.return_type == TYPE_ID_VOID {
         Ok(None)
     } else {
-        let value = builder
-            .inst_results(call)
-            .first()
-            .copied()
-            .ok_or_else(|| {
-                format!(
-                    "extern call to '{}' expected value result but produced none",
-                    symbol
-                )
-            })?;
+        let value = builder.inst_results(call).first().copied().ok_or_else(|| {
+            format!(
+                "extern call to '{}' expected value result but produced none",
+                symbol
+            )
+        })?;
         Ok(Some(value))
     }
 }
@@ -3654,7 +3761,12 @@ fn emit_simple_statements(
                 type_id,
                 expression,
             } => {
-                ensure_no_variable_shadowing(name, values_by_name, foreach_bindings, "let binding")?;
+                ensure_no_variable_shadowing(
+                    name,
+                    values_by_name,
+                    foreach_bindings,
+                    "let binding",
+                )?;
                 let binding = emit_simple_expression(
                     builder,
                     expression,
@@ -3668,7 +3780,11 @@ fn emit_simple_statements(
                     foreach_bindings,
                 )?;
                 let local_type_id = if let Some(declared_type_id) = *type_id {
-                    if !are_assignment_types_compatible(declared_type_id, binding.type_id, type_table) {
+                    if !are_assignment_types_compatible(
+                        declared_type_id,
+                        binding.type_id,
+                        type_table,
+                    ) {
                         return Err(format!(
                             "let binding '{}' expected type {} expression but found {}",
                             name, declared_type_id, binding.type_id
@@ -3678,14 +3794,13 @@ fn emit_simple_statements(
                 } else {
                     binding.type_id
                 };
-                let variable =
-                    declare_new_variable(
-                        builder,
-                        next_variable,
-                        binding.value,
-                        local_type_id,
-                        type_table,
-                    )?;
+                let variable = declare_new_variable(
+                    builder,
+                    next_variable,
+                    binding.value,
+                    local_type_id,
+                    type_table,
+                )?;
                 values_by_name.insert(
                     name.clone(),
                     LocalBinding {
@@ -3714,7 +3829,11 @@ fn emit_simple_statements(
                 match target {
                     AssignTarget::Local(name) => {
                         if let Some(local) = values_by_name.get(name).copied() {
-                            if !are_assignment_types_compatible(local.type_id, rhs.type_id, type_table) {
+                            if !are_assignment_types_compatible(
+                                local.type_id,
+                                rhs.type_id,
+                                type_table,
+                            ) {
                                 return Err(format!(
                                     "assignment type mismatch for '{}': target type {}, expression type {}",
                                     name, local.type_id, rhs.type_id
@@ -3853,7 +3972,8 @@ fn emit_simple_statements(
                         index,
                         suffix,
                     } => {
-                        if let Some(local_collection) = values_by_name.get(collection_path).copied() {
+                        if let Some(local_collection) = values_by_name.get(collection_path).copied()
+                        {
                             let index_binding = emit_simple_expression(
                                 builder,
                                 index,
@@ -4104,12 +4224,10 @@ fn emit_simple_statements(
                     binding.type_id,
                     type_table,
                 ) {
-                    return Err(
-                        format!(
-                            "return expression expected type {} but found {}",
-                            expected_return_type, binding.type_id
-                        )
-                    );
+                    return Err(format!(
+                        "return expression expected type {} but found {}",
+                        expected_return_type, binding.type_id
+                    ));
                 }
                 builder.ins().return_(&[binding.value]);
                 return Ok(true);
@@ -4141,13 +4259,9 @@ fn emit_simple_statements(
                 let then_block = builder.create_block();
                 let else_block = builder.create_block();
                 let continue_block = builder.create_block();
-                builder.ins().brif(
-                    condition_value,
-                    then_block,
-                    &[],
-                    else_block,
-                    &[],
-                );
+                builder
+                    .ins()
+                    .brif(condition_value, then_block, &[], else_block, &[]);
                 builder.seal_block(then_block);
                 builder.switch_to_block(then_block);
 
@@ -4322,7 +4436,10 @@ fn emit_simple_statements(
                             local_collection.type_id,
                             type_table,
                         )?;
-                        (info, ForeachCollectionHandle::LocalVar(local_collection.var))
+                        (
+                            info,
+                            ForeachCollectionHandle::LocalVar(local_collection.var),
+                        )
                     } else {
                         let Some(collection_info) = collection_infos.get(collection_path) else {
                             return Err(format!(
@@ -4377,7 +4494,9 @@ fn emit_simple_statements(
                     .ins()
                     .iconst(types::I32, i64::from(collection_info.len));
                 let condition_value =
-                    builder.ins().icmp(IntCC::SignedLessThan, index_value, len_value);
+                    builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThan, index_value, len_value);
                 builder
                     .ins()
                     .brif(condition_value, body_block, &[], continue_block, &[]);
@@ -4431,10 +4550,7 @@ fn emit_conversion_assignment_value(
                 return Err("from_i32 source expression must be i32".to_string());
             }
             if target_type != TYPE_ID_F32 {
-                return Err(format!(
-                    "from_i32 target '{}' must be f32",
-                    target_name
-                ));
+                return Err(format!("from_i32 target '{}' must be f32", target_name));
             }
             Ok(ValueBinding {
                 value: builder.ins().fcvt_from_sint(types::F32, source.value),
@@ -4446,10 +4562,7 @@ fn emit_conversion_assignment_value(
                 return Err("from_f32 source expression must be f32".to_string());
             }
             if target_type != TYPE_ID_I32 {
-                return Err(format!(
-                    "from_f32 target '{}' must be i32",
-                    target_name
-                ));
+                return Err(format!("from_f32 target '{}' must be i32", target_name));
             }
             Ok(ValueBinding {
                 value: builder.ins().fcvt_to_sint(types::I32, source.value),
@@ -4681,13 +4794,19 @@ fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprToken>, String
                     break;
                 }
                 let Some(next_char) = expression[index..].chars().next() else {
-                    return Err(format!("unterminated string literal in expression '{}'", expression));
+                    return Err(format!(
+                        "unterminated string literal in expression '{}'",
+                        expression
+                    ));
                 };
                 literal.push(next_char);
                 index += next_char.len_utf8();
             }
             if !closed {
-                return Err(format!("unterminated string literal in expression '{}'", expression));
+                return Err(format!(
+                    "unterminated string literal in expression '{}'",
+                    expression
+                ));
             }
             tokens.push(ExprToken::StringLiteral(literal));
             continue;
@@ -4976,14 +5095,13 @@ fn resolve_call_signature<'a>(
     let Some(candidates) = call_signatures.get(target) else {
         return Err(format!("unknown call target '{}'", target));
     };
-    let mut matches = candidates
-        .iter()
-        .filter(|candidate| {
-            candidate.params.len() == arg_types.len()
-                && arg_types.iter().zip(candidate.params.iter()).all(|(arg, param)| {
-                    type_table.is_argument_compatible_with_param(*arg, *param)
-                })
-        });
+    let mut matches = candidates.iter().filter(|candidate| {
+        candidate.params.len() == arg_types.len()
+            && arg_types
+                .iter()
+                .zip(candidate.params.iter())
+                .all(|(arg, param)| type_table.is_argument_compatible_with_param(*arg, *param))
+    });
     let Some(first) = matches.next() else {
         return Err(format!(
             "no matching overload for call target '{}' with parameter types {:?}",
@@ -5070,13 +5188,7 @@ fn emit_simple_expression(
             } else if let Some((binding, suffix)) =
                 resolve_foreach_binding_for_path(name, foreach_bindings)
             {
-                emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    &suffix,
-                )
+                emit_foreach_binding_load(builder, runtime_call_refs, type_table, binding, &suffix)
             } else if let Some(constant) = constant_values.get(name) {
                 emit_constant_value(builder, constant)
             } else {
@@ -5176,16 +5288,21 @@ fn emit_simple_expression(
                     ));
                 }
                 let call = if target == "sin_fast" {
-                    builder.ins().call(runtime_call_refs.sin_fast, &[arg_values[0]])
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.sin_fast, &[arg_values[0]])
                 } else {
-                    builder.ins().call(runtime_call_refs.cos_fast, &[arg_values[0]])
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.cos_fast, &[arg_values[0]])
                 };
                 return Ok(ValueBinding {
                     value: builder.inst_results(call)[0],
                     type_id: TYPE_ID_F32,
                 });
             }
-            let signature = resolve_call_signature(target, &arg_types, call_signatures, type_table)?;
+            let signature =
+                resolve_call_signature(target, &arg_types, call_signatures, type_table)?;
             if signature.extern_symbol.is_some() {
                 let result = emit_extern_call_for_signature(
                     builder,
@@ -5226,7 +5343,10 @@ fn emit_simple_expression(
                         .iter()
                         .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table));
                 let all_f32_args = arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32)
-                    && signature.params.iter().all(|type_id| *type_id == TYPE_ID_F32);
+                    && signature
+                        .params
+                        .iter()
+                        .all(|type_id| *type_id == TYPE_ID_F32);
                 if all_i32_abi_args {
                     match arg_values.len() {
                         0 => builder
@@ -5411,9 +5531,8 @@ fn emit_simple_expression(
                             type_table,
                         )?
                     };
-                    let value = result.ok_or_else(|| {
-                        format!("call target '{}' did not produce value", target)
-                    })?;
+                    let value = result
+                        .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
                     return Ok(ValueBinding {
                         value,
                         type_id: signature.return_type,
@@ -5789,63 +5908,58 @@ fn emit_foreach_binding_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().iadd(lhs, rhs.value)
             }
             AssignOp::Sub => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().isub(lhs, rhs.value)
             }
             AssignOp::Mul => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().imul(lhs, rhs.value)
             }
             AssignOp::Div => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().sdiv(lhs, rhs.value)
             }
             AssignOp::Mod => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().srem(lhs, rhs.value)
             }
         };
@@ -5872,51 +5986,47 @@ fn emit_foreach_binding_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().fadd(lhs, rhs.value)
             }
             AssignOp::Sub => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().fsub(lhs, rhs.value)
             }
             AssignOp::Mul => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().fmul(lhs, rhs.value)
             }
             AssignOp::Div => {
-                let lhs =
-                    emit_foreach_binding_load(
-                        builder,
-                        runtime_call_refs,
-                        type_table,
-                        binding,
-                        suffix,
-                    )?
-                    .value;
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
                 builder.ins().fdiv(lhs, rhs.value)
             }
             AssignOp::Mod => {
@@ -5938,19 +6048,21 @@ fn emit_foreach_binding_assignment(
     ))
 }
 
-fn resolve_foreach_binding_value_type(binding: &ForeachBinding, suffix: &str) -> Result<TypeId, String> {
+fn resolve_foreach_binding_value_type(
+    binding: &ForeachBinding,
+    suffix: &str,
+) -> Result<TypeId, String> {
     if suffix.is_empty() {
         if let Some(type_id) = binding.element_type {
             return Ok(type_id);
         }
         return Err("foreach binding requires field access for struct element".to_string());
     }
-    binding.field_types.get(suffix).copied().ok_or_else(|| {
-        format!(
-            "unknown foreach field path '{}'",
-            suffix
-        )
-    })
+    binding
+        .field_types
+        .get(suffix)
+        .copied()
+        .ok_or_else(|| format!("unknown foreach field path '{}'", suffix))
 }
 
 fn hash_foreach_field_suffix(suffix: &str) -> i32 {
@@ -5966,7 +6078,9 @@ fn emit_foreach_collection_handle_value(
     handle: ForeachCollectionHandle,
 ) -> Value {
     match handle {
-        ForeachCollectionHandle::PathHash(hash) => builder.ins().iconst(types::I32, i64::from(hash)),
+        ForeachCollectionHandle::PathHash(hash) => {
+            builder.ins().iconst(types::I32, i64::from(hash))
+        }
         ForeachCollectionHandle::LocalVar(var) => builder.use_var(var),
     }
 }
@@ -5979,7 +6093,9 @@ fn resolve_collection_value_type(
         if let Some(type_id) = collection_info.element_type {
             return Ok(type_id);
         }
-        return Err("indexed collection access requires field path for struct elements".to_string());
+        return Err(
+            "indexed collection access requires field path for struct elements".to_string(),
+        );
     }
     collection_info
         .field_types
@@ -5988,7 +6104,10 @@ fn resolve_collection_value_type(
         .ok_or_else(|| format!("unknown indexed collection field path '{}'", suffix))
 }
 
-fn normalize_index_binding(index: ValueBinding, type_table: &TypeTable) -> Result<ValueBinding, String> {
+fn normalize_index_binding(
+    index: ValueBinding,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
     if is_i32_abi_compatible_type(index.type_id, type_table) {
         Ok(index)
     } else {
@@ -6029,7 +6148,8 @@ fn emit_local_indexed_collection_load(
     suffix: &str,
     index_binding: ValueBinding,
 ) -> Result<ValueBinding, String> {
-    let resolved = resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
+    let resolved =
+        resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
@@ -6072,7 +6192,8 @@ fn emit_local_indexed_collection_assignment(
     op: AssignOp,
     rhs: ValueBinding,
 ) -> Result<(), String> {
-    let path_type = resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
+    let path_type =
+        resolve_local_collection_value_type(collection_binding.type_id, suffix, type_table)?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     if !are_assignment_types_compatible(path_type, rhs.type_id, type_table) {
         return Err(format!(
@@ -6169,7 +6290,12 @@ fn emit_local_indexed_collection_assignment(
         }
         builder.ins().call(
             runtime_call_refs.global_i32_array_store,
-            &[collection_handle, field_hash, index_binding.value, rhs.value],
+            &[
+                collection_handle,
+                field_hash,
+                index_binding.value,
+                rhs.value,
+            ],
         );
         return Ok(());
     }
@@ -7603,7 +7729,9 @@ mod tests {
             "sample.stasis",
             "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal state: Enemy[COUNT];\nfunction main(): i32 {\n    foreach (i, enemy in state) { enemy.hp = i + 1; }\n    let sum: i32 = 0;\n    foreach (enemy in state) { sum += enemy.hp; }\n    return sum;\n}\n",
         );
-        let error = process.compile().expect_err("compile should reject non-let foreach");
+        let error = process
+            .compile()
+            .expect_err("compile should reject non-let foreach");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -7646,7 +7774,9 @@ mod tests {
             "sample.stasis",
             "const COUNT: i32 = 4;\nglobal nums: i32[COUNT];\nfunction init(arr: i32[4]): i32 {\n    foreach (i, v in arr) { arr[i] = i + 1; }\n    let sum: i32 = 0;\n    foreach (v in arr) { sum += v; }\n    return sum;\n}\nfunction main(): i32 { return init(nums); }\n",
         );
-        let error = process.compile().expect_err("compile should reject non-let foreach");
+        let error = process
+            .compile()
+            .expect_err("compile should reject non-let foreach");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -7706,12 +7836,16 @@ mod tests {
             .expect("execute tick");
         assert_eq!(tick_value, 1);
 
-        let pointer_count = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_pointer_count"));
-        let escape_down = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_escape_down"));
+        let pointer_count =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_pointer_count"));
+        let escape_down =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_escape_down"));
         let first_went_down =
             stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_first_went_down"));
-        let first_x = stasis_dynload::stasis_jit_global_f32_load(hash_global_path("model_first_x_px"));
-        let latched = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
+        let first_x =
+            stasis_dynload::stasis_jit_global_f32_load(hash_global_path("model_first_x_px"));
+        let latched =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
         assert_eq!(pointer_count, 1);
         assert_eq!(escape_down, 1);
         assert_eq!(first_went_down, 1);
@@ -7724,7 +7858,8 @@ mod tests {
             .execute_i32_noarg_by_name("tick")
             .expect("execute quit tick");
         assert_eq!(quit_tick, -1);
-        let quit_latched = stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
+        let quit_latched =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
         assert_eq!(quit_latched, -1);
     }
 
@@ -8245,7 +8380,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let value = 1; if (value) { return 1; } return 0; }\n",
         );
-        let error = process.compile().expect_err("expected condition type error");
+        let error = process
+            .compile()
+            .expect_err("expected condition type error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8264,7 +8401,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let alpha = 1.0; if (alpha) { return 1; } return 0; }\n",
         );
-        let error = process.compile().expect_err("expected condition type error");
+        let error = process
+            .compile()
+            .expect_err("expected condition type error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8283,7 +8422,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let i = 2; for (; i; i -= 1) { return 1; } return 0; }\n",
         );
-        let error = process.compile().expect_err("expected condition type error");
+        let error = process
+            .compile()
+            .expect_err("expected condition type error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8388,7 +8529,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let sum: i32 = 0; for (; sum < 3; sum += 1) { } return sum; }\n",
         );
-        let error = process.compile().expect_err("expected for header segment error");
+        let error = process
+            .compile()
+            .expect_err("expected for header segment error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8407,7 +8550,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let sum: i32 = 0; for (sum = 0; ; sum += 1) { } return sum; }\n",
         );
-        let error = process.compile().expect_err("expected for header segment error");
+        let error = process
+            .compile()
+            .expect_err("expected for header segment error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8426,7 +8571,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let sum: i32 = 0; for (sum = 0; sum < 3; ) { } return sum; }\n",
         );
-        let error = process.compile().expect_err("expected for header segment error");
+        let error = process
+            .compile()
+            .expect_err("expected for header segment error");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
@@ -8530,7 +8677,9 @@ mod tests {
             "sample.stasis",
             "function main(): i32 { let i: i32 = 0; while (i < 3) { i += 1; } return i; }\n",
         );
-        let error = process.compile().expect_err("expected unsupported statement");
+        let error = process
+            .compile()
+            .expect_err("expected unsupported statement");
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(

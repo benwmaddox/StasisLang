@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 if "%~1"=="" (
   echo [stasis-sign-runner] missing executable path>&2
@@ -8,6 +8,13 @@ if "%~1"=="" (
 
 set "TARGET=%~1"
 shift
+set "FORWARD_ARGS="
+:collect_args
+if "%~1"=="" goto sign_and_run
+set "FORWARD_ARGS=!FORWARD_ARGS! "%~1""
+shift
+goto collect_args
+:sign_and_run
 
 set "SIGN_TOOL=%STASIS_AOT_SIGN_TOOL%"
 if not "%SIGN_TOOL%"=="" (
@@ -27,5 +34,5 @@ if not "%SIGN_TOOL%"=="" (
   )
 )
 
-"%TARGET%" %*
+"%TARGET%" %FORWARD_ARGS%
 exit /b %ERRORLEVEL%

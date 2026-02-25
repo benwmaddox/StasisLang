@@ -5,7 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use stasis::{
-    publish_cli_args_to_env, restore_cli_args_env,
+    publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory,
     run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
     scenarios::brickout_revenge_v1_runner_config, RunnerConfig,
 };
@@ -15,6 +15,11 @@ struct CliOptions {
     runner: RunnerConfig,
     emit_events_jsonl: bool,
     events_jsonl_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestCliArgs {
+    directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +153,61 @@ fn parse_args() -> CliOptions {
         emit_events_jsonl,
         events_jsonl_file,
     }
+}
+
+fn parse_test_cli_args(args: &[String]) -> Result<TestCliArgs, String> {
+    let mut directory: Option<PathBuf> = None;
+    let mut i: usize = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--dir" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --dir".to_string());
+            }
+            directory = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    let Some(directory) = directory else {
+        return Err("missing required --dir <path>".to_string());
+    };
+    Ok(TestCliArgs { directory })
+}
+
+fn try_run_test_subcommand() -> Option<i32> {
+    let mut args = env::args().skip(1);
+    let first = args.next()?;
+    if first != "test" {
+        return None;
+    }
+    let arg_list: Vec<String> = args.collect();
+    let parsed = match parse_test_cli_args(&arg_list) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+
+    let summary = match run_jit_tests_in_directory(&parsed.directory) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(1);
+        }
+    };
+    println!("test_files_discovered={}", summary.files_discovered);
+    println!("test_files_with_tests={}", summary.files_with_tests);
+    println!("tests_discovered={}", summary.tests_discovered);
+    println!("tests_run={}", summary.tests_run);
+    println!("tests_passed={}", summary.tests_passed);
+    println!("tests_failed={}", summary.tests_failed);
+    for failure in &summary.failures {
+        println!("test_failure={failure}");
+    }
+    Some(if summary.tests_failed > 0 { 1 } else { 0 })
 }
 
 fn write_events_jsonl(
@@ -322,10 +382,7 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
     match result {
         Ok(summary) => {
             println!("aot_cli_source_file_count={}", summary.source_file_count);
-            println!(
-                "aot_cli_output_exe={}",
-                summary.linked_image_path.display()
-            );
+            println!("aot_cli_output_exe={}", summary.linked_image_path.display());
             println!("aot_cli_entry_symbol={}", summary.entry_symbol);
             Some(0)
         }
@@ -339,6 +396,20 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_test_cli_args_accepts_required_dir_flag() {
+        let args = vec!["--dir".to_string(), "tests/stasis".to_string()];
+        let parsed = parse_test_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.directory, PathBuf::from("tests/stasis"));
+    }
+
+    #[test]
+    fn parse_test_cli_args_rejects_missing_required_dir_flag() {
+        let args = vec!["--ticks".to_string(), "10".to_string()];
+        let error = parse_test_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("missing required --dir"));
+    }
 
     #[test]
     fn parse_aot_cli_contract_args_accepts_required_flags() {
@@ -459,6 +530,9 @@ mod tests {
 }
 
 fn main() {
+    if let Some(exit) = try_run_test_subcommand() {
+        std::process::exit(exit);
+    }
     if let Some(exit) = try_run_aot_cli_subcommand() {
         std::process::exit(exit);
     }

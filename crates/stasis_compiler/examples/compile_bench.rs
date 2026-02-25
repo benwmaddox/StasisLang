@@ -215,11 +215,12 @@ fn compile_error_message(error: stasis_compiler::compiler::CompileError) -> Stri
     }
 }
 
-fn timed_compile_jit(process: &mut JitProcess, expected_functions: usize) -> Result<Duration, String> {
+fn timed_compile_jit(
+    process: &mut JitProcess,
+    expected_functions: usize,
+) -> Result<Duration, String> {
     let start = Instant::now();
-    process
-        .compile()
-        .map_err(compile_error_message)?;
+    process.compile().map_err(compile_error_message)?;
     let elapsed = start.elapsed();
     if process.artifacts().len() != expected_functions {
         return Err(format!(
@@ -227,7 +228,11 @@ fn timed_compile_jit(process: &mut JitProcess, expected_functions: usize) -> Res
             process.artifacts().len()
         ));
     }
-    if process.artifacts().iter().any(|artifact| artifact.code_ptr == 0) {
+    if process
+        .artifacts()
+        .iter()
+        .any(|artifact| artifact.code_ptr == 0)
+    {
         return Err("jit compile produced zero code pointer artifact".to_string());
     }
     Ok(elapsed)
@@ -316,8 +321,9 @@ fn run_scenario_jit(
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("clock error: {error}"))?
         .as_nanos();
-    let temp_root =
-        env::temp_dir().join(format!("stasis_compiler_bench_jit_{function_count}_{stamp}"));
+    let temp_root = env::temp_dir().join(format!(
+        "stasis_compiler_bench_jit_{function_count}_{stamp}"
+    ));
     let layouts = write_project_fixture(&temp_root, function_count, chunk_size, seed)?;
     let expected_functions = function_count + 1; // generated fns + main
 
@@ -411,9 +417,13 @@ fn run_scenario(
             cold_samples,
             incremental_samples,
         ),
-        BenchMode::Jit => {
-            run_scenario_jit(function_count, chunk_size, seed, cold_samples, incremental_samples)
-        }
+        BenchMode::Jit => run_scenario_jit(
+            function_count,
+            chunk_size,
+            seed,
+            cold_samples,
+            incremental_samples,
+        ),
     }
 }
 

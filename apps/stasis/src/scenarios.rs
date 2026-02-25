@@ -1,6 +1,6 @@
 use crate::RunnerConfig;
-use std::path::PathBuf;
 use stasis_runner::swap::contracts::TargetMode;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowConfig {

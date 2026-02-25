@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
@@ -131,13 +131,17 @@ pub fn replace_jit_code_ptr_table(entries: &[(u32, usize)]) {
 
 pub fn clear_jit_string_literal_table() {
     let table = jit_string_literal_table();
-    let mut guard = table.lock().expect("jit string literal table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
     guard.clear();
 }
 
 pub fn upsert_jit_string_literal(id: i32, value: &str) {
     let table = jit_string_literal_table();
-    let mut guard = table.lock().expect("jit string literal table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
     guard.insert(id, value.to_string());
 }
 
@@ -148,7 +152,9 @@ pub extern "C" fn stasis_jit_print_i32(value: i32) {
 
 pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     let table = jit_string_literal_table();
-    let guard = table.lock().expect("jit string literal table mutex poisoned");
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
     if let Some(text) = guard.get(&value_id) {
         print!("{text}");
         let _ = std::io::stdout().flush();

@@ -264,7 +264,9 @@ impl TypeTable {
                 let payload_size = element_static_size
                     .map(|element_size| checked_mul(element_size, max_len))
                     .transpose()?;
-                let static_size = payload_size.map(|payload| checked_add(4, payload)).transpose()?;
+                let static_size = payload_size
+                    .map(|payload| checked_add(4, payload))
+                    .transpose()?;
                 self.intern_with_info(
                     TypeKey::ArrayFixed {
                         element: element_type,
@@ -311,34 +313,31 @@ impl TypeTable {
             if base == "ascii" {
                 return match extent {
                     ArrayExtent::View => self.by_key.get(&TypeKey::AsciiView).copied(),
-                    ArrayExtent::Fixed(max_len) => self
-                        .by_key
-                        .get(&TypeKey::AsciiFixed { max_len })
-                        .copied(),
+                    ArrayExtent::Fixed(max_len) => {
+                        self.by_key.get(&TypeKey::AsciiFixed { max_len }).copied()
+                    }
                 };
             }
             if base == "utf8" || base == "string" {
                 return match extent {
                     ArrayExtent::View => self.by_key.get(&TypeKey::Utf8View).copied(),
-                    ArrayExtent::Fixed(max_len) => self
-                        .by_key
-                        .get(&TypeKey::Utf8Fixed { max_len })
-                        .copied(),
+                    ArrayExtent::Fixed(max_len) => {
+                        self.by_key.get(&TypeKey::Utf8Fixed { max_len }).copied()
+                    }
                 };
             }
             let element = self.resolve_existing(base)?;
             return match extent {
-                ArrayExtent::View => self
-                    .by_key
-                    .get(&TypeKey::ArrayView { element })
-                    .copied(),
+                ArrayExtent::View => self.by_key.get(&TypeKey::ArrayView { element }).copied(),
                 ArrayExtent::Fixed(max_len) => self
                     .by_key
                     .get(&TypeKey::ArrayFixed { element, max_len })
                     .copied(),
             };
         }
-        self.by_key.get(&TypeKey::Named(type_name.to_string())).copied()
+        self.by_key
+            .get(&TypeKey::Named(type_name.to_string()))
+            .copied()
     }
 
     fn intern_builtin(&mut self, name: &str, builtin: BuiltinType, static_size_bytes: u32) {
@@ -391,11 +390,19 @@ impl TypeTable {
 fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> bool {
     matches!(
         (argument, parameter),
-        (TypeKey::Builtin(BuiltinType::I32), TypeKey::Builtin(BuiltinType::I32))
-            | (TypeKey::Builtin(BuiltinType::Bool), TypeKey::Builtin(BuiltinType::Bool))
-            | (TypeKey::Builtin(BuiltinType::I32), TypeKey::Builtin(BuiltinType::Bool))
-            | (TypeKey::Builtin(BuiltinType::Bool), TypeKey::Builtin(BuiltinType::I32))
-            | (TypeKey::Builtin(BuiltinType::I32), TypeKey::Named(_))
+        (
+            TypeKey::Builtin(BuiltinType::I32),
+            TypeKey::Builtin(BuiltinType::I32)
+        ) | (
+            TypeKey::Builtin(BuiltinType::Bool),
+            TypeKey::Builtin(BuiltinType::Bool)
+        ) | (
+            TypeKey::Builtin(BuiltinType::I32),
+            TypeKey::Builtin(BuiltinType::Bool)
+        ) | (
+            TypeKey::Builtin(BuiltinType::Bool),
+            TypeKey::Builtin(BuiltinType::I32)
+        ) | (TypeKey::Builtin(BuiltinType::I32), TypeKey::Named(_))
             | (TypeKey::Builtin(BuiltinType::Bool), TypeKey::Named(_))
             | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::I32))
             | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::Bool))

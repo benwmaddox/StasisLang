@@ -2,19 +2,21 @@
 
 mod compiler_backend;
 mod events;
-pub mod scenarios;
 mod runtime_exec;
+pub mod scenarios;
 mod self_host_runtime_bridge;
+mod stasis_test_runner;
 mod watch;
 
+pub use compiler_backend::run_self_host_aot_cli;
 pub use events::RunnerEvent;
+pub use scenarios::WindowConfig;
 pub use self_host_runtime_bridge::{
     publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
     stasis_process_env_lock,
 };
-pub use scenarios::WindowConfig;
-pub use compiler_backend::run_self_host_aot_cli;
+pub use stasis_test_runner::{run_jit_tests_in_directory, StasisTestRunSummary};
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
@@ -174,8 +176,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut file_change_sent = false;
     let hook_failure_reason = config.hook_failure_reason.clone();
     let swap_failure_reason = config.swap_failure_reason.clone();
-    let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
-        BTreeMap::new();
+    let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
     let mut aot_linked_image_activations: u32 = 0;
@@ -564,7 +565,11 @@ fn apply_commit_request(
     } else {
         pointer_table.commit_patch_set(&request.fn_patch_set)
     };
-    SwapCommitResult::success(request.request_id, outcome.swapped_fn_ids, outcome.new_generation)
+    SwapCommitResult::success(
+        request.request_id,
+        outcome.swapped_fn_ids,
+        outcome.new_generation,
+    )
 }
 
 fn observe_pipeline_results(
@@ -658,12 +663,14 @@ fn probe_aot_loadability(path: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        stasis_dynload::Library::load(path).map(|_| ()).map_err(|error| {
-            format!(
-                "AOT loadability probe failed for {}: {error}",
-                path.display()
-            )
-        })
+        stasis_dynload::Library::load(path)
+            .map(|_| ())
+            .map_err(|error| {
+                format!(
+                    "AOT loadability probe failed for {}: {error}",
+                    path.display()
+                )
+            })
     }
     #[cfg(not(windows))]
     {
@@ -762,7 +769,10 @@ mod tests {
 
         assert_eq!(result.status, SwapCommitStatus::Success);
         assert_eq!(swap_commit_successes, 1);
-        assert_eq!(pointer_table.code_ptr(FnId(9)), Some(stasis_jit::CodePtr(0x9988)));
+        assert_eq!(
+            pointer_table.code_ptr(FnId(9)),
+            Some(stasis_jit::CodePtr(0x9988))
+        );
     }
 
     #[test]

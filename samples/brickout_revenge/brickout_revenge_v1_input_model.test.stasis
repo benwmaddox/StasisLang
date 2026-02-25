@@ -1,0 +1,23 @@
+import "../../src/input_testkit.stasis";
+import "brickout_revenge_v1.stasis";
+
+test `brickout refresh input model maps testkit snapshot`(): bool {
+    input_testkit_reset();
+    input_testkit_set_quit_requested(false);
+    input_testkit_set_key_down(Scancode.Escape, true);
+    input_testkit_set_pointer_count(1);
+    input_testkit_set_pointer(0, 17, true, true, false, 33.5, 44.5);
+
+    refresh_input_model();
+
+    if (input_model.quit_requested) { return false; }
+    if (!input_model.escape_down) { return false; }
+    if (input_model.pointer_count != 1) { return false; }
+    if (input_model.pointers[0].id != 17) { return false; }
+    if (!input_model.pointers[0].is_down) { return false; }
+    if (!input_model.pointers[0].went_down) { return false; }
+    if (input_model.pointers[0].went_up) { return false; }
+    if (input_model.pointers[0].x_px < 33.4 || input_model.pointers[0].x_px > 33.6) { return false; }
+    if (input_model.pointers[0].y_px < 44.4 || input_model.pointers[0].y_px > 44.6) { return false; }
+    return true;
+}
