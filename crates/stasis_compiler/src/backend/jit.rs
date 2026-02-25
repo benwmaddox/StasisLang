@@ -40,6 +40,7 @@ pub struct JitProcess {
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
+    import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
 }
@@ -63,6 +64,7 @@ impl JitProcess {
             runtime_libraries: Vec::new(),
             runtime_symbol_cache: BTreeMap::new(),
             source_disk_probe_cache: BTreeMap::new(),
+            import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
         }
@@ -114,7 +116,7 @@ impl JitProcess {
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
         stasis_dynload::clear_jit_string_literal_table();
-        load_import_graph_sources(&mut self.compiler)
+        self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
@@ -485,6 +487,76 @@ impl JitProcess {
             }
         }
     }
+
+    fn load_import_graph_sources(&mut self) -> Result<(), String> {
+        let mut known_paths: BTreeSet<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        let mut queue: Vec<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+
+        while let Some(path) = queue.pop() {
+            let Some((source_hash, source)) = self
+                .compiler
+                .files()
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| (file.hash, file.content.clone()))
+            else {
+                continue;
+            };
+            let imports = self.cached_import_paths_for_source(&path, source_hash, &source);
+            for import_path in imports {
+                let resolved = resolve_import_path(&path, &import_path);
+                let normalized = normalize_path_for_compiler_key(&resolved);
+                if known_paths.contains(&normalized) {
+                    continue;
+                }
+                let content = std::fs::read_to_string(&resolved).map_err(|error| {
+                    format!(
+                        "failed to load import '{}' referenced by '{}': {}",
+                        import_path, path, error
+                    )
+                })?;
+                self.compiler.upsert_file(normalized.clone(), content);
+                known_paths.insert(normalized.clone());
+                queue.push(normalized);
+            }
+        }
+
+        self.import_parse_cache
+            .retain(|path, _| known_paths.contains(path));
+        Ok(())
+    }
+
+    fn cached_import_paths_for_source(
+        &mut self,
+        path: &str,
+        source_hash: u64,
+        source: &str,
+    ) -> Vec<String> {
+        if let Some(entry) = self.import_parse_cache.get(path) {
+            if entry.source_hash == source_hash {
+                return entry.import_paths.clone();
+            }
+        }
+        let import_paths = parse_import_paths(source);
+        self.import_parse_cache.insert(
+            path.to_string(),
+            ImportParseCacheEntry {
+                source_hash,
+                import_paths: import_paths.clone(),
+            },
+        );
+        import_paths
+    }
 }
 
 impl Default for JitProcess {
@@ -546,6 +618,12 @@ struct CompileAnalysisCache {
 struct SourceDiskProbe {
     len: u64,
     modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportParseCacheEntry {
+    source_hash: u64,
+    import_paths: Vec<String>,
 }
 
 fn probe_disk_source(path: &Path) -> Option<SourceDiskProbe> {
@@ -845,49 +923,6 @@ fn are_assignment_types_compatible(
     }
     is_i32_abi_compatible_type(target_type, type_table)
         && is_i32_abi_compatible_type(expression_type, type_table)
-}
-
-fn load_import_graph_sources(compiler: &mut Compiler) -> Result<(), String> {
-    let mut known_paths: BTreeSet<String> = compiler
-        .files()
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
-    let mut queue: Vec<String> = compiler
-        .files()
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
-
-    while let Some(path) = queue.pop() {
-        let Some(source) = compiler
-            .files()
-            .iter()
-            .find(|file| file.path == path)
-            .map(|file| file.content.clone())
-        else {
-            continue;
-        };
-        let imports = parse_import_paths(&source);
-        for import_path in imports {
-            let resolved = resolve_import_path(&path, &import_path);
-            let normalized = normalize_path_for_compiler_key(&resolved);
-            if known_paths.contains(&normalized) {
-                continue;
-            }
-            let content = std::fs::read_to_string(&resolved).map_err(|error| {
-                format!(
-                    "failed to load import '{}' referenced by '{}': {}",
-                    import_path, path, error
-                )
-            })?;
-            compiler.upsert_file(normalized.clone(), content);
-            known_paths.insert(normalized.clone());
-            queue.push(normalized);
-        }
-    }
-
-    Ok(())
 }
 
 fn parse_import_paths(source: &str) -> Vec<String> {
@@ -9301,6 +9336,54 @@ mod tests {
         assert_ne!(
             first_fingerprint, second_fingerprint,
             "dependency source change should invalidate compile-analysis cache key"
+        );
+    }
+
+    #[test]
+    fn jit_process_refreshes_import_parse_cache_when_imports_change() {
+        let mut process = JitProcess::new();
+        process.upsert_file("dep.stasis", "function dep(): i32 { return 1; }\n");
+        process.upsert_file(
+            "main.stasis",
+            "import \"dep.stasis\";\nfunction main(): i32 { return dep(); }\n",
+        );
+        process.compile().expect("first compile");
+        let first_entry = process
+            .import_parse_cache
+            .get("main.stasis")
+            .expect("main import cache entry")
+            .clone();
+        assert_eq!(
+            first_entry.import_paths,
+            vec!["dep.stasis".to_string()],
+            "expected single cached import"
+        );
+
+        process.upsert_file("dep2.stasis", "function dep2(): i32 { return 2; }\n");
+        process.upsert_file(
+            "main.stasis",
+            "import \"dep.stasis\";\nimport \"dep2.stasis\";\nfunction main(): i32 { return dep() + dep2(); }\n",
+        );
+        process.compile().expect("second compile");
+        let second_entry = process
+            .import_parse_cache
+            .get("main.stasis")
+            .expect("main import cache entry after update")
+            .clone();
+        assert_ne!(
+            first_entry.source_hash, second_entry.source_hash,
+            "cache hash should refresh when source import set changes"
+        );
+        assert_eq!(
+            second_entry.import_paths,
+            vec!["dep.stasis".to_string(), "dep2.stasis".to_string()],
+            "expected refreshed cached imports"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute second"),
+            3
         );
     }
 
