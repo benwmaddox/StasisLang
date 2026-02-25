@@ -839,7 +839,7 @@ fn load_import_graph_sources(compiler: &mut Compiler) -> Result<(), String> {
 fn parse_import_paths(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in source.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
         if !trimmed.starts_with("import") {
             continue;
         }
