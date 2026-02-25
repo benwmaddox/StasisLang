@@ -30,7 +30,7 @@ use stasis_runner::swap::contracts::{
     RequestId, SwapCommitResult, SwapCommitStatus, TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -187,6 +187,100 @@ fn collect_stasis_sources_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn normalize_watch_path_for_compare(path: &Path) -> PathBuf {
+    if path.exists() {
+        if let Ok(canonical) = fs::canonicalize(path) {
+            return canonical;
+        }
+    }
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+fn parse_watch_import_paths(source: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("import ") {
+            continue;
+        }
+        let Some(first_quote) = trimmed.find('"') else {
+            continue;
+        };
+        let rest = &trimmed[first_quote + 1..];
+        let Some(second_quote_rel) = rest.find('"') else {
+            continue;
+        };
+        let candidate = &rest[..second_quote_rel];
+        let path = PathBuf::from(candidate);
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
+        {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<PathBuf>, String> {
+    if !root_source.exists() {
+        return Err(format!(
+            "watch root source does not exist: {}",
+            root_source.display()
+        ));
+    }
+    let mut out: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut queue: Vec<PathBuf> = vec![root_source.to_path_buf()];
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    while let Some(path) = queue.pop() {
+        let normalized = normalize_watch_path_for_compare(&path);
+        if !visited.insert(normalized.clone()) {
+            continue;
+        }
+        out.insert(normalized.clone());
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        for import_path in parse_watch_import_paths(&source) {
+            let candidate = if import_path.is_absolute() {
+                import_path
+            } else {
+                parent.join(import_path)
+            };
+            let candidate_normalized = normalize_watch_path_for_compare(&candidate);
+            out.insert(candidate_normalized.clone());
+            if candidate.exists() {
+                queue.push(candidate);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn should_submit_watch_event(
+    event: &FileChangeEvent,
+    root_source: Option<&Path>,
+    dependency_paths: Option<&BTreeSet<PathBuf>>,
+) -> bool {
+    let Some(root_source) = root_source else {
+        return true;
+    };
+    let Some(dependency_paths) = dependency_paths else {
+        return true;
+    };
+    let normalized_event = normalize_watch_path_for_compare(&event.path);
+    if normalized_event == normalize_watch_path_for_compare(root_source) {
+        return true;
+    }
+    dependency_paths.contains(&normalized_event)
+}
+
 fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf> {
     if !watch_directory.is_dir() {
         return None;
@@ -239,6 +333,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         .as_deref()
         .and_then(|dir| WatchService::start(dir).ok());
     let initial_source_file = resolve_initial_source_file(&config);
+    let mut watch_dependency_paths = initial_source_file
+        .as_deref()
+        .and_then(|source| collect_watch_dependency_paths(source).ok());
     let window = config.window;
 
     let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, config.target_mode);
@@ -301,8 +398,23 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         }
 
         if let Some(watch_service) = watcher.as_mut() {
+            let mut refresh_dependency_graph = false;
             for event in watch_service.drain_stasis_changes() {
-                pipeline.submit_file_change(event);
+                if should_submit_watch_event(
+                    &event,
+                    initial_source_file.as_deref(),
+                    watch_dependency_paths.as_ref(),
+                ) {
+                    refresh_dependency_graph = true;
+                    pipeline.submit_file_change(event);
+                }
+            }
+            if refresh_dependency_graph {
+                if let Some(root_source) = initial_source_file.as_deref() {
+                    if let Ok(next_graph) = collect_watch_dependency_paths(root_source) {
+                        watch_dependency_paths = Some(next_graph);
+                    }
+                }
             }
         }
 
@@ -1166,6 +1278,109 @@ mod tests {
     }
 
     #[test]
+    fn watch_directory_dependency_change_triggers_recompile() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_watch_dep_change_{}", stamp));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let root_file = temp_root.join("game.stasis");
+        let dep_file = temp_root.join("dep.stasis");
+        fs::write(
+            &root_file,
+            "import \"./dep.stasis\";\nfunction main(): i32 { return dep(); }\n",
+        )
+        .expect("write root");
+        fs::write(&dep_file, "function dep(): i32 { return 0; }\n").expect("write dep");
+
+        let dep_file_for_thread = dep_file.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            fs::write(&dep_file_for_thread, "function dep(): i32 { return 1; }\n")
+                .expect("update dependency file");
+        });
+
+        let config = RunnerConfig {
+            max_ticks: 300,
+            tick_sleep_micros: 1000,
+            window: None,
+            inject_file_change: Some(root_file),
+            watch_directory: Some(temp_root.clone()),
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_default_backend(config);
+        writer.join().expect("writer thread join");
+        fs::remove_dir_all(&temp_root).expect("cleanup temp dir");
+
+        assert!(summary.compile_successes >= 2);
+        assert!(summary.swap_commit_successes >= 2);
+        assert_eq!(summary.compile_failures, 0);
+    }
+
+    #[test]
+    fn watch_directory_ignores_non_dependency_changes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_watch_ignore_unrelated_{}", stamp));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let root_file = temp_root.join("game.stasis");
+        let dep_file = temp_root.join("dep.stasis");
+        let unrelated_file = temp_root.join("unrelated.stasis");
+        fs::write(
+            &root_file,
+            "import \"./dep.stasis\";\nfunction main(): i32 { return dep(); }\n",
+        )
+        .expect("write root");
+        fs::write(&dep_file, "function dep(): i32 { return 0; }\n").expect("write dep");
+        fs::write(&unrelated_file, "function helper(): i32 { return 0; }\n")
+            .expect("write unrelated");
+
+        let unrelated_file_for_thread = unrelated_file.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            fs::write(
+                &unrelated_file_for_thread,
+                "function helper(): i32 { return 1; }\n",
+            )
+            .expect("update unrelated file");
+        });
+
+        let config = RunnerConfig {
+            max_ticks: 300,
+            tick_sleep_micros: 1000,
+            window: None,
+            inject_file_change: Some(root_file),
+            watch_directory: Some(temp_root.clone()),
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_default_backend(config);
+        writer.join().expect("writer thread join");
+        fs::remove_dir_all(&temp_root).expect("cleanup temp dir");
+
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+    }
+
+    #[test]
     fn runner_dispatches_aot_target_mode_when_configured() {
         use std::sync::{Arc, Mutex};
 
@@ -1287,6 +1502,83 @@ mod tests {
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
         assert_eq!(resolved, temp_root.join("brickout_revenge_v1.stasis"));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn collect_watch_dependency_paths_includes_nested_imports() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_watch_dep_graph_{}", stamp));
+        let sub_dir = temp_root.join("sub");
+        fs::create_dir_all(&sub_dir).expect("create temp dirs");
+        let root = temp_root.join("main.stasis");
+        let dep = temp_root.join("dep.stasis");
+        let dep2 = sub_dir.join("dep2.stasis");
+        fs::write(
+            &root,
+            "import \"./dep.stasis\";\nfunction tick(): i32 { return dep(); }\n",
+        )
+        .expect("write root");
+        fs::write(
+            &dep,
+            "import \"./sub/dep2.stasis\";\nfunction dep(): i32 { return dep2(); }\n",
+        )
+        .expect("write dep");
+        fs::write(&dep2, "function dep2(): i32 { return 1; }\n").expect("write dep2");
+
+        let graph = collect_watch_dependency_paths(&root).expect("dependency graph");
+        assert!(graph.contains(&normalize_watch_path_for_compare(&root)));
+        assert!(graph.contains(&normalize_watch_path_for_compare(&dep)));
+        assert!(graph.contains(&normalize_watch_path_for_compare(&dep2)));
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn should_submit_watch_event_filters_non_dependency_paths() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_watch_filter_{}", stamp));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let root = temp_root.join("root.stasis");
+        let dep = temp_root.join("dep.stasis");
+        let other = temp_root.join("other.stasis");
+        fs::write(&root, "function tick(): i32 { return 0; }\n").expect("write root");
+        fs::write(&dep, "function dep(): i32 { return 0; }\n").expect("write dep");
+        fs::write(&other, "function other(): i32 { return 0; }\n").expect("write other");
+
+        let mut dependency_paths = std::collections::BTreeSet::new();
+        dependency_paths.insert(normalize_watch_path_for_compare(&root));
+        dependency_paths.insert(normalize_watch_path_for_compare(&dep));
+
+        let dep_event = FileChangeEvent::new(
+            dep.clone(),
+            1,
+            TextSource::FileWatcher,
+            FileChangeKind::Modified,
+        );
+        let other_event = FileChangeEvent::new(
+            other.clone(),
+            2,
+            TextSource::FileWatcher,
+            FileChangeKind::Modified,
+        );
+        assert!(should_submit_watch_event(
+            &dep_event,
+            Some(&root),
+            Some(&dependency_paths)
+        ));
+        assert!(!should_submit_watch_event(
+            &other_event,
+            Some(&root),
+            Some(&dependency_paths)
+        ));
 
         fs::remove_dir_all(&temp_root).ok();
     }
