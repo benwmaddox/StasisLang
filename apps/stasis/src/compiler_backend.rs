@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 pub struct IncrementalCompilerBackend {
     host: IncrementalCompilerHost,
     source_by_path: BTreeMap<String, String>,
+    jit_process: JitProcess,
+    jit_process_seeded: bool,
     fn_id_by_signature: BTreeMap<String, FnId>,
     next_fn_id: u32,
     aot_compile_config: AotCompileConfig,
@@ -95,6 +97,12 @@ struct EngineBundleManifest {
     functions: Vec<EngineBundleManifestFunctionRow>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SourceCacheDelta {
+    touched_paths: Vec<String>,
+    removed_paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SelfHostCliEnvSnapshot {
     strict_self_host: bool,
@@ -126,6 +134,8 @@ impl IncrementalCompilerBackend {
         Self {
             host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
+            jit_process: JitProcess::new(),
+            jit_process_seeded: false,
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config: AotCompileConfig::default(),
@@ -154,6 +164,8 @@ impl IncrementalCompilerBackend {
         Self {
             host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
+            jit_process: JitProcess::new(),
+            jit_process_seeded: false,
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config,
@@ -175,6 +187,8 @@ impl IncrementalCompilerBackend {
         Self {
             host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
+            jit_process: JitProcess::new(),
+            jit_process_seeded: false,
             fn_id_by_signature: BTreeMap::new(),
             next_fn_id: 1,
             aot_compile_config,
@@ -210,29 +224,35 @@ impl CompilerBackend for IncrementalCompilerBackend {
     fn compile(&mut self, request: CompileRequest) -> CompileResult {
         self.last_jit_engine_package = None;
         self.last_aot_engine_bundle = None;
-        if let Err(message) = self.refresh_cached_sources(&request.changed_files) {
-            return CompileResult::failed(
-                request.request_id,
-                vec![Diagnostic {
-                    severity: DiagnosticSeverity::Error,
-                    message,
-                    path: request.changed_files.first().cloned(),
-                    line: None,
-                    column: None,
-                }],
-            );
-        }
+        let source_delta = match self.refresh_cached_sources(&request.changed_files) {
+            Ok(delta) => delta,
+            Err(message) => {
+                return CompileResult::failed(
+                    request.request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: request.changed_files.first().cloned(),
+                        line: None,
+                        column: None,
+                    }],
+                );
+            }
+        };
 
         let has_tick_entrypoint = self.source_cache_has_function("tick");
         let has_render_entrypoint = self.source_cache_has_function("render");
         let has_on_code_swap_entrypoint = self.source_cache_has_function("on_code_swap");
         let use_engine_mode_contracts = has_tick_entrypoint && has_render_entrypoint;
         if use_engine_mode_contracts {
-            return self
-                .compile_engine_mode_contract_request(&request, has_on_code_swap_entrypoint);
+            return self.compile_engine_mode_contract_request(
+                &request,
+                has_on_code_swap_entrypoint,
+                &source_delta,
+            );
         }
         if request.target_mode == TargetMode::JitDev {
-            return match self.compile_jit_non_engine_contract_request(&request) {
+            return match self.compile_jit_non_engine_contract_request(&request, &source_delta) {
                 Ok(result) => result,
                 Err(message) => CompileResult::failed(
                     request.request_id,
@@ -427,6 +447,7 @@ impl IncrementalCompilerBackend {
         &mut self,
         request: &CompileRequest,
         include_on_code_swap: bool,
+        source_delta: &SourceCacheDelta,
     ) -> CompileResult {
         let function_entries = match self.collect_cached_function_entries() {
             Ok(entries) => entries,
@@ -452,7 +473,7 @@ impl IncrementalCompilerBackend {
         match request.target_mode {
             TargetMode::JitDev => {
                 if let Err(message) =
-                    self.compile_jit_engine_package_from_cache(include_on_code_swap)
+                    self.compile_jit_engine_package_from_cache(include_on_code_swap, source_delta)
                 {
                     return CompileResult::failed(
                         request.request_id,
@@ -675,9 +696,10 @@ impl IncrementalCompilerBackend {
     fn compile_jit_non_engine_contract_request(
         &mut self,
         request: &CompileRequest,
+        source_delta: &SourceCacheDelta,
     ) -> Result<CompileResult, String> {
         let function_entries = self.collect_cached_function_entries()?;
-        let symbol_code_ptrs = self.compile_jit_symbol_code_ptrs_from_cache()?;
+        let symbol_code_ptrs = self.compile_jit_symbol_code_ptrs_from_cache(source_delta)?;
         if function_entries.is_empty() || symbol_code_ptrs.is_empty() {
             return Err(
                 "non-engine JIT compile requires at least one parsed function and emitted code pointer"
@@ -742,23 +764,50 @@ impl IncrementalCompilerBackend {
         Ok(result)
     }
 
-    fn refresh_cached_sources(&mut self, changed_files: &[PathBuf]) -> Result<(), String> {
+    fn refresh_cached_sources(
+        &mut self,
+        changed_files: &[PathBuf],
+    ) -> Result<SourceCacheDelta, String> {
+        let mut touched_paths: BTreeSet<String> = BTreeSet::new();
+        let mut removed_paths: BTreeSet<String> = BTreeSet::new();
         for path in changed_files {
             let key = path.to_string_lossy().to_string();
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let source = String::from_utf8_lossy(&bytes).to_string();
-                    self.source_by_path.insert(key, source);
+                    self.source_by_path.insert(key.clone(), source);
+                    touched_paths.insert(key);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.source_by_path.remove(&key);
+                    removed_paths.insert(key);
                 }
                 Err(error) => {
                     return Err(format!("failed reading {}: {error}", path.display()));
                 }
             }
         }
-        Ok(())
+        Ok(SourceCacheDelta {
+            touched_paths: touched_paths.into_iter().collect(),
+            removed_paths: removed_paths.into_iter().collect(),
+        })
+    }
+
+    fn sync_jit_process_sources(&mut self, source_delta: &SourceCacheDelta) {
+        let requires_full_sync = !self.jit_process_seeded || !source_delta.removed_paths.is_empty();
+        if requires_full_sync {
+            self.jit_process = JitProcess::new();
+            for (path, source) in &self.source_by_path {
+                self.jit_process.upsert_file(path.clone(), source.clone());
+            }
+            self.jit_process_seeded = true;
+            return;
+        }
+        for path in &source_delta.touched_paths {
+            if let Some(source) = self.source_by_path.get(path) {
+                self.jit_process.upsert_file(path.clone(), source.clone());
+            }
+        }
     }
 
     fn source_cache_has_function(&self, function_name: &str) -> bool {
@@ -822,30 +871,29 @@ impl IncrementalCompilerBackend {
     fn compile_jit_engine_package_from_cache(
         &mut self,
         include_on_code_swap: bool,
+        source_delta: &SourceCacheDelta,
     ) -> Result<(), String> {
-        let mut process = JitProcess::new();
-        for (path, source) in &self.source_by_path {
-            process.upsert_file(path.clone(), source.clone());
-        }
-        process
+        self.sync_jit_process_sources(source_delta);
+        self.jit_process
             .compile()
             .map_err(|error| format!("rust-native JIT engine compile failed: {error:?}"))?;
-        let package = process
+        let package = self
+            .jit_process
             .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
             .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
         self.last_jit_engine_package = Some(package);
         Ok(())
     }
 
-    fn compile_jit_symbol_code_ptrs_from_cache(&self) -> Result<BTreeMap<String, u64>, String> {
-        let mut process = JitProcess::new();
-        for (path, source) in &self.source_by_path {
-            process.upsert_file(path.clone(), source.clone());
-        }
-        process
+    fn compile_jit_symbol_code_ptrs_from_cache(
+        &mut self,
+        source_delta: &SourceCacheDelta,
+    ) -> Result<BTreeMap<String, u64>, String> {
+        self.sync_jit_process_sources(source_delta);
+        self.jit_process
             .compile()
             .map_err(|error| format!("rust-native JIT compile failed: {error:?}"))?;
-        Ok(process.symbol_code_ptrs())
+        Ok(self.jit_process.symbol_code_ptrs())
     }
 
     fn compile_aot_engine_bundle_from_cache(
@@ -906,6 +954,11 @@ impl IncrementalCompilerBackend {
     #[cfg(test)]
     fn last_jit_engine_package(&self) -> Option<&JitEnginePackage> {
         self.last_jit_engine_package.as_ref()
+    }
+
+    #[cfg(test)]
+    fn jit_artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
+        self.jit_process.artifact_slot_for_function_name(name)
     }
 
     #[cfg(test)]
@@ -3358,6 +3411,66 @@ mod tests {
         assert!(package.render_code_ptr != 0);
         assert!(package.on_code_swap_code_ptr.is_some());
         assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_engine_mode_reuses_unchanged_function_artifacts_between_compiles() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_jit_engine_reuse_artifacts_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let first = backend.compile(CompileRequest::new(
+            RequestId(9_111),
+            vec![source.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(first.status, CompileStatus::Success);
+        let tick_slot_before = backend
+            .jit_artifact_slot_for_function_name("tick")
+            .expect("tick slot after first compile");
+        let render_slot_before = backend
+            .jit_artifact_slot_for_function_name("render")
+            .expect("render slot after first compile");
+
+        fs::write(
+            &source,
+            "function tick(): i32 { return 3; }\nfunction render(): i32 { return 2; }\n",
+        )
+        .expect("rewrite source");
+        let second = backend.compile(CompileRequest::new(
+            RequestId(9_112),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(second.status, CompileStatus::Success);
+        let tick_slot_after = backend
+            .jit_artifact_slot_for_function_name("tick")
+            .expect("tick slot after second compile");
+        let render_slot_after = backend
+            .jit_artifact_slot_for_function_name("render")
+            .expect("render slot after second compile");
+
+        assert!(
+            tick_slot_after > tick_slot_before,
+            "changed function should get a new slot"
+        );
+        assert_eq!(
+            render_slot_after, render_slot_before,
+            "unchanged function should keep prior artifact slot"
+        );
+
         fs::remove_dir_all(&temp_root).ok();
     }
 

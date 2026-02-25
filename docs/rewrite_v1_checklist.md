@@ -649,6 +649,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Removed external harness-only tests and stale process-signing/override code paths from `crates/stasis_compiler/src/lib.rs`.
 - Preserved in-memory reachability behavior and changed/newly-reachable emission behavior under the new in-process analysis path.
 - `apps/stasis` runtime compile path now has an in-process engine-mode fast path: when `tick`+`render` entrypoints are present, backend compile bypasses legacy host analysis and compiles via rust-native JIT/AOT process contracts directly.
+- JIT engine/non-engine compile paths in `apps/stasis` now keep a long-lived in-memory `JitProcess` per backend instance and apply changed-file upserts incrementally; full process rebuild only occurs on source removals.
 - Non-engine `JitDev` compile path now runs rust-native JIT compilation only and emits explicit diagnostics on unsupported shapes; silent fallback to legacy host analysis was removed for this path.
 - Rust-native JIT return-expression lowering now supports parameter identifiers and infix arithmetic (`+ - * / %`) in addition to literal-only returns, with in-memory two-arg execution coverage for verification.
 - Rust-native JIT `i32` statement lowering now supports a simple block subset (`let` bindings and `if` branches with comparison conditions) with deterministic in-memory execution tests, while still keeping direct one-pass lowering.

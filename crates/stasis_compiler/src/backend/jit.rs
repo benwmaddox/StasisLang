@@ -156,6 +156,18 @@ impl JitProcess {
         &self.artifacts
     }
 
+    pub fn artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)?;
+        self.artifacts
+            .iter()
+            .find(|artifact| artifact.function_id == function.id)
+            .map(|artifact| artifact.slot)
+    }
+
     pub fn execute_i32_noarg_by_name(&self, name: &str) -> Result<i32, String> {
         let function = self
             .compiler

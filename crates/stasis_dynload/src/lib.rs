@@ -12,6 +12,9 @@ pub struct Library {
     handle: *mut c_void,
 }
 
+// Library handles are process-wide OS resources and can be moved between threads.
+unsafe impl Send for Library {}
+
 impl Library {
     pub fn load(path: &Path) -> Result<Self, String> {
         #[cfg(windows)]
