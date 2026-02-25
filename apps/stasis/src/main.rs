@@ -356,6 +356,7 @@ fn run_test_watch_loop(parsed: &TestCliArgs) -> Result<i32, String> {
     println!("watch_mode=1");
     println!("watch_settle_ms={}", parsed.watch_settle_ms);
     println!("watch_last_exit={first_exit}");
+    flush_test_stdout();
 
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = RecommendedWatcher::new(
@@ -412,8 +413,10 @@ fn run_test_watch_loop(parsed: &TestCliArgs) -> Result<i32, String> {
         }
 
         println!("watch_change=stasis");
+        flush_test_stdout();
         let exit = run_test_dir_once_with_session(&parsed.directory, &mut session)?;
         println!("watch_last_exit={exit}");
+        flush_test_stdout();
     }
 }
 
@@ -453,7 +456,12 @@ fn run_test_dir_once_with_session(
         println!("test_failure={failure}");
     }
     println!("elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+    flush_test_stdout();
     Ok(if summary.tests_failed > 0 { 1 } else { 0 })
+}
+
+fn flush_test_stdout() {
+    let _ = io::stdout().flush();
 }
 
 fn is_stasis_change_event(event: &Event) -> bool {

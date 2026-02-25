@@ -33,6 +33,7 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
 
 pub struct StasisTestRunSession {
     by_path: BTreeMap<PathBuf, CachedTestProcess>,
+    last_active_path: Option<PathBuf>,
 }
 
 struct CachedTestProcess {
@@ -44,6 +45,7 @@ impl StasisTestRunSession {
     pub fn new() -> Self {
         Self {
             by_path: BTreeMap::new(),
+            last_active_path: None,
         }
     }
 }
@@ -69,7 +71,6 @@ pub fn run_jit_tests_in_directory_with_session(
         )
     });
     let timing_discovery_us = elapsed_us_u64(discovery_started.elapsed().as_micros());
-
     let mut summary = StasisTestRunSummary {
         files_discovered: files.len(),
         files_with_tests: 0,
@@ -115,7 +116,12 @@ pub fn run_jit_tests_in_directory_with_session(
                 process: JitProcess::new(),
             });
         let compile_required = entry.source_hash != source_hash;
-        if compile_required {
+        let runtime_rebind_required = !compile_required
+            && session
+                .last_active_path
+                .as_ref()
+                .is_some_and(|active| active != &file_path);
+        if compile_required || runtime_rebind_required {
             entry
                 .process
                 .upsert_file(file_path.to_string_lossy().to_string(), rewritten);
@@ -143,15 +149,23 @@ pub fn run_jit_tests_in_directory_with_session(
                 .timing_compile_us
                 .saturating_add(elapsed_us_u64(compile_started.elapsed().as_micros()));
             entry.source_hash = source_hash;
+            session.last_active_path = Some(file_path.clone());
         }
 
+        entry.process.activate_runtime_dispatch_table();
         let execute_started = Instant::now();
         run_discovered_tests(&entry.process, &tests, &file_path, &mut summary);
+        session.last_active_path = Some(file_path.clone());
         summary.timing_execute_us = summary
             .timing_execute_us
             .saturating_add(elapsed_us_u64(execute_started.elapsed().as_micros()));
     }
     session.by_path.retain(|path, _| seen_paths.contains(path));
+    if let Some(active_path) = session.last_active_path.as_ref() {
+        if !seen_paths.contains(active_path) {
+            session.last_active_path = None;
+        }
+    }
 
     summary.timing_total_us = elapsed_us_u64(total_started.elapsed().as_micros());
 
@@ -478,6 +492,46 @@ mod tests {
         let second = run_jit_tests_in_directory_with_session(&root, &mut session).expect("second");
         assert_eq!(second.tests_passed, 1, "{second:?}");
         assert_eq!(second.timing_compile_us, 0, "{second:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_restores_dispatch_table_for_cached_process_before_execute() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_test_runner_dispatch_{stamp}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let left = root.join("left.test.stasis");
+        let right = root.join("right.test.stasis");
+        fs::write(
+            &left,
+            "function left_helper(): bool { return true; }\ntest `left`(): bool { return left_helper(); }\n",
+        )
+        .expect("write left");
+        fs::write(
+            &right,
+            "function right_helper(): bool { return false; }\ntest `right`(): bool { return !right_helper(); }\n",
+        )
+        .expect("write right");
+
+        let mut session = StasisTestRunSession::new();
+        let first = run_jit_tests_in_directory_with_session(&root, &mut session).expect("first");
+        assert_eq!(first.tests_passed, 2, "{first:?}");
+        assert_eq!(first.tests_failed, 0, "{first:?}");
+
+        fs::write(
+            &left,
+            "function left_helper(): bool { return true; }\ntest `left`(): bool { if (1 == 2) { return false; } return left_helper(); }\n",
+        )
+        .expect("rewrite left");
+
+        let second =
+            run_jit_tests_in_directory_with_session(&root, &mut session).expect("second run");
+        assert_eq!(second.tests_passed, 2, "{second:?}");
+        assert_eq!(second.tests_failed, 0, "{second:?}");
 
         fs::remove_dir_all(&root).ok();
     }

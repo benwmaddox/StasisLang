@@ -156,6 +156,10 @@ impl JitProcess {
         &self.artifacts
     }
 
+    pub fn activate_runtime_dispatch_table(&self) {
+        self.refresh_runtime_dispatch_table();
+    }
+
     pub fn artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
         let function = self
             .compiler
