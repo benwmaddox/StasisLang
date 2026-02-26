@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -16,9 +15,40 @@ pub struct RuntimeLauncher {
     summary: RuntimeExecutionSummary,
 }
 
+#[cfg(test)]
+fn default_repo_root() -> PathBuf {
+    use std::path::Path;
+    // Tests run under Cargo, so `current_exe()` points at `target/.../deps/*` and won't
+    // reliably infer the workspace root.
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+#[cfg(not(test))]
+fn default_repo_root() -> PathBuf {
+    // Best-effort runtime inference for non-test builds:
+    // - If we're running from `.../target/{debug,release}/stasis[.exe]`, treat the parent of
+    //   `target/` as repo root.
+    // - Otherwise fall back to current working directory.
+    let inferred = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .and_then(|dir| {
+            let name = dir.file_name()?.to_string_lossy().to_ascii_lowercase();
+            let parent = dir.parent()?;
+            let parent_name = parent.file_name()?.to_string_lossy().to_ascii_lowercase();
+            if (name == "debug" || name == "release") && parent_name == "target" {
+                return parent.parent().map(|root| root.to_path_buf());
+            }
+            None
+        });
+    inferred
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 impl RuntimeLauncher {
     pub fn new(source_file: PathBuf) -> Self {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let repo_root = default_repo_root();
         Self {
             repo_root,
             source_file,

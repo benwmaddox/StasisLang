@@ -152,6 +152,45 @@ fn try_run_play_subcommand() -> Option<i32> {
     }
 }
 
+fn try_run_probe_graphics_runtime_subcommand() -> Option<i32> {
+    let mut args = env::args().skip(1);
+    let first = args.next()?;
+    if first != "probe-graphics-runtime" {
+        return None;
+    }
+
+    if !cfg!(windows) {
+        eprintln!("probe-graphics-runtime is only supported on Windows today");
+        return Some(2);
+    }
+
+    let candidates = stasis_dynload::runtime_library_candidate_paths();
+    for candidate in &candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        match stasis_dynload::StasisGraphicsApi::load(candidate) {
+            Ok(api) => {
+                println!("graphics_runtime_loaded=1");
+                println!("graphics_runtime_path={}", candidate.display());
+                // Exercise at least one export to catch partial-load issues.
+                let _ = api.sleep_ms(0);
+                return Some(0);
+            }
+            Err(error) => {
+                eprintln!("failed loading {}: {error}", candidate.display());
+            }
+        }
+    }
+
+    eprintln!("graphics_runtime_loaded=0");
+    eprintln!("searched_candidates={}", candidates.len());
+    for (idx, candidate) in candidates.iter().enumerate() {
+        eprintln!("candidate[{idx}]={}", candidate.display());
+    }
+    Some(1)
+}
+
 fn parse_args() -> CliOptions {
     let mut config = RunnerConfig::default();
     let mut emit_events_jsonl = false;
@@ -934,6 +973,9 @@ mod tests {
 fn main() {
     maybe_cleanup_stale_stasis_cache();
 
+    if let Some(exit) = try_run_probe_graphics_runtime_subcommand() {
+        std::process::exit(exit);
+    }
     if let Some(exit) = try_run_test_subcommand() {
         std::process::exit(exit);
     }

@@ -355,13 +355,48 @@ fn resolve_aot_helper_path(config: &AotCompileConfig) -> Result<PathBuf, String>
         }
     }
 
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Release-friendly default: ship the helper next to the stasis executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join(default_aot_exe_name()));
+        }
+    }
+
+    // Dev-friendly default: locate the helper under the repo tree.
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    Ok(repo_root
-        .join("tools")
-        .join("cranelift-aot")
-        .join("target")
-        .join("debug")
-        .join(default_aot_exe_name()))
+    candidates.push(
+        repo_root
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("release")
+            .join(default_aot_exe_name()),
+    );
+    candidates.push(
+        repo_root
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join(default_aot_exe_name()),
+    );
+
+    // Allow running with the helper on PATH / in the current directory.
+    candidates.push(PathBuf::from(default_aot_exe_name()));
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    // No candidate exists; return the most likely location so the caller reports a concrete path.
+    Ok(candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from(default_aot_exe_name())))
 }
 
 fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
