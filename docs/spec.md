@@ -19,7 +19,7 @@ Core direction for Rewrite V1:
 - Symbol-level reachability pruning before lowering (functions + struct metadata).
 - Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
 - Hot swap only between ticks.
-- Rust host wrapper with Stasis-owned compiler orchestration.
+- Rust host/runtime with a Rust-implemented compiler pipeline.
 
 ## 2. Core Principles
 
@@ -496,7 +496,7 @@ let phase: Phase = Phase.Play;
 ```
 - Enum/integer conversion uses explicit conversion calls.
 - Current Rewrite V1 conversion surface: `enum_to_i32(value: EnumType): i32`.
-- In bootstrap compatibility mode this is treated as a compiler-path builtin rewrite with the same call shape; in self-hosted mode this remains the intrinsic surface.
+- `enum_to_i32` is a compiler intrinsic with a stable call shape.
 
 ## 9. Modules and Imports
 
@@ -713,16 +713,17 @@ Diagnostics should not silently skip invalid semantics.
 - Production backend: Cranelift AOT.
 - Host runtime: Rust (`winit + glutin + glow`).
 - C usage: only where unavoidable for platform bindings.
-- Compiler orchestration: implemented in `.stasis` source.
+- Compiler implementation: fully Rust (`stasis_compiler` + `stasis_jit` + runtime integration).
 
-### 17.1 Language Ownership Boundary
+### 17.1 Language and Implementation Ownership Boundary
 
-- `.stasis` owns compiler language logic: lexing/tokenization, parsing (including incremental parse behavior), semantic rules/diagnostics, and compile policy (file invalidation and hash-gating decisions).
-- Rust owns host/runtime and backend integration: file watcher/input bridge, cross-thread message transport and swap coordinator, Cranelift JIT/AOT code emission, executable memory management, and runtime ABI/extern bridge.
+- `.stasis` owns user program source, language surface usage, and gameplay/runtime logic.
+- Rust owns compiler implementation end-to-end: lexing/tokenization, parsing (including incremental parse behavior), semantic rules/diagnostics, compile policy (file invalidation and hash-gating decisions), lowering, and Cranelift backend integration.
+- Rust also owns host/runtime integration: file watcher/input bridge, cross-thread message transport and swap coordinator, executable memory management, and runtime ABI/extern bridge.
 
 Rules:
-- New compiler frontend behavior must be implemented in `.stasis` first.
-- Rust may expose helper surfaces and tests, but must not become a second source of truth for lexer/parser semantics.
+- New compiler frontend/backend behavior is implemented in Rust.
+- Language semantics remain spec-driven from this document; compiler behavior must conform to it.
 - Tick-path runtime must remain free of parser/semantic/codegen work.
 
 ## 18. Status Note
