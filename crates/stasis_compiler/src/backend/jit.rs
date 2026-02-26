@@ -501,7 +501,7 @@ impl JitProcess {
         if !self.runtime_libraries.is_empty() {
             return;
         }
-        for path in runtime_library_candidate_paths() {
+        for path in stasis_dynload::runtime_library_candidate_paths() {
             if !path.exists() {
                 continue;
             }
@@ -1040,31 +1040,6 @@ fn compute_files_fingerprint(files: &[SourceFile]) -> u64 {
         }
     }
     hash
-}
-
-fn runtime_library_candidate_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
-        out.push(PathBuf::from(configured));
-    }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    out.push(
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join("Release")
-            .join("stasis_graphics.dll"),
-    );
-    out.push(
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join("Debug")
-            .join("stasis_graphics.dll"),
-    );
-    out
 }
 
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {

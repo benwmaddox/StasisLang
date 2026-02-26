@@ -10,28 +10,64 @@ permissions:
   contents: read
 
 jobs:
-  build-bootstrap-cli:
+  build-rust-stasis:
     strategy:
       fail-fast: false
       matrix:
         os:
           - windows-latest
           - ubuntu-latest
+          - macos-14
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 9.0.x
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build bootstrap CLI
-        run: dotnet build Stasis.Cli/Stasis.Cli.csproj -c Release
+      - name: Build stasis (release)
+        run: cargo build -p stasis --release
 
-      - name: Upload bootstrap artifact
+      - name: Assemble bundle (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/stasis-release-${{ runner.os }}"
+          mkdir -p "${out}/bin"
+          cp "target/release/stasis" "${out}/bin/"
+          cp README.md "${out}/"
+          cp LICENSE "${out}/"
+          cp -R src "${out}/"
+          cp -R samples "${out}/"
+          tar -C dist -czf "dist/stasis-release-${{ runner.os }}.tar.gz" "stasis-release-${{ runner.os }}"
+
+      - name: Assemble bundle (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = "dist/stasis-release-${{ runner.os }}"
+          New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
+          Copy-Item "target/release/stasis.exe" "$out/bin/" -Force
+          Copy-Item README.md "$out/" -Force
+          Copy-Item LICENSE "$out/" -Force
+          Copy-Item src "$out/" -Recurse -Force
+          Copy-Item samples "$out/" -Recurse -Force
+          Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
+
+      - name: Upload artifact (unix)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-cli-${{ matrix.os }}
-          path: Stasis.Cli/bin/Release/net9.0/**
+          name: stasis-release-${{ runner.os }}
+          path: dist/stasis-release-${{ runner.os }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload artifact (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stasis-release-${{ runner.os }}
+          path: dist/stasis-release-${{ runner.os }}.zip
+          if-no-files-found: error

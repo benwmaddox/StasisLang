@@ -326,28 +326,41 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
     }
 }
 
-fn runtime_library_candidate_paths() -> Vec<PathBuf> {
+pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
         out.push(PathBuf::from(configured));
     }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    out.push(
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join("Release")
-            .join("stasis_graphics.dll"),
-    );
-    out.push(
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join("Debug")
-            .join("stasis_graphics.dll"),
-    );
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            // Release-friendly default: ship the DLL next to the stasis binary.
+            out.push(exe_dir.join("stasis_graphics.dll"));
+
+            // Dev-friendly default: locate the runtime DLL built under the repo tree by
+            // walking a few parents from the executable location.
+            for ancestor in exe_dir.ancestors().take(6) {
+                out.push(
+                    ancestor
+                        .join("runtime")
+                        .join("build")
+                        .join("bin")
+                        .join("Release")
+                        .join("stasis_graphics.dll"),
+                );
+                out.push(
+                    ancestor
+                        .join("runtime")
+                        .join("build")
+                        .join("bin")
+                        .join("Debug")
+                        .join("stasis_graphics.dll"),
+                );
+            }
+        }
+    }
+
+    // Allow loading from the current working directory too (handy for ad-hoc runs).
+    out.push(PathBuf::from("stasis_graphics.dll"));
     out
 }
 

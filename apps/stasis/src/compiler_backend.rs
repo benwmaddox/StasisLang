@@ -130,7 +130,14 @@ fn capture_self_host_cli_env_snapshot() -> SelfHostCliEnvSnapshot {
 
 impl IncrementalCompilerBackend {
     pub fn new() -> Self {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let cache_root = std::env::var_os("STASIS_CACHE_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".stasis_cache")
+            });
         Self {
             host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
@@ -140,7 +147,7 @@ impl IncrementalCompilerBackend {
             next_fn_id: 1,
             aot_compile_config: AotCompileConfig::default(),
             aot_link_config: AotLinkConfig::default(),
-            aot_artifact_root: repo_root.join(".stasis_cache").join("aot"),
+            aot_artifact_root: cache_root.join("aot"),
             enable_aot_link_step: std::env::var("STASIS_AOT_LINK_ARTIFACTS")
                 .ok()
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
