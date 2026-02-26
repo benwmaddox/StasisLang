@@ -1,0 +1,31 @@
+﻿import "../../compiler/simple_pass_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+
+    if (!compiler_upsert_file("func_metrics.stasis", "function main(): i32 { return helper(); } function helper(): i32 { return 1; }")) { return 70; }
+    if (run_incremental_compiler() != 0) { return 71; }
+    if (Compiler.incremental_changed_functions != 2) { return 72; }
+    if (Compiler.incremental_codegen_functions != 2) { return 73; }
+    if (Compiler.incremental_reused_functions != 0) { return 74; }
+
+    if (run_incremental_compiler() != 0) { return 75; }
+    if (Compiler.incremental_changed_functions != 0) { return 76; }
+    if (Compiler.incremental_codegen_functions != 0) { return 77; }
+    if (Compiler.incremental_reused_functions != 2) { return 78; }
+
+    if (!compiler_upsert_file("func_metrics.stasis", "function main(): i32 { return helper(); } function helper(): i32 { return 2; }")) { return 79; }
+    if (run_incremental_compiler() != 0) { return 80; }
+    if (Compiler.incremental_changed_functions != 1) { return 81; }
+    if (Compiler.incremental_codegen_functions != 1) { return 82; }
+    if (Compiler.incremental_reused_functions != 1) { return 83; }
+
+    if (!compiler_upsert_file("func_metrics.stasis", "function main(): i32 { return helper(); } function helper(value: i32): i32 { return value; }")) { return 84; }
+    if (run_incremental_compiler() != 0) { return 85; }
+    if (Compiler.incremental_changed_functions != 1) { return 86; }
+    if (Compiler.incremental_codegen_functions != 1) { return 87; }
+    if (Compiler.incremental_reused_functions != 1) { return 88; }
+
+    return 0;
+}
+

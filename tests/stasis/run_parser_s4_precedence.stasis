@@ -1,0 +1,9 @@
+﻿import "../../compiler/simple_pass_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+    compiler_set_source("function main(): i32 { let x: i32 = 0; let y: i32 = 0; x = 1 + 2 * 3; y = (x + 4) * 2; if ((y > 0 && x != 0) || y == 0) { x = y; } return x; }");
+
+    return run_incremental_compiler();
+}
+

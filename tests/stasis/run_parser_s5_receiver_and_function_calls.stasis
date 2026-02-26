@@ -1,0 +1,9 @@
+﻿import "../../compiler/simple_pass_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+    compiler_set_source("function damage(target: i32, amount: i32): i32 { return target - amount; } function main(): i32 { let enemy: i32 = 10; enemy = enemy.damage(5); enemy = damage(enemy, 2); return enemy; }");
+
+    return run_incremental_compiler();
+}
+

@@ -156,13 +156,17 @@ function tick(): i32 {
     // Demo: batch build sprites/lines into arrays, then submit once.
     let w: i32 = state.config.screen.width;
     let h: i32 = state.config.screen.height;
+    let w_f: f32;
+    w_f.from_i32(w);
+    let h_f: f32;
+    h_f.from_i32(h);
     render_push_sprite(state.sprites.paddle, (w / 2) - 64, h - 40, 128, 24, 0, 255);
     render_push_sprite(state.sprites.ball, (w / 2) - 16, (h / 2) - 16, 32, 32, 0, 255);
 
-    render_push_line(0.0, 0.0, i32_to_f32(w), 0.0, 0.2, 0.2, 0.5, 1.0);
-    render_push_line(i32_to_f32(w), 0.0, i32_to_f32(w), i32_to_f32(h), 0.2, 0.2, 0.5, 1.0);
-    render_push_line(i32_to_f32(w), i32_to_f32(h), 0.0, i32_to_f32(h), 0.2, 0.2, 0.5, 1.0);
-    render_push_line(0.0, i32_to_f32(h), 0.0, 0.0, 0.2, 0.2, 0.5, 1.0);
+    render_push_line(0.0, 0.0, w_f, 0.0, 0.2, 0.2, 0.5, 1.0);
+    render_push_line(w_f, 0.0, w_f, h_f, 0.2, 0.2, 0.5, 1.0);
+    render_push_line(w_f, h_f, 0.0, h_f, 0.2, 0.2, 0.5, 1.0);
+    render_push_line(0.0, h_f, 0.0, 0.0, 0.2, 0.2, 0.5, 1.0);
 
     begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
@@ -188,3 +192,6 @@ function draw_frame(): void {
     // draw_ui();
     // draw_tap_pulses();
 }
+
+
+

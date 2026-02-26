@@ -3724,6 +3724,14 @@ public sealed class CraneliftFunctionBuilder
             return true;
         }
 
+        if (expr is MemberAccessExpressionSyntax indexedMember &&
+            indexedMember.Receiver is ArrayAccessExpressionSyntax &&
+            GetExpressionType(indexedMember) is ArrayTypeSymbol)
+        {
+            ptr = LowerMemberAccess(indexedMember);
+            return true;
+        }
+
         if (reportErrors)
         {
             _diagnostics.Add(new Diagnostic("String built-ins require array arguments.", new SourceSpan(0, 0)));
@@ -3768,6 +3776,86 @@ public sealed class CraneliftFunctionBuilder
         arrayType = arrayTypeSymbol;
         arrayName = $"{baseName}__{member.Member.Text}";
         return true;
+    }
+
+    private bool TryResolveArrayElementField(
+        ArrayAccessExpressionSyntax array,
+        string fieldName,
+        out string baseName,
+        out TypeSymbol fieldType,
+        out ExpressionSyntax outerIndexExpr)
+    {
+        baseName = string.Empty;
+        fieldType = new NamedTypeSymbol("unknown");
+        outerIndexExpr = array.Index;
+
+        if (array.Receiver is IdentifierExpressionSyntax id &&
+            _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
+            symbol.Type is ArrayTypeSymbol arrayType &&
+            arrayType.ElementType is NamedTypeSymbol namedElem &&
+            _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+        {
+            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
+            if (field is null)
+            {
+                return false;
+            }
+
+            baseName = $"{structDecl.Name.Text}__{fieldName}";
+            fieldType = ResolveType(field.Type);
+            return true;
+        }
+
+        if (array.Receiver is MemberAccessExpressionSyntax memberAccess &&
+            TryResolveMemberBase(memberAccess.Receiver, out var parentBaseName, out var parentBaseType) &&
+            parentBaseType is NamedTypeSymbol parentNamed &&
+            _structs.TryGetValue(parentNamed.TypeName, out var parentStructDecl))
+        {
+            var arrayField = parentStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
+            if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax &&
+                ResolveType(arrayTypeSyntax) is ArrayTypeSymbol arrayFieldType &&
+                arrayFieldType.ElementType is NamedTypeSymbol elementNamed &&
+                _structs.TryGetValue(elementNamed.TypeName, out var elemStructDecl))
+            {
+                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
+                if (field is null)
+                {
+                    return false;
+                }
+
+                baseName = $"{parentBaseName}__{memberAccess.Member.Text}__{fieldName}";
+                fieldType = ResolveType(field.Type);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private int GetArrayStrideBytes(ArrayTypeSymbol arrayType)
+    {
+        if (IsStringBuffer(arrayType, out var headerSize))
+        {
+            return arrayType.Size + headerSize;
+        }
+
+        // TODO: extend to nested array element strides once nested-array fields
+        // are first-class in this backend path.
+        var elemClifType = _typeMapper.Map(arrayType.ElementType);
+        return arrayType.Size * GetTypeSize(elemClifType);
+    }
+
+    private string EmitArrayElementBaseAddress(string baseAddr, string outerIndex, int strideBytes)
+    {
+        var strideVal = NewValue();
+        _instructions.AppendLine($"    {strideVal} = iconst.i64 {strideBytes}");
+        var outerIndexI64 = NewValue();
+        _instructions.AppendLine($"    {outerIndexI64} = sextend.i64 {outerIndex}");
+        var outerOffset = NewValue();
+        _instructions.AppendLine($"    {outerOffset} = imul {outerIndexI64}, {strideVal}");
+        var elemBase = NewValue();
+        _instructions.AppendLine($"    {elemBase} = iadd {baseAddr}, {outerOffset}");
+        return elemBase;
     }
 
     private string EmitByteAddress(string basePtr, string index)
@@ -4333,6 +4421,51 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerArrayFieldAccess(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr)
     {
+        if (memberAccess.Receiver is ArrayAccessExpressionSyntax arrayReceiver &&
+            TryResolveArrayElementField(arrayReceiver, memberAccess.Member.Text, out var nestedBaseName, out var nestedFieldType, out var outerIndexExpr))
+        {
+            if (nestedFieldType is not ArrayTypeSymbol nestedArrayType)
+            {
+                return EmitLoweringErrorValue($"Cranelift: '{memberAccess.Member.Text}' is not an array field on indexed receiver.", memberAccess.Span);
+            }
+
+            var outerIndex = LowerExpression(outerIndexExpr);
+            var innerIndex = LowerExpression(indexExpr);
+            var nestedBaseAddr = NewValue();
+            _instructions.AppendLine($"    {nestedBaseAddr} = global_value {nestedBaseName}");
+
+            var strideBytes = GetArrayStrideBytes(nestedArrayType);
+            var elemBase = EmitArrayElementBaseAddress(nestedBaseAddr, outerIndex, strideBytes);
+
+            if (IsStringBuffer(nestedArrayType, out var nestedHeaderSize))
+            {
+                var payloadBase = NewValue();
+                var headerOffset = ConstI64(nestedHeaderSize);
+                _instructions.AppendLine($"    {payloadBase} = iadd {elemBase}, {headerOffset}");
+                var addr = EmitByteAddress(payloadBase, innerIndex);
+                var value = NewValue();
+                _instructions.AppendLine($"    {value} = load.i8 {addr}");
+                var byteResult = NewValue();
+                _instructions.AppendLine($"    {byteResult} = uextend.i32 {value}");
+                return byteResult;
+            }
+
+            var innerElemType = _typeMapper.Map(nestedArrayType.ElementType);
+            var innerElemSize = GetTypeSize(innerElemType);
+            var innerElemSizeVal = NewValue();
+            _instructions.AppendLine($"    {innerElemSizeVal} = iconst.i64 {innerElemSize}");
+            var innerIndexI64 = NewValue();
+            _instructions.AppendLine($"    {innerIndexI64} = sextend.i64 {innerIndex}");
+            var innerOffset = NewValue();
+            _instructions.AppendLine($"    {innerOffset} = imul {innerIndexI64}, {innerElemSizeVal}");
+            var innerElemAddr = NewValue();
+            _instructions.AppendLine($"    {innerElemAddr} = iadd {elemBase}, {innerOffset}");
+
+            var nestedResult = NewValue();
+            _instructions.AppendLine($"    {nestedResult} = load.{FormatType(innerElemType)} {innerElemAddr}");
+            return CoerceLoadedSmallIntToI32(nestedResult, innerElemType);
+        }
+
         if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
             baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
@@ -4385,31 +4518,33 @@ public sealed class CraneliftFunctionBuilder
 
     private string LowerArrayElementFieldAccess(ArrayAccessExpressionSyntax array, string fieldName)
     {
-        if (array.Receiver is IdentifierExpressionSyntax id &&
-            _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
-            symbol.Type is ArrayTypeSymbol arrayType &&
-            arrayType.ElementType is NamedTypeSymbol namedElem &&
-            _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+        if (TryResolveArrayElementField(array, fieldName, out var baseName, out var fieldType, out var outerIndexExpr))
         {
-            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-            if (field is null)
-            {
-                return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{structDecl.Name.Text}'.", array.Span);
-            }
-
-            var elemType = ResolveType(field.Type);
-            var clifElemType = _typeMapper.Map(elemType);
-            var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}__{fieldName}";
-
+            var outerIndex = LowerExpression(outerIndexExpr);
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
 
+            if (fieldType is ArrayTypeSymbol nestedArrayType)
+            {
+                var strideBytes = GetArrayStrideBytes(nestedArrayType);
+                var elemBase = EmitArrayElementBaseAddress(baseAddr, outerIndex, strideBytes);
+                if (IsStringBuffer(nestedArrayType, out var headerSize))
+                {
+                    var payload = NewValue();
+                    var headerOffset = ConstI64(headerSize);
+                    _instructions.AppendLine($"    {payload} = iadd {elemBase}, {headerOffset}");
+                    return payload;
+                }
+                return elemBase;
+            }
+
+            var elemType = fieldType;
+            var clifElemType = _typeMapper.Map(elemType);
             var elemSize = GetTypeSize(clifElemType);
             var elemSizeVal = NewValue();
             _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
             var indexI64 = NewValue();
-            _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
+            _instructions.AppendLine($"    {indexI64} = sextend.i64 {outerIndex}");
             var offset = NewValue();
             _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
 
@@ -4419,48 +4554,6 @@ public sealed class CraneliftFunctionBuilder
             var result = NewValue();
             _instructions.AppendLine($"    {result} = load.{FormatType(clifElemType)} {elemAddr}");
             return CoerceLoadedSmallIntToI32(result, clifElemType);
-        }
-
-        if (array.Receiver is MemberAccessExpressionSyntax memberAccess &&
-            memberAccess.Receiver is IdentifierExpressionSyntax structId &&
-            _symbols.TryGetValue(structId.Identifier.Text, out var structSymbol) &&
-            structSymbol.Type is NamedTypeSymbol structType &&
-            _structs.TryGetValue(structType.TypeName, out var parentStructDecl))
-        {
-            var arrayField = parentStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
-            if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax &&
-                arrayTypeSyntax.ElementType is NamedTypeSyntax elementNamed &&
-                _structs.TryGetValue(elementNamed.Name, out var elemStructDecl))
-            {
-                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                if (field is null)
-                {
-                    return EmitLoweringErrorValue($"Cranelift: unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", array.Span);
-                }
-
-                var elemType = ResolveType(field.Type);
-                var clifElemType = _typeMapper.Map(elemType);
-                var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
-
-                var baseAddr = NewValue();
-                _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
-
-                var elemSize = GetTypeSize(clifElemType);
-                var elemSizeVal = NewValue();
-                _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
-                var indexI64 = NewValue();
-                _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
-                var offset = NewValue();
-                _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
-
-                var elemAddr = NewValue();
-                _instructions.AppendLine($"    {elemAddr} = iadd {baseAddr}, {offset}");
-
-                var result = NewValue();
-                _instructions.AppendLine($"    {result} = load.{FormatType(clifElemType)} {elemAddr}");
-                return CoerceLoadedSmallIntToI32(result, clifElemType);
-            }
         }
 
         var fallback = NewValue();
@@ -4575,6 +4668,50 @@ public sealed class CraneliftFunctionBuilder
 
     private void LowerArrayFieldStore(MemberAccessExpressionSyntax memberAccess, ExpressionSyntax indexExpr, string value, TypeSymbol? valueType)
     {
+        if (memberAccess.Receiver is ArrayAccessExpressionSyntax arrayReceiver &&
+            TryResolveArrayElementField(arrayReceiver, memberAccess.Member.Text, out var nestedBaseName, out var nestedFieldType, out var outerIndexExpr))
+        {
+            if (nestedFieldType is not ArrayTypeSymbol nestedArrayType)
+            {
+                EmitLoweringErrorVoid($"Cranelift: '{memberAccess.Member.Text}' is not an array field on indexed receiver.", memberAccess.Span);
+                return;
+            }
+
+            var outerIndex = LowerExpression(outerIndexExpr);
+            var innerIndex = LowerExpression(indexExpr);
+            var nestedBaseAddr = NewValue();
+            _instructions.AppendLine($"    {nestedBaseAddr} = global_value {nestedBaseName}");
+
+            var strideBytes = GetArrayStrideBytes(nestedArrayType);
+            var elemBase = EmitArrayElementBaseAddress(nestedBaseAddr, outerIndex, strideBytes);
+
+            if (IsStringBuffer(nestedArrayType, out var nestedHeaderSize))
+            {
+                var payloadBase = NewValue();
+                var headerOffset = ConstI64(nestedHeaderSize);
+                _instructions.AppendLine($"    {payloadBase} = iadd {elemBase}, {headerOffset}");
+                var addr = EmitByteAddress(payloadBase, innerIndex);
+                value = ReduceI32ToSmallInt(value, CraneliftTypeMapper.ClifType.I8);
+                _instructions.AppendLine($"    store {value}, {addr}");
+                return;
+            }
+
+            var innerElemType = _typeMapper.Map(nestedArrayType.ElementType);
+            value = CoerceAssignmentValue(value, valueType, nestedArrayType.ElementType);
+            value = ReduceI32ToSmallInt(value, innerElemType);
+            var innerElemSize = GetTypeSize(innerElemType);
+            var innerElemSizeVal = NewValue();
+            _instructions.AppendLine($"    {innerElemSizeVal} = iconst.i64 {innerElemSize}");
+            var innerIndexI64 = NewValue();
+            _instructions.AppendLine($"    {innerIndexI64} = sextend.i64 {innerIndex}");
+            var innerOffset = NewValue();
+            _instructions.AppendLine($"    {innerOffset} = imul {innerIndexI64}, {innerElemSizeVal}");
+            var innerElemAddr = NewValue();
+            _instructions.AppendLine($"    {innerElemAddr} = iadd {elemBase}, {innerOffset}");
+            _instructions.AppendLine($"    store {value}, {innerElemAddr}");
+            return;
+        }
+
         if (!TryResolveMemberBase(memberAccess.Receiver, out var baseName, out var baseType) ||
             baseType is not NamedTypeSymbol named ||
             !_structs.TryGetValue(named.TypeName, out var structDecl))
@@ -4655,24 +4792,18 @@ public sealed class CraneliftFunctionBuilder
 
     private void LowerArrayElementFieldStore(ArrayAccessExpressionSyntax array, string fieldName, string value, TypeSymbol? valueType)
     {
-        if (array.Receiver is IdentifierExpressionSyntax id &&
-            _symbols.TryGetValue(id.Identifier.Text, out var symbol) &&
-            symbol.Type is ArrayTypeSymbol arrayType &&
-            arrayType.ElementType is NamedTypeSymbol namedElem &&
-            _structs.TryGetValue(namedElem.TypeName, out var structDecl))
+        if (TryResolveArrayElementField(array, fieldName, out var baseName, out var fieldType, out var outerIndexExpr))
         {
-            var field = structDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-            if (field is null)
+            var outerIndex = LowerExpression(outerIndexExpr);
+            if (fieldType is ArrayTypeSymbol)
             {
-                EmitLoweringErrorVoid($"Cranelift: unknown field '{fieldName}' on struct '{structDecl.Name.Text}'.", array.Span);
+                EmitLoweringErrorVoid("Cranelift: assigning whole array fields via indexed receiver is not supported.", array.Span);
                 return;
             }
 
-            var elemType = ResolveType(field.Type);
+            var elemType = fieldType;
             var clifElemType = _typeMapper.Map(elemType);
             value = CoerceAssignmentValue(value, valueType, elemType);
-            var index = LowerExpression(array.Index);
-            var baseName = $"{structDecl.Name.Text}__{fieldName}";
 
             var baseAddr = NewValue();
             _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
@@ -4681,7 +4812,7 @@ public sealed class CraneliftFunctionBuilder
             var elemSizeVal = NewValue();
             _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
             var indexI64 = NewValue();
-            _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
+            _instructions.AppendLine($"    {indexI64} = sextend.i64 {outerIndex}");
             var offset = NewValue();
             _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
 
@@ -4689,48 +4820,6 @@ public sealed class CraneliftFunctionBuilder
             _instructions.AppendLine($"    {elemAddr} = iadd {baseAddr}, {offset}");
             _instructions.AppendLine($"    store {value}, {elemAddr}");
             return;
-        }
-
-        if (array.Receiver is MemberAccessExpressionSyntax memberAccess &&
-            memberAccess.Receiver is IdentifierExpressionSyntax structId &&
-            _symbols.TryGetValue(structId.Identifier.Text, out var structSymbol) &&
-            structSymbol.Type is NamedTypeSymbol structType &&
-            _structs.TryGetValue(structType.TypeName, out var parentStructDecl))
-        {
-            var arrayField = parentStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == memberAccess.Member.Text);
-            if (arrayField?.Type is ArrayTypeSyntax arrayTypeSyntax &&
-                arrayTypeSyntax.ElementType is NamedTypeSyntax elementNamed &&
-                _structs.TryGetValue(elementNamed.Name, out var elemStructDecl))
-            {
-                var field = elemStructDecl.Fields.FirstOrDefault(f => f.Identifier.Text == fieldName);
-                if (field is null)
-                {
-                    EmitLoweringErrorVoid($"Cranelift: unknown field '{fieldName}' on struct '{elemStructDecl.Name.Text}'.", array.Span);
-                    return;
-                }
-
-                var elemType = ResolveType(field.Type);
-                var clifElemType = _typeMapper.Map(elemType);
-                value = CoerceAssignmentValue(value, valueType, elemType);
-                var index = LowerExpression(array.Index);
-                var baseName = $"{structId.Identifier.Text}__{memberAccess.Member.Text}__{fieldName}";
-
-                var baseAddr = NewValue();
-                _instructions.AppendLine($"    {baseAddr} = global_value {baseName}");
-
-                var elemSize = GetTypeSize(clifElemType);
-                var elemSizeVal = NewValue();
-                _instructions.AppendLine($"    {elemSizeVal} = iconst.i64 {elemSize}");
-                var indexI64 = NewValue();
-                _instructions.AppendLine($"    {indexI64} = sextend.i64 {index}");
-                var offset = NewValue();
-                _instructions.AppendLine($"    {offset} = imul {indexI64}, {elemSizeVal}");
-
-                var elemAddr = NewValue();
-                _instructions.AppendLine($"    {elemAddr} = iadd {baseAddr}, {offset}");
-                _instructions.AppendLine($"    store {value}, {elemAddr}");
-                return;
-            }
         }
 
         _diagnostics.Add(new Diagnostic("Array element field store not supported in Cranelift backend.", array.Span));
@@ -5283,6 +5372,14 @@ public sealed class CraneliftFunctionBuilder
                 memberType = ResolveType(field.Type);
                 return true;
             }
+        }
+
+        // Array element struct field access (e.g. items[i].field).
+        if (member.Receiver is ArrayAccessExpressionSyntax arrayAccess &&
+            TryResolveArrayElementField(arrayAccess, member.Member.Text, out _, out var arrayFieldType, out _))
+        {
+            memberType = arrayFieldType;
+            return true;
         }
 
         // Globals/flattened structs.

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
@@ -19,6 +19,13 @@ using Stasis.Compiler.Syntax;
 using Stasis.Cli;
 
 var cliArgs = new Queue<string>(Environment.GetCommandLineArgs().Skip(1));
+if (cliArgs.Count > 0 && string.Equals(cliArgs.Peek(), "bridge", StringComparison.OrdinalIgnoreCase))
+{
+    cliArgs.Dequeue();
+    var bridgeExit = RunBridgeMode(cliArgs);
+    Environment.Exit(bridgeExit);
+    return;
+}
 if (cliArgs.Count == 0 || cliArgs.Contains("--help"))
 {
     PrintUsage();
@@ -34,6 +41,7 @@ var emitIrOnly = false;
 string? outputPath = null;
 var runAllInDirectory = false;
 var watch = false;
+var watchConfiguredByUser = false;
 string? optLevel = null;
 var enableLto = false;
 var enableGraphics = false;
@@ -62,9 +70,14 @@ while (cliArgs.Count > 0)
         case "dev":
             // Back-compat alias for the run dev workflow.
             mode = "run";
+            watch = true;
+            watchConfiguredByUser = true;
             break;
         case "build":
             mode = arg;
+            // Go-like default: build emits optimized artifacts.
+            optLevel ??= "3";
+            enableLto = true;
             break;
         case "release":
             mode = arg;
@@ -96,6 +109,11 @@ while (cliArgs.Count > 0)
             break;
         case "--watch":
             watch = true;
+            watchConfiguredByUser = true;
+            break;
+        case "--no-watch":
+            watch = false;
+            watchConfiguredByUser = true;
             break;
         case "--opt-level" when cliArgs.Count > 0:
             optLevel = cliArgs.Dequeue();
@@ -182,7 +200,12 @@ if (path is null)
         if (pickedWatch.HasValue)
         {
             watch = pickedWatch.Value;
+            watchConfiguredByUser = true;
         }
+    }
+    else if (mode == "format")
+    {
+        path = Directory.GetCurrentDirectory();
     }
     else
     {
@@ -195,6 +218,11 @@ if (optLevel is not null && !IsValidOptLevel(optLevel))
 {
     Console.Error.WriteLine($"error: invalid --opt-level '{optLevel}'. Use 0,1,2,3,s,z.");
     Environment.Exit(1);
+}
+
+if (mode == "run" && !watchConfiguredByUser)
+{
+    watch = true;
 }
 
 devMode = mode == "run";
@@ -305,11 +333,44 @@ static void AddHostAbiDataExports(LayoutPlan layout, List<string> exports)
 
 if (mode == "format")
 {
-    var input = File.ReadAllText(path);
-    var formatted = Stasis.Cli.StasisFormatter.Format(input);
-    if (!string.Equals(input, formatted, StringComparison.Ordinal))
+    if (Directory.Exists(path))
     {
-        File.WriteAllText(path, formatted);
+        var files = Directory.GetFiles(path, "*.stasis", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToArray();
+        if (files.Length == 0)
+        {
+            Console.Error.WriteLine($"error: no .stasis files found under {path}");
+            Environment.Exit(1);
+        }
+
+        var changed = 0;
+        foreach (var file in files)
+        {
+            var input = File.ReadAllText(file);
+            var formatted = Stasis.Cli.StasisFormatter.Format(input);
+            if (!string.Equals(input, formatted, StringComparison.Ordinal))
+            {
+                File.WriteAllText(file, formatted);
+                changed++;
+            }
+        }
+
+        Console.WriteLine($"formatted {files.Length} file(s), changed {changed}.");
+    }
+    else
+    {
+        var input = File.ReadAllText(path);
+        var formatted = Stasis.Cli.StasisFormatter.Format(input);
+        if (!string.Equals(input, formatted, StringComparison.Ordinal))
+        {
+            File.WriteAllText(path, formatted);
+            Console.WriteLine($"formatted {path}.");
+        }
+        else
+        {
+            Console.WriteLine($"already formatted: {path}.");
+        }
     }
 
     return;
@@ -689,7 +750,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
             var useInMemoryClif = useAotServer && useCraneliftRunner && mode != "build" && mode != "release" && !enableHotState;
             if (!useInMemoryClif)
             {
-                tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+                tempClif = NewTransientPath(".clif");
                 File.WriteAllText(tempClif, ir);
                 if (logPhaseTiming)
                 {
@@ -740,7 +801,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
                 return runExit;
             }
 
-            tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
+            tempObj = NewTransientPath(GetObjectFileExtension());
             var aotExit = RunCraneliftAot(aotTool, tempClif, tempObj, moduleName, optLevel, out var aotSpawnFallback, out var aotCompileFallback);
             if (logPhaseTiming)
             {
@@ -775,7 +836,7 @@ static int ProcessFile(string path, string mode, bool includeTests, string modul
         }
 
         // LLVM path: emit .ll and run via lli/clang.
-        tempLl = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+        tempLl = NewTransientPath(".ll");
         File.WriteAllText(tempLl, ir);
         if (logPhaseTiming)
         {
@@ -840,7 +901,7 @@ static int ExecuteObject(string mode, string objPath, string? optLevel, bool ena
         return 1;
     }
 
-    var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.exe");
+    var exePath = NewTransientPath(".exe");
     var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
@@ -902,7 +963,7 @@ static int ExecuteObjectWithRunner(string mode, string objPath, string? optLevel
         return 1;
     }
 
-    var dllPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.dll");
+    var dllPath = NewTransientPath(".dll");
     var processTimeoutMs = mode == "test" ? GetTestExecutionTimeoutMs() : 0;
     try
     {
@@ -984,7 +1045,7 @@ static int ExecuteClifWithRunner(string mode, string clifPath, string? optLevel,
     aotCompileMs = 0;
     linkMs = 0;
     runMs = 0;
-    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
+    var tempObj = NewTransientPath(GetObjectFileExtension());
     try
     {
         var aotExit = RunCraneliftAot(aotTool, clifPath, tempObj, moduleName, optLevel, out aotSpawnMs, out aotCompileMs);
@@ -1010,7 +1071,7 @@ static int ExecuteClifWithRunnerFromString(string mode, string clif, string? opt
     aotCompileMs = 0;
     linkMs = 0;
     runMs = 0;
-    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
+    var tempObj = NewTransientPath(GetObjectFileExtension());
     try
     {
         var aotExit = RunCraneliftAotFromString(aotTool, clif, tempObj, moduleName, optLevel, out aotSpawnMs, out aotCompileMs);
@@ -1443,7 +1504,7 @@ static int Execute(string mode, string llPath, string? optLevel, bool enableLto,
 
     if (TryFindTool("clang", out var clang))
     {
-        var exePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+        var exePath = NewTransientPath(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty);
         string? testWrapperPath = null;
         try
         {
@@ -1538,7 +1599,7 @@ static string EnsureLlvmTestEntrypoint(string llPath, out string? tempPath)
         return llPath;
     }
 
-    tempPath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.test.ll");
+    tempPath = NewTransientPath(".test.ll");
     var sb = new StringBuilder(text.Length + 256);
     sb.AppendLine(text.TrimEnd());
     sb.AppendLine();
@@ -1724,7 +1785,7 @@ static bool TryExecuteWithClangFallback(string mode, string llvmIrPath, string? 
         return false;
     }
 
-    var executablePath = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty));
+    var executablePath = NewTransientPath(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : string.Empty);
     string? testWrapperPath = null;
     try
     {
@@ -2311,6 +2372,22 @@ const int CraneliftArtifactCacheVersion = 1;
 
 static bool IsCraneliftArtifactCacheEnabled() =>
     !string.Equals(Environment.GetEnvironmentVariable("STASIS_DISABLE_ARTIFACT_CACHE"), "1", StringComparison.OrdinalIgnoreCase);
+
+static string GetTransientBuildDirectory()
+{
+    var configured = Environment.GetEnvironmentVariable("STASIS_TEMP_DIR");
+    var root = string.IsNullOrWhiteSpace(configured)
+        ? Path.Combine(Directory.GetCurrentDirectory(), ".stasis_cache", "tmp")
+        : configured;
+    Directory.CreateDirectory(root);
+    return root;
+}
+
+static string NewTransientPath(string extensionWithDot)
+{
+    var ext = extensionWithDot.StartsWith(".", StringComparison.Ordinal) ? extensionWithDot : "." + extensionWithDot;
+    return Path.Combine(GetTransientBuildDirectory(), $"stasis_{Guid.NewGuid():N}{ext}");
+}
 
 static string GetCraneliftArtifactCacheDirectory(string mode)
 {
@@ -2927,7 +3004,7 @@ static int RunCraneliftAotFromString(string aotTool, string clif, string objPath
         }
     }
 
-    var tempClif = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+    var tempClif = NewTransientPath(".clif");
     try
     {
         File.WriteAllText(tempClif, clif);
@@ -5473,6 +5550,13 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     var childArgs = Environment.GetCommandLineArgs()
         .Skip(1)
         .Where(arg => !string.Equals(arg, "--watch", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+    // Watch child must always execute a single run; otherwise default run behavior re-enters watch mode.
+    if (mode == "run" && !childArgs.Any(arg => string.Equals(arg, "--no-watch", StringComparison.OrdinalIgnoreCase)))
+    {
+        childArgs.Add("--no-watch");
+    }
+    var quotedChildArgs = childArgs
         .Select(QuoteArg)
         .ToArray();
 
@@ -5483,7 +5567,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
         return 1;
     }
     if (Path.GetFileNameWithoutExtension(exePath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
-        childArgs.Length > 0 && childArgs[0].Equals("run", StringComparison.OrdinalIgnoreCase))
+        childArgs.Count > 0 && childArgs[0].Equals("run", StringComparison.OrdinalIgnoreCase))
     {
         Console.Error.WriteLine("error: --watch requires running the built CLI (not `dotnet run`).");
         return 1;
@@ -5492,7 +5576,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
     Process? child = null;
     if (mode == "run")
     {
-        child = StartWatchChild(exePath, childArgs);
+        child = StartWatchChild(exePath, quotedChildArgs);
     }
     else
     {
@@ -5551,7 +5635,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
                         child.Kill(entireProcessTree: true);
                         child.WaitForExit();
                     }
-                    child = StartWatchChild(exePath, childArgs);
+                    child = StartWatchChild(exePath, quotedChildArgs);
                 }
             }
             else
@@ -5562,7 +5646,7 @@ static int WatchFile(string path, string mode, bool includeTests, string moduleN
 
         if (mode == "run" && enableHotState && pendingRestart && (child is null || child.HasExited))
         {
-            child = StartWatchChild(exePath, childArgs);
+            child = StartWatchChild(exePath, quotedChildArgs);
             pendingRestart = false;
             if (restartRequestedAt != DateTime.MinValue)
             {
@@ -5688,15 +5772,19 @@ static void WriteIrOutput(string ir, string? outputPath)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  stasisc run [<file>] [--fps <1..240>] [--module <name>] [--emit-ir] [--out <path>]");
-    Console.WriteLine("  stasisc release <file> [--out <path>] [--module <name>]");
+    Console.WriteLine("  stasisc run [<file>] [--watch|--no-watch]");
+    Console.WriteLine("  stasisc build <file> [--out <path>]");
+    Console.WriteLine("  stasisc test [<file>|--all]");
+    Console.WriteLine("  stasisc format [<file-or-dir>]");
     Console.WriteLine();
-    Console.WriteLine("Other commands:");
-    Console.WriteLine("  stasisc test [<file>|--all] [--watch] [--module <name>] [--emit-ir] [--backend <llvm|cranelift>]");
-    Console.WriteLine("  stasisc build <file> [--module <name>] [--with-tests] [--out <path>] [--opt-level <0|1|2|3|s|z>] [--lto|--no-lto] [--backend <llvm|cranelift>] [--graphics] [--graphics-lib <path>]");
-    Console.WriteLine("  stasisc format <file>");
+    Console.WriteLine("Integrated defaults:");
+    Console.WriteLine("  run   => dev watch loop by default (use --no-watch to run once)");
+    Console.WriteLine("  build => optimized output by default (-O3 + LTO)");
+    Console.WriteLine("  test  => with no path (or --all), run all tests under working dir");
+    Console.WriteLine("  format=> with no path, format all .stasis files under working dir");
     Console.WriteLine();
-    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). With no path (or --all), 'test' runs every .stasis file under the working directory. Build/release require clang in PATH. 'release' defaults to -O3 with LTO.");
+    Console.WriteLine("Compatibility: 'stasisc release <file>' remains available as a build alias.");
+    Console.WriteLine("Defaults: execute via lli if available, else clang. Use --emit-ir to only write IR to stdout (or --out to write to a file). Build/release require clang in PATH.");
     Console.WriteLine("Run: omit <file> to pick interactively (breadth-first listing) and optionally enable --watch.");
     Console.WriteLine("Run: use --watch for a dev loop (auto-rebuild + tick hot-swap + phase timings) with state preserved between swaps and no re-running main().");
     Console.WriteLine("Hot state: use --hot-state (Cranelift run only) to restore and save the global 'state' across process runs (restart-based experiments).");
@@ -5706,6 +5794,130 @@ static void PrintUsage()
     Console.WriteLine("Cranelift: run/test uses the native DLL runner when available (stasis_runner.exe). Set STASIS_CRANELIFT_RUNNER_EXE to override, or pass --no-cranelift-runner to force EXE mode.");
     Console.WriteLine("Tick watch (experimental): set STASIS_CRANELIFT_INPROC_TICK=1 to run headless tick hot-swap in-process (no stasis-cranelift-jit-runner process).");
     Console.WriteLine("Cache: set STASIS_DISABLE_ARTIFACT_CACHE=1 to disable binary caching for Cranelift run/test.");
+}
+
+static int RunBridgeMode(Queue<string> args)
+{
+    var moduleName = "module";
+    string? optLevel = null;
+    var tickHostFps = 60;
+    while (args.Count > 0)
+    {
+        var arg = args.Dequeue();
+        switch (arg)
+        {
+            case "--module" when args.Count > 0:
+                moduleName = args.Dequeue();
+                break;
+            case "--opt-level" when args.Count > 0:
+                optLevel = args.Dequeue();
+                break;
+            case "--fps" when args.Count > 0:
+                if (!int.TryParse(args.Dequeue(), out tickHostFps) || tickHostFps < 1 || tickHostFps > 240)
+                {
+                    Console.Error.WriteLine("error: --fps expects an integer between 1 and 240.");
+                    return 1;
+                }
+                break;
+            default:
+                Console.Error.WriteLine($"error: unknown bridge argument '{arg}'");
+                return 1;
+        }
+    }
+
+    // Keep bridge protocol output in one stream.
+    Console.SetError(Console.Out);
+    Console.WriteLine("BRIDGE_READY 1");
+
+    for (;;)
+    {
+        var line = Console.ReadLine();
+        if (line == null)
+        {
+            return 0;
+        }
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            continue;
+        }
+
+        string op = string.Empty;
+        ulong requestId = 0;
+        string? requestPath = null;
+        try
+        {
+            using var json = JsonDocument.Parse(line);
+            var root = json.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                Console.WriteLine("BRIDGE_PROTOCOL_ERROR command_not_object");
+                continue;
+            }
+            if (root.TryGetProperty("op", out var opElement) && opElement.ValueKind == JsonValueKind.String)
+            {
+                op = opElement.GetString() ?? string.Empty;
+            }
+            if (root.TryGetProperty("request_id", out var requestIdElement))
+            {
+                if (requestIdElement.ValueKind == JsonValueKind.Number && requestIdElement.TryGetUInt64(out var parsedRequestId))
+                {
+                    requestId = parsedRequestId;
+                }
+                else
+                {
+                    Console.WriteLine("BRIDGE_PROTOCOL_ERROR invalid_request_id");
+                    continue;
+                }
+            }
+            if (root.TryGetProperty("path", out var pathElement) && pathElement.ValueKind == JsonValueKind.String)
+            {
+                requestPath = pathElement.GetString();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR bad_json {ex.Message}");
+            continue;
+        }
+
+        if (string.Equals(op, "quit", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("BRIDGE_BYE");
+            return 0;
+        }
+
+        if (!string.Equals(op, "compile", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR unknown_op {op}");
+            continue;
+        }
+
+        if (string.IsNullOrWhiteSpace(requestPath))
+        {
+            Console.WriteLine($"BRIDGE_PROTOCOL_ERROR missing_path {requestId}");
+            continue;
+        }
+
+        Console.WriteLine($"BRIDGE_BEGIN {requestId}");
+        var exit = ProcessFile(
+            requestPath,
+            mode: "run",
+            includeTests: false,
+            moduleName,
+            emitIrOnly: false,
+            outputPath: null,
+            optLevel,
+            enableLto: false,
+            enableGraphics: false,
+            graphicsLibPath: null,
+            backend: BackendType.Cranelift,
+            tickHostFps,
+            llvmTargetTriple: null,
+            useLowerLock: true,
+            useCraneliftRunner: true,
+            enableHotState: false);
+        Console.WriteLine($"BRIDGE_END {requestId} {exit}");
+    }
 }
 
 static bool TryPromptForRunPath(string root, out string? path, out bool? watch)
@@ -6407,7 +6619,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
             }
             else
             {
-                tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.clif");
+                tempArtifact = NewTransientPath(".clif");
             }
             File.WriteAllText(tempArtifact, result.Ir);
             if (isCacheArtifact && prep.TestCacheLocation is not null)
@@ -6450,7 +6662,7 @@ static CompileResult LowerPrepared(PreparedForLower prep, bool includeTests, str
             }
             else
             {
-                tempArtifact = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}.ll");
+                tempArtifact = NewTransientPath(".ll");
             }
             File.WriteAllText(tempArtifact, lower.Ir);
             if (isCacheArtifact && prep.TestCacheLocation is not null)
@@ -6578,7 +6790,7 @@ static int ConsumeCompileResult(CompileResult result, bool emitIrOnly, string? o
                 }
                 else
                 {
-                    var tempObj = Path.Combine(Path.GetTempPath(), $"stasis_{Guid.NewGuid():N}{GetObjectFileExtension()}");
+                    var tempObj = NewTransientPath(GetObjectFileExtension());
                     try
                     {
                         var aotExit = RunCraneliftAot(aotTool, result.ArtifactPath, tempObj, moduleName, optLevel, out _, out _);
@@ -7925,3 +8137,4 @@ sealed record TestCacheEntry(
     bool UseCraneliftRunner,
     string? CraneliftTargetTriple,
     string CompilerCacheSalt);
+

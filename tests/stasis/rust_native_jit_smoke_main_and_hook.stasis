@@ -1,0 +1,7 @@
+function on_code_swap(): void {
+    return;
+}
+
+function main(): i32 {
+    return 7;
+}

@@ -1,0 +1,12 @@
+[package]
+name = "stasis_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+crossbeam-channel.workspace = true
+
+[lib]
+path = "src/lib.rs"

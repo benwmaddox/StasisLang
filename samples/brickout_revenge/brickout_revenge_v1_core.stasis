@@ -59,7 +59,8 @@ function brickout_level_consume_spawns(level_index: i32, out_presets: BrickoutBa
     let level_offset: i32 = brickout_level_event_offset[level_index];
     let t: i32 = brickout_level_tick;
     let keep_going: i32 = 1;
-    for (; keep_going == 1; ) {
+    let consume_step: i32 = 0;
+    for (consume_step = 0; keep_going == 1; consume_step = consume_step + 1) {
         if (brickout_level_next_event_index >= level_count) {
             keep_going = 0;
         } else {
@@ -121,7 +122,8 @@ function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
     }
 
     let count: i32 = 0;
-    for (; v > 0 && count < 12; ) {
+    let digit_step: i32 = 0;
+    for (digit_step = 0; v > 0 && count < 12; digit_step = digit_step + 1) {
         let d: i32 = v % 10;
         brickout_digits_tmp[count] = i32_to_u8_trunc(48 + d);
         count = count + 1;
@@ -129,7 +131,7 @@ function brickout_ascii_append_i32(dst: ascii[], value: i32): void {
     }
 
     let i: i32 = count - 1;
-    for (; i >= 0; i = i - 1) {
+    for (i = count - 1; i >= 0; i = i - 1) {
         ascii_push(dst, brickout_digits_tmp[i]);
     }
 }
@@ -151,3 +153,6 @@ function brickout_ascii_write_scraps_power_line(
     brickout_ascii_append_i32(tmp_ascii, power_cap);
     utf8_from_ascii(out, tmp_ascii, out_max);
 }
+
+
+

@@ -1,786 +1,731 @@
-# **Stasis Language Specification (v0.2)**
+# Stasis Language Specification (Rewrite V1)
 
-_A statically-allocated, AoS-syntax / SoA-storage, operator-method-based language for deterministic WASM/LLVM compilation._
+This document is the language-level specification for Rewrite V1.
+It is aligned with:
+- `docs/live-compilation-prd.md`
+- `docs/rewrite_v1_checklist.md`
 
----
+The focus is deterministic simulation/game logic with static memory, in-process incremental compilation, and safe hot swap.
 
-# **1. Overview**
+## 1. Overview
 
-Stasis is a low-level but ergonomic language designed for predictable compilation into **WebAssembly, LLVM IR, and Cranelift CLIF**, primarily intended for game systems, simulation engines, parallelizable logic, and environments where static memory is required.
+Stasis is a statically allocated language with explicit behavior.
 
-Toolchain direction:
-- Stage 0 (bootstrap): a C# frontend (LLVMSharp) used for development and bootstrapping.
-- Stage 1: improve the C# toolchain UX and stability (fast edit-run loop, clear diagnostics, deterministic outputs).
+Core direction for Rewrite V1:
+- Single process runtime.
+- In-process Cranelift JIT for development.
+- Cranelift AOT for production builds.
+- File-level incremental compilation.
+- Symbol-level reachability pruning before lowering (functions + struct metadata).
+- Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
+- Hot swap only between ticks.
+- Rust host wrapper with Stasis-owned compiler orchestration.
 
-The core design pillars are:
+## 2. Core Principles
 
-- **Static memory only** - all data exists in a fixed global memory region
-- **No dynamic allocation** - no heap, no runtime resizing
-- **Explicit semantics** - no hidden copies, no implicit boxing
-- **Operator-methods** for arithmetic/comparison; assignment uses infix `=`
-- **Assignment uses infix syntax**:
+- Static global memory only.
+- No hidden allocation and no hidden copies.
+- AoS source syntax lowered to SoA storage.
+- Deterministic behavior and deterministic layout.
+- Explicit side effects and assignment.
+- Receiver-form callable style preferred.
+- Tick-based simulation semantics.
 
-  ```
-  target = value
-  ```
+## 3. Lexical Structure
 
-- **AoS source structure -> SoA target memory**
-- **LLVM, Cranelift, and WASM compatibility**
-- **Analyzable effects** (reads vs writes can be statically determined)
-- **Deterministic layout** - struct offsets, array bounds known at compile time
-- **Direct opcode functions** for arithmetic and memory operations
+### 3.1 Identifiers
 
----
-
-# **2. Lexical Structure**
-
-### Identifiers
-
-```
+```text
 [_a-zA-Z][_a-zA-Z0-9_]*
 ```
 
-### Literals
+### 3.2 Literals
 
-- Integer literal (base-10): `123`
-- `u8` integer literal (base-10, 0..255): `123u8`
-- Float literal (IEEE-compliant textual form)
-- String literal: `" ... "`
-- Backtick literal: `` ` ... ` `` (used for test names)
+- Integer literal (base 10): `123`
+- Float literal: `123.0`, `0.5`
 - Boolean literal: `true`, `false`
+- String literal: `"text"`
+- Backtick literal (test names): `` `name` ``
 
-### Keywords
+### 3.3 Keywords
 
-```
-struct enum global function export test return let if else for foreach in
-```
-
-(Reserved but potentially unused tokens may be added later.)
-
-### Operators
-
-- Infix arithmetic/comparison: `+ - * / % < <= > >= == !=` with TypeScript-style precedence.
-- Compound assignment: `= += -= *= /= %=` 
-- Method-style arithmetic/comparison (still supported): `.+() .-() .*() ./() .%() .<() .<=() .>() .>=() .==() .!=()`
-- Assignment expressions may appear only once per expression to keep parsing deterministic; chained infix assignments or ternary-like constructs are disallowed and raise diagnostics that highlight the offending operator.
-
----
-
-# **3. Diagnostics**
-
-- Diagnostics highlight the exact `SourceSpan` that triggered an error, include a concise human-friendly description, and often include a hint on how to fix it (similar to Elm's clarity).
-- The parser/semantic layers emit messages such as "Use infix '=' for assignment" or "Only one assignment per expression is permitted" so the code author immediately sees which operator or expression needs rewriting.
-- CLI tools and editors can read the `SourceSpan` attached to every diagnostic to underline the tokens, show line/column info, and include references to the spec section being violated.
-- Compilation must not silently continue after an error: any invalid program or unsupported construct must produce diagnostics and fail compilation, rather than generating placeholder IR or skipping effects.
-
-# **4. Types**
-
-### Primitive Types
-
-```
-u8, u16, u32
-i32
-f32, f64
-bool
+```text
+struct enum global function extern test return let if else for foreach in import
 ```
 
-### Explicit Numeric Casts (No Implicit Widening/Truncation)
+Additional reserved keywords may be introduced later.
 
-Stasis does not perform implicit numeric casts between integer sizes. Use explicit conversion functions:
+## 4. Types
 
-- `u8_to_i32(u8) -> i32`
-- `u16_to_i32(u16) -> i32`
-- `i32_to_u8_trunc(i32) -> u8` (low 8 bits)
-- `i32_to_u8_checked(i32) -> u8` (aborts if out of range)
-- `i32_to_u16_trunc(i32) -> u16` (low 16 bits)
-- `i32_to_u16_checked(i32) -> u16` (aborts if out of range)
-- `i32_to_f32(i32) -> f32`
-- `f32_to_i32(f32) -> i32`
+### 4.1 Primitive Types
 
-### Arrays (fixed size)
-
-```
-Type[IntegerLiteral]
+```text
+u8 u16 u32 i32 f32 f64 bool void
 ```
 
-### String Types
+### 4.2 Composite Types
 
-```
-ascii[N]   // fixed-byte ASCII strings (single-byte code units)
-utf8[N]    // UTF-8 strings with tracked byte and codepoint lengths
-string     // alias for utf8 (default string storage)
-string[N]  // alias for utf8[N] (backward compatibility)
-ascii[N]   // ASCII-only string buffers with a single length header
-```
+- Fixed-size arrays: `Type[N]`
+- Structs: `struct Name { ... }`
+- Enums: `enum Name { ... }`
+- Strings:
+- `utf8[N]`
+- `ascii[N]`
+- `string` (alias for UTF-8 string type in Rewrite V1 runtime conventions)
+- `string[N]` (alias form for compatibility)
 
-**ascii[N] layout and invariants**
-- Layout: `[len: i32][data: u8[N]]`
-- Invariant: all bytes are `< 128`; `len` is the used byte count.
-- `data[len]` is set to `0` as a sentinel; sentinel is not counted in `N`.
+### 4.2.1 String Layout and Invariants
 
-**utf8[N] layout and invariants**
-- Layout: `[byte_length: i32][char_length: i32][data: u8[N]]`
-- Invariant: `data[0..byte_length)` is valid UTF-8; `char_length` matches decoded codepoints.
-- `data[byte_length]` is set to `0` as a sentinel; sentinel is not counted in `N`.
-- C interop: the payload is a null-terminated UTF-8 byte sequence, so host functions can treat `data` as a normal C string and ignore the header unless length metadata is needed.
+String-like storage is fixed-layout and deterministic.
 
-**string literal typing**
-- String literals are context-typed: `""` can target `ascii[N]` or `utf8[N]`/`string` based on the expected type.
-- Non-literal values still require explicit conversion between `ascii[N]` and `utf8[N]`.
+`Type[N]` layout:
+- header `max_length: i32`
+- payload `elements[N]`
 
-### Built-in I/O helpers
+Header access:
+- Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
+- Negative indices are not allowed in source-level collection indexing.
 
-- `print_string(utf8[N])` prints a UTF-8 buffer; the compiler lowers string literals to static storage with UTF-8 headers and a null sentinel, and the runtime passes the payload pointer to the host I/O layer.
-- `string` and `string[N]` are `utf8` aliases, so any string passed to built-ins uses the UTF-8 header layout by default.
-- `ascii[N]` and `utf8[N]` are distinct; there is no implicit widening between them. Use explicit conversion helpers (for example, a stdlib `utf8_from_ascii` function) when crossing the boundary.
-- Helpers like `print(i32)`, `print_int(i32)`, and `print_char(i32)` cover common prompt cases, while `print_cell(i32)` renders Sudoku grid cells with coloring metadata.
-- Input helpers include `read_char()` and `read_int()`; higher-level readers such as `read_line()` and `parse_seed_input()` can be implemented in Stasis using these primitives, which is how `samples/sudoku.stasis` parses seeds and user moves.
-- `time()` returns the current wall-clock epoch truncated to `i32`, so samples can seed deterministic generators from the clock when the user does not supply a value.
-- String globals stay in the static memory region so their lifetime is global and deterministic; tests can rely on the same literal being shared across translation units.
+`Type[]` call-site compatibility:
+- A `Type[]` parameter is a view/reference type and may accept storage values with different fixed capacities (`Type[N]`, `Type[M]`, ...).
+- The storage header still carries `max_length` so bounds metadata remains available at runtime.
 
-### Host input snapshot
+`ascii[N]` layout:
+- header `byte_length: i32`
+- header `max_length: i32`
+- payload `bytes[N]`
 
-The host runtime owns a canonical per-frame input snapshot and writes it directly into a Stasis global named `input`.
-
-- Stasis projects import `src/host_input_snapshot.stasis`, which declares `global input: InputSnapshot`.
-- The host binds the `input` global at startup (and after hot-swap) and fills it once per tick before `tick()` runs.
-- No Stasis-side copying is required; games read from `input` directly to keep setup minimal and deterministic.
-- Key transition flags (`key_went_down`, `key_went_up`) are computed by the host runtime.
-- Pointer coordinates are written in integer pixels (`pointer_x_px`, `pointer_y_px`, `mouse_x_px`, `mouse_y_px`).
-
-### System/host helpers (`sys_*`)
-
-These are host-provided helpers intended for tooling (compilers, asset pipelines, etc.).
-
-- `sys_argc() -> i32`
-- `sys_argv(idx: i32, out: utf8[N], out_cap: i32) -> i32` (returns bytes written, `-1` on failure)
-- `sys_read_file(path: utf8[N], out: u8[M], out_cap: i32) -> i32` (returns bytes read, `-1` on failure; always writes a `0` sentinel when `out_cap > 0`)
-- `sys_write_file(path: utf8[N], data: u8[M], len: i32) -> bool`
-- `sys_file_exists(path: utf8[N]) -> bool`
-- `sys_file_size(path: utf8[N]) -> i32` (returns bytes, `-1` on failure)
-- `sys_file_mtime_ms(path: utf8[N]) -> i32` (returns ms since epoch on supported hosts, `-1` on failure)
-- `sys_exec(command: utf8[N]) -> i32` (process exit code)
-- `sys_sleep_ms(ms: i32) -> i32` (returns 0; used by polling `watch` loops)
-- `sys_memcpy_u8(dst: u8[M], dst_index: i32, src: u8[N], src_index: i32, count: i32) -> void` (copies `count` bytes)
-- `sys_memcpy_i32(dst: i32[M], dst_index: i32, src: i32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
-- `sys_memcpy_f32(dst: f32[M], dst_index: i32, src: f32[N], src_index: i32, count: i32) -> void` (copies `count` elements)
-- `sys_memmove_u8(dst: u8[M], dst_index: i32, src: u8[N], src_index: i32, count: i32) -> void` (copies `count` bytes; overlap-safe)
-- `sys_memmove_i32(dst: i32[M], dst_index: i32, src: i32[N], src_index: i32, count: i32) -> void` (copies `count` elements; overlap-safe)
-- `sys_memmove_f32(dst: f32[M], dst_index: i32, src: f32[N], src_index: i32, count: i32) -> void` (copies `count` elements; overlap-safe)
-- `sys_memset_u8(dst: u8[M], dst_index: i32, value: i32, count: i32) -> void` (runtime internal; compiler/runtime may use for bulk clears; not callable from Stasis source)
-- `sys_memset_i32(dst: i32[M], dst_index: i32, value: i32, count: i32) -> void` (runtime internal; compiler/runtime may use for bulk clears; not callable from Stasis source)
-- `sys_memset_f32(dst: f32[M], dst_index: i32, value: f32, count: i32) -> void` (runtime internal; compiler/runtime may use for bulk clears; not callable from Stasis source)
-
-### Imports
-
-Stasis supports compilation-unit imports that reference another `.stasis` file as part of the build.
-
-```
-import "relative/path/to/file.stasis";
-```
-
-- Imports are resolved relative to the importing file.
-- Each imported file is a module (file = module); imports introduce modules (see "Modules").
-- Imported files are included once (duplicate imports are ignored).
-- Imports are graph edges; compilers build a multi-file source graph (no textual import expansion).
-- Standard library modules are regular imports; the compiler does not auto-include them.
-
-### Struct Types
-
-Named via:
-
-```
-struct Player { ... }
-```
-
-### Struct initializer (zero-fill)
-
-For struct-typed assignment targets, Stasis supports a **field initializer** form that assigns multiple fields at once and **zero-fills** every other field on that struct value.
-
-Syntax:
-
-```stasis
-target = {
-    field_a = expr,
-    field_b = expr,
-};
-```
-
-Semantics:
-
-- Only valid when `target` has a known struct type (e.g. `state.ball`, `units[i]`, `state.units[i]`).
-- Each listed `field = expr` is assigned.
-- Every other field on that struct value is set to `0`/`false` (recursively for nested structs).
-- Unknown field names and duplicate field names are diagnostics.
-- Only `=` is supported (no `+=`/`-=` etc).
-
-Example:
-
-```stasis
-if (!state.balls[i].active) {
-    state.balls[i] = {
-        active = true,
-        x = 120,
-        y = -10,
-        vy = 4,
-    };
-}
-```
-
-### clear()
-
-`clear()` is a convenience operation for bulk-zeroing global state. It is *not* a general-purpose memory primitive and does not expose `memset` to user code.
+`utf8[N]` layout:
+- header `byte_length: i32`
+- header `max_length: i32`
+- header `char_length: i32`
+- payload `bytes[N]`
 
 Rules:
+- `ascii[N]` payload bytes must be valid single-byte ASCII.
+- `utf8[N]` payload bytes must be valid UTF-8.
+- For `utf8[N]`, `char_length` must match decoded character count.
+- `ascii[N]` allows direct payload byte writes; written bytes must remain in ASCII range (`0..127`), and header values must remain consistent.
+- `utf8[N]` payload mutation must go through checked helper APIs (direct raw-byte mutation is not allowed in source-level semantics).
+- Mutations must keep header values synchronized with payload contents.
+- Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
-- `clear()` takes no arguments: `some_global.clear()`.
-- The receiver must be a global or a global struct field (not a local).
-- Supported receivers:
-  - Fixed-size arrays of zeroable primitives (`u8/u16/u32/i32/f32/f64/bool`)
-  - Struct globals whose fields recursively consist of those fixed-size arrays and zeroable primitives
-  - Global arrays of structs where the struct fields are zeroable primitives (clears all backing storage)
+### 4.3 Numeric Conversion Semantics
 
-AoS vs SoA (important):
+Numeric conversion helpers use receiver-form methods in two categories:
 
-- Stasis *syntax* can look AoS (e.g. `global units: Unit[8]; units[i].hp = 1;`) but the compiler lowers global arrays of structs to SoA storage (separate arrays per field).
-- `units.clear()` means: clear the entire SoA backing storage for `units` (each field array), not "loop the AoS and assign a default struct".
-- Global struct instances (e.g. `global state: GameState;`) are also lowered to flattened globals per field; `state.clear()` clears all backing globals for the instance.
+`from_*` conversions (mutating target):
+- Assignment-like operations that write into receiver target.
+- Statement-style side-effect operations.
+- Example: `f32Value.from_i32(i32Value);`
 
-### Enum Types
-
-```
-enum State { Idle, Jump, Run, Fall }
-```
-
-Enums are **type-safe** named types that lower to integers (`i32`) at runtime. Enum members are automatically assigned sequential integer values starting from 0:
-
-```
-State.Idle -> 0
-State.Jump -> 1
-State.Run -> 2
-State.Fall -> 3
-```
-
-Enum members may optionally specify an explicit integer value. When a member has an explicit value, subsequent members without an explicit value continue counting upward from that value:
-
-```stasis
-enum Scancode { Escape = 41, Space = 44, Left = 80 }
-```
-
-**Enum semantics:**
-- Members are accessed via dot notation: `EnumName.MemberName`
-- Members are implicitly assigned values 0, 1, 2, ... in declaration order unless overridden with `= <int>`
-- The first member (value 0) is the default value for uninitialized enum variables
-- Each enum member becomes a compile-time constant in the symbol table
-
-**Type safety:**
-- Enum variables must be declared with the enum type: `let state: State = State.Idle;`
-- Enums are NOT compatible with integer types - you cannot assign an integer to an enum variable
-- Enums are NOT compatible with other enum types - you cannot assign `Direction.North` to a `State` variable
-- Comparisons between enums and integers are not allowed
-- Comparisons between different enum types are not allowed
-- Only enum members of the same type can be assigned or compared
+`to_*` conversions (pure value):
+- Pure operations on basic numeric types.
+- Expression-safe and can be used in declarations and initializers.
+- Example: `let alpha: f32 = ticks_i32.to_f32();`
 
 Example:
+
 ```stasis
-enum State { Idle, Jump, Run }
+let ticks_i32: i32;
+let alpha: f32;
 
-function update(): void {
-    let state: State = State.Idle;  // valid
-    state = State.Jump;              // valid
+ticks_i32.from_u32(DebugUI.swapFlashTicks);
+alpha.from_i32(ticks_i32);
+alpha /= 180.0;
+```
 
-    if (state == State.Idle) {       // valid
-        state = State.Run;
+Equivalent initializer style:
+
+```stasis
+let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+let alpha: f32 = ticks_i32.to_f32();
+alpha /= 180.0;
+```
+
+### 4.4 Local Type Inference
+
+Local `let` declarations may omit explicit type annotations when type can be inferred from initializer/context.
+
+Examples:
+
+```stasis
+let count = 0;      // inferred as i32
+let alpha = 0.5;    // inferred as f32
+let hp: u8 = 0;     // explicit narrow type remains supported/required when needed
+let enemy = state.enemies[0]; // inferred from indexed expression when unambiguous
+```
+
+Rules:
+- If type annotation is omitted, initializer is required.
+- If type annotation is provided, it is authoritative.
+- Local variable bindings must not shadow any already-visible local binding name (including parameters, `for`-init `let` bindings, and `foreach` item/index bindings); shadowing is a compile-time error.
+- Narrow integer types should be explicitly annotated when required by layout/ABI (`u8`, `u16`, etc).
+- Struct/array element expressions can infer local type when source type is uniquely known.
+- Example: `let enemy = state.enemies[0];` infers `Enemy` element view/reference type.
+- A binding inferred from an element expression aliases that element; it is not an implicit copy.
+- For primitive locals, `let b = a;` copies the primitive value.
+- For struct/element references, `let b = a;` binds another alias to the same referenced element.
+- If inference has multiple valid candidate types, declaration is rejected with an ambiguity diagnostic and requires explicit annotation.
+- Numeric literal defaults are deterministic:
+- integer literals infer as `i32` by default
+- floating literals infer as `f32` by default
+
+## 5. Operators and Expressions
+
+### 5.1 Arithmetic and Comparison Operators
+
+Arithmetic and comparison are infix only:
+- `+ - * / %`
+- `< <= > >= == !=`
+
+Method-style arithmetic/comparison forms are removed from Rewrite V1 language surface.
+
+### 5.2 Logical Operators
+
+Logical operators are:
+- `&&`
+- `||`
+- `!`
+
+Semantics:
+- `&&` and `||` are short-circuit operators with left-to-right evaluation.
+- `!` is unary logical negation.
+- Operands for logical operators must be `bool`.
+- Logical operator results are `bool`.
+
+### 5.3 Assignment Operators
+
+Assignment is infix:
+- `=`
+- `+= -= *= /= %=`
+
+### 5.4 Precedence
+
+Infix expressions follow TypeScript-like precedence for:
+- multiplicative
+- additive
+- relational
+- equality
+- logical operators
+- assignment
+
+## 6. Declarations and Statements
+
+### 6.1 Variable Declarations
+
+```stasis
+let x: i32;
+let y: i32 = 10;
+let z = 10;
+let t = 0.5;
+let enemy = state.enemies[0];
+```
+
+Rules:
+- `let name: Type;` is allowed.
+- `let name: Type = expr;` is allowed.
+- `let name = expr;` is allowed and uses inference.
+- `let name;` is invalid.
+
+### 6.2 Globals
+
+```stasis
+global State {
+    score: i32;
+}
+```
+
+All persistent data lives in global memory.
+
+### 6.3 Assignment
+
+```stasis
+State.score = 5;
+State.score += 1;
+let enemy = state.enemies[0];
+enemy.hp -= 1;                  // mutates state.enemies[0]
+state.enemies[1] = state.enemies[0]; // explicit struct value copy
+```
+
+Rules:
+- Assignment is explicit and may perform explicit value copies.
+- `let enemy = state.enemies[0];` binds an element view/reference alias.
+- Assigning directly to a reference/view local or parameter binding (for example `enemy = state.enemies[1];`) is not allowed.
+- To change underlying referenced data, mutate fields/elements through the binding (for example `enemy.hp -= 1;`).
+- `state.enemies[1] = state.enemies[0];` copies source struct value into destination struct value.
+- For SoA-lowered struct arrays, struct copy assignment lowers to per-field writes at source and destination indices.
+
+### 6.4 Control Flow
+
+```stasis
+if (condition) {
+    // ...
+} else if (otherCondition) {
+    // ...
+} else {
+    // ...
+}
+```
+
+Rules:
+- `else if` is supported as a direct language form.
+- `else if` chains are evaluated top-to-bottom; the first `true` branch executes.
+- `else` is optional.
+- If no branch condition is `true` and no `else` is present, control falls through.
+
+### 6.5 Looping
+
+Rewrite V1 includes `for` and `foreach`.
+
+#### 6.5.1 `for` loop
+
+Canonical form:
+
+```stasis
+for (init; condition; step) {
+    // body
+}
+```
+
+Example:
+
+```stasis
+for (let i = 0; i < 10; i += 1) {
+    total += i;
+}
+```
+
+Alternative form with explicit narrow type:
+
+```stasis
+for (let i: u8 = 0; i < maxSlots; i += 1) {
+    slots[i].active = true;
+}
+```
+
+Rules:
+- `init` runs once before the first iteration.
+- `init` may be a declaration (`let i = 0` or `let i: i32 = 0`) or an assignment/expression (`i = 0`).
+- `condition` is required, evaluated before each iteration, and must be `bool`.
+- `step` is required and runs after each body execution.
+- A variable declared in `init` is scoped to the loop (condition, step, and body).
+- `init` declarations follow the general no-shadowing local binding rule.
+- Omitting any of `init`, `condition`, or `step` is a compile-time error.
+- `for` lowering is explicit control flow equivalent to:
+- run `init`
+- branch on `condition`
+- execute body
+- execute `step`
+- repeat
+
+#### 6.5.2 `foreach` loop (value form)
+
+Value-only form:
+
+```stasis
+foreach (let enemy in enemies) {
+    enemy.hp -= 1;
+}
+```
+
+Primitive example:
+
+```stasis
+foreach (let value in scores) {
+    value += 1;
+}
+```
+
+Rules:
+- Iterates left-to-right from index `0` to `N - 1` for fixed-size arrays `Type[N]`.
+- `enemy` is an element view for the current index (not a detached copy).
+- Writes through the element view mutate the underlying storage.
+- Primitive element variables in `foreach` are also writable views; writes are write-through to backing storage.
+
+#### 6.5.3 `foreach` loop (index + value form)
+
+Indexed form:
+
+```stasis
+foreach (let enemy, i in enemies) {
+    if (i == focusIndex) {
+        enemy.hp -= 10;
     }
-
-    // let x: State = 0;              // invalid: cannot assign i32 to State
-    // if (state == 0) {              // invalid: cannot compare State with i32
 }
 ```
 
----
+Rules:
+- `i` is the current element index (type `i32`).
+- `enemy` is the element view at `enemies[i]`.
+- Iteration order is deterministic: `0 .. N - 1`.
 
-# **5. Memory Model**
+#### 6.5.4 `foreach` lowering model (AoS syntax -> SoA storage)
 
-### 4.1 Global Memory Only
+`foreach` lowers to an index loop over the array extent.
 
-- All structs and arrays live in a single global memory region.
-- Functions may not allocate dynamic memory.
-- Local variables are primitive scalars stored in WASM/LLVM locals; struct-typed locals hold references (indices) into global structs.
-- Arrays are never local - struct storage stays global-only even when referenced from the stack.
-
-### 4.2 AoS Syntax -> SoA Storage
-
-Example struct:
+Conceptual desugaring:
 
 ```stasis
-struct Player {
-    posX: f32;
-    posY: f32;
-    hp: u8;
+for (__i = 0; __i < N; __i += 1) {
+    // element view bound to array[__i]
+    // original foreach body
 }
 ```
 
-**Memory layout becomes:**
+For struct arrays lowered to SoA, field access inside `foreach` maps to field arrays at the loop index.
 
-```
-Player_posX[N]
-Player_posY[N]
-Player_hp[N]
-```
+Example source:
 
-Access:
-
-```
-p.posX  ->  Player_posX[p.index]
-p.hp    ->  Player_hp[p.index]
-```
-
-### 4.3 Assignment
-
-Assignment is explicit:
-
-```
-p.hp = 5
-```
-
-Lowering:
-
-```
-store global.Player_hp[p.index], 5
-```
-
-### 4.4 Arrays
-
-Fixed size arrays lower to contiguous memory.
-
-Bounds checking rules may be:
-
-- **compile-time optional**
-- **lowered to trap**
-- **or omitted for speed flags**
-
----
-
-# **6. Expressions**
-
-Stasis expressions allow infix arithmetic/comparison with TypeScript-style precedence (`||`, `&&`, equality, relational, additive, multiplicative) plus infix `=`/`+=`/`-=`/`*=` `/=` `%=`, and `&&`/`||` for logical flow. Operator-methods for arithmetic/comparison remain valid. Assignment operators are right-associative.
-
----
-
-# **7. Built-in Operators (Complete List)**
-
-## 6.1 Arithmetic Operators
-
-```
-.+(rhs)    -> add
-.-(rhs)    -> subtract
-.*(rhs)    -> multiply
-./(rhs)    -> divide
-.%(rhs)    -> modulo
-```
-
-### Lowering (WASM example)
-
-| Method | i32         | f32       |
-| ------ | ----------- | --------- |
-| .+()   | `i32.add`   | `f32.add` |
-| .-()   | `i32.sub`   | `f32.sub` |
-| .\*()  | `i32.mul`   | `f32.mul` |
-| ./()   | `i32.div_s` | `f32.div` |
-| .%()   | `i32.rem_s` | n/a       |
-
-`%` for floats is a compile error.
-
----
-
-## 6.2 Comparison Operators
-
-```
-.<(rhs)     // less-than
-.>(rhs)     // greater-than
-.==(rhs)    // equality
-```
-
-### Lowering
-
-| Operator | i32        | f32      |
-| -------- | ---------- | -------- |
-| .<()     | `i32.lt_s` | `f32.lt` |
-| .>()     | `i32.gt_s` | `f32.gt` |
-| .==()    | `i32.eq`   | `f32.eq` |
-
-Returns `bool` (`i32`, 0 or 1).
-
----
-
-## 6.3 Assignment Operator
-
-```
- = rhs
-```
-
-### Semantics:
-
-- Writes `rhs` into the l-value receiver.
-- Receiver must be a mutable field, array element, or global.
-- Returns `void`.
-
-### Lowering:
-
-```
-store <resolved address>, rhs
-```
-
----
-
-## 6.4 Unary Operators
-
-```
--(x)    // negation
-!(x)    // logical negation
-```
-
-Lowering:
-
-- integer negation via `i32.const 0` + `i32.sub`
-- boolean negation via `i32.eqz`
-- float negation via `f32.neg`
-
----
-
-# **8. Statements**
-
-### 7.1 Variable Declaration
-
-```
-let x: Type;
-```
-
-Locals are primitive scalars or struct references (indices into globals). Arrays cannot be local. Initialize them with a subsequent assignment, e.g. `let x: i32; x = 0;`.
-
-### 7.2 Assignment
-
-Just another expression:
-
-```
-p.hp = 10;
-```
-
-### 7.3 If
-
-```
-if (expr) { ... }
-else { ... }
-```
-
-### 7.4 For
-
-```
-for i = 0; i.<(10); i = i.+(1) {
-    ...
+```stasis
+foreach (let enemy, i in enemies) {
+    enemy.hp -= 1;
+    enemy.transform.position.x += 2.0;
 }
 ```
 
-### 7.5 Foreach
+Conceptual lowered targets:
+- `Enemy_hp[i] -= 1`
+- `Enemy_transform_position_x[i] += 2.0`
 
-```
-foreach (i in array) {
-}
-```
+Nested struct paths are flattened deterministically during lowering, and the current iteration index is applied at the array element dimension.
 
-Lowers to index iteration.
+#### 6.5.5 `continue` (planned post-checklist feature)
 
-### 7.6 Return
+`continue` is planned for the new compiler, but intentionally deferred until after all Rewrite V1 checklist slices (S0-S12) are complete.
 
-```
-return expr;
+Planned behavior:
+- Valid only inside `for` and `foreach` loops.
+- Skips the remainder of the current iteration body.
+- Proceeds to the next iteration according to the loop's normal step/iteration rule.
+
+Status:
+- Documented target behavior only; not required in current S0-S12 implementation.
+
+### 6.6 Return
+
+```stasis
 return;
+return value;
 ```
 
----
+## 7. Functions and Calls
 
-# **9. Functions**
+### 7.1 Function Declaration
 
-```
-function name(param: Type, ...): ReturnType {
-    ...
+```stasis
+function name(param: Type): ReturnType {
+    // ...
 }
 ```
 
-Attributes may appear between `function` and the name:
+For struct/element arguments, Rewrite V1 uses reference/view passing semantics (pointer-like behavior), not implicit by-value copies.
 
-```
-function @inline name(param: Type): ReturnType { ... }
-```
+Reference/view bindings for struct/element parameters are not rebindable inside the callee:
+- assigning to fields/elements through the parameter is allowed
+- assigning a new reference target to the parameter binding is a compile-time error
 
-### Function properties:
+### 7.2 Receiver-Scoped Resolution
 
-- No general overloading by parameter list alone.
-- Receiver-scoped callable names are allowed: the same function name may be declared for different parameter-0 types.
-- All declarations that share a function name must use the same parameter count (arity overloading is not supported).
-- No closures.
-- Parameters are primitive or references (struct indices, slices, etc.).
-- All struct/array data resides in global memory.
-
-### Receiver-scoped callables (parameter 0 dispatch)
-
-Stasis supports receiver-scoped callable resolution without requiring a separate `method` declaration keyword.
-
-Given declarations:
-
-```stasis
-function damage(self: Enemy, amt: i32): void { ... }
-function damage(self: Hero, amt: i32): void { ... }
-```
-
-Both declarations are valid and distinct.
-
-Callable identity is:
-
+Function identity for receiver-scoped names is:
 - function name
 - parameter 0 type
 
-Call forms:
+Example declarations:
 
-- Receiver form (recommended): `enemy.damage(5)`
-- Function form (supported): `damage(enemy, 5)`
+```stasis
+function damage(self: Enemy, amount: i32): void {
+    self.hp -= amount;
+}
 
-Style guidance:
-
-- Prefer receiver form for receiver-centric operations.
-- Write `receiver.doAction(action)` instead of `doAction(receiver, action)` unless function form is clearer for a specific context.
-
-Resolution rules:
-
-1. Resolve receiver type:
-   - Receiver form uses the expression before `.`.
-   - Function form uses argument 0.
-2. Find candidates with matching function name and parameter-0 type.
-3. Require exactly one declaration for that `(name, parameter-0 type)` in scope.
-4. Validate arity and remaining argument types for that declaration.
-5. Ties are compile errors; import order is never used as a tie-breaker.
-
-Invalid duplicate declarations:
-
-- Defining the same `(name, parameter-0 type)` more than once in the same effective scope is a compile error.
-- Any declarations that share a name but differ in parameter count are compile errors.
-- For a fixed `(name, parameter-0 type)`, additional overloads by non-receiver parameter types are not supported.
-
-Lowering model:
-
-- Receiver-form and function-form calls are equivalent after binding and lower through the same function ABI path.
-- Non-receiver callables lower to symbol `name`.
-- Receiver callables lower to symbol `name__ReceiverTypeKey` (for example `damage__Enemy`, `tag__i32`).
-
-### Extern declarations
-
-Functions declared without a body must be explicitly marked as extern:
-
-```
-extern function sleep_ms(ms: i32): void;
-```
-
-The attribute form is also supported:
-
-```
-function @extern sleep_ms(ms: i32): void;
-```
-
-To call a different underlying symbol name, provide a link name:
-
-```
-function @extern("stasis_sleep_ms") sleep_ms(ms: i32): void;
-```
-
-Extern functions also participate in receiver-scoped resolution when declared with a typed parameter 0 and called in receiver form.
-Extern link names must be unique across extern declarations and must not collide with emitted non-extern callable symbols.
-
----
-
-# **10. Globals**
-
-```
-global enemies: Enemy[1000];
-```
-
-Global arrays of struct references become SoA automatically.
-
----
-
-# **11. Modules**
-
-- File = Module.
-- `import "relative/path/to/file.stasis";` adds that file's module to the build (no textual expansion required).
-- Imports introduce modules, and module members are in scope by default after import.
-  - No import aliasing.
-  - `module_name` defaults to the imported file basename (strip extension, map `-` to `_`, and replace other non-identifier bytes with `_`).
-  - Module identity is the canonical (normalized) file path; module names are not required to be unique.
-  - If multiple imports introduce the same non-callable member name (or a callable reference without receiver/argument-0 typing context), unqualified references are ambiguous and should produce a diagnostic.
-  - For receiver-scoped callables, ambiguity is checked on `(name, parameter-0 type)` at the call site. If multiple imports provide the same key, the call is ambiguous and must fail with a diagnostic.
-- Imports are transitive for compilation: the build graph includes the imported file and recursively includes its imports.
-- Compiled via signature-first pass.
-- Platform variants: if an import resolves to `name.stasis` and that file does not exist, the importer will fall back to `name.{platform}.stasis` (e.g. `name.windows.stasis`).
-
----
-
-# **12. Built-in Testing**
-
-```
-test `enemy takes damage`(): bool {
-    let hp: i32;
-    hp = 50;
-    hp = hp - 10;
-    return hp == 40;
+function damage(self: Hero, amount: i32): void {
+    self.hp -= amount;
 }
 ```
 
-Tests are:
+### 7.3 Call Forms
 
-- Discovered automatically
-- Excluded from production builds through tree-shaking
-
----
-
-# **13. Compile-Time Memory Offsets**
-
-Stasis provides compile-time offsets:
-
-```
-p.posX.memoryOffset()
-```
-
-Lowers to a constant `i32`.
-
-Useful for JS interop, debugging, and memory inspection tools.
-
----
-
-# **14. Compiler Architecture**
-
-## Phase 1 - Signature Discovery
-
-Scan all files, collect:
-
-- Functions
-- Structs
-- Enums
-- Globals
-
-Skip bodies.
-
-## Phase 2 - Dependency and Tree-Shaking
-
-Process exported + test functions as roots.
-
-Parse bodies on-demand.
-
-Mark reachable declarations.
-
-## Phase 3 - WASM/LLVM Code Generation
-
-Lower each reachable function.
-
-Layout memory according to SoA rules.
-
-Generate:
-
-- WASM binary or
-- LLVM IR module
-
----
-
-# **15. LLVM Backend Integration**
-
-### Struct Lowering
-
-AoS syntax -> flat arrays:
-
-Example:
-
-```
-struct Player { hp: u8; score: i32; }
-```
-
-Generates LLVM globals:
-
-```
-@Player_hp = global [N x i8]
-@Player_score = global [N x i32]
-```
-
-### Operator Lowering
-
-Example:
-
-```
-p.hp = p.hp.-(10)
-```
-
-Compiles to:
-
-1. Compute index
-2. Load hp array element
-3. Subtract
-4. Store back
-
----
-
-# **16. LL(1) Grammar (Final)**
-
-See `docs/compilation.md` for the LL(1) grammar used by the compiler.
-
----
-
-# **17. Examples (Full)**
-
-### Full update step:
+Preferred receiver form:
 
 ```stasis
-function updateEnemy(i: u32, dt: f32): void {
-    let e: Enemy;
-    e = Enemy(i);
+enemy.damage(5);
+hero.damage(5);
+```
 
-    e.posX = e.posX.+( e.vx.*(dt) );
-    e.posY = e.posY.+( e.vy.*(dt) );
+Function form remains supported indefinitely:
 
-    if (e.hp.<(1)) {
-        e.hp = 0;
+```stasis
+damage(enemy, 5);
+```
+
+### 7.4 Arity Rule
+
+Arity overloading is not supported.
+If declarations share a function name, they must use the same parameter count.
+
+### 7.5 Struct and Array Returns
+
+Struct and array returns are allowed.
+
+Rewrite V1 treats these as strongly typed references/views, not implicit by-value copies.
+- Struct/array returns must reference global-backed storage (for example a global struct field/element path).
+- Struct-typed temporaries are not materialized as standalone local value objects in Rewrite V1.
+
+## 8. Enums
+
+Enums are named types that lower to integer values.
+
+```stasis
+enum State {
+    Idle,
+    Jump,
+    Run
+}
+```
+
+Rules:
+- Members default to sequential values from `0`.
+- Enum members can be explicitly assigned integer constants.
+- Enum comparisons and assignments must be type-correct.
+- Enum underlying type is `i32`.
+- Explicit enum member values must be within `i32` range; out-of-range values are compile-time errors.
+- No implicit enum <-> `i32` conversion is allowed.
+- Enum typed locals are valid and preferred for enum state:
+```stasis
+let phase: Phase = Phase.Play;
+```
+- Enum/integer conversion uses explicit conversion calls.
+- Current Rewrite V1 conversion surface: `enum_to_i32(value: EnumType): i32`.
+- In bootstrap compatibility mode this is treated as a compiler-path builtin rewrite with the same call shape; in self-hosted mode this remains the intrinsic surface.
+
+## 9. Modules and Imports
+
+File is module.
+
+Import syntax:
+
+```stasis
+import "relative/path/to/file.stasis";
+```
+
+Rules:
+- Imports are resolved relative to the importing file.
+- Imported files are included once.
+- Import graphs are compilation graph edges, not textual expansion.
+- Import cycles are hard errors.
+- Ambiguous references across modules must produce diagnostics.
+- Disambiguation is explicit `module.symbol` only.
+- For Rewrite V1, `module` is the imported file basename (without extension).
+- If multiple imports map to the same basename `module` name, compilation fails with a hard error.
+- When a symbol name collides across imports, unqualified use is invalid and must be rewritten as `module.symbol`.
+
+## 10. Testing Construct
+
+Stasis supports language-level tests:
+
+```stasis
+test `enemy takes damage`(): bool {
+    return true;
+}
+```
+
+Rules:
+- Tests are discoverable by tooling.
+- Tests are excluded from production builds.
+- Test execution should be deterministic.
+- Runtime test discovery modes:
+- entry-file mode: discover tests in the entry file only (no cascading import traversal)
+- directory mode: discover tests in all `.stasis` files in the target directory (including root)
+- Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
+- Tests may call extern/runtime functions.
+
+## 11. Memory Model
+
+- All persistent data is global.
+- No dynamic allocation.
+- No hidden copies (no implicit copy temporaries inserted by language semantics).
+- Struct arrays lower from AoS syntax to SoA backing storage.
+- Layout is deterministic and compile-time known.
+
+Explicit copy operations are still valid.
+Example:
+- `state.enemies[1] = state.enemies[0];` is an explicit value copy operation.
+- Under SoA lowering, this becomes deterministic per-field copy writes.
+
+Illustrative lowering:
+- Source: `units[i].hp`
+- Lowered target concept: `Unit_hp[i]`
+
+## 12. Runtime Boundary and Extern
+
+### 12.1 Current Rewrite V1 Boundary
+
+Compiled Stasis code calls a stable host API using ABI-stable primitive shapes.
+
+Example boundary areas:
+- logging
+- input state
+- rendering commands
+- audio events
+- entity/system helpers
+
+Extern declarations:
+
+```stasis
+extern function print_i32(value: i32): void;
+extern function print_string(value: string): void;
+```
+
+Console output contract (Rewrite V1):
+- `print_i32(i32)` prints integer text in deterministic decimal form.
+- `print_string(string)` prints string data without implicit formatting.
+- `print_string` accepts `string`, `ascii[]`, and `utf8[]` call sites in Rewrite V1 runtime conventions.
+- For `ascii[]`/`utf8[]` call sites, argument passing is by string-view/reference semantics (no implicit full-buffer copy).
+
+Bootstrap compatibility note:
+- Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Rewrite V1 naming.
+
+### 12.2 Future Direction: Optional Plugin Libraries
+
+Long-term direction is opt-in runtime libraries/plugins rather than one monolithic host surface.
+
+Intent:
+- pull only required host libraries into a build/runtime
+- keep ABI boundaries explicit
+- avoid hard-coupling every project to every host service
+
+Syntax and packaging details for plugin/library declarations are intentionally deferred for a later spec revision.
+
+## 13. Tick Policy
+
+Stasis-level lifecycle counters are tick-based.
+
+Rules:
+- Simulation logic should not depend on `dt`.
+- Engine defines `TICKS_PER_SECOND`.
+- State progression should be expressed in ticks.
+
+Example:
+
+```stasis
+global DebugUI {
+    swapFlashTicks: u32;
+}
+
+function draw_debug_ui(): void {
+    if (DebugUI.swapFlashTicks > 0) {
+        let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
+        let alpha: f32 = ticks_i32.to_f32();
+        alpha /= 180.0;
+        draw_swap_icon(alpha);
+        DebugUI.swapFlashTicks -= 1;
     }
 }
 ```
 
-### Array update:
+## 14. Incremental Compilation and Hot Swap
+
+### 14.1 Granularity
+
+- Invalidation unit: file
+- Correctness unit: file
+- Emission unit: function
+
+### 14.2 Hashes
+
+- `fnSigHash`: signature/ABI relevant shape
+- `fnBodyHash`: behavior
+
+Rules:
+- Unchanged `fnBodyHash` can reuse generated machine code.
+- Layout-affecting changes force conservative rebuild for changed file.
+
+### 14.3 Two-Phase Swap
+
+1. Background compile:
+- Re-lex, parse, index, and semantic-check changed file.
+- Compute per-function semantic hashes.
+- Compile changed functions.
+2. Commit between ticks:
+- Run `on_code_swap()` if present.
+- Atomically update function pointer table.
+- Retire previous code generation.
+
+Swap is rejected if:
+- Global layout changes.
+- Signature compatibility changes.
+- `on_code_swap()` fails.
+
+On rejection, old code and old data remain active.
+
+### 14.4 Development File-Change Boundary Contracts
+
+During development, file-change handling uses explicit role ownership and message boundaries.
+
+Role ownership:
+- Runtime/main thread owns tick loop, safe-point gating, and final commit.
+- Compiler service thread owns lex/parse/index/semantic/hash and patch assembly.
+- Codegen service owns backend emission (JIT for dev, AOT for prod artifacts).
+- Swap coordinator owns transactional all-or-nothing commit orchestration.
+
+Required high-level message contracts:
+- `FileChangeEvent(path, revision, text_source, change_kind)`
+- `CompileRequest(request_id, changed_files[], target_mode)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?)`
+- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
+- `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
+
+Rules:
+- Compiler/codegen services must not mutate runtime game state directly.
+- Runtime must not execute parser/semantic/codegen work on tick path.
+- Commit may occur only between ticks and must be all-or-nothing.
+- Any failure at compile or commit stage preserves old code and old data.
+
+## 15. Swap Hook
+
+Optional hook:
 
 ```stasis
-scores[i] = scores[i].+(1);
-```
-
-### Health handling:
-
-```stasis
-function damage(e: Enemy, amt: u8): void {
-    e.hp = e.hp.-(amt);
+function on_code_swap(): void {
+    // adjust invariants or transient state
 }
 ```
 
----
+Rules:
+- Runs once per successful swap attempt.
+- Runs between ticks.
+- Runs before new code executes.
+- May mutate global data.
+- Must not invoke gameplay entrypoints.
 
-# **18. Summary of Major Language Properties**
+## 16. Diagnostics
 
-| Feature                        | Status       |
-| ------------------------------ | ------------ |
-| Static memory                      | required |
-| AoS syntax -> SoA memory            | automatic |
-| No dynamic allocation              | required |
-| Infix arith/compare + method calls | available |
-| Assignment via `=`, `+=`, `-=`, `*=`, `/=`, `%=` | available |
-| Receiver-scoped callables (param-0 typed) | available |
-| Infix ops beyond these             | none in v1 |
-| Function signatures first pass     | yes |
-| Tree shaking                       | yes |
-| LLVM backend                       | yes |
-| Cranelift backend (debug)          | experimental |
-| WASM backend                       | yes |
-| Deterministic behavior             | required |
-| Suitable for parallel analysis     | yes |
+Diagnostics should:
+- point to offending source span
+- use actionable, concise wording
+- fail compilation for invalid/unsupported constructs
+
+Diagnostics should not silently skip invalid semantics.
+
+## 17. Development Target for Rewrite V1
+
+- Development backend: in-process Cranelift JIT.
+- Production backend: Cranelift AOT.
+- Host runtime: Rust (`winit + glutin + glow`).
+- C usage: only where unavoidable for platform bindings.
+- Compiler orchestration: implemented in `.stasis` source.
+
+### 17.1 Language Ownership Boundary
+
+- `.stasis` owns compiler language logic: lexing/tokenization, parsing (including incremental parse behavior), semantic rules/diagnostics, and compile policy (file invalidation and hash-gating decisions).
+- Rust owns host/runtime and backend integration: file watcher/input bridge, cross-thread message transport and swap coordinator, Cranelift JIT/AOT code emission, executable memory management, and runtime ABI/extern bridge.
+
+Rules:
+- New compiler frontend behavior must be implemented in `.stasis` first.
+- Rust may expose helper surfaces and tests, but must not become a second source of truth for lexer/parser semantics.
+- Tick-path runtime must remain free of parser/semantic/codegen work.
+
+## 18. Status Note
+
+This document defines Rewrite V1 direction.
+Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.

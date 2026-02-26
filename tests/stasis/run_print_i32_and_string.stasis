@@ -1,0 +1,8 @@
+import "../../src/stdlib/stdlib.stasis";
+
+function main(): i32 {
+    print_string("S3_PRINT_START:");
+    print_i32(42);
+    print_string(":S3_PRINT_END\n");
+    return 0;
+}
