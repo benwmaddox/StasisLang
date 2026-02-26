@@ -3887,7 +3887,14 @@ mod tests {
         )
         .expect("write source");
 
-        let mut backend = IncrementalCompilerBackend::new();
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
         let result = backend.compile(CompileRequest::new(
             RequestId(137),
             vec![source],
@@ -5181,7 +5188,14 @@ mod tests {
         )
         .expect("write source");
 
-        let mut backend = IncrementalCompilerBackend::new();
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
         let result = backend.compile(CompileRequest::new(
             RequestId(135),
             vec![source],
@@ -5215,7 +5229,14 @@ mod tests {
         )
         .expect("write source");
 
-        let mut backend = IncrementalCompilerBackend::new();
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
         let result = backend.compile(CompileRequest::new(
             RequestId(132),
             vec![source],
@@ -5249,7 +5270,14 @@ mod tests {
         )
         .expect("write source");
 
-        let mut backend = IncrementalCompilerBackend::new();
+        let helper = write_fake_aot_helper(&temp_root);
+        let config = AotCompileConfig {
+            helper_path: Some(helper),
+            ..AotCompileConfig::default()
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(config, artifact_root.clone());
         let result = backend.compile(CompileRequest::new(
             RequestId(133),
             vec![source],

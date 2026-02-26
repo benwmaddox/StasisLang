@@ -84,8 +84,8 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = address;
-        Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+        let callback: extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
+        Ok(callback())
     }
 }
 
@@ -100,8 +100,8 @@ pub fn invoke_noarg_i32(address: usize) -> Result<i32, String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = address;
-        Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+        let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        Ok(callback())
     }
 }
 
@@ -117,8 +117,9 @@ pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = address;
-        Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+        let callback: extern "C" fn() = unsafe { std::mem::transmute(address) };
+        callback();
+        Ok(())
     }
 }
 
@@ -133,12 +134,8 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     }
     #[cfg(not(windows))]
     {
-        let _ = left;
-        let _ = right;
-        Err(
-            "native i32(i32,i32) invocation is only supported on windows in stasis_dynload"
-                .to_string(),
-        )
+        let callback: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+        Ok(callback(left, right))
     }
 }
 
