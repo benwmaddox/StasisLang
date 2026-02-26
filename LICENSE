@@ -14,11 +14,15 @@ Internal use (including by employees, contractors, testers, and beta users) is p
 without a fee as long as you do not distribute or ship binaries built with the Software
 in a way that triggers Section 2.
 
-2. Commercial Use (Paid License Required)
+2. Commercial Use (1% Revenue Share After $10,000)
 If you distribute, ship, or otherwise make available binaries built with the Software
 ("Shipped Binaries"), and the gross revenue attributable to the products that use the
-Software is USD $10,000 or more in a calendar year, you must obtain a paid commercial
-license from Maddox Labs LLC to continue distributing Shipped Binaries in that calendar year.
+Software exceeds USD $10,000 in a calendar year, you must pay Maddox Labs LLC a revenue share
+equal to 1% of that gross revenue above the $10,000 threshold for that calendar year.
+
+Example:
+- If gross revenue attributable to products that use the Software is $12,000 in a calendar year:
+  revenue share = 1% * ($12,000 - $10,000) = $20.
 
 - The $10,000 threshold is measured per company (if applicable), otherwise per person.
 - "Gross revenue" means revenue before expenses.
@@ -40,4 +44,4 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 DEALINGS IN THE SOFTWARE.
 
 6. Commercial Licensing
-To obtain a commercial license, contact Maddox Labs LLC.
+To arrange payment details for the revenue share, contact Maddox Labs LLC.
