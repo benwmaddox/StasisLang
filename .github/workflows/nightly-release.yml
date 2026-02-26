@@ -71,9 +71,13 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
             archive: stasis-nightly-win-x64
             ext: zip
-          - os: macos-14
+          - os: macos-13
             rust_target: x86_64-apple-darwin
             archive: stasis-nightly-osx-x64
+            ext: tar.gz
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            archive: stasis-nightly-osx-arm64
             ext: tar.gz
     runs-on: ${{ matrix.os }}
     steps:
