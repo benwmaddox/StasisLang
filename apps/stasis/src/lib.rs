@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Instant;
 use std::time::Duration;
 use watch::WatchService;
 
@@ -301,40 +302,90 @@ pub fn run_play_in_process(
     loop {
         // Drain file events and recompile at tick boundaries (all-or-nothing).
         let mut needs_recompile = false;
+        let mut ignored_changes: u32 = 0;
+        let mut triggered_paths: Vec<String> = Vec::new();
         for event in watcher.drain_stasis_changes() {
-            if should_submit_watch_event(
+            let submit = should_submit_watch_event(
                 &event,
                 Some(&root_path),
                 watch_dependency_paths.as_ref(),
-            ) {
+            );
+            if submit {
                 needs_recompile = true;
+                triggered_paths.push(normalize_watch_path_for_log(&event.path));
+            } else {
+                ignored_changes = ignored_changes.saturating_add(1);
             }
         }
+        if ignored_changes > 0 && !needs_recompile {
+            println!(
+                "[watch] ignored {ignored_changes} change(s) (not in dependency graph)"
+            );
+        }
         if needs_recompile {
+            let changed = triggered_paths
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_string());
+            println!("[watch] change detected: {changed}");
+
+            let t_total = Instant::now();
             // Ensure the root file is refreshed (imports are pulled by the JIT process).
             if let Ok(next_root_source) = fs::read_to_string(&root_path) {
                 jit.upsert_file(root_path_str.clone(), next_root_source);
             }
             let _ = jit.refresh_imported_sources_from_disk(&root_path_str);
+
+            let t_compile = Instant::now();
             match jit.compile() {
                 Ok(_) => {
-                    if let Ok(next_package) =
-                        jit.build_engine_package(&EngineEntrypoints::runtime_default())
-                    {
-                        tick_code_ptr = next_package.tick_code_ptr;
-                        render_code_ptr = next_package.render_code_ptr;
-                        on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
-                        if let Some(hook) = on_code_swap_code_ptr {
-                            let _ = stasis_dynload::invoke_noarg_void(hook as usize);
+                    let compile_ms = t_compile.elapsed().as_millis();
+
+                    let t_pkg = Instant::now();
+                    match jit.build_engine_package(&EngineEntrypoints::runtime_default()) {
+                        Ok(next_package) => {
+                            let package_ms = t_pkg.elapsed().as_millis();
+                            tick_code_ptr = next_package.tick_code_ptr;
+                            render_code_ptr = next_package.render_code_ptr;
+                            on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+
+                            let mut hook_ms: u128 = 0;
+                            if let Some(hook) = on_code_swap_code_ptr {
+                                let t_hook = Instant::now();
+                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
+                                {
+                                    println!("[swap] on_code_swap failed: {error}");
+                                }
+                                hook_ms = t_hook.elapsed().as_millis();
+                            }
+
+                            let t_deps = Instant::now();
+                            if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
+                                watch_dependency_paths = Some(next_graph);
+                            }
+                            let deps_ms = t_deps.elapsed().as_millis();
+
+                            let total_ms = t_total.elapsed().as_millis();
+                            println!(
+                                "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
+                            );
+                        }
+                        Err(error) => {
+                            println!(
+                                "[swap] build_engine_package failed after {}ms: {error}",
+                                t_pkg.elapsed().as_millis()
+                            );
                         }
                     }
 
-                    if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
-                        watch_dependency_paths = Some(next_graph);
-                    }
                 }
-                Err(_error) => {
+                Err(error) => {
                     // Keep running the last known-good code/data if compilation fails.
+                    println!(
+                        "[swap] compile failed after {}ms: {:?}",
+                        t_compile.elapsed().as_millis(),
+                        error
+                    );
                 }
             }
         }
@@ -435,6 +486,19 @@ fn normalize_watch_path_for_compare(path: &Path) -> PathBuf {
     }
 }
 
+fn normalize_watch_path_for_log(path: &Path) -> String {
+    let normalized = normalize_watch_path_for_compare(path);
+    let mut text = normalized.to_string_lossy().to_string();
+    text = text.replace('\\', "/");
+    if let Some(stripped) = text.strip_prefix("//?/") {
+        text = stripped.to_string();
+    }
+    if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+        text = stripped.to_string();
+    }
+    text.to_ascii_lowercase()
+}
+
 fn parse_watch_import_paths(source: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for line in source.lines() {
@@ -461,18 +525,18 @@ fn parse_watch_import_paths(source: &str) -> Vec<PathBuf> {
     out
 }
 
-fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<PathBuf>, String> {
+fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<String>, String> {
     if !root_source.exists() {
         return Err(format!(
             "watch root source does not exist: {}",
             root_source.display()
         ));
     }
-    let mut out: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut out: BTreeSet<String> = BTreeSet::new();
     let mut queue: Vec<PathBuf> = vec![root_source.to_path_buf()];
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
     while let Some(path) = queue.pop() {
-        let normalized = normalize_watch_path_for_compare(&path);
+        let normalized = normalize_watch_path_for_log(&path);
         if !visited.insert(normalized.clone()) {
             continue;
         }
@@ -486,7 +550,7 @@ fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<PathBuf
             } else {
                 parent.join(import_path)
             };
-            let candidate_normalized = normalize_watch_path_for_compare(&candidate);
+            let candidate_normalized = normalize_watch_path_for_log(&candidate);
             out.insert(candidate_normalized.clone());
             if candidate.exists() {
                 queue.push(candidate);
@@ -499,7 +563,7 @@ fn collect_watch_dependency_paths(root_source: &Path) -> Result<BTreeSet<PathBuf
 fn should_submit_watch_event(
     event: &FileChangeEvent,
     root_source: Option<&Path>,
-    dependency_paths: Option<&BTreeSet<PathBuf>>,
+    dependency_paths: Option<&BTreeSet<String>>,
 ) -> bool {
     let Some(root_source) = root_source else {
         return true;
@@ -507,8 +571,8 @@ fn should_submit_watch_event(
     let Some(dependency_paths) = dependency_paths else {
         return true;
     };
-    let normalized_event = normalize_watch_path_for_compare(&event.path);
-    if normalized_event == normalize_watch_path_for_compare(root_source) {
+    let normalized_event = normalize_watch_path_for_log(&event.path);
+    if normalized_event == normalize_watch_path_for_log(root_source) {
         return true;
     }
     dependency_paths.contains(&normalized_event)
@@ -1762,9 +1826,9 @@ mod tests {
         fs::write(&dep2, "function dep2(): i32 { return 1; }\n").expect("write dep2");
 
         let graph = collect_watch_dependency_paths(&root).expect("dependency graph");
-        assert!(graph.contains(&normalize_watch_path_for_compare(&root)));
-        assert!(graph.contains(&normalize_watch_path_for_compare(&dep)));
-        assert!(graph.contains(&normalize_watch_path_for_compare(&dep2)));
+        assert!(graph.contains(&normalize_watch_path_for_log(&root)));
+        assert!(graph.contains(&normalize_watch_path_for_log(&dep)));
+        assert!(graph.contains(&normalize_watch_path_for_log(&dep2)));
 
         fs::remove_dir_all(&temp_root).ok();
     }
@@ -1784,9 +1848,9 @@ mod tests {
         fs::write(&dep, "function dep(): i32 { return 0; }\n").expect("write dep");
         fs::write(&other, "function other(): i32 { return 0; }\n").expect("write other");
 
-        let mut dependency_paths = std::collections::BTreeSet::new();
-        dependency_paths.insert(normalize_watch_path_for_compare(&root));
-        dependency_paths.insert(normalize_watch_path_for_compare(&dep));
+        let mut dependency_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        dependency_paths.insert(normalize_watch_path_for_log(&root));
+        dependency_paths.insert(normalize_watch_path_for_log(&dep));
 
         let dep_event = FileChangeEvent::new(
             dep.clone(),
