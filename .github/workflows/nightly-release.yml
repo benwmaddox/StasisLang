@@ -88,8 +88,43 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Setup MSVC dev environment (windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build stasis (release)
         run: cargo build -p stasis --release --target ${{ matrix.rust_target }}
+
+      - name: Build stasis_graphics runtime (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Prefer GitHub runner's preinstalled vcpkg if available.
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot -or -not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
+            if (Test-Path "C:\\vcpkg\\vcpkg.exe") {
+              $vcpkgRoot = "C:\\vcpkg"
+            }
+          }
+          if (-not $vcpkgRoot -or -not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
+            throw "vcpkg.exe not found (expected VCPKG_INSTALLATION_ROOT or C:\\vcpkg)."
+          }
+
+          $triplet = "x64-windows-static"
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" "glew:$triplet" --recurse
+
+          $buildDir = "runtime/build_ci"
+          cmake -S runtime -B $buildDir -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$triplet" `
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
+            -DSTASIS_BUILD_RUNNER=OFF `
+            -DSTASIS_BUILD_SYS=OFF
+
+          cmake --build $buildDir --config Release --target stasis_graphics
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -113,6 +148,8 @@ jobs:
           $out = "dist/${{ matrix.archive }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/bin/" -Force
+          # Include the graphics runtime DLL so `stasis play` works out of the box on Windows.
+          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/bin/" -Force
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           # Ship the stdlib + samples so relative imports keep working in the bundle.
