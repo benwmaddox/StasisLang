@@ -1,0 +1,13 @@
+struct Enemy {
+    hp: i32;
+}
+
+global State {
+    score: i32;
+    first_enemy: Enemy;
+}
+
+function main(): i32 {
+    State.first_enemy.hp = 7;
+    return State.first_enemy.hp;
+}

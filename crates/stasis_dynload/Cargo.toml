@@ -1,0 +1,9 @@
+[package]
+name = "stasis_dynload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+

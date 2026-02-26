@@ -1,0 +1,16 @@
+﻿import "../../compiler/simple_pass_compiler.stasis";
+
+function main(): i32 {
+    compiler_reset_state();
+
+    compiler_set_source("global DebugUI { swapFlashTicks: u32; marker: u8[4]; } function main(): i32 { return 0; }");
+    if (run_incremental_compiler() != 0) { return 95; }
+    let base_hash: i32 = Compiler.layout_hash;
+
+    compiler_set_source("global DebugUI { swapFlashTicks: u32; marker: u8[8]; } function main(): i32 { return 0; }");
+    if (run_incremental_compiler() != 0) { return 96; }
+    if (Compiler.layout_hash == base_hash) { return 97; }
+
+    return 0;
+}
+

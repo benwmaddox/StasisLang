@@ -1,5 +1,0 @@
-{
-  ExitCode: 5,
-  Stdout: ,
-  Stderr: 
-}

@@ -1,0 +1,18 @@
+[package]
+name = "stasis_compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
+cranelift-native.workspace = true
+cranelift-object.workspace = true
+stasis_jit = { path = "../stasis_jit" }
+stasis_dynload = { path = "../stasis_dynload" }

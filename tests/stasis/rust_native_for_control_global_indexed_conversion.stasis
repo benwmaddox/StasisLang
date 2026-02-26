@@ -1,0 +1,18 @@
+const COUNT: i32 = 2;
+
+struct Node {
+    value: f32;
+}
+
+global nodes: Node[COUNT];
+global State { snap: f32; }
+
+function main(): i32 {
+    let sum: i32 = 0;
+    for (State.snap.from_i32(0); sum < 2; nodes[1].value.from_i32(sum)) {
+        sum += 1;
+    }
+    let out: i32 = 0;
+    out.from_f32(nodes[1].value);
+    return out;
+}

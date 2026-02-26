@@ -1,0 +1,13 @@
+function main(): i32 {
+    let sum: i32 = 0;
+    for /* before header */ (let i: i32 = 0; i < 3; i += 1) /* before body */ {
+        /* semicolon in string should not terminate statement early */
+        print_string("count;step");
+        sum += i;
+    }
+    if /* before condition */ (sum == 3) /* before then */ {
+        return 1;
+    } else /* between else and body */ {
+        return 0;
+    }
+}

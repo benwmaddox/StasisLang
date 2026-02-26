@@ -1,0 +1,6 @@
+function main(): i32 {
+    let value: i32 = 2;
+    /* block comment between statements */
+    value += 5;
+    return value;
+}

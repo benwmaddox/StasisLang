@@ -13,7 +13,8 @@ import "brickout_revenge_v1_ui_flow.stasis";
 // Fonts:
 // - `load_font` prerenders a glyph atlas from a TTF.
 // - This default path is Windows-centric; change it if needed.
-const UI_FONT_PATH: string = "../../docs/assets/fonts/dejavu-sans-mono.ttf";
+//   Forward slashes work on Windows and avoid escape noise.
+const UI_FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
 const UI_FONT_SIZE_PX: i32 = 24;
 //
 // Live tuning:
@@ -43,6 +44,7 @@ const UI_FONT_SIZE_PX: i32 = 24;
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
 const MAX_TAP_PULSES: i32 = 16;
+const MAX_INPUT_POINTERS: i32 = 8;
 const GRID_COLS: i32 = 6;
 const GRID_ROWS: i32 = 6;
 const UI_MENU_PAD: f32 = 10.0;
@@ -72,11 +74,13 @@ const BENCH_AUTO_EXIT: i32 = 1;
 const BENCH_WARMUP_FRAMES: i32 = 200;
 const BENCH_TOTAL_FRAMES: i32 = 2000;
 const BENCH_SKIP_MAXIMIZE: i32 = 1;
+const SWAP_FLASH_TICKS_MAX: i32 = 180;
 
 global bench_frame: i32;
 global bench_sum_ms: i32;
 global bench_sum_us: i32;
 global bench_count: i32;
+global swap_flash_ticks: i32;
 
 // Virtual resolution + safe gameplay area.
 // The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
@@ -277,6 +281,22 @@ struct SoundVoice {
     duration_frames: i32;
 }
 
+struct InputPointerSample {
+    id: i32;
+    is_down: bool;
+    went_down: bool;
+    went_up: bool;
+    x_px: f32;
+    y_px: f32;
+}
+
+struct InputModel {
+    quit_requested: bool;
+    escape_down: bool;
+    pointer_count: i32;
+    pointers: InputPointerSample[8];
+}
+
 struct BrickoutRuntimeScreen {
     w: i32;
     h: i32;
@@ -348,6 +368,7 @@ global audio_sr: i32;
 global sfx_voices: SoundVoice[12];
 global desktop_size_w: i32[1];
 global desktop_size_h: i32[1];
+global input_model: InputModel;
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -364,7 +385,8 @@ function next_rand(): i32 {
 
 function rand_float(max: f32): f32 {
     let r: i32 = next_rand() % 1000;
-    let rf: f32 = i32_to_f32(r);
+    let rf: f32;
+    rf.from_i32(r);
     return (rf / 1000.0) * max;
 }
 
@@ -504,8 +526,10 @@ function sfx_reset(): void {
 function sfx_spawn(freq: f32, amp: f32, duration_ms: f32): void {
     let sr: i32 = audio_sr;
     if (sr < 1) { sr = 48000; }
-    let sr_f: f32 = i32_to_f32(sr);
-    let dur_frames: i32 = f32_to_i32((duration_ms / 1000.0) * sr_f);
+    let sr_f: f32;
+    sr_f.from_i32(sr);
+    let dur_frames: i32;
+    dur_frames.from_f32((duration_ms / 1000.0) * sr_f);
     if (dur_frames < 1) { dur_frames = 1; }
     let i: i32 = 0;
     for (i = 0; i < SFX_MAX_VOICES; i = i + 1) {
@@ -533,7 +557,8 @@ function sfx_play(kind: i32): void {
 }
 
 function fill_audio_chunk(sample_rate: i32): void {
-    let sr_f: f32 = i32_to_f32(sample_rate);
+    let sr_f: f32;
+    sr_f.from_i32(sample_rate);
     if (sr_f < 1.0) { return; }
     let frame: i32 = 0;
     for (frame = 0; frame < AUDIO_FRAMES_PER_PUSH; frame = frame + 1) {
@@ -541,8 +566,10 @@ function fill_audio_chunk(sample_rate: i32): void {
         let v: i32 = 0;
         for (v = 0; v < SFX_MAX_VOICES; v = v + 1) {
             if (sfx_voices[v].active != 0) {
-                let age_f: f32 = i32_to_f32(sfx_voices[v].age_frames);
-                let dur_f: f32 = i32_to_f32(sfx_voices[v].duration_frames);
+                let age_f: f32;
+                age_f.from_i32(sfx_voices[v].age_frames);
+                let dur_f: f32;
+                dur_f.from_i32(sfx_voices[v].duration_frames);
                 let t: f32 = age_f / dur_f;
                 if (t >= 1.0) {
                     sfx_voices[v].active = 0;
@@ -593,10 +620,14 @@ function sync_screen_size(): void {
 }
 
 function update_layout(): void {
-    let vx: f32 = i32_to_f32(input_viewport_x_px());
-    let vy: f32 = i32_to_f32(input_viewport_y_px());
-    let vw: f32 = i32_to_f32(input_viewport_w_px());
-    let vh: f32 = i32_to_f32(input_viewport_h_px());
+    let vx: f32;
+    vx.from_i32(input_viewport_x_px());
+    let vy: f32;
+    vy.from_i32(input_viewport_y_px());
+    let vw: f32;
+    vw.from_i32(input_viewport_w_px());
+    let vh: f32;
+    vh.from_i32(input_viewport_h_px());
     if (vw < 1.0 || vh < 1.0) {
         return;
     }
@@ -646,10 +677,15 @@ function @inline play_to_screen_len(play_len: f32): f32 {
 }
 
 function snap_px(value: f32): f32 {
+    let snap_i: i32;
+    let snap_f: f32;
     if (value >= 0.0) {
-        return i32_to_f32(f32_to_i32(value + 0.5));
+        snap_i.from_f32(value + 0.5);
+    } else {
+        snap_i.from_f32(value - 0.5);
     }
-    return i32_to_f32(f32_to_i32(value - 0.5));
+    snap_f.from_i32(snap_i);
+    return snap_f;
 }
 
 function play_snap_x(play_x: f32): f32 {
@@ -697,23 +733,32 @@ function maximize_window_for_desktop(): void {
     let margin_h: i32 = 120;
     let usable_w: i32 = dw - margin_w;
     let usable_h: i32 = dh - margin_h;
-    if (usable_w < f32_to_i32(VIRTUAL_W)) { usable_w = f32_to_i32(VIRTUAL_W); }
-    if (usable_h < f32_to_i32(VIRTUAL_H)) { usable_h = f32_to_i32(VIRTUAL_H); }
+    let min_w: i32;
+    min_w.from_f32(VIRTUAL_W);
+    let min_h: i32;
+    min_h.from_f32(VIRTUAL_H);
+    if (usable_w < min_w) { usable_w = min_w; }
+    if (usable_h < min_h) { usable_h = min_h; }
 
     // Candidate A: fit height.
     let fit_h_h: i32 = usable_h;
-    let fit_h_w: i32 = f32_to_i32(i32_to_f32(fit_h_h) * (VIRTUAL_W / VIRTUAL_H));
-
+    let fit_h_h_f: f32;
+    fit_h_h_f.from_i32(fit_h_h);
+    let fit_h_w: i32;
+    fit_h_w.from_f32(fit_h_h_f * (VIRTUAL_W / VIRTUAL_H));
     // Candidate B: fit width.
     let fit_w_w: i32 = usable_w;
-    let fit_w_h: i32 = f32_to_i32(i32_to_f32(fit_w_w) * (VIRTUAL_H / VIRTUAL_W));
-
+    let fit_w_w_f: f32;
+    fit_w_w_f.from_i32(fit_w_w);
+    let fit_w_h: i32;
+    fit_w_h.from_f32(fit_w_w_f * (VIRTUAL_H / VIRTUAL_W));
     let a_ok: bool = fit_h_w <= usable_w && fit_h_h <= usable_h;
     let b_ok: bool = fit_w_w <= usable_w && fit_w_h <= usable_h;
 
-    let choose_w: i32 = f32_to_i32(VIRTUAL_W);
-    let choose_h: i32 = f32_to_i32(VIRTUAL_H);
-
+    let choose_w: i32;
+    choose_w.from_f32(VIRTUAL_W);
+    let choose_h: i32;
+    choose_h.from_f32(VIRTUAL_H);
     if (a_ok && b_ok) {
         // Pick the bigger one (area).
         let a_area: i32 = fit_h_w * fit_h_h;
@@ -737,8 +782,8 @@ function maximize_window_for_desktop(): void {
         }
     }
 
-    if (choose_w < f32_to_i32(VIRTUAL_W)) { choose_w = f32_to_i32(VIRTUAL_W); }
-    if (choose_h < f32_to_i32(VIRTUAL_H)) { choose_h = f32_to_i32(VIRTUAL_H); }
+    if (choose_w < min_w) { choose_w = min_w; }
+    if (choose_h < min_h) { choose_h = min_h; }
 
     set_window_size(choose_w, choose_h);
 }
@@ -753,12 +798,14 @@ function point_in_rect(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32): bo
 
 // Grid helpers - bricks are placed on a grid in the lower portion
 function grid_to_world_x(gx: i32): f32 {
-    let gxf: f32 = i32_to_f32(gx);
+    let gxf: f32;
+    gxf.from_i32(gx);
     return state.config.grid.origin_x + gxf * (state.config.brick.width + state.config.grid.spacing);
 }
 
 function grid_to_world_y(gy: i32): f32 {
-    let gyf: f32 = i32_to_f32(gy);
+    let gyf: f32;
+    gyf.from_i32(gy);
     // Place bricks starting near the bottom and stack upward with the same spacing.
     return GAME_H - state.config.grid.margin_bottom - state.config.brick.height - gyf * (state.config.brick.height + state.config.grid.spacing);
 }
@@ -793,7 +840,9 @@ function world_to_grid_x(wx: f32): i32 {
     let local_x: f32 = wx - state.config.grid.origin_x;
     if (cell_w <= 0.0) { return -1; }
     if (local_x < 0.0) { return -1; }
-    return f32_to_i32(local_x / cell_w);
+    let gx: i32;
+    gx.from_f32(local_x / cell_w);
+    return gx;
 }
 
 function world_to_grid_y(wy: f32): i32 {
@@ -802,7 +851,9 @@ function world_to_grid_y(wy: f32): i32 {
     if (cell_h <= 0.0) { return -1; }
     let local_y: f32 = base_y - wy;
     if (local_y < 0.0) { return -1; }
-    return f32_to_i32(local_y / cell_h);
+    let gy: i32;
+    gy.from_f32(local_y / cell_h);
+    return gy;
 }
 
 function grid_is_occupied(gx: i32, gy: i32): bool {
@@ -1094,7 +1145,8 @@ function update_brick_attacks(delta_ms: i32): void {
 
 // Spawn a ball near the paddle, heading downward, with preset stats.
 function spawn_ball_preset(preset: BrickoutBallPreset): void {
-    let sw: f32 = i32_to_f32(state.config.screen.w);
+    let sw: f32;
+    sw.from_i32(state.config.screen.w);
     foreach (let ball in state.balls) {
         if (!ball.active) {
             ball.active = true;
@@ -1117,7 +1169,8 @@ function spawn_ball_preset(preset: BrickoutBallPreset): void {
             ball.vx = rand_range(0.0 - vr, vr);
 
             let level: i32 = state.level_index + 1;
-            let wf: f32 = i32_to_f32(level);
+            let wf: f32;
+            wf.from_i32(level);
             let speed_min: f32 = state.config.ball.speed_min_base + wf * state.config.ball.speed_min_per_wave;
             let speed_max: f32 = state.config.ball.speed_max_base + wf * state.config.ball.speed_max_per_wave;
             let div: i32 = state.config.ball.damage_wave_div;
@@ -1592,8 +1645,10 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
     let prev_y: f32 = cy;
 
     for (i = 1; i < (segments + 1); i = i + 1) {
-        let fi: f32 = i32_to_f32(i);
-        let seg_f: f32 = i32_to_f32(segments);
+        let fi: f32;
+        fi.from_i32(i);
+        let seg_f: f32;
+        seg_f.from_i32(segments);
         let angle: f32 = (fi / seg_f) * 2.0 * PI;
         let px: f32 = cx + cos_fast(angle) * radius;
         let py: f32 = cy + sin_fast(angle) * radius;
@@ -1643,16 +1698,19 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     let screen_y: f32 = play_snap_y(y);
     let screen_w_f: f32 = play_snap_len(width);
     let screen_h_f: f32 = play_snap_len(height);
-    let screen_w: i32 = f32_to_i32(screen_w_f);
-    let screen_h: i32 = f32_to_i32(screen_h_f);
-
+    let screen_w: i32;
+    screen_w.from_f32(screen_w_f);
+    let screen_h: i32;
+    screen_h.from_f32(screen_h_f);
     // Ensure even sizes so a centered sprite lands on integer pixel bounds.
     // Otherwise `x - w/2` ends up at .5, which makes sprites appear misaligned with line primitives.
     if ((screen_w % 2) != 0) { screen_w = screen_w + 1; }
     if ((screen_h % 2) != 0) { screen_h = screen_h + 1; }
 
-    let screen_x_i: i32 = f32_to_i32(screen_x);
-    let screen_y_i: i32 = f32_to_i32(screen_y);
+    let screen_x_i: i32;
+    screen_x_i.from_f32(screen_x);
+    let screen_y_i: i32;
+    screen_y_i.from_f32(screen_y);
     let top_left_x: i32 = screen_x_i - (screen_w / 2);
     let top_left_y: i32 = screen_y_i - (screen_h / 2);
     gfx_draw_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
@@ -1661,7 +1719,8 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
 function draw_bricks(): void {
     let now_ms: i32 = get_time_ms();
     let t_mod: i32 = now_ms % 2000;
-    let t_f: f32 = i32_to_f32(t_mod);
+    let t_f: f32;
+    t_f.from_i32(t_mod);
     let phase: f32 = (t_f / 2000.0) * 2.0 * PI;
     let wave: f32 = sin_fast(phase);
     let pulse: f32 = 0.5 + 0.5 * wave;
@@ -1700,8 +1759,10 @@ function draw_bricks(): void {
                 let seed: f32 = cx * 0.013 + cy * 0.021;
                 let wobble: f32 = sin_fast(phase + seed);
                 let oy: f32 = wobble * 1.4;
-                let rot_deg: i32 = f32_to_i32(wobble * 3.0);  // ~0.05 radians = ~3 degrees
-                let a: i32 = f32_to_i32((0.85 + 0.15 * (0.5 + 0.5 * wobble)) * 255.0);
+                let rot_deg: i32;  // ~0.05 radians = ~3 degrees
+                rot_deg.from_f32(wobble * 3.0);
+                let a: i32;
+                a.from_f32((0.85 + 0.15 * (0.5 + 0.5 * wobble)) * 255.0);
                 play_draw_sprite(h_turret, cx, cy + oy, brick.width, brick.height, rot_deg, a);
             }
 
@@ -1711,13 +1772,15 @@ function draw_bricks(): void {
                 if (brick.brick_type == BrickType.Reflector) {
                     a_f = 0.12 + 0.28 * (0.5 + 0.5 * sin_fast(phase * 1.7));
                 }
-                let a: i32 = f32_to_i32(a_f * 255.0);
+                let a: i32;
+                a.from_f32(a_f * 255.0);
                 play_draw_sprite(h_fx, cx, cy, brick.width, brick.height, 0, a);
             }
 
             // Shot tracer (tower attack feedback)
             if (brick.shot_fx_ms > 0) {
-                let a: f32 = i32_to_f32(brick.shot_fx_ms);
+                let a: f32;
+                a.from_i32(brick.shot_fx_ms);
                 let alpha: f32 = a / 90.0;
                 let sr: f32 = 1.0;
                 let sg: f32 = 0.4;
@@ -1754,8 +1817,10 @@ function draw_balls(): void {
             // Ball HP bar
             if (ball.max_hp > 0) {
                 if (ball.hp < ball.max_hp) {
-                    let hp_f: f32 = i32_to_f32(ball.hp);
-                    let max_f: f32 = i32_to_f32(ball.max_hp);
+                    let hp_f: f32;
+                    hp_f.from_i32(ball.hp);
+                    let max_f: f32;
+                    max_f.from_i32(ball.max_hp);
                     let t: f32 = hp_f / max_f;
                     let ball_x: f32 = ball.x;
                     let ball_y: f32 = ball.y;
@@ -1864,11 +1929,13 @@ function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
 
 function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
     // Draw a float with 1 decimal place (e.g., 3.5)
-    let int_part: i32 = f32_to_i32(value);
-    let int_part_f: f32 = i32_to_f32(int_part);
+    let int_part: i32;
+    int_part.from_f32(value);
+    let int_part_f: f32;
+    int_part_f.from_i32(int_part);
     let decimal_f: f32 = (value - int_part_f) * 10.0;
-    let decimal_part: i32 = f32_to_i32(decimal_f);
-
+    let decimal_part: i32;
+    decimal_part.from_f32(decimal_f);
     // Draw integer part
     draw_number(int_part, x, y, scale);
 
@@ -1878,7 +1945,8 @@ function draw_decimal_1(value: f32, x: f32, y: f32, scale: f32): void {
     if (int_part > 99) { int_digits = 3; }
 
     let spacing: f32 = scale * 1.5;
-    let int_width: f32 = i32_to_f32(int_digits);
+    let int_width: f32;
+    int_width.from_i32(int_digits);
     let decimal_x: f32 = x + int_width * spacing;
 
     // Draw decimal point (small filled square)
@@ -1905,7 +1973,8 @@ function draw_decimal_1_tenths(value_tenths: i32, x: f32, y: f32, scale: f32): v
     if (int_part > 999) { int_digits = 4; }
 
     let spacing: f32 = scale * 1.5;
-    let int_width: f32 = i32_to_f32(int_digits);
+    let int_width: f32;
+    int_width.from_i32(int_digits);
     let decimal_x: f32 = x + int_width * spacing;
 
     // Draw decimal point (small filled square)
@@ -2163,7 +2232,9 @@ function ui_pick_menu_slot(px: f32, py: f32, panel_x: f32, panel_y: f32, panel_w
     let slot_y: f32 = panel_y + UI_MENU_HEADER_H + UI_MENU_PAD;
     let i: i32 = 0;
     for (i = 0; i < 3; i = i + 1) {
-        let sy: f32 = slot_y + i32_to_f32(i) * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
+        let i_f: f32;
+        i_f.from_i32(i);
+        let sy: f32 = slot_y + i_f * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
         if (sy + UI_MENU_SLOT_H > panel_y + panel_h - UI_MENU_PAD) {
             return -1;
         }
@@ -2186,7 +2257,9 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
     let slots_done: bool = false;
     for (i = 0; i < 3; i = i + 1) {
         if (!slots_done) {
-            let sy: f32 = slot_y + i32_to_f32(i) * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
+            let i_f: f32;
+            i_f.from_i32(i);
+            let sy: f32 = slot_y + i_f * (UI_MENU_SLOT_H + UI_MENU_SLOT_GAP);
             if (sy + UI_MENU_SLOT_H > y + h - UI_MENU_PAD) {
                 slots_done = true;
             } else {
@@ -2222,7 +2295,15 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                     if (icon_size > 4.0) {
                         let icon_x: f32 = x + UI_MENU_PAD + slot_w * 0.5;
                         let icon_y: f32 = sy + UI_MENU_SLOT_H * 0.5;
-                        gfx_draw_sprite(icon_handle, f32_to_i32(icon_x), f32_to_i32(icon_y), f32_to_i32(icon_size), f32_to_i32(icon_size), 0, 255);
+                        let icon_x_i: i32;
+                        icon_x_i.from_f32(icon_x);
+                        let icon_y_i: i32;
+                        icon_y_i.from_f32(icon_y);
+                        let icon_w_i: i32;
+                        icon_w_i.from_f32(icon_size);
+                        let icon_h_i: i32;
+                        icon_h_i.from_f32(icon_size);
+                        gfx_draw_sprite(icon_handle, icon_x_i, icon_y_i, icon_w_i, icon_h_i, 0, 255);
                     }
                 }
                 let selected: bool = false;
@@ -2373,10 +2454,30 @@ function draw_ui(): void {
     draw_ui_panels();
 }
 
+function draw_swap_indicator(): void {
+    if (swap_flash_ticks <= 0) { return; }
+
+    let alpha: f32;
+    alpha.from_i32(swap_flash_ticks);
+    let max_ticks: f32;
+    max_ticks.from_i32(SWAP_FLASH_TICKS_MAX);
+    alpha = alpha / max_ticks;
+    if (alpha < 0.1) { alpha = 0.1; }
+
+    let size: f32 = 12.0 * state.layout.play_scale;
+    let x: f32 = play_to_screen_x(VIRTUAL_W - 22.0);
+    let y: f32 = play_to_screen_y(8.0);
+    draw_filled_rect(x, y, size, size, 0.25, 0.95, 0.35, alpha);
+    draw_rect(x, y, size, size, 0.9, 1.0, 0.9, alpha);
+
+    swap_flash_ticks = swap_flash_ticks - 1;
+}
+
 function draw_frame(): void {
     if (state.screen == BrickoutScreen.Menu) {
         draw_main_menu();
         draw_tap_pulses();
+        draw_swap_indicator();
         return;
     }
     draw_bricks();
@@ -2385,6 +2486,7 @@ function draw_frame(): void {
     draw_drag_preview();
     draw_ui();
     draw_tap_pulses();
+    draw_swap_indicator();
 }
 
 // Timing
@@ -2397,14 +2499,43 @@ function compute_delta_ms(): i32 {
     return delta_ms;
 }
 
-function record_tap_pulses(): void {
+function refresh_input_model(): void {
+    input_model.quit_requested = should_quit();
+    input_model.escape_down = is_key_down(Scancode.Escape);
+
     let count: i32 = input_pointer_count();
+    if (count < 0) { count = 0; }
+    if (count > MAX_INPUT_POINTERS) { count = MAX_INPUT_POINTERS; }
+    input_model.pointer_count = count;
+
+    let i: i32 = 0;
+    for (i = 0; i < MAX_INPUT_POINTERS; i = i + 1) {
+        if (i < count) {
+            input_model.pointers[i].id = input_pointer_id(i);
+            input_model.pointers[i].is_down = input_pointer_is_down(i);
+            input_model.pointers[i].went_down = input_pointer_went_down(i);
+            input_model.pointers[i].went_up = input_pointer_went_up(i);
+            input_model.pointers[i].x_px = input_pointer_x_px(i);
+            input_model.pointers[i].y_px = input_pointer_y_px(i);
+        } else {
+            input_model.pointers[i].id = -1;
+            input_model.pointers[i].is_down = false;
+            input_model.pointers[i].went_down = false;
+            input_model.pointers[i].went_up = false;
+            input_model.pointers[i].x_px = 0.0;
+            input_model.pointers[i].y_px = 0.0;
+        }
+    }
+}
+
+function record_tap_pulses(): void {
+    let count: i32 = input_model.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let went_down: bool = input_pointer_went_down(i);
+        let went_down: bool = input_model.pointers[i].went_down;
         if (went_down) {
-            let x: f32 = input_pointer_x_px(i);
-            let y: f32 = input_pointer_y_px(i);
+            let x: f32 = input_model.pointers[i].x_px;
+            let y: f32 = input_model.pointers[i].y_px;
             let vx: f32 = state.layout.viewport_x;
             let vy: f32 = state.layout.viewport_y;
             let j: i32 = 0;
@@ -2440,8 +2571,10 @@ function draw_tap_pulses(): void {
     let i: i32 = 0;
     for (i = 0; i < MAX_TAP_PULSES; i = i + 1) {
         if (state.tap_pulses[i].active != 0) {
-            let age_f: f32 = i32_to_f32(state.tap_pulses[i].age_ms);
-            let dur_f: f32 = i32_to_f32(TAP_PULSE_DURATION_MS);
+            let age_f: f32;
+            age_f.from_i32(state.tap_pulses[i].age_ms);
+            let dur_f: f32;
+            dur_f.from_i32(TAP_PULSE_DURATION_MS);
             let t: f32 = age_f / dur_f;
             if (t > 1.0) { t = 1.0; }
             let radius: f32 = 8.0 + (48.0 * t);
@@ -2467,6 +2600,10 @@ function draw_drag_preview(): void {
     }
     play_draw_filled_rect(x, y, w, h, r, g, b, 0.12);
     play_draw_rect(x, y, w, h, r, g, b, a);
+}
+
+function on_code_swap(): void {
+    swap_flash_ticks = SWAP_FLASH_TICKS_MAX;
 }
 
 function main(): i32 {
@@ -2506,12 +2643,12 @@ function main(): i32 {
     state.runtime_screen.h = gfx_window_height();
     state.layout.viewport_x = 0.0;
     state.layout.viewport_y = 0.0;
-    state.layout.viewport_w = i32_to_f32(state.runtime_screen.w);
-    state.layout.viewport_h = i32_to_f32(state.runtime_screen.h);
+    state.layout.viewport_w.from_i32(state.runtime_screen.w);
+    state.layout.viewport_h.from_i32(state.runtime_screen.h);
     state.layout.play_x = 0.0;
     state.layout.play_y = 0.0;
-    state.layout.play_w = i32_to_f32(state.config.screen.w);
-    state.layout.play_h = i32_to_f32(state.config.screen.h);
+    state.layout.play_w.from_i32(state.config.screen.w);
+    state.layout.play_h.from_i32(state.config.screen.h);
     state.layout.play_scale = 1.0;
     state.layout.ui_x = 0.0;
     state.layout.ui_y = 0.0;
@@ -2553,6 +2690,7 @@ function main(): i32 {
     bench_sum_ms = 0;
     bench_sum_us = 0;
     bench_count = 0;
+    swap_flash_ticks = 0;
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
@@ -2564,8 +2702,8 @@ function tick(): i32 {
         return 1;
     }
 
-    let quit: bool = should_quit();
-    if (quit) {
+    refresh_input_model();
+    if (input_model.quit_requested) {
         state.running = 0;
     }
 
@@ -2576,7 +2714,7 @@ function tick(): i32 {
     state.timers.frame_start = get_time_ms();
     let bench_start_us: i32 = get_time_us();
 
-    if (is_key_down(Scancode.Escape)) {
+    if (input_model.escape_down) {
         state.running = 0;
     }
 
@@ -2591,7 +2729,8 @@ function tick(): i32 {
     clear(0.05, 0.05, 0.15, 1.0);
 
     let delta_ms: i32 = compute_delta_ms();
-    let delta_f: f32 = i32_to_f32(delta_ms);
+    let delta_f: f32;
+    delta_f.from_i32(delta_ms);
     let dt: f32 = delta_f / 1000.0;
 
     if (state.screen == BrickoutScreen.Game) {
@@ -2646,3 +2785,16 @@ function tick(): i32 {
 
     return 0;
 }
+
+function render(): i32 {
+    if (state.running != 1) {
+        return 1;
+    }
+
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
+    draw_frame();
+    end_frame();
+    return 0;
+}
+

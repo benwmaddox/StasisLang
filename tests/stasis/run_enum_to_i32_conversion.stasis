@@ -1,0 +1,10 @@
+enum Phase {
+    Idle = 10,
+    Play = 11
+}
+
+function main(): i32 {
+    let phase: Phase = Phase.Play;
+    let code: i32 = enum_to_i32(phase);
+    return code;
+}
