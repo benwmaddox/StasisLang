@@ -59,6 +59,12 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
+        // Allow `stasis.exe play <entry.stasis>` as the default path.
+        if !arg.starts_with("--") && watch_file.is_none() {
+            watch_file = Some(PathBuf::from(args[i].clone()));
+            i += 1;
+            continue;
+        }
         if arg == "--watch-file" {
             if i + 1 >= args.len() {
                 return Err("missing value for --watch-file".to_string());
@@ -100,7 +106,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         i += 1;
     }
     let Some(watch_file) = watch_file else {
-        return Err("missing required --watch-file <path>".to_string());
+        return Err("missing entry file. Use `stasis.exe play <path.stasis>` (or --watch-file <path>)".to_string());
     };
     Ok(PlayCliArgs {
         watch_file,
