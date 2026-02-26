@@ -401,15 +401,16 @@ Interfaces are message-based and versioned. No cross-thread shared mutable compi
 
 Failure at any sequence step aborts commit and preserves old code/data.
 
-### 12.4 Language Ownership (Rewrite V1)
+### 12.4 Language and Implementation Ownership (Rewrite V1)
 
-- `.stasis` owns compiler language behavior: lexer, parser, semantic diagnostics, and incremental compile policy.
-- Rust owns runtime/backends: watcher input bridge, message transport, swap coordinator execution, Cranelift JIT/AOT integration, and runtime ABI boundary.
+- `.stasis` owns user program source, language feature usage, and gameplay/runtime logic.
+- Rust owns compiler implementation end-to-end: lexer/tokenization, parser, semantic diagnostics, incremental compile policy, lowering, and Cranelift JIT/AOT backend integration.
+- Rust owns runtime/backends: watcher input bridge, message transport, swap coordinator execution, executable memory management, and runtime ABI boundary.
 
 Constraints:
 
-- Compiler frontend semantics must not diverge between languages; `.stasis` is source of truth.
-- Rust wrappers may validate/invoke `.stasis` compiler flows but do not re-implement parser/semantic policy.
+- Compiler semantics are spec-driven by `docs/spec.md`; Rust compiler behavior must conform to the spec.
+- New compiler frontend/backend behavior is implemented in Rust.
 
 ## 13. Code Memory Management
 
