@@ -92,6 +92,16 @@ jobs:
           Copy-Item samples "$out/" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
 
+      - name: Smoke test bundled graphics runtime (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+          Push-Location "dist/stasis-release-${{ runner.os }}/bin"
+          .\stasis.exe probe-graphics-runtime
+          Pop-Location
+
       - name: Upload artifact (unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4

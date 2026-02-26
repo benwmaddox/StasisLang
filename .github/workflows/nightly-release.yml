@@ -157,6 +157,16 @@ jobs:
           Copy-Item samples "$out/" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
 
+      - name: Smoke test bundled graphics runtime (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+          Push-Location "dist/${{ matrix.archive }}/bin"
+          .\stasis.exe probe-graphics-runtime
+          Pop-Location
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
