@@ -4,45 +4,102 @@ Stasis is an experimental programming language and toolchain focused on determin
 
 - Static global memory (no hidden allocations)
 - Predictable layouts (stable field offsets and array layouts)
-- Tick-based runtime model (host sets a per-frame snapshot; Stasis emits command buffers)
-- Fast edit-compile-run loops via in-process hot swap in development
+- A simple game loop model (`main` once, then `tick` + `render` each frame)
+- Fast edit-compile-run loops via in-process JIT + hot swap in development
 
 ## Status
 
 Fast-moving. Expect breaking changes.
 
-## Architecture (Rewrite V1)
+## Start Here
 
-Rewrite V1 is Rust-first:
+Most users will:
 
-- `apps/stasis`: main app/CLI. Includes in-process dev runner (`play`) with file watch + hot swap.
-- `crates/stasis_compiler`: Rust-native frontend + lowering to Cranelift (JIT/AOT).
-- `crates/stasis_jit`: JIT/AOT codegen support + function pointer table commit mechanics.
-- `crates/stasis_runner`: swap pipeline contracts + sequencing.
-- `runtime/`: native graphics/audio host runtime (currently Windows-focused; used by `play`).
-- `src/stdlib/`: Stasis standard library modules.
-- `samples/brickout_revenge/`: end-to-end sample game.
+1. Write a `.stasis` game with `main()`, `tick()`, `render()`.
+2. Run it in dev with `play` (watch + hot swap).
+3. Write `.stasis` tests and run them with `test`.
+4. Later: build production artifacts with AOT (WIP).
 
-Canonical documents:
+Nightly releases are published from `main`:
 
-- `docs/spec.md`: language spec (Rewrite V1)
-- `docs/live-compilation-prd.md`: hot swap + product requirements
-- `docs/rewrite_v1_checklist.md`: execution plan and slice ordering
+- Releases: https://github.com/benwmaddox/StasisLang/releases
+- Workflow: `.github/workflows/nightly-release.yml`
 
-## Build/Test (from source)
+On Windows, SmartScreen may warn on unsigned binaries.
 
-```bash
-cargo build
-cargo test
+## Hello, World
+
+Create `hello.stasis`:
+
+```stasis
+import "../src/stdlib/stdlib.stasis";
+
+function main(): i32 {
+    print_string("hello from stasis\n");
+    return 0;
+}
 ```
 
-## Run (dev in-process play + watch + hot swap)
+Note: import paths are project-relative. In this repo, the samples typically use `../src/stdlib/...` or `../../src/stdlib/...`.
 
-Build once:
+## Minimal Game Skeleton
 
-```bash
-cargo build -p stasis
+Stasis gameplay code is usually:
+
+- One global `state` struct (your entire simulation state).
+- `main()` initializes state and requests the window.
+- `tick()` updates state using host snapshots (input/window info).
+- `render()` emits drawing commands (no direct rendering calls on hot path).
+
+Example:
+
+```stasis
+import "../src/stdlib/stdlib.stasis";
+import "../src/stdlib/graphics.stasis";
+import "../src/stdlib/sdl_scancodes.stasis";
+
+struct GameState {
+    x: f32;
+}
+
+global state: GameState;
+
+function main(): i32 {
+    // Host reads the request and creates/updates the window.
+    init_window(800, 600, "Stasis Game");
+    state.x = 120.0;
+    return 0;
+}
+
+function tick(): i32 {
+    if (should_quit()) { return 1; }
+
+    if (is_key_down(Scancode.Left)) { state.x = state.x - 3.0; }
+    if (is_key_down(Scancode.Right)) { state.x = state.x + 3.0; }
+
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.05, 0.05, 0.10, 1.0);
+    draw_line(state.x, 60.0, state.x + 120.0, 60.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+    return 0;
+}
+
+// Optional: runs after a successful hot swap.
+function on_code_swap(): void { return; }
 ```
+
+## Game Dev Workflow (Watch + Hot Swap)
+
+Development runs in one process:
+
+- Stasis compiles to machine code via Cranelift JIT.
+- File changes are compiled in the background.
+- Swap commit happens between ticks.
+- On success the runner prints swap timing.
 
 Run Brickout Revenge v1 (Windows in-process dev runner):
 
@@ -50,22 +107,61 @@ Run Brickout Revenge v1 (Windows in-process dev runner):
 .\target\debug\stasis.exe play samples\brickout_revenge\brickout_revenge_v1.stasis --watch-dir samples\brickout_revenge
 ```
 
-What to expect:
+Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
 
-- Save a `.stasis` file under `--watch-dir` and the runner recompiles between ticks.
-- On success you should see `[swap] swapped ok ... total=...ms` in stdout.
+```text
+[watch] change detected: ...
+[swap] swapped ok total=29ms (compile=...ms package=...ms hook=...ms deps=...ms)
+```
 
-## Nightly Builds
+Notes:
 
-Nightly prereleases are published from `main` when new commits are detected since the last nightly tag.
+- `play` is currently Windows-focused (graphics runtime integration).
+- You can cap runtime for smoke testing with `--ticks N`.
 
-- Releases: https://github.com/benwmaddox/StasisLang/releases
-- Workflow: `.github/workflows/nightly-release.yml`
+## Tests (In Stasis, Run via JIT)
 
-Bundles:
+Create a test file like `math.test.stasis`:
 
-- `stasis-nightly-win-x64.zip`
-- `stasis-nightly-linux-x64.tar.gz`
-- `stasis-nightly-osx-x64.tar.gz`
+```stasis
+import "../src/stdlib/stdlib.stasis";
 
-On Windows, SmartScreen may warn on unsigned nightly binaries.
+test `adds`(): bool {
+    return 2 + 3 == 5;
+}
+```
+
+Run tests in a directory:
+
+```powershell
+.\target\debug\stasis.exe test --dir tests/stasis
+```
+
+Watch mode:
+
+```powershell
+.\target\debug\stasis.exe test --dir tests/stasis --watch --watch-settle-ms 50
+```
+
+## Build From Source
+
+```bash
+cargo build
+cargo test
+```
+
+## Where Things Live (Rewrite V1)
+
+- `apps/stasis`: main app/CLI (includes `play`, `test`, `aot-cli`).
+- `crates/stasis_compiler`: Rust-native frontend + Cranelift lowering (JIT/AOT).
+- `crates/stasis_jit`: JIT/AOT support + function pointer table.
+- `crates/stasis_runner`: swap pipeline contracts + sequencing.
+- `runtime/`: graphics/audio host runtime (used by `play`).
+- `src/stdlib/`: standard library.
+- `samples/brickout_revenge/`: end-to-end game sample.
+
+## Specs / PRD
+
+- `docs/spec.md`: canonical language spec (Rewrite V1)
+- `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
+- `docs/rewrite_v1_checklist.md`: execution plan and slice ordering
