@@ -11,6 +11,20 @@ Stasis is an experimental programming language and toolchain focused on determin
 
 Fast-moving. Expect breaking changes.
 
+## Philosophy and Influences
+
+Stasis is built around a few pragmatic ideas that work well for games and simulations:
+
+- Deterministic simulation: the same inputs produce the same outputs (tick-based, fixed-step thinking).
+- Make state explicit: prefer a single `global state` struct over scattered globals and hidden runtime state.
+- No hidden work: avoid implicit allocations and unpredictable background activity on the tick path.
+- Fast iteration: compile and hot-swap between ticks, with an explicit `on_code_swap()` hook for invariants.
+
+Direct influences:
+
+- **Age of Empires II**: deterministic, tick-style simulation mindset (good for replay/debug/lockstep-style thinking).
+- **Handmade Hero**: “simple and debuggable” game code, data-oriented structures, and skepticism of hidden complexity.
+
 ## Start Here
 
 Most users will:
