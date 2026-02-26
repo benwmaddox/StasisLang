@@ -1265,15 +1265,8 @@ fn dispatch_i32_call0(fn_id_raw: i32) -> Result<i32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=0"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback());
-    }
-    #[cfg(not(windows))]
-    {
-        Err("jit i32 dispatch call0 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback())
 }
 
 fn dispatch_i32_call1(fn_id_raw: i32, arg0: i32) -> Result<i32, String> {
@@ -1282,16 +1275,8 @@ fn dispatch_i32_call1(fn_id_raw: i32, arg0: i32) -> Result<i32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=1"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        Err("jit i32 dispatch call1 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0))
 }
 
 fn dispatch_i32_call2(fn_id_raw: i32, arg0: i32, arg1: i32) -> Result<i32, String> {
@@ -1300,17 +1285,8 @@ fn dispatch_i32_call2(fn_id_raw: i32, arg0: i32, arg1: i32) -> Result<i32, Strin
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=2"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        Err("jit i32 dispatch call2 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1))
 }
 
 fn dispatch_i32_call3(fn_id_raw: i32, arg0: i32, arg1: i32, arg2: i32) -> Result<i32, String> {
@@ -1319,19 +1295,8 @@ fn dispatch_i32_call3(fn_id_raw: i32, arg0: i32, arg1: i32, arg2: i32) -> Result
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        Err("jit i32 dispatch call3 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2))
 }
 
 fn dispatch_i32_call4(
@@ -1346,20 +1311,8 @@ fn dispatch_i32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        Err("jit i32 dispatch call4 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3))
 }
 
 fn dispatch_i32_call5(
@@ -1375,21 +1328,9 @@ fn dispatch_i32_call5(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=5"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        Err("jit i32 dispatch call5 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4))
 }
 
 fn dispatch_i32_call6(
@@ -1406,22 +1347,9 @@ fn dispatch_i32_call6(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=6"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32, i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        Err("jit i32 dispatch call6 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32, i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5))
 }
 
 fn dispatch_i32_call7(
@@ -1439,23 +1367,9 @@ fn dispatch_i32_call7(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=7"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32, i32, i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        Err("jit i32 dispatch call7 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32, i32, i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6))
 }
 
 fn dispatch_i32_call8(
@@ -1474,24 +1388,9 @@ fn dispatch_i32_call8(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=8"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        let _ = arg7;
-        Err("jit i32 dispatch call8 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7))
 }
 
 fn dispatch_i32_f32_call1(fn_id_raw: i32, arg0: f32) -> Result<i32, String> {
@@ -1500,16 +1399,8 @@ fn dispatch_i32_f32_call1(fn_id_raw: i32, arg0: f32) -> Result<i32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=1"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32) -> i32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        Err("jit i32 f32 dispatch call1 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0))
 }
 
 fn dispatch_i32_f32_call2(fn_id_raw: i32, arg0: f32, arg1: f32) -> Result<i32, String> {
@@ -1518,17 +1409,8 @@ fn dispatch_i32_f32_call2(fn_id_raw: i32, arg0: f32, arg1: f32) -> Result<i32, S
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=2"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        Err("jit i32 f32 dispatch call2 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1))
 }
 
 fn dispatch_i32_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Result<i32, String> {
@@ -1537,19 +1419,8 @@ fn dispatch_i32_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Re
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        Err("jit i32 f32 dispatch call3 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2))
 }
 
 fn dispatch_i32_f32_call4(
@@ -1564,20 +1435,8 @@ fn dispatch_i32_f32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        Err("jit i32 f32 dispatch call4 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3))
 }
 
 fn dispatch_i32_f32_call5(
@@ -1593,21 +1452,9 @@ fn dispatch_i32_f32_call5(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=5"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        Err("jit i32 f32 dispatch call5 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4))
 }
 
 fn dispatch_i32_f32_call6(
@@ -1624,22 +1471,9 @@ fn dispatch_i32_f32_call6(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=6"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        Err("jit i32 f32 dispatch call6 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5))
 }
 
 fn dispatch_i32_f32_call7(
@@ -1657,23 +1491,9 @@ fn dispatch_i32_f32_call7(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=7"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        Err("jit i32 f32 dispatch call7 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6))
 }
 
 fn dispatch_i32_f32_call8(
@@ -1692,24 +1512,9 @@ fn dispatch_i32_f32_call8(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=8"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32, f32) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        let _ = arg7;
-        Err("jit i32 f32 dispatch call8 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7))
 }
 
 fn dispatch_f32_call0(fn_id_raw: i32) -> Result<f32, String> {
@@ -1718,15 +1523,8 @@ fn dispatch_f32_call0(fn_id_raw: i32) -> Result<f32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=0"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn() -> f32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback());
-    }
-    #[cfg(not(windows))]
-    {
-        Err("jit f32 dispatch call0 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn() -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback())
 }
 
 fn dispatch_f32_call1(fn_id_raw: i32, arg0: f32) -> Result<f32, String> {
@@ -1735,16 +1533,8 @@ fn dispatch_f32_call1(fn_id_raw: i32, arg0: f32) -> Result<f32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=1"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32) -> f32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        Err("jit f32 dispatch call1 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32) -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0))
 }
 
 fn dispatch_f32_call2(fn_id_raw: i32, arg0: f32, arg1: f32) -> Result<f32, String> {
@@ -1753,17 +1543,8 @@ fn dispatch_f32_call2(fn_id_raw: i32, arg0: f32, arg1: f32) -> Result<f32, Strin
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=2"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        Err("jit f32 dispatch call2 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1))
 }
 
 fn dispatch_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Result<f32, String> {
@@ -1772,19 +1553,8 @@ fn dispatch_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Result
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        Err("jit f32 dispatch call3 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2))
 }
 
 fn dispatch_f32_call4(
@@ -1799,20 +1569,8 @@ fn dispatch_f32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        Err("jit f32 dispatch call4 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3))
 }
 
 fn dispatch_f32_call5(
@@ -1828,21 +1586,9 @@ fn dispatch_f32_call5(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=5"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        Err("jit f32 dispatch call5 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4))
 }
 
 fn dispatch_f32_call6(
@@ -1859,22 +1605,9 @@ fn dispatch_f32_call6(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=6"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        Err("jit f32 dispatch call6 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5))
 }
 
 fn dispatch_f32_call7(
@@ -1892,23 +1625,9 @@ fn dispatch_f32_call7(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=7"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        Err("jit f32 dispatch call7 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6))
 }
 
 fn dispatch_f32_call8(
@@ -1927,24 +1646,9 @@ fn dispatch_f32_call8(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=8"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32, f32) -> f32 =
-            unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        let _ = arg1;
-        let _ = arg2;
-        let _ = arg3;
-        let _ = arg4;
-        let _ = arg5;
-        let _ = arg6;
-        let _ = arg7;
-        Err("jit f32 dispatch call8 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7))
 }
 
 fn dispatch_f32_call_i32_1(fn_id_raw: i32, arg0: i32) -> Result<f32, String> {
@@ -1953,16 +1657,8 @@ fn dispatch_f32_call_i32_1(fn_id_raw: i32, arg0: i32) -> Result<f32, String> {
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=1"));
     }
-    #[cfg(windows)]
-    {
-        let callback: extern "system" fn(i32) -> f32 = unsafe { std::mem::transmute(address) };
-        return Ok(callback(arg0));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = arg0;
-        Err("jit f32 dispatch call(i32)->f32 is only supported on windows".to_string())
-    }
+    let callback: extern "system" fn(i32) -> f32 = unsafe { std::mem::transmute(address) };
+    Ok(callback(arg0))
 }
 
 fn lookup_jit_i32_target(fn_id: u32, arity: u8) -> Result<usize, String> {
