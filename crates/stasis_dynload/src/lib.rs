@@ -16,6 +16,8 @@ pub struct Library {
 
 // Library handles are process-wide OS resources and can be moved between threads.
 unsafe impl Send for Library {}
+// Loading a module and calling exports is thread-safe on Windows; the handle is immutable after load.
+unsafe impl Sync for Library {}
 
 impl Library {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -78,6 +80,22 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     #[cfg(windows)]
     {
         let callback: extern "system" fn() -> u64 = unsafe { std::mem::transmute(address) };
+        return Ok(callback());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = address;
+        Err("native no-arg invocation is only supported on windows in stasis_dynload".to_string())
+    }
+}
+
+pub fn invoke_noarg_i32(address: usize) -> Result<i32, String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
         return Ok(callback());
     }
     #[cfg(not(windows))]
@@ -264,6 +282,53 @@ impl StasisGraphicsApi {
     }
 }
 
+// ============================================================
+// stasis_graphics asset API (JIT extern call bridge)
+// ============================================================
+
+struct StasisGraphicsAssetsApi {
+    _lib: Library,
+    stasis_gfx_load_sprite: usize,
+    stasis_gfx_dump_bmp: usize,
+    stasis_load_font: usize,
+    stasis_measure_text: usize,
+    stasis_gfx_cache_text: usize,
+}
+
+impl StasisGraphicsAssetsApi {
+    fn load_default() -> Result<Self, String> {
+        for candidate in runtime_library_candidate_paths() {
+            if !candidate.exists() {
+                continue;
+            }
+            if let Ok(api) = Self::load(&candidate) {
+                return Ok(api);
+            }
+        }
+        Err("failed to load stasis_graphics runtime library for asset calls".to_string())
+    }
+
+    fn load(path: &Path) -> Result<Self, String> {
+        let lib = Library::load(path)?;
+        Ok(Self {
+            stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
+            stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
+            stasis_load_font: lib.symbol_address("stasis_load_font")?,
+            stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
+            stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
+            _lib: lib,
+        })
+    }
+}
+
+fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, String> {
+    static API: OnceLock<Result<StasisGraphicsAssetsApi, String>> = OnceLock::new();
+    match API.get_or_init(StasisGraphicsAssetsApi::load_default) {
+        Ok(api) => Ok(api),
+        Err(error) => Err(error.clone()),
+    }
+}
+
 fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
@@ -406,6 +471,129 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     if let Some(text) = guard.get(&value_id) {
         print!("{text}");
         let _ = std::io::stdout().flush();
+    }
+}
+
+#[cfg(windows)]
+fn jit_string_literal_to_cstring(value_id: i32) -> Result<CString, String> {
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    let Some(text) = guard.get(&value_id) else {
+        return Err(format!(
+            "missing jit string literal for id={value_id} (string extern bridge only supports literals today)"
+        ));
+    };
+    CString::new(text.as_bytes())
+        .map_err(|_| "string contains interior NUL byte; cannot pass to C runtime".to_string())
+}
+
+// JIT string->C bridge for startup/asset extern calls.
+// The language-level `string` currently lowers to an i32 handle in the JIT path, so we must
+// translate that into a stable `const char*` when calling the C runtime.
+pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
+        return callback(path.as_ptr(), max_w, max_h);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        let _ = max_w;
+        let _ = max_h;
+        0
+    }
+}
+
+pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_dump_bmp) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_load_font) };
+        return callback(path.as_ptr(), size);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        let _ = size;
+        0
+    }
+}
+
+pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    #[cfg(windows)]
+    {
+        let Ok(text) = jit_string_literal_to_cstring(text_id) else {
+            return 0.0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0.0;
+        };
+        let callback: extern "system" fn(i32, *const c_char) -> f32 =
+            unsafe { std::mem::transmute(api.stasis_measure_text) };
+        return callback(font, text.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = font;
+        let _ = text_id;
+        0.0
+    }
+}
+
+pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(text) = jit_string_literal_to_cstring(text_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(i32, *const c_char) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_cache_text) };
+        return callback(font, text.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = font;
+        let _ = text_id;
+        0
     }
 }
 
@@ -937,7 +1125,18 @@ pub extern "C" fn stasis_jit_sys_memcpy_u8(
     src_index: i32,
     count: i32,
 ) {
-    copy_i32_array_lane(dst, dst_index, src, src_index, count);
+    if count <= 0 {
+        return;
+    }
+    let mut values: Vec<i32> = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let index = src_index.saturating_add(offset);
+        values.push(stasis_jit_global_i32_array_load(src, 0, index));
+    }
+    for (offset, value) in values.into_iter().enumerate() {
+        let index = dst_index.saturating_add(offset as i32);
+        stasis_jit_global_i32_array_store(dst, 0, index, value);
+    }
 }
 
 pub extern "C" fn stasis_jit_sys_memcpy_i32(
@@ -947,7 +1146,18 @@ pub extern "C" fn stasis_jit_sys_memcpy_i32(
     src_index: i32,
     count: i32,
 ) {
-    copy_i32_array_lane(dst, dst_index, src, src_index, count);
+    if count <= 0 {
+        return;
+    }
+    let mut values: Vec<i32> = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let index = src_index.saturating_add(offset);
+        values.push(stasis_jit_global_i32_array_load(src, 0, index));
+    }
+    for (offset, value) in values.into_iter().enumerate() {
+        let index = dst_index.saturating_add(offset as i32);
+        stasis_jit_global_i32_array_store(dst, 0, index, value);
+    }
 }
 
 pub extern "C" fn stasis_jit_sys_memcpy_f32(
@@ -957,7 +1167,18 @@ pub extern "C" fn stasis_jit_sys_memcpy_f32(
     src_index: i32,
     count: i32,
 ) {
-    copy_f32_array_lane(dst, dst_index, src, src_index, count);
+    if count <= 0 {
+        return;
+    }
+    let mut values: Vec<f32> = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let index = src_index.saturating_add(offset);
+        values.push(stasis_jit_global_f32_array_load(src, 0, index));
+    }
+    for (offset, value) in values.into_iter().enumerate() {
+        let index = dst_index.saturating_add(offset as i32);
+        stasis_jit_global_f32_array_store(dst, 0, index, value);
+    }
 }
 
 pub extern "C" fn stasis_jit_sys_memmove_u8(
@@ -967,7 +1188,7 @@ pub extern "C" fn stasis_jit_sys_memmove_u8(
     src_index: i32,
     count: i32,
 ) {
-    copy_i32_array_lane(dst, dst_index, src, src_index, count);
+    stasis_jit_sys_memcpy_u8(dst, dst_index, src, src_index, count);
 }
 
 pub extern "C" fn stasis_jit_sys_memmove_i32(
@@ -977,7 +1198,7 @@ pub extern "C" fn stasis_jit_sys_memmove_i32(
     src_index: i32,
     count: i32,
 ) {
-    copy_i32_array_lane(dst, dst_index, src, src_index, count);
+    stasis_jit_sys_memcpy_i32(dst, dst_index, src, src_index, count);
 }
 
 pub extern "C" fn stasis_jit_sys_memmove_f32(
@@ -987,53 +1208,22 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
     src_index: i32,
     count: i32,
 ) {
-    copy_f32_array_lane(dst, dst_index, src, src_index, count);
+    stasis_jit_sys_memcpy_f32(dst, dst_index, src, src_index, count);
 }
 
-fn copy_i32_array_lane(dst: i32, dst_index: i32, src: i32, src_index: i32, count: i32) {
-    if count <= 0 {
-        return;
-    }
-    let mut values: Vec<i32> = Vec::with_capacity(count as usize);
-    {
-        let table = jit_i32_array_global_table();
-        let guard = table.lock().expect("jit global table mutex poisoned");
-        for offset in 0..count {
-            let index = src_index.saturating_add(offset);
-            values.push(*guard.get(&(src, 0, index)).unwrap_or(&0));
-        }
-    }
-    {
-        let table = jit_i32_array_global_table();
-        let mut guard = table.lock().expect("jit global table mutex poisoned");
-        for (offset, value) in values.into_iter().enumerate() {
-            let index = dst_index.saturating_add(offset as i32);
-            guard.insert((dst, 0, index), value);
-        }
-    }
+// ============================================================
+// Audio host API (JIT extern call bridge)
+// ============================================================
+
+// Current dev runner doesn't model audio as a command buffer yet.
+// Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
+// pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
+pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
+    0
 }
 
-fn copy_f32_array_lane(dst: i32, dst_index: i32, src: i32, src_index: i32, count: i32) {
-    if count <= 0 {
-        return;
-    }
-    let mut values: Vec<f32> = Vec::with_capacity(count as usize);
-    {
-        let table = jit_f32_array_global_table();
-        let guard = table.lock().expect("jit global table mutex poisoned");
-        for offset in 0..count {
-            let index = src_index.saturating_add(offset);
-            values.push(*guard.get(&(src, 0, index)).unwrap_or(&0.0));
-        }
-    }
-    {
-        let table = jit_f32_array_global_table();
-        let mut guard = table.lock().expect("jit global table mutex poisoned");
-        for (offset, value) in values.into_iter().enumerate() {
-            let index = dst_index.saturating_add(offset as i32);
-            guard.insert((dst, 0, index), value);
-        }
-    }
+pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
+    0
 }
 
 fn dispatch_i32_call0(fn_id_raw: i32) -> Result<i32, String> {

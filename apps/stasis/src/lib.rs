@@ -161,6 +161,7 @@ pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
     tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
 ) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("in-process play runner currently supports Windows only".to_string());
@@ -170,6 +171,12 @@ pub fn run_play_in_process(
         .or_else(|| watch_file.parent())
         .ok_or_else(|| "play runner requires a watch directory".to_string())?;
 
+    // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
+    // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
+    let watch_dir_abs = watch_dir
+        .canonicalize()
+        .unwrap_or_else(|_| watch_dir.to_path_buf());
+
     let mut watcher = WatchService::start(watch_dir)
         .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
 
@@ -177,6 +184,13 @@ pub fn run_play_in_process(
         .canonicalize()
         .unwrap_or_else(|_| watch_file.to_path_buf());
     let root_path_str = root_path.to_string_lossy().to_string();
+
+    std::env::set_current_dir(&watch_dir_abs).map_err(|error| {
+        format!(
+            "failed to set current directory to {}: {error}",
+            watch_dir_abs.display()
+        )
+    })?;
 
     let mut watch_dependency_paths =
         collect_watch_dependency_paths(&root_path).ok();
@@ -274,11 +288,16 @@ pub fn run_play_in_process(
         &host_req_window_h_px,
     )?;
 
+    if max_ticks == Some(0) {
+        return Ok(());
+    }
+
     let mut tick_code_ptr = package.tick_code_ptr;
     let mut render_code_ptr = package.render_code_ptr;
     let mut on_code_swap_code_ptr = package.on_code_swap_code_ptr;
     let _ = on_code_swap_code_ptr;
 
+    let mut ticks_executed: u64 = 0;
     loop {
         // Drain file events and recompile at tick boundaries (all-or-nothing).
         let mut needs_recompile = false;
@@ -331,13 +350,11 @@ pub fn run_play_in_process(
             &host_req_window_h_px,
         )?;
 
-        let tick_raw = stasis_dynload::invoke_noarg_u64(tick_code_ptr as usize)?;
-        let tick_rc = (tick_raw as u32) as i32;
+        let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
         if tick_rc != 0 {
             break;
         }
-        let render_raw = stasis_dynload::invoke_noarg_u64(render_code_ptr as usize)?;
-        let render_rc = (render_raw as u32) as i32;
+        let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
         if render_rc != 0 {
             break;
         }
@@ -347,6 +364,13 @@ pub fn run_play_in_process(
             let ms = (tick_sleep_micros / 1000) as i32;
             if ms > 0 {
                 gfx.sleep_ms(ms)?;
+            }
+        }
+
+        ticks_executed = ticks_executed.saturating_add(1);
+        if let Some(limit) = max_ticks {
+            if ticks_executed >= limit {
+                break;
             }
         }
     }

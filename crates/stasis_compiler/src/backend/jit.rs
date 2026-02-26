@@ -1073,6 +1073,23 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "print_string" | "stasis_jit_print_string" => {
             stasis_dynload::stasis_jit_print_string as usize
         }
+        // Startup / asset-loading externs that take `string` (JIT lowers to i32 string-literal id today).
+        "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
+            stasis_dynload::stasis_jit_gfx_load_sprite as usize
+        }
+        "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => stasis_dynload::stasis_jit_gfx_dump_bmp as usize,
+        "load_font" | "stasis_load_font" => stasis_dynload::stasis_jit_load_font as usize,
+        "measure_text" | "stasis_measure_text" => stasis_dynload::stasis_jit_measure_text as usize,
+        "gfx_cache_text" | "stasis_gfx_cache_text" => {
+            stasis_dynload::stasis_jit_gfx_cache_text as usize
+        }
+        // Audio bridge: dev runner currently disables audio to avoid pointer-typed extern calls.
+        "audio_is_available" | "stasis_audio_is_available" => {
+            stasis_dynload::stasis_jit_audio_is_available as usize
+        }
+        "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
+            stasis_dynload::stasis_jit_audio_push_f32_interleaved as usize
+        }
         "sin_fast" | "stasis_jit_sin_fast" => stasis_dynload::stasis_jit_sin_fast as usize,
         "cos_fast" | "stasis_jit_cos_fast" => stasis_dynload::stasis_jit_cos_fast as usize,
         "stasis_jit_global_i32_load" => stasis_dynload::stasis_jit_global_i32_load as usize,

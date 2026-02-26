@@ -6496,6 +6496,10 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_default_summary_sidecar() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _guard = SUMMARY_ENV_LOCK.lock().expect("lock summary env");
+        let old_summary = std::env::var("STASIS_AOT_SUMMARY_FILE").ok();
+        std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -6553,6 +6557,9 @@ echo "signed" > "$1.signed"
         assert_eq!(sidecar_summary.entry_symbol, summary.entry_symbol);
         assert_eq!(sidecar_summary.object_file_names, summary.object_file_names);
 
+        if let Some(old) = old_summary {
+            std::env::set_var("STASIS_AOT_SUMMARY_FILE", old);
+        }
         fs::remove_dir_all(&temp_root).ok();
     }
 

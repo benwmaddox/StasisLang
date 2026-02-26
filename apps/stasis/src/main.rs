@@ -42,6 +42,7 @@ struct PlayCliArgs {
     watch_file: PathBuf,
     watch_dir: Option<PathBuf>,
     tick_sleep_micros: u64,
+    ticks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,6 +55,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut watch_file: Option<PathBuf> = None;
     let mut watch_dir: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
+    let mut ticks: Option<u64> = None;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -70,6 +72,18 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
                 return Err("missing value for --watch-dir".to_string());
             }
             watch_dir = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--ticks" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --ticks".to_string());
+            }
+            ticks = Some(
+                args[i + 1]
+                    .parse::<u64>()
+                    .map_err(|error| format!("invalid value for --ticks: {error}"))?,
+            );
             i += 2;
             continue;
         }
@@ -92,6 +106,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         watch_file,
         watch_dir,
         tick_sleep_micros,
+        ticks,
     })
 }
 
@@ -121,6 +136,7 @@ fn try_run_play_subcommand() -> Option<i32> {
         &parsed.watch_file,
         watch_dir.as_deref(),
         parsed.tick_sleep_micros,
+        parsed.ticks,
     ) {
         Ok(()) => Some(0),
         Err(message) => {
