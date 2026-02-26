@@ -64,53 +64,71 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            rid: linux-x64
             rust_target: x86_64-unknown-linux-gnu
             archive: stasis-nightly-linux-x64
             ext: tar.gz
           - os: windows-latest
-            rid: win-x64
             rust_target: x86_64-pc-windows-msvc
             archive: stasis-nightly-win-x64
             ext: zip
-          - os: macos-14
-            rid: osx-x64
+          - os: macos-13
             rust_target: x86_64-apple-darwin
             archive: stasis-nightly-osx-x64
             ext: tar.gz
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            archive: stasis-nightly-osx-arm64
+            ext: tar.gz
     runs-on: ${{ matrix.os }}
-    env:
-      DOTNET_NOLOGO: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "9.0.x"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Build Cranelift AOT helper
+      - name: Setup MSVC dev environment (windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build stasis (release)
+        run: cargo build -p stasis --release --target ${{ matrix.rust_target }}
+
+      - name: Build Cranelift AOT helper (release)
         run: cargo build -p stasis-cranelift-aot --release --target ${{ matrix.rust_target }}
         working-directory: tools/cranelift-aot
 
-      - name: Build Cranelift JIT runner
-        run: cargo build -p stasis-cranelift-jit-runner --release --target ${{ matrix.rust_target }}
-        working-directory: tools/cranelift-jit-runner
+      - name: Build stasis_graphics runtime (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      - name: Publish Stasis CLI (self-contained)
-        run: >
-          dotnet publish Stasis.Cli/Stasis.Cli.csproj
-          -c Release
-          -r ${{ matrix.rid }}
-          -p:SelfContained=true
-          -p:PublishSingleFile=true
-          -p:PublishReadyToRun=true
-          -o dist/cli
+          # Prefer GitHub runner's preinstalled vcpkg if available.
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot -or -not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
+            if (Test-Path "C:\\vcpkg\\vcpkg.exe") {
+              $vcpkgRoot = "C:\\vcpkg"
+            }
+          }
+          if (-not $vcpkgRoot -or -not (Test-Path (Join-Path $vcpkgRoot "vcpkg.exe"))) {
+            throw "vcpkg.exe not found (expected VCPKG_INSTALLATION_ROOT or C:\\vcpkg)."
+          }
+
+          $triplet = "x64-windows-static"
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" "glew:$triplet" --recurse
+
+          $buildDir = "runtime/build_ci"
+          cmake -S runtime -B $buildDir -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$triplet" `
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
+            -DSTASIS_BUILD_RUNNER=OFF `
+            -DSTASIS_BUILD_SYS=OFF
+
+          cmake --build $buildDir --config Release --target stasis_graphics
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -119,10 +137,13 @@ jobs:
           set -euo pipefail
           out="dist/${{ matrix.archive }}"
           mkdir -p "${out}/bin"
-          cp -R dist/cli/. "${out}/"
-          cp tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot "${out}/bin/"
-          cp tools/cranelift-jit-runner/target/${{ matrix.rust_target }}/release/stasis-cranelift-jit-runner "${out}/bin/"
+          cp "target/${{ matrix.rust_target }}/release/stasis" "${out}/bin/"
+          cp "tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot" "${out}/bin/"
           cp README.md "${out}/"
+          cp LICENSE "${out}/"
+          # Ship the stdlib + samples so relative imports keep working in the bundle.
+          cp -R src "${out}/"
+          cp -R samples "${out}/"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
 
       - name: Assemble bundle (windows)
@@ -131,11 +152,27 @@ jobs:
         run: |
           $out = "dist/${{ matrix.archive }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
-          Copy-Item dist/cli/* $out -Recurse -Force
-          Copy-Item tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot.exe "$out/bin/" -Force
-          Copy-Item tools/cranelift-jit-runner/target/${{ matrix.rust_target }}/release/stasis-cranelift-jit-runner.exe "$out/bin/" -Force
+          Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/bin/" -Force
+          Copy-Item "tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot.exe" "$out/bin/" -Force
+          # Include the graphics runtime DLL so `stasis play` works out of the box on Windows.
+          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/bin/" -Force
           Copy-Item README.md "$out/" -Force
+          Copy-Item LICENSE "$out/" -Force
+          # Ship the stdlib + samples so relative imports keep working in the bundle.
+          Copy-Item src "$out/" -Recurse -Force
+          Copy-Item samples "$out/" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
+
+      - name: Smoke test bundled graphics runtime (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+          Push-Location "dist/${{ matrix.archive }}/bin"
+          .\stasis.exe probe-graphics-runtime
+          .\stasis-cranelift-aot.exe --help | Out-Null
+          Pop-Location
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4

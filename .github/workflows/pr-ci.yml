@@ -19,64 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  debounce:
-    runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.debounce.outputs.should_run }}
-    steps:
-      - name: Debounce synchronize runs (max once per hour per PR)
-        id: debounce
-        uses: actions/github-script@v7
-        with:
-          script: |
-            if (context.eventName !== "pull_request" || context.payload.action !== "synchronize") {
-              core.setOutput("should_run", "true");
-              return;
-            }
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const prNumber = context.payload.pull_request.number;
-            const currentRunId = context.runId;
-            const oneHourMs = 60 * 60 * 1000;
-            const nowMs = Date.now();
-
-            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
-              owner,
-              repo,
-              workflow_id: "pr-ci.yml",
-              event: "pull_request",
-              per_page: 100
-            });
-
-            const samePrRuns = runs
-              .filter((run) => run.id !== currentRunId)
-              .filter((run) => (run.pull_requests || []).some((pr) => pr.number === prNumber))
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-            if (samePrRuns.length === 0) {
-              core.setOutput("should_run", "true");
-              return;
-            }
-
-            const latest = samePrRuns[0];
-            const latestStartedAt = latest.run_started_at || latest.created_at;
-            const latestMs = new Date(latestStartedAt).getTime();
-            const deltaMs = nowMs - latestMs;
-
-            if (deltaMs < oneHourMs) {
-              core.notice(
-                `Skipping tests for PR #${prNumber}; last run was ${Math.floor(deltaMs / 60000)} minute(s) ago.`
-              );
-              core.setOutput("should_run", "false");
-              return;
-            }
-
-            core.setOutput("should_run", "true");
-
   test:
-    needs: debounce
-    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.debounce.outputs.should_run == 'true' }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -86,11 +30,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run Cargo Test
-        run: cargo test --workspace --all-targets
+        # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
+        run: cargo test --workspace --all-targets -- --test-threads=1
 
   bootstrap-smoke-windows:
-    needs: debounce
-    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && needs.debounce.outputs.should_run == 'true' }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: windows-latest
     steps:
       - name: Checkout
