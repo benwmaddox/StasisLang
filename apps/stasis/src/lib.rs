@@ -295,8 +295,6 @@ pub fn run_play_in_process(
 
     let mut tick_code_ptr = package.tick_code_ptr;
     let mut render_code_ptr = package.render_code_ptr;
-    let mut on_code_swap_code_ptr = package.on_code_swap_code_ptr;
-    let _ = on_code_swap_code_ptr;
 
     let mut ticks_executed: u64 = 0;
     loop {
@@ -345,18 +343,24 @@ pub fn run_play_in_process(
                     match jit.build_engine_package(&EngineEntrypoints::runtime_default()) {
                         Ok(next_package) => {
                             let package_ms = t_pkg.elapsed().as_millis();
-                            tick_code_ptr = next_package.tick_code_ptr;
-                            render_code_ptr = next_package.render_code_ptr;
-                            on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+
+                            // Candidate pointers: do not commit them until after the swap hook succeeds.
+                            let candidate_tick_code_ptr = next_package.tick_code_ptr;
+                            let candidate_render_code_ptr = next_package.render_code_ptr;
+                            let candidate_on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
 
                             let mut hook_ms: u128 = 0;
-                            if let Some(hook) = on_code_swap_code_ptr {
+                            let mut hook_failed: Option<String> = None;
+                            if let Some(hook) = candidate_on_code_swap_code_ptr {
                                 let t_hook = Instant::now();
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
-                                {
-                                    println!("[swap] on_code_swap failed: {error}");
+                                // Run the hook against the newly compiled code. If it fails, abort the swap attempt
+                                // and keep running last-known-good code/data.
+                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize) {
+                                    hook_ms = t_hook.elapsed().as_millis();
+                                    hook_failed = Some(error);
+                                } else {
+                                    hook_ms = t_hook.elapsed().as_millis();
                                 }
-                                hook_ms = t_hook.elapsed().as_millis();
                             }
 
                             let t_deps = Instant::now();
@@ -366,9 +370,19 @@ pub fn run_play_in_process(
                             let deps_ms = t_deps.elapsed().as_millis();
 
                             let total_ms = t_total.elapsed().as_millis();
-                            println!(
-                                "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
-                            );
+
+                            if let Some(error) = hook_failed {
+                                println!(
+                                    "[swap] aborted (on_code_swap failed) total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms): {error}"
+                                );
+                            } else {
+                                // Commit the swap (all-or-nothing).
+                                tick_code_ptr = candidate_tick_code_ptr;
+                                render_code_ptr = candidate_render_code_ptr;
+                                println!(
+                                    "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
+                                );
+                            }
                         }
                         Err(error) => {
                             println!(
