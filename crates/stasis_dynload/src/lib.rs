@@ -361,6 +361,29 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).
     out.push(PathBuf::from("stasis_graphics.dll"));
+
+    // Dev-friendly fallback: if the runtime DLL exists under this repo checkout, include it.
+    // This helps when `CARGO_TARGET_DIR` points outside the workspace (so `current_exe()` ancestry
+    // won't include the repo root).
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let repo_release = repo_root
+        .join("runtime")
+        .join("build")
+        .join("bin")
+        .join("Release")
+        .join("stasis_graphics.dll");
+    if repo_release.exists() {
+        out.push(repo_release);
+    }
+    let repo_debug = repo_root
+        .join("runtime")
+        .join("build")
+        .join("bin")
+        .join("Debug")
+        .join("stasis_graphics.dll");
+    if repo_debug.exists() {
+        out.push(repo_debug);
+    }
     out
 }
 

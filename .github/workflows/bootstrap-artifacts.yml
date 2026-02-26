@@ -33,6 +33,10 @@ jobs:
       - name: Build stasis (release)
         run: cargo build -p stasis --release
 
+      - name: Build Cranelift AOT helper (release)
+        run: cargo build -p stasis-cranelift-aot --release
+        working-directory: tools/cranelift-aot
+
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -71,6 +75,7 @@ jobs:
           out="dist/stasis-release-${{ runner.os }}"
           mkdir -p "${out}/bin"
           cp "target/release/stasis" "${out}/bin/"
+          cp "tools/cranelift-aot/target/release/stasis-cranelift-aot" "${out}/bin/"
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           cp -R src "${out}/"
@@ -84,6 +89,7 @@ jobs:
           $out = "dist/stasis-release-${{ runner.os }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
           Copy-Item "target/release/stasis.exe" "$out/bin/" -Force
+          Copy-Item "tools/cranelift-aot/target/release/stasis-cranelift-aot.exe" "$out/bin/" -Force
           # Include the graphics runtime DLL so `stasis play` works out of the box on Windows.
           Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/bin/" -Force
           Copy-Item README.md "$out/" -Force
@@ -100,6 +106,7 @@ jobs:
           Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
           Push-Location "dist/stasis-release-${{ runner.os }}/bin"
           .\stasis.exe probe-graphics-runtime
+          .\stasis-cranelift-aot.exe --help | Out-Null
           Pop-Location
 
       - name: Upload artifact (unix)
