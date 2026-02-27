@@ -71,7 +71,7 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
             archive: stasis-nightly-win-x64
             ext: zip
-          - os: macos-13
+          - os: macos-15
             rust_target: x86_64-apple-darwin
             archive: stasis-nightly-osx-x64
             ext: tar.gz
