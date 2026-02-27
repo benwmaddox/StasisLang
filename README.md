@@ -1,5 +1,7 @@
 # Stasis
 
+![Stasis Lang](opengraph.jpg)
+
 Stasis is an experimental programming language and toolchain focused on deterministic, game-style programs:
 
 - Static global memory (no hidden allocations)
