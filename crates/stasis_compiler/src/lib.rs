@@ -22,6 +22,12 @@ pub struct IncrementalCompileOutput {
     pub errors: Vec<ErrorMetric>,
 }
 
+pub const RETURN_TYPE_CODE_UNKNOWN: i32 = 0;
+pub const RETURN_TYPE_CODE_I32: i32 = 1;
+pub const RETURN_TYPE_CODE_VOID: i32 = 2;
+pub const RETURN_TYPE_CODE_F32: i32 = 3;
+pub const RETURN_TYPE_CODE_BOOL: i32 = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionMetric {
     pub file_index: usize,
@@ -30,6 +36,7 @@ pub struct FunctionMetric {
     pub sig_hash: i32,
     pub body_hash: i32,
     pub return_type: String,
+    pub return_type_code: i32,
     pub param_count: i32,
     pub first_param_type_code: i32,
     pub simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -101,6 +108,7 @@ struct ParsedFunction {
     sig_hash: i32,
     body_hash: i32,
     return_type: String,
+    return_type_code: i32,
     param_count: i32,
     first_param_type_code: i32,
     simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -359,6 +367,7 @@ impl IncrementalCompilerHost {
                     sig_hash: parsed.sig_hash,
                     body_hash: parsed.body_hash,
                     return_type: parsed.return_type.clone(),
+                    return_type_code: parsed.return_type_code,
                     param_count: parsed.param_count,
                     first_param_type_code: parsed.first_param_type_code,
                     simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
@@ -462,6 +471,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             &function.return_type_name,
         );
         let body_hash = hash_i32(body_text);
+        let return_type_code = return_type_code_from_name(&function.return_type_name);
         let first_param_type_code = function
             .params
             .first()
@@ -469,14 +479,14 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             .unwrap_or_default();
         if function.name == "main" {
             main_decl_count += 1;
-            if function.params.is_empty() && function.return_type_name == "i32" {
+            if function.params.is_empty() && return_type_code == RETURN_TYPE_CODE_I32 {
                 main_valid_count += 1;
             } else {
                 main_invalid_count += 1;
             }
         }
 
-        let expression = if function.return_type_name == "i32" {
+        let expression = if return_type_code == RETURN_TYPE_CODE_I32 {
             parse_return_expression(body_text)
         } else {
             None
@@ -502,7 +512,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_void_print_i32_call_target_id_hash,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
-        ) = if function.return_type_name == "void" {
+        ) = if return_type_code == RETURN_TYPE_CODE_VOID {
             analyze_simple_void_print_i32_metadata(body_text)
         } else {
             (None, None, None, None)
@@ -516,6 +526,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             sig_hash,
             body_hash,
             return_type: function.return_type_name.clone(),
+            return_type_code,
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
             first_param_type_code,
             simple_i32_return_expr,
@@ -853,6 +864,16 @@ fn type_code_from_name(type_name: &str) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn return_type_code_from_name(type_name: &str) -> i32 {
+    match type_name.trim() {
+        "i32" => RETURN_TYPE_CODE_I32,
+        "void" => RETURN_TYPE_CODE_VOID,
+        "f32" => RETURN_TYPE_CODE_F32,
+        "bool" => RETURN_TYPE_CODE_BOOL,
+        _ => RETURN_TYPE_CODE_UNKNOWN,
     }
 }
 
@@ -1340,7 +1361,7 @@ fn evaluate_function_i32(
         return None;
     }
     let function = functions.get(index)?;
-    if function.return_type != "i32" || function.param_count != 0 {
+    if function.return_type_code != RETURN_TYPE_CODE_I32 || function.param_count != 0 {
         return None;
     }
     let expression = return_exprs.get(index)?.as_ref()?;
@@ -1406,7 +1427,7 @@ fn evaluate_expr_i32(
             let mut selected = None;
             for candidate in candidates {
                 let function = functions.get(*candidate)?;
-                if function.return_type == "i32" && function.param_count == 0 {
+                if function.return_type_code == RETURN_TYPE_CODE_I32 && function.param_count == 0 {
                     if selected.is_some() {
                         return None;
                     }
@@ -1430,7 +1451,7 @@ fn build_stub_clif_text(function: &ParsedFunction, i32_return_value: i32) -> Str
     } else {
         "system_v"
     };
-    if function.return_type == "void" {
+    if function.return_type_code == RETURN_TYPE_CODE_VOID {
         format!("function %{symbol}() {call_conv} {{\nblock0:\nreturn\n}}")
     } else {
         format!(
@@ -2008,6 +2029,7 @@ mod tests {
             sig_hash,
             body_hash: sig_hash.wrapping_mul(31),
             return_type: "i32".to_string(),
+            return_type_code: RETURN_TYPE_CODE_I32,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -2212,6 +2234,14 @@ mod tests {
         assert_eq!(compile.functions.len(), 2);
         assert!(compile.functions.iter().any(|f| f.return_type == "i32"));
         assert!(compile.functions.iter().any(|f| f.return_type == "void"));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_I32));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_VOID));
         let main = compile
             .functions
             .iter()
@@ -2222,6 +2252,8 @@ mod tests {
             .iter()
             .find(|function| function.id_hash == hash_identifier("on_code_swap"))
             .expect("hook metric");
+        assert_eq!(main.return_type_code, RETURN_TYPE_CODE_I32);
+        assert_eq!(hook.return_type_code, RETURN_TYPE_CODE_VOID);
         assert_eq!(
             main.simple_i32_return_expr,
             Some(SimpleI32ReturnExpr::Literal(0))

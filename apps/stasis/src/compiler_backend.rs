@@ -1851,7 +1851,7 @@ fn resolve_unique_i32_call_target_symbol_by_hash(
     let target_id_hash = maybe_target_id_hash?;
     let mut matches = metrics.iter().filter(|candidate| {
         candidate.id_hash == target_id_hash
-            && candidate.return_type == "i32"
+            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
             && candidate.param_count == 0
     });
     if let Some(first) = matches.next() {
@@ -1871,7 +1871,7 @@ fn resolve_unique_i32_single_arg_call_target_symbol_by_hash(
     let target_id_hash = maybe_target_id_hash?;
     let mut matches = metrics.iter().filter(|candidate| {
         candidate.id_hash == target_id_hash
-            && candidate.return_type == "i32"
+            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
             && candidate.param_count == 1
             && candidate.first_param_type_code == first_param_type_code
     });
@@ -3193,6 +3193,7 @@ mod tests {
             sig_hash: 11,
             body_hash: 12,
             return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3217,6 +3218,7 @@ mod tests {
             sig_hash: 21,
             body_hash: 22,
             return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3252,6 +3254,7 @@ mod tests {
             sig_hash: 11,
             body_hash: 12,
             return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3276,6 +3279,7 @@ mod tests {
             sig_hash: 21,
             body_hash: 22,
             return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             param_count: 1,
             first_param_type_code: 1,
             simple_i32_return_expr: None,
@@ -10314,7 +10318,7 @@ fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
 }
 
 fn metric_uses_stub_fallback(metric: &stasis_compiler::FunctionMetric) -> bool {
-    if metric.return_type != "i32" {
+    if metric.return_type_code != stasis_compiler::RETURN_TYPE_CODE_I32 {
         return false;
     }
     metric.simple_i32_return_expr.is_none()
