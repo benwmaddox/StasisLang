@@ -143,10 +143,10 @@ impl JitProcess {
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
         type_table
-            .resolve_or_intern("string")
+            .ensure_utf8_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
         type_table
-            .resolve_or_intern("ascii[]")
+            .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
         let cache_miss = self
@@ -6406,7 +6406,7 @@ fn emit_simple_expression(
         SimpleExpr::StringLiteral(value) => {
             let literal_id = hash_string_literal(value);
             stasis_dynload::upsert_jit_string_literal(literal_id, value);
-            let string_type_id = type_table.resolve("string").unwrap_or(TYPE_ID_I32);
+            let string_type_id = type_table.string_literal_type_id().unwrap_or(TYPE_ID_I32);
             Ok(ValueBinding {
                 value: builder.ins().iconst(types::I32, i64::from(literal_id)),
                 type_id: string_type_id,

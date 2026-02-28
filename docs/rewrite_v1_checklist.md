@@ -776,6 +776,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Added targeted coverage for this shape in both paths: `crates/stasis_compiler::backend::jit::tests::jit_process_accepts_non_ascii_utf8_string_literal_argument` and `apps/stasis::compiler_backend::tests::aot_compile_accepts_utf8_literal_call_contract`.
 - JIT top-level constant/global primitive typing now routes through interned `TypeId`/`TypeCategory` checks instead of raw `"i32"/"f32"/"bool"` and `"string"/"utf8[]"/"ascii[]"` string matching in hot-path analysis helpers (`crates/stasis_compiler/src/backend/jit.rs`).
 - Added regression coverage for ASCII constant-identifier call flow on the interned path: `crates/stasis_compiler::backend::jit::tests::jit_process_executes_ascii_constant_identifier_argument`.
+- Added explicit text-view helper APIs in `TypeTable` (`ensure_utf8_view_id`, `ensure_ascii_view_id`, `string_literal_type_id`) and switched JIT compile/string-literal lowering paths to use those interned helpers instead of direct `"string"`/`"ascii[]"` name resolution in hot-path code (`crates/stasis_compiler/src/frontend/types.rs`, `crates/stasis_compiler/src/backend/jit.rs`).
 - Added deterministic unit coverage in `crates/stasis_compiler/src/frontend/types.rs` for array/string interning and layout metadata.
 - Status: `in_progress`
 - Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
