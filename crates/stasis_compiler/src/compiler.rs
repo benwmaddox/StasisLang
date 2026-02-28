@@ -32,9 +32,118 @@ pub struct FunctionMeta {
     pub dirty: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolEntry {
+    name_hash: u64,
+    function_id: FunctionId,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
-    pub map: HashMap<u64, FunctionId>,
+    slots: Vec<Option<SymbolEntry>>,
+    len: usize,
+}
+
+impl SymbolTable {
+    const MIN_CAPACITY: usize = 8;
+    const LOAD_FACTOR_NUMERATOR: usize = 7;
+    const LOAD_FACTOR_DENOMINATOR: usize = 10;
+
+    fn clear(&mut self) {
+        if self.slots.is_empty() {
+            self.slots = vec![None; Self::MIN_CAPACITY];
+            self.len = 0;
+            return;
+        }
+
+        self.slots.fill(None);
+        self.len = 0;
+    }
+
+    fn insert(&mut self, name_hash: u64, function_id: FunctionId) {
+        self.ensure_capacity_for_insert();
+        self.insert_no_resize(name_hash, function_id);
+    }
+
+    fn get(&self, name_hash: u64) -> Option<FunctionId> {
+        if self.len == 0 || self.slots.is_empty() {
+            return None;
+        }
+
+        let mut index = self.bucket_index(name_hash);
+        loop {
+            match self.slots[index] {
+                Some(entry) if entry.name_hash == name_hash => return Some(entry.function_id),
+                Some(_) => {
+                    index = (index + 1) & (self.slots.len() - 1);
+                }
+                None => return None,
+            }
+        }
+    }
+
+    fn ensure_capacity_for_insert(&mut self) {
+        if self.slots.is_empty() {
+            self.slots = vec![None; Self::MIN_CAPACITY];
+            self.len = 0;
+            return;
+        }
+
+        let threshold =
+            (self.slots.len() * Self::LOAD_FACTOR_NUMERATOR) / Self::LOAD_FACTOR_DENOMINATOR;
+        if self.len + 1 <= threshold {
+            return;
+        }
+
+        self.resize(self.slots.len() * 2);
+    }
+
+    fn resize(&mut self, requested_capacity: usize) {
+        let mut capacity = requested_capacity.max(Self::MIN_CAPACITY);
+        if !capacity.is_power_of_two() {
+            capacity = capacity.next_power_of_two();
+        }
+
+        let previous_slots = std::mem::replace(&mut self.slots, vec![None; capacity]);
+        self.len = 0;
+        for entry in previous_slots.into_iter().flatten() {
+            self.insert_no_resize(entry.name_hash, entry.function_id);
+        }
+    }
+
+    fn insert_no_resize(&mut self, name_hash: u64, function_id: FunctionId) {
+        let mut index = self.bucket_index(name_hash);
+        loop {
+            match &mut self.slots[index] {
+                Some(entry) if entry.name_hash == name_hash => {
+                    entry.function_id = function_id;
+                    return;
+                }
+                Some(_) => {
+                    index = (index + 1) & (self.slots.len() - 1);
+                }
+                slot @ None => {
+                    *slot = Some(SymbolEntry {
+                        name_hash,
+                        function_id,
+                    });
+                    self.len += 1;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn bucket_index(&self, name_hash: u64) -> usize {
+        (name_hash as usize) & (self.slots.len() - 1)
+    }
+
+    #[cfg(test)]
+    fn with_test_capacity(capacity: usize) -> Self {
+        let mut table = Self::default();
+        table.resize(capacity);
+        table
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,7 +219,7 @@ impl Compiler {
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
-        self.symbols.map.clear();
+        self.symbols.clear();
         self.deps = DependencyGraph;
 
         let mut dependency_hashes_by_function: Vec<Vec<u64>> = Vec::new();
@@ -123,9 +232,7 @@ impl Compiler {
             for indexed_function in indexed {
                 let function_id = self.functions.len() as FunctionId;
                 self.files[file_id].functions.push(function_id);
-                self.symbols
-                    .map
-                    .insert(indexed_function.name_hash, function_id);
+                self.symbols.insert(indexed_function.name_hash, function_id);
 
                 let previous = previous_hashes
                     .get(&(file_id as u32, indexed_function.name_hash))
@@ -163,7 +270,7 @@ impl Compiler {
         {
             let caller = caller_index as FunctionId;
             for dependency_hash in dependency_hashes {
-                if let Some(&callee) = self.symbols.map.get(&dependency_hash) {
+                if let Some(callee) = self.symbols.get(dependency_hash) {
                     if caller != callee {
                         unique_edges.insert((caller, callee));
                     }
@@ -305,6 +412,27 @@ mod tests {
             .iter()
             .find(|function| function.name == name)
             .expect("missing function by name")
+    }
+
+    #[test]
+    fn symbol_table_resolves_collision_heavy_keys() {
+        let mut table = SymbolTable::with_test_capacity(8);
+        let colliding_hashes = [1_u64, 9_u64, 17_u64, 25_u64];
+        for (offset, hash) in colliding_hashes.iter().enumerate() {
+            table.insert(*hash, (offset + 10) as FunctionId);
+        }
+
+        for (offset, hash) in colliding_hashes.iter().enumerate() {
+            assert_eq!(table.get(*hash), Some((offset + 10) as FunctionId));
+        }
+    }
+
+    #[test]
+    fn symbol_table_last_insert_wins_for_duplicate_hash() {
+        let mut table = SymbolTable::with_test_capacity(8);
+        table.insert(42, 1);
+        table.insert(42, 7);
+        assert_eq!(table.get(42), Some(7));
     }
 
     #[test]
@@ -455,6 +583,45 @@ mod tests {
         assert!(error.is_err(), "expected emit failure");
         assert!(function_by_name(&compiler, "main").dirty);
         assert!(function_by_name(&compiler, "helper").dirty);
+    }
+
+    #[test]
+    fn duplicate_name_across_files_resolves_to_last_indexed_function() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("a.stasis", "function shared(): i32 { return 1; }\n");
+        compiler.upsert_file(
+            "b.stasis",
+            "function shared(): i32 { return 2; }\nfunction main(): i32 { return shared(); }\n",
+        );
+
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.parsed_functions, 3);
+
+        let main = function_by_name(&compiler, "main");
+        assert_eq!(main.dependencies.len(), 1);
+        let callee = &compiler.functions()[main.dependencies[0] as usize];
+        assert_eq!(callee.name, "shared");
+        assert_eq!(callee.file_id, 1);
+    }
+
+    #[test]
+    fn duplicate_name_lookup_is_deterministic_across_repeated_index_passes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("a.stasis", "function shared(): i32 { return 1; }\n");
+        compiler.upsert_file(
+            "b.stasis",
+            "function shared(): i32 { return 2; }\nfunction main(): i32 { return shared(); }\n",
+        );
+
+        let mut resolved_file_ids = Vec::new();
+        for _ in 0..2 {
+            let _ = compiler.index_pass().expect("index pass");
+            let main = function_by_name(&compiler, "main");
+            let callee = &compiler.functions()[main.dependencies[0] as usize];
+            resolved_file_ids.push(callee.file_id);
+        }
+
+        assert_eq!(resolved_file_ids, vec![1_u32, 1_u32]);
     }
 
     #[test]
