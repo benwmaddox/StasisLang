@@ -652,6 +652,7 @@ struct ParsedParamDecl {
 #[derive(Debug, Clone)]
 enum EvalExpr {
     Literal(i32),
+    Identifier,
     Add(Box<EvalExpr>, Box<EvalExpr>),
     Sub(Box<EvalExpr>, Box<EvalExpr>),
     Mul(Box<EvalExpr>, Box<EvalExpr>),
@@ -1296,10 +1297,10 @@ impl<'a> EvalExpressionParser<'a> {
         match self.peek_byte()? {
             b'0'..=b'9' => self.parse_integer().map(EvalExpr::Literal),
             byte if is_identifier_start(byte) => {
-                let identifier = self.parse_identifier()?.to_string();
+                let identifier = self.parse_identifier()?;
                 self.skip_ws();
                 if self.peek_byte() != Some(b'(') {
-                    return None;
+                    return Some(EvalExpr::Identifier);
                 }
                 self.cursor += 1;
                 let mut args = Vec::new();
@@ -1324,7 +1325,7 @@ impl<'a> EvalExpressionParser<'a> {
                         _ => return None,
                     }
                 }
-                Some(EvalExpr::Call(identifier, args))
+                Some(EvalExpr::Call(identifier.to_string(), args))
             }
             b'(' => {
                 self.cursor += 1;
@@ -1378,6 +1379,7 @@ impl<'a> EvalExpressionParser<'a> {
 fn convert_eval_expr_to_simple(expression: &EvalExpr) -> Option<SimpleI32ReturnExpr> {
     match expression {
         EvalExpr::Literal(value) => Some(SimpleI32ReturnExpr::Literal(*value)),
+        EvalExpr::Identifier => None,
         EvalExpr::Add(lhs, rhs) => Some(SimpleI32ReturnExpr::Add(
             Box::new(convert_eval_expr_to_simple(lhs)?),
             Box::new(convert_eval_expr_to_simple(rhs)?),
@@ -1440,6 +1442,7 @@ fn evaluate_expr_i32(
 ) -> Option<i32> {
     match expression {
         EvalExpr::Literal(value) => Some(*value),
+        EvalExpr::Identifier => None,
         EvalExpr::Add(lhs, rhs) => Some(
             evaluate_expr_i32(lhs, functions, return_exprs, by_name, memo, visiting)?.wrapping_add(
                 evaluate_expr_i32(rhs, functions, return_exprs, by_name, memo, visiting)?,
@@ -2415,6 +2418,39 @@ mod tests {
         assert!(!wrapper.simple_i32_three_arg_uses_first_second_third_param_passthrough);
         assert!(!wrapper.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough);
         assert!(wrapper.simple_i32_two_arg_uses_literal_first_second_param_passthrough);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_sets_one_arg_passthrough_metric_flag_for_identifier_wrapper_shape() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_passthrough_ident_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction wrapper(value: i32): i32 { return callee(value); }\nfunction main(): i32 { return wrapper(3); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let wrapper = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("wrapper"))
+            .expect("wrapper metric");
+        assert!(wrapper.simple_i32_one_arg_uses_first_param_passthrough);
+        assert!(!wrapper.simple_i32_two_arg_uses_first_second_param_passthrough);
+        assert!(!wrapper.simple_i32_three_arg_uses_first_second_third_param_passthrough);
+        assert!(!wrapper.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough);
+        assert!(!wrapper.simple_i32_two_arg_uses_literal_first_second_param_passthrough);
         fs::remove_dir_all(&temp_root).ok();
     }
 
