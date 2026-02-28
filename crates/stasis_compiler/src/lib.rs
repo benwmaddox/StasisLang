@@ -58,6 +58,7 @@ pub struct FunctionMetric {
     pub simple_void_print_i32_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_add_delta: Option<i32>,
+    pub simple_void_print_is_one_arg: bool,
     pub clif_text: String,
 }
 
@@ -136,6 +137,7 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
+    simple_void_print_is_one_arg: bool,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
 }
@@ -415,6 +417,7 @@ impl IncrementalCompilerHost {
                         .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
                     simple_void_print_i32_call_add_delta: parsed
                         .simple_void_print_i32_call_add_delta,
+                    simple_void_print_is_one_arg: parsed.simple_void_print_is_one_arg,
                     clif_text: parsed.clif_text.clone(),
                 });
             }
@@ -560,6 +563,8 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
         } else {
             (None, None, None, None)
         };
+        let simple_void_print_is_one_arg = simple_void_print_i32_call_target_id_hash.is_some()
+            && simple_void_print_i32_literal.is_some();
         let uses_stub_fallback = return_type_code == RETURN_TYPE_CODE_I32
             && simple_i32_return_expr.is_none()
             && simple_i32_return_call_target_id_hash.is_none()
@@ -598,6 +603,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_void_print_i32_call_target_id_hash,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
+            simple_void_print_is_one_arg,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
         });
@@ -2110,6 +2116,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_is_one_arg: false,
             call_target_id_hashes: callees
                 .iter()
                 .map(|callee| hash_identifier(callee))
@@ -2360,6 +2367,10 @@ mod tests {
             .functions
             .iter()
             .all(|f| f.simple_void_print_i32_call_add_delta.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| !f.simple_void_print_is_one_arg));
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2451,6 +2462,36 @@ mod tests {
         assert!(!wrapper.simple_i32_three_arg_uses_first_second_third_param_passthrough);
         assert!(!wrapper.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough);
         assert!(!wrapper.simple_i32_two_arg_uses_literal_first_second_param_passthrough);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_keeps_simple_void_print_one_arg_metric_flag_false_for_current_rust_fallback_shapes()
+    {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_void_print_one_arg_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(): i32 { return 4; }\nfunction sink(): void { print_i32(callee()); return; }\nfunction main(): i32 { sink(); return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let sink = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("sink"))
+            .expect("sink metric");
+        assert!(!sink.simple_void_print_is_one_arg);
         fs::remove_dir_all(&temp_root).ok();
     }
 

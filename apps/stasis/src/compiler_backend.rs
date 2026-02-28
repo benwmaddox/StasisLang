@@ -1175,9 +1175,7 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_void_print_is_one_arg =
-                metric.simple_void_print_i32_call_target_id_hash.is_some()
-                    && metric.simple_void_print_i32_literal.is_some();
+            let simple_void_print_is_one_arg = metric.simple_void_print_is_one_arg;
             let resolved_simple_void_print_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
                     metric.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
@@ -3185,6 +3183,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_is_one_arg: false,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3216,6 +3215,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_is_one_arg: false,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee.clone()];
@@ -3258,6 +3258,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_is_one_arg: false,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3289,6 +3290,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_is_one_arg: false,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];
