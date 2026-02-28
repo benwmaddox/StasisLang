@@ -37,6 +37,7 @@ pub struct FunctionMetric {
     pub body_hash: i32,
     pub return_type: String,
     pub return_type_code: i32,
+    pub uses_stub_fallback: bool,
     pub param_count: i32,
     pub first_param_type_code: i32,
     pub simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -109,6 +110,7 @@ struct ParsedFunction {
     body_hash: i32,
     return_type: String,
     return_type_code: i32,
+    uses_stub_fallback: bool,
     param_count: i32,
     first_param_type_code: i32,
     simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -368,6 +370,7 @@ impl IncrementalCompilerHost {
                     body_hash: parsed.body_hash,
                     return_type: parsed.return_type.clone(),
                     return_type_code: parsed.return_type_code,
+                    uses_stub_fallback: parsed.uses_stub_fallback,
                     param_count: parsed.param_count,
                     first_param_type_code: parsed.first_param_type_code,
                     simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
@@ -517,6 +520,13 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
         } else {
             (None, None, None, None)
         };
+        let uses_stub_fallback = return_type_code == RETURN_TYPE_CODE_I32
+            && simple_i32_return_expr.is_none()
+            && simple_i32_return_call_target_id_hash.is_none()
+            && simple_i32_return_call_one_arg_target_id_hash.is_none()
+            && simple_i32_return_call_one_arg_arg_call_target_id_hash.is_none()
+            && simple_i32_return_two_call_left_target_id_hash.is_none()
+            && simple_i32_return_two_call_right_target_id_hash.is_none();
 
         let parsed_index = parsed_functions.len();
         parsed_functions.push(ParsedFunction {
@@ -527,6 +537,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             body_hash,
             return_type: function.return_type_name.clone(),
             return_type_code,
+            uses_stub_fallback,
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
             first_param_type_code,
             simple_i32_return_expr,
@@ -2030,6 +2041,7 @@ mod tests {
             body_hash: sig_hash.wrapping_mul(31),
             return_type: "i32".to_string(),
             return_type_code: RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: true,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,

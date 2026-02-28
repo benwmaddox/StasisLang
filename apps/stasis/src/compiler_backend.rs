@@ -3194,6 +3194,7 @@ mod tests {
             body_hash: 12,
             return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3219,6 +3220,7 @@ mod tests {
             body_hash: 22,
             return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3255,6 +3257,7 @@ mod tests {
             body_hash: 12,
             return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3280,6 +3283,7 @@ mod tests {
             body_hash: 22,
             return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 1,
             first_param_type_code: 1,
             simple_i32_return_expr: None,
@@ -10318,23 +10322,7 @@ fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
 }
 
 fn metric_uses_stub_fallback(metric: &stasis_compiler::FunctionMetric) -> bool {
-    if metric.return_type_code != stasis_compiler::RETURN_TYPE_CODE_I32 {
-        return false;
-    }
-    metric.simple_i32_return_expr.is_none()
-        && metric.simple_i32_return_call_target_id_hash.is_none()
-        && metric
-            .simple_i32_return_call_one_arg_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_call_one_arg_arg_call_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_two_call_left_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_two_call_right_target_id_hash
-            .is_none()
+    metric.uses_stub_fallback
 }
 
 fn resolve_aot_cli_summary_sidecar_path(
