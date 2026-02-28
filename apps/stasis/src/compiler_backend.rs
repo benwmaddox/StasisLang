@@ -1141,7 +1141,8 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_void_print_is_one_arg = metric.simple_void_print_is_one_arg;
+            let simple_void_print_call_target_shape_code =
+                metric.simple_void_print_call_target_shape_code;
             let resolved_simple_void_print_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
                     metric.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
@@ -1157,31 +1158,29 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let resolved_simple_void_print_call_target = if simple_void_print_is_one_arg {
-                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                    1,
-                )
-            } else if metric
-                .simple_void_print_i32_call_one_arg_arg_call_target_id_hash
-                .is_some()
-            {
-                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                    1,
-                )
-            } else {
-                resolve_unique_i32_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                )
-            };
+            let resolved_simple_void_print_call_target =
+                match simple_void_print_call_target_shape_code {
+                    stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+                    | stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL => {
+                        resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+                            metric.simple_void_print_i32_call_target_id_hash,
+                            metrics,
+                            1,
+                        )
+                    }
+                    _ => resolve_unique_i32_call_target_symbol_by_hash(
+                        metric.simple_void_print_i32_call_target_id_hash,
+                        metrics,
+                    ),
+                };
             if metric.simple_void_print_i32_call_target_id_hash.is_some()
                 && resolved_simple_void_print_call_target.is_none()
             {
-                if simple_void_print_is_one_arg {
+                if simple_void_print_call_target_shape_code
+                    == stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+                    || simple_void_print_call_target_shape_code
+                        == stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL
+                {
                     return Err(format!(
                         "unresolved void print_i32 one-arg call target for emitted function {} (id_hash={})",
                         function_name, metric.id_hash
@@ -3151,6 +3150,8 @@ mod tests {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
             simple_void_print_is_one_arg: false,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3184,6 +3185,8 @@ mod tests {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
             simple_void_print_is_one_arg: false,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee.clone()];
@@ -3228,6 +3231,8 @@ mod tests {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
             simple_void_print_is_one_arg: false,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3261,6 +3266,8 @@ mod tests {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
             simple_void_print_is_one_arg: false,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];

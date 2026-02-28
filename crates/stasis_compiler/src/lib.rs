@@ -34,6 +34,10 @@ pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH: i32 = 3;
 pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH: i32 = 4;
 pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST: i32 = 5;
 pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT: i32 = 6;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE: i32 = 0;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG: i32 = 1;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL: i32 = 2;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL: i32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionMetric {
@@ -67,6 +71,7 @@ pub struct FunctionMetric {
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_add_delta: Option<i32>,
     pub simple_void_print_is_one_arg: bool,
+    pub simple_void_print_call_target_shape_code: i32,
     pub clif_text: String,
 }
 
@@ -147,6 +152,7 @@ struct ParsedFunction {
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
     simple_void_print_is_one_arg: bool,
+    simple_void_print_call_target_shape_code: i32,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
 }
@@ -428,6 +434,8 @@ impl IncrementalCompilerHost {
                     simple_void_print_i32_call_add_delta: parsed
                         .simple_void_print_i32_call_add_delta,
                     simple_void_print_is_one_arg: parsed.simple_void_print_is_one_arg,
+                    simple_void_print_call_target_shape_code: parsed
+                        .simple_void_print_call_target_shape_code,
                     clif_text: parsed.clif_text.clone(),
                 });
             }
@@ -583,6 +591,11 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
         };
         let simple_void_print_is_one_arg = simple_void_print_i32_call_target_id_hash.is_some()
             && simple_void_print_i32_literal.is_some();
+        let simple_void_print_call_target_shape_code = simple_void_print_call_target_shape_code(
+            simple_void_print_i32_call_target_id_hash.is_some(),
+            simple_void_print_is_one_arg,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash.is_some(),
+        );
         let uses_stub_fallback = return_type_code == RETURN_TYPE_CODE_I32
             && simple_i32_return_expr.is_none()
             && simple_i32_return_call_target_id_hash.is_none()
@@ -623,6 +636,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
             simple_void_print_is_one_arg,
+            simple_void_print_call_target_shape_code,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
         });
@@ -981,6 +995,22 @@ fn simple_i32_one_arg_call_shape_code(
         SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT
     } else {
         SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE
+    }
+}
+
+fn simple_void_print_call_target_shape_code(
+    has_call_target: bool,
+    one_arg_literal: bool,
+    one_arg_arg_call: bool,
+) -> i32 {
+    if !has_call_target {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE
+    } else if one_arg_literal {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+    } else if one_arg_arg_call {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL
+    } else {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG
     }
 }
 
@@ -2162,6 +2192,7 @@ mod tests {
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
             simple_void_print_is_one_arg: false,
+            simple_void_print_call_target_shape_code: SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             call_target_id_hashes: callees
                 .iter()
                 .map(|callee| hash_identifier(callee))
@@ -2545,6 +2576,10 @@ mod tests {
             .find(|function| function.id_hash == hash_identifier("sink"))
             .expect("sink metric");
         assert!(!sink.simple_void_print_is_one_arg);
+        assert_eq!(
+            sink.simple_void_print_call_target_shape_code,
+            SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 
