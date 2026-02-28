@@ -10,7 +10,6 @@ mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
 pub use events::RunnerEvent;
-pub use window_config::WindowConfig;
 pub use self_host_runtime_bridge::{
     publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
@@ -20,6 +19,7 @@ pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
 };
+pub use window_config::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
@@ -36,8 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
@@ -178,8 +178,12 @@ pub fn run_play_in_process(
         .canonicalize()
         .unwrap_or_else(|_| watch_dir.to_path_buf());
 
-    let mut watcher = WatchService::start(watch_dir)
-        .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
+    let mut watcher = WatchService::start(watch_dir).map_err(|error| {
+        format!(
+            "failed to start watch service for {}: {error}",
+            watch_dir.display()
+        )
+    })?;
 
     let root_path = watch_file
         .canonicalize()
@@ -193,8 +197,7 @@ pub fn run_play_in_process(
         )
     })?;
 
-    let mut watch_dependency_paths =
-        collect_watch_dependency_paths(&root_path).ok();
+    let mut watch_dependency_paths = collect_watch_dependency_paths(&root_path).ok();
 
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
@@ -316,9 +319,7 @@ pub fn run_play_in_process(
             }
         }
         if ignored_changes > 0 && !needs_recompile {
-            println!(
-                "[watch] ignored {ignored_changes} change(s) (not in dependency graph)"
-            );
+            println!("[watch] ignored {ignored_changes} change(s) (not in dependency graph)");
         }
         if needs_recompile {
             let changed = triggered_paths
@@ -347,7 +348,8 @@ pub fn run_play_in_process(
                             // Candidate pointers: do not commit them until after the swap hook succeeds.
                             let candidate_tick_code_ptr = next_package.tick_code_ptr;
                             let candidate_render_code_ptr = next_package.render_code_ptr;
-                            let candidate_on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+                            let candidate_on_code_swap_code_ptr =
+                                next_package.on_code_swap_code_ptr;
 
                             let mut hook_ms: u128 = 0;
                             let mut hook_failed: Option<String> = None;
@@ -355,7 +357,8 @@ pub fn run_play_in_process(
                                 let t_hook = Instant::now();
                                 // Run the hook against the newly compiled code. If it fails, abort the swap attempt
                                 // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize) {
+                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
+                                {
                                     hook_ms = t_hook.elapsed().as_millis();
                                     hook_failed = Some(error);
                                 } else {
@@ -391,7 +394,6 @@ pub fn run_play_in_process(
                             );
                         }
                     }
-
                 }
                 Err(error) => {
                     // Keep running the last known-good code/data if compilation fails.
@@ -474,7 +476,9 @@ fn collect_stasis_sources_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
     paths.sort();
     for path in paths {
         if path.is_dir() {
@@ -597,11 +601,7 @@ fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf>
         return None;
     }
 
-    for preferred in [
-        "main.stasis",
-        "game.stasis",
-        "app.stasis",
-    ] {
+    for preferred in ["main.stasis", "game.stasis", "app.stasis"] {
         let candidate = watch_directory.join(preferred);
         if candidate.is_file() {
             return Some(candidate);
@@ -1786,8 +1786,11 @@ mod tests {
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_watch_entry_infer_{}", stamp));
         fs::create_dir_all(&temp_root).expect("create temp dir");
-        fs::write(temp_root.join("helper.stasis"), "function util(): i32 { return 1; }\n")
-            .expect("write helper");
+        fs::write(
+            temp_root.join("helper.stasis"),
+            "function util(): i32 { return 1; }\n",
+        )
+        .expect("write helper");
         fs::write(
             temp_root.join("main.stasis"),
             "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
@@ -1862,7 +1865,8 @@ mod tests {
         fs::write(&dep, "function dep(): i32 { return 0; }\n").expect("write dep");
         fs::write(&other, "function other(): i32 { return 0; }\n").expect("write other");
 
-        let mut dependency_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut dependency_paths: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         dependency_paths.insert(normalize_watch_path_for_log(&root));
         dependency_paths.insert(normalize_watch_path_for_log(&dep));
 
