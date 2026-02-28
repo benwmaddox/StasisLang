@@ -1,4 +1,4 @@
-﻿use crate::backend::EngineEntrypoints;
+use crate::backend::EngineEntrypoints;
 use crate::compiler::{
     CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
 };
@@ -14,16 +14,16 @@ use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::Ieee32,
-    types, AbiParam, FuncRef, InstBuilder, Value,
+    types, AbiParam, Block, FuncRef, InstBuilder, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -108,7 +108,8 @@ impl JitProcess {
             .filter(|file| file.path != root_source_path)
             .map(|file| (file.path.clone(), file.hash))
             .collect();
-        let tracked_paths: BTreeSet<String> = tracked.iter().map(|(path, _)| path.clone()).collect();
+        let tracked_paths: BTreeSet<String> =
+            tracked.iter().map(|(path, _)| path.clone()).collect();
         self.source_disk_probe_cache
             .retain(|path, _| tracked_paths.contains(path));
 
@@ -1072,7 +1073,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "stasis_jit_global_f32_load" => stasis_dynload::stasis_jit_global_f32_load as usize,
         "stasis_jit_global_f32_store" => stasis_dynload::stasis_jit_global_f32_store as usize,
         "stasis_jit_collection_i32_load" => stasis_dynload::stasis_jit_collection_i32_load as usize,
-        "stasis_jit_collection_i32_store" => stasis_dynload::stasis_jit_collection_i32_store as usize,
+        "stasis_jit_collection_i32_store" => {
+            stasis_dynload::stasis_jit_collection_i32_store as usize
+        }
         "sys_memcpy_u8" | "stasis_sys_memcpy_u8" | "stasis_jit_sys_memcpy_u8" => {
             stasis_dynload::stasis_jit_sys_memcpy_u8 as usize
         }
@@ -1232,6 +1235,8 @@ fn expand_global_type_paths(
             trimmed
         ));
     }
+    let struct_type_id = type_table.resolve_or_intern(trimmed)?;
+    out.insert(path.to_string(), struct_type_id);
     visiting_structs.push(trimmed.to_string());
     for field in fields {
         let child_path = format!("{path}.{}", field.name);
@@ -2043,8 +2048,16 @@ fn compile_function_to_jit_module(
             &mut module,
             "stasis_jit_global_f32_array_store",
         )?,
-        collection_i32_load: declare_i32_call_import(&mut module, "stasis_jit_collection_i32_load", 2)?,
-        collection_i32_store: declare_void_call_import(&mut module, "stasis_jit_collection_i32_store", 3)?,
+        collection_i32_load: declare_i32_call_import(
+            &mut module,
+            "stasis_jit_collection_i32_load",
+            2,
+        )?,
+        collection_i32_store: declare_void_call_import(
+            &mut module,
+            "stasis_jit_collection_i32_store",
+            3,
+        )?,
         extern_calls: declare_extern_call_imports(&mut module, call_signatures, type_table)?,
     };
 
@@ -2180,6 +2193,7 @@ fn compile_function_to_jit_module(
             collection_infos,
             named_struct_field_types,
             &empty_foreach_bindings,
+            None,
             meta.return_type,
             &mut next_variable,
         )?;
@@ -2618,8 +2632,14 @@ enum SimpleStmt {
         body_statements: Vec<SimpleStmt>,
     },
     Expr(SimpleExpr),
+    Continue,
     Return(SimpleExpr),
     ReturnVoid,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LoopControlContext {
+    continue_block: Block,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2719,6 +2739,14 @@ fn parse_simple_statements_from_block(
             cursor = semicolon + 1;
             continue;
         }
+        if starts_with_keyword(inner, cursor, "continue") {
+            let continue_start = cursor;
+            let semicolon = find_statement_terminator(inner, cursor)?;
+            let statement_text = inner[continue_start..semicolon].trim();
+            statements.push(parse_continue_statement(statement_text)?);
+            cursor = semicolon + 1;
+            continue;
+        }
         if starts_with_keyword(inner, cursor, "for") {
             let (statement, next_cursor) = parse_for_statement(inner, cursor, type_table)?;
             statements.push(statement);
@@ -2775,7 +2803,10 @@ fn parse_simple_statements_from_block(
     Ok(statements)
 }
 
-fn parse_let_statement(statement_text: &str, type_table: &mut TypeTable) -> Result<SimpleStmt, String> {
+fn parse_let_statement(
+    statement_text: &str,
+    type_table: &mut TypeTable,
+) -> Result<SimpleStmt, String> {
     let after_let = statement_text
         .strip_prefix("let")
         .ok_or_else(|| format!("invalid let statement '{statement_text}'"))?;
@@ -2786,7 +2817,8 @@ fn parse_let_statement(statement_text: &str, type_table: &mut TypeTable) -> Resu
         Some(b':') => {
             cursor += 1;
             cursor = skip_ascii_whitespace(after_let, cursor);
-            let (type_name, initializer) = split_type_annotation_and_initializer(after_let, cursor)?;
+            let (type_name, initializer) =
+                split_type_annotation_and_initializer(after_let, cursor)?;
             let resolved_type_id = type_table.resolve_or_intern(type_name).map_err(|_| {
                 format!(
                     "unsupported let type '{}' in statement '{}'",
@@ -3070,6 +3102,16 @@ fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt, String> {
         return Ok(SimpleStmt::ReturnVoid);
     }
     Ok(SimpleStmt::Return(parse_value_expression(expression_text)?))
+}
+
+fn parse_continue_statement(statement_text: &str) -> Result<SimpleStmt, String> {
+    if statement_text.trim() != "continue" {
+        return Err(format!(
+            "invalid continue statement '{}': expected bare continue",
+            statement_text
+        ));
+    }
+    Ok(SimpleStmt::Continue)
 }
 
 fn parse_for_statement(
@@ -4140,10 +4182,12 @@ fn try_emit_indexed_struct_copy_assignment(
     let local_target = values_by_name.get(target_collection).copied();
     let local_source = values_by_name.get(source_collection).copied();
     if let (Some(target_local), Some(source_local)) = (local_target, local_source) {
-        let Some(target_element_type) = type_table.indexed_element_type_id(target_local.type_id) else {
+        let Some(target_element_type) = type_table.indexed_element_type_id(target_local.type_id)
+        else {
             return Ok(false);
         };
-        let Some(source_element_type) = type_table.indexed_element_type_id(source_local.type_id) else {
+        let Some(source_element_type) = type_table.indexed_element_type_id(source_local.type_id)
+        else {
             return Ok(false);
         };
         let Some(target_fields) = named_struct_field_types.get(&target_element_type) else {
@@ -4257,8 +4301,21 @@ fn try_emit_global_struct_copy_assignment(
     if values_by_name.contains_key(source_path) || foreach_bindings.contains_key(source_path) {
         return Ok(false);
     }
-    if global_path_types.contains_key(target_path) || global_path_types.contains_key(source_path) {
-        return Ok(false);
+    if let Some(type_id) = global_path_types.get(target_path).copied() {
+        let is_named_struct = type_table
+            .type_info(type_id)
+            .is_some_and(|info| info.category == TypeCategory::Named);
+        if !is_named_struct {
+            return Ok(false);
+        }
+    }
+    if let Some(type_id) = global_path_types.get(source_path).copied() {
+        let is_named_struct = type_table
+            .type_info(type_id)
+            .is_some_and(|info| info.category == TypeCategory::Named);
+        if !is_named_struct {
+            return Ok(false);
+        }
     }
 
     let target_prefix = format!("{target_path}.");
@@ -4566,6 +4623,7 @@ fn emit_simple_statements(
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
+    loop_control: Option<&LoopControlContext>,
     expected_return_type: TypeId,
     next_variable: &mut u32,
 ) -> Result<bool, String> {
@@ -4870,24 +4928,37 @@ fn emit_simple_statements(
                                     }
 
                                     let base_value = builder.use_var(local.var);
-                                    let kind_value = builder
-                                        .ins()
-                                        .iconst(types::I32, i64::from(kind as i32));
+                                    let kind_value =
+                                        builder.ins().iconst(types::I32, i64::from(kind as i32));
 
                                     let value = match op {
                                         AssignOp::Set => rhs.value,
-                                        AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
+                                        AssignOp::Add
+                                        | AssignOp::Sub
+                                        | AssignOp::Mul
+                                        | AssignOp::Div
+                                        | AssignOp::Mod => {
                                             let current = builder.ins().call(
                                                 runtime_call_refs.collection_i32_load,
                                                 &[base_value, kind_value],
                                             );
                                             let current_value = builder.inst_results(current)[0];
                                             match op {
-                                                AssignOp::Add => builder.ins().iadd(current_value, rhs.value),
-                                                AssignOp::Sub => builder.ins().isub(current_value, rhs.value),
-                                                AssignOp::Mul => builder.ins().imul(current_value, rhs.value),
-                                                AssignOp::Div => builder.ins().sdiv(current_value, rhs.value),
-                                                AssignOp::Mod => builder.ins().srem(current_value, rhs.value),
+                                                AssignOp::Add => {
+                                                    builder.ins().iadd(current_value, rhs.value)
+                                                }
+                                                AssignOp::Sub => {
+                                                    builder.ins().isub(current_value, rhs.value)
+                                                }
+                                                AssignOp::Mul => {
+                                                    builder.ins().imul(current_value, rhs.value)
+                                                }
+                                                AssignOp::Div => {
+                                                    builder.ins().sdiv(current_value, rhs.value)
+                                                }
+                                                AssignOp::Mod => {
+                                                    builder.ins().srem(current_value, rhs.value)
+                                                }
                                                 AssignOp::Set => unreachable!(),
                                             }
                                         }
@@ -4898,6 +4969,153 @@ fn emit_simple_statements(
                                         &[base_value, kind_value, value],
                                     );
                                     continue;
+                                }
+                                if let Some(field_types) =
+                                    named_struct_field_types.get(&local.type_id)
+                                {
+                                    let Some(field_type) = field_types.get(suffix).copied() else {
+                                        return Err(format!(
+                                            "unknown local struct field path '{}.{}' in current jit path",
+                                            base, suffix
+                                        ));
+                                    };
+                                    if is_collection_handle_type(field_type, type_table) {
+                                        return Err(format!(
+                                            "local struct field assignment to collection handle '{}.{}' is unsupported in current jit path",
+                                            base, suffix
+                                        ));
+                                    }
+                                    if !are_assignment_types_compatible(
+                                        field_type,
+                                        rhs.type_id,
+                                        type_table,
+                                    ) {
+                                        return Err(format!(
+                                            "assignment type mismatch for local struct field '{}.{}': target type {}, expression type {}",
+                                            base, suffix, field_type, rhs.type_id
+                                        ));
+                                    }
+
+                                    let path_hash = emit_local_struct_field_path_hash(
+                                        builder.use_var(local.var),
+                                        suffix,
+                                        builder,
+                                    );
+                                    if is_i32_scalar_lane_type(field_type, type_table) {
+                                        let value = match op {
+                                            AssignOp::Set => rhs.value,
+                                            AssignOp::Add => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_i32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().iadd(lhs, rhs.value)
+                                            }
+                                            AssignOp::Sub => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_i32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().isub(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mul => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_i32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().imul(lhs, rhs.value)
+                                            }
+                                            AssignOp::Div => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_i32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().sdiv(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mod => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_i32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().srem(lhs, rhs.value)
+                                            }
+                                        };
+                                        builder.ins().call(
+                                            runtime_call_refs.global_i32_store,
+                                            &[path_hash, value],
+                                        );
+                                        continue;
+                                    }
+                                    if field_type == TYPE_ID_BOOL {
+                                        if *op != AssignOp::Set {
+                                            return Err(format!(
+                                                "bool local struct field assignment only supports '=' for '{}.{}'",
+                                                base, suffix
+                                            ));
+                                        }
+                                        builder.ins().call(
+                                            runtime_call_refs.global_i32_store,
+                                            &[path_hash, rhs.value],
+                                        );
+                                        continue;
+                                    }
+                                    if field_type == TYPE_ID_F32 {
+                                        let value = match op {
+                                            AssignOp::Set => rhs.value,
+                                            AssignOp::Add => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fadd(lhs, rhs.value)
+                                            }
+                                            AssignOp::Sub => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fsub(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mul => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fmul(lhs, rhs.value)
+                                            }
+                                            AssignOp::Div => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f32_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fdiv(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mod => {
+                                                return Err(format!(
+                                                    "'%=' is unsupported for f32 local struct field '{}.{}'",
+                                                    base, suffix
+                                                ));
+                                            }
+                                        };
+                                        builder.ins().call(
+                                            runtime_call_refs.global_f32_store,
+                                            &[path_hash, value],
+                                        );
+                                        continue;
+                                    }
+                                    return Err(format!(
+                                        "unsupported local struct field type {} for '{}.{}'",
+                                        field_type, base, suffix
+                                    ));
                                 }
                             }
                         }
@@ -5164,6 +5382,13 @@ fn emit_simple_statements(
                     foreach_bindings,
                 )?;
             }
+            SimpleStmt::Continue => {
+                let Some(loop_control) = loop_control else {
+                    return Err("continue statement is only valid inside loops".to_string());
+                };
+                builder.ins().jump(loop_control.continue_block, &[]);
+                return Ok(true);
+            }
             SimpleStmt::Return(expression) => {
                 let binding = emit_simple_expression(
                     builder,
@@ -5238,6 +5463,7 @@ fn emit_simple_statements(
                     collection_infos,
                     named_struct_field_types,
                     foreach_bindings,
+                    loop_control,
                     expected_return_type,
                     next_variable,
                 )?;
@@ -5261,6 +5487,7 @@ fn emit_simple_statements(
                         collection_infos,
                         named_struct_field_types,
                         foreach_bindings,
+                        loop_control,
                         expected_return_type,
                         next_variable,
                     )?
@@ -5303,7 +5530,10 @@ fn emit_simple_statements(
                 let condition_block = builder.create_block();
                 let body_block = builder.create_block();
                 let step_block = builder.create_block();
-                let continue_block = builder.create_block();
+                let exit_block = builder.create_block();
+                let loop_control = LoopControlContext {
+                    continue_block: step_block,
+                };
 
                 builder.ins().jump(condition_block, &[]);
                 builder.switch_to_block(condition_block);
@@ -5323,7 +5553,7 @@ fn emit_simple_statements(
                 )?;
                 builder
                     .ins()
-                    .brif(condition_value, body_block, &[], continue_block, &[]);
+                    .brif(condition_value, body_block, &[], exit_block, &[]);
 
                 builder.seal_block(body_block);
                 builder.switch_to_block(body_block);
@@ -5339,6 +5569,7 @@ fn emit_simple_statements(
                     collection_infos,
                     named_struct_field_types,
                     foreach_bindings,
+                    Some(&loop_control),
                     expected_return_type,
                     next_variable,
                 )?;
@@ -5366,8 +5597,8 @@ fn emit_simple_statements(
                 builder.ins().jump(condition_block, &[]);
                 builder.seal_block(condition_block);
 
-                builder.seal_block(continue_block);
-                builder.switch_to_block(continue_block);
+                builder.seal_block(exit_block);
+                builder.switch_to_block(exit_block);
             }
             SimpleStmt::Foreach {
                 item_name,
@@ -5451,7 +5682,10 @@ fn emit_simple_statements(
                 let condition_block = builder.create_block();
                 let body_block = builder.create_block();
                 let step_block = builder.create_block();
-                let continue_block = builder.create_block();
+                let exit_block = builder.create_block();
+                let loop_control = LoopControlContext {
+                    continue_block: step_block,
+                };
 
                 builder.ins().jump(condition_block, &[]);
                 builder.switch_to_block(condition_block);
@@ -5466,7 +5700,7 @@ fn emit_simple_statements(
                         .icmp(IntCC::SignedLessThan, index_value, len_value);
                 builder
                     .ins()
-                    .brif(condition_value, body_block, &[], continue_block, &[]);
+                    .brif(condition_value, body_block, &[], exit_block, &[]);
 
                 builder.seal_block(body_block);
                 builder.switch_to_block(body_block);
@@ -5482,6 +5716,7 @@ fn emit_simple_statements(
                     collection_infos,
                     named_struct_field_types,
                     &loop_foreach_bindings,
+                    Some(&loop_control),
                     expected_return_type,
                     next_variable,
                 )?;
@@ -5497,8 +5732,8 @@ fn emit_simple_statements(
                 builder.ins().jump(condition_block, &[]);
                 builder.seal_block(condition_block);
 
-                builder.seal_block(continue_block);
-                builder.switch_to_block(continue_block);
+                builder.seal_block(exit_block);
+                builder.switch_to_block(exit_block);
             }
         }
     }
@@ -5573,6 +5808,7 @@ fn emit_for_control_statement(
                 collection_infos,
                 named_struct_field_types,
                 foreach_bindings,
+                None,
                 expected_return_type,
                 next_variable,
             )?;
@@ -6196,9 +6432,8 @@ fn emit_simple_expression(
                     if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
                         if is_collection_handle_type(local.type_id, type_table) {
                             let base_value = builder.use_var(local.var);
-                            let kind_value = builder
-                                .ins()
-                                .iconst(types::I32, i64::from(kind as i32));
+                            let kind_value =
+                                builder.ins().iconst(types::I32, i64::from(kind as i32));
                             let call = builder.ins().call(
                                 runtime_call_refs.collection_i32_load,
                                 &[base_value, kind_value],
@@ -6208,6 +6443,45 @@ fn emit_simple_expression(
                                 type_id: TYPE_ID_I32,
                             });
                         }
+                    }
+                    if let Some(field_types) = named_struct_field_types.get(&local.type_id) {
+                        let Some(field_type) = field_types.get(suffix).copied() else {
+                            return Err(format!(
+                                "unknown local struct field path '{}.{}' in current jit path",
+                                base, suffix
+                            ));
+                        };
+                        let base_hash = builder.use_var(local.var);
+                        let path_hash =
+                            emit_local_struct_field_path_hash(base_hash, suffix, builder);
+                        if is_collection_handle_type(field_type, type_table) {
+                            return Ok(ValueBinding {
+                                value: path_hash,
+                                type_id: field_type,
+                            });
+                        }
+                        if is_i32_abi_compatible_type(field_type, type_table) {
+                            let call = builder
+                                .ins()
+                                .call(runtime_call_refs.global_i32_load, &[path_hash]);
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: field_type,
+                            });
+                        }
+                        if field_type == TYPE_ID_F32 {
+                            let call = builder
+                                .ins()
+                                .call(runtime_call_refs.global_f32_load, &[path_hash]);
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: TYPE_ID_F32,
+                            });
+                        }
+                        return Err(format!(
+                            "unsupported local struct field type {} for '{}.{}'",
+                            field_type, base, suffix
+                        ));
                     }
                 }
             }
@@ -6226,6 +6500,14 @@ fn emit_simple_expression(
                 let Some(path_type) = global_path_types.get(name).copied() else {
                     return Err(format!("unknown identifier '{}' in current jit path", name));
                 };
+                if named_struct_field_types.contains_key(&path_type) {
+                    return Ok(ValueBinding {
+                        value: builder
+                            .ins()
+                            .iconst(types::I32, i64::from(hash_global_path(name))),
+                        type_id: path_type,
+                    });
+                }
                 emit_global_load(builder, runtime_call_refs, type_table, name, path_type)
             }
         }
@@ -6307,6 +6589,42 @@ fn emit_simple_expression(
                 )?;
                 arg_values.push(binding.value);
                 arg_types.push(binding.type_id);
+            }
+            if target == "i32_to_f32" {
+                if arg_values.len() != 1 {
+                    return Err(format!(
+                        "math intrinsic 'i32_to_f32' expects exactly one argument, found {}",
+                        arg_values.len()
+                    ));
+                }
+                if !is_i32_abi_compatible_type(arg_types[0], type_table) {
+                    return Err(format!(
+                        "math intrinsic 'i32_to_f32' requires i32-compatible argument, found type {}",
+                        arg_types[0]
+                    ));
+                }
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_from_sint(types::F32, arg_values[0]),
+                    type_id: TYPE_ID_F32,
+                });
+            }
+            if target == "f32_to_i32" {
+                if arg_values.len() != 1 {
+                    return Err(format!(
+                        "math intrinsic 'f32_to_i32' expects exactly one argument, found {}",
+                        arg_values.len()
+                    ));
+                }
+                if arg_types[0] != TYPE_ID_F32 {
+                    return Err(format!(
+                        "math intrinsic 'f32_to_i32' requires f32 argument, found type {}",
+                        arg_types[0]
+                    ));
+                }
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_to_sint(types::I32, arg_values[0]),
+                    type_id: TYPE_ID_I32,
+                });
             }
             if (target == "sin_fast" || target == "cos_fast") && arg_values.len() != 1 {
                 return Err(format!(
@@ -7116,6 +7434,23 @@ fn hash_foreach_field_suffix(suffix: &str) -> i32 {
     } else {
         hash_global_path(suffix)
     }
+}
+
+fn emit_local_struct_field_path_hash(
+    base_hash: Value,
+    suffix: &str,
+    builder: &mut FunctionBuilder<'_>,
+) -> Value {
+    let mut hash_value = base_hash;
+    let dot = builder.ins().iconst(types::I32, i64::from(b'.'));
+    hash_value = builder.ins().bxor(hash_value, dot);
+    hash_value = builder.ins().imul_imm(hash_value, 16_777_619);
+    for byte in suffix.bytes() {
+        let byte_value = builder.ins().iconst(types::I32, i64::from(byte));
+        hash_value = builder.ins().bxor(hash_value, byte_value);
+        hash_value = builder.ins().imul_imm(hash_value, 16_777_619);
+    }
+    hash_value
 }
 
 fn emit_foreach_collection_handle_value(
@@ -8854,7 +9189,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_tick_from_stasis_fixture_with_input_snapshot() {
-
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -8961,6 +9295,51 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 14);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_struct_parameter_field_access() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pipe { active: bool; }\nglobal pipe: Pipe;\nfunction read_active(p: Pipe): i32 { if (p.active) { return 1; } return 0; }\nfunction main(): i32 { pipe.active = true; return read_active(pipe); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_i32_to_f32_intrinsic_call() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let x: f32 = i32_to_f32(7); if (x > 6.9) { return 1; } return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_continue_in_for_loop() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let count: i32 = 0; for (let i: i32 = 0; i < 5; i += 1) { if (i == 2) { continue; } count += 1; } return count; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 4);
     }
 
     #[cfg(windows)]
@@ -9178,7 +9557,9 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("struct copy assignment from indexed source requires matching field layout"),
+                    message.contains(
+                        "struct copy assignment from indexed source requires matching field layout"
+                    ),
                     "unexpected message: {message}"
                 );
             }
@@ -9198,7 +9579,9 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("struct copy assignment to indexed target requires matching field layout"),
+                    message.contains(
+                        "struct copy assignment to indexed target requires matching field layout"
+                    ),
                     "unexpected message: {message}"
                 );
             }
@@ -9233,7 +9616,8 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("struct indexed copy assignment requires matching field layout"),
+                    message
+                        .contains("struct indexed copy assignment requires matching field layout"),
                     "unexpected message: {message}"
                 );
             }
@@ -9253,7 +9637,9 @@ mod tests {
         match error {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
-                    message.contains("struct path copy assignment currently supports scalar fields only"),
+                    message.contains(
+                        "struct path copy assignment currently supports scalar fields only"
+                    ),
                     "unexpected message: {message}"
                 );
             }
