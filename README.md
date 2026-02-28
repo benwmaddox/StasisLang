@@ -159,6 +159,17 @@ Watch mode:
 .\target\debug\stasis.exe test --dir tests/stasis --watch --watch-settle-ms 50
 ```
 
+## Known Issues (Rewrite V1 JIT Backend)
+
+The following limitations exist in the current JIT backend and are tracked for resolution:
+
+| Issue | Workaround |
+|-------|------------|
+| **Struct parameters**: passing a struct to a function parameter fails when accessing fields on the parameter | Access struct fields via global state with an index parameter instead of passing the struct directly |
+| **`i32_to_f32` builtin**: the integer-to-float conversion builtin is not resolved by the JIT. This also affects stdlib modules that use it (e.g. `game_draw.stasis`, `host_frame.stasis`) | Use `f32` constants directly instead of converting at runtime |
+| **`continue` statement**: not yet implemented in the JIT backend | Restructure loops to use `if`/`else` instead of `continue` |
+| **`for` loop without init clause**: loops like `for (; cond; step)` fail. This affects the stdlib `ascii_push_i32` function | Add a dummy init variable or write a custom implementation using three-part `for` loops |
+
 ## Build From Source
 
 ```bash
