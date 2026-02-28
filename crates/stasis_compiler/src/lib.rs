@@ -70,7 +70,6 @@ pub struct FunctionMetric {
     pub simple_void_print_i32_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_add_delta: Option<i32>,
-    pub simple_void_print_is_one_arg: bool,
     pub simple_void_print_call_target_shape_code: i32,
     pub clif_text: String,
 }
@@ -151,7 +150,6 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
-    simple_void_print_is_one_arg: bool,
     simple_void_print_call_target_shape_code: i32,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
@@ -433,7 +431,6 @@ impl IncrementalCompilerHost {
                         .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
                     simple_void_print_i32_call_add_delta: parsed
                         .simple_void_print_i32_call_add_delta,
-                    simple_void_print_is_one_arg: parsed.simple_void_print_is_one_arg,
                     simple_void_print_call_target_shape_code: parsed
                         .simple_void_print_call_target_shape_code,
                     clif_text: parsed.clif_text.clone(),
@@ -635,7 +632,6 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_void_print_i32_call_target_id_hash,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
-            simple_void_print_is_one_arg,
             simple_void_print_call_target_shape_code,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
@@ -2191,7 +2187,6 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
-            simple_void_print_is_one_arg: false,
             simple_void_print_call_target_shape_code: SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             call_target_id_hashes: callees
                 .iter()
@@ -2446,7 +2441,8 @@ mod tests {
         assert!(compile
             .functions
             .iter()
-            .all(|f| !f.simple_void_print_is_one_arg));
+            .all(|f| f.simple_void_print_call_target_shape_code
+                == SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE));
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2550,8 +2546,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_keeps_simple_void_print_one_arg_metric_flag_false_for_current_rust_fallback_shapes()
-    {
+    fn compile_sets_simple_void_print_call_target_shape_noarg_for_current_rust_fallback_shapes() {
         let mut host = IncrementalCompilerHost::new();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2575,7 +2570,6 @@ mod tests {
             .iter()
             .find(|function| function.id_hash == hash_identifier("sink"))
             .expect("sink metric");
-        assert!(!sink.simple_void_print_is_one_arg);
         assert_eq!(
             sink.simple_void_print_call_target_shape_code,
             SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG

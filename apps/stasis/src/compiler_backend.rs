@@ -3149,7 +3149,6 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
-            simple_void_print_is_one_arg: false,
             simple_void_print_call_target_shape_code:
                 stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
@@ -3184,7 +3183,6 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
-            simple_void_print_is_one_arg: false,
             simple_void_print_call_target_shape_code:
                 stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
@@ -3230,7 +3228,6 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
-            simple_void_print_is_one_arg: false,
             simple_void_print_call_target_shape_code:
                 stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
@@ -3265,7 +3262,6 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
-            simple_void_print_is_one_arg: false,
             simple_void_print_call_target_shape_code:
                 stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
