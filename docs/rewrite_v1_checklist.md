@@ -748,7 +748,11 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: deterministic ripple invalidation without full-project rebuild for local edits.
 - Tests: single-edge, fan-out, multi-level chain, and no-op signature-equal edits.
 - Done gate: invalidation matches expected closure and touches only impacted functions.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler index stage builds forward/dependent adjacency from dependency hashes each pass and stores edges in compact per-function vectors (`dependencies`, `dependents`).
+- Signature-change ripple propagation is enforced via queue walk (`propagate_dirty_from_signature_changes`) with regression coverage for single-edge, fan-out, and multi-level chain closures.
+- No-op signature-equivalent edits remain clean (`signature_equivalent_formatting_edit_does_not_dirty_or_emit`), and body-only fan-out edits keep dependents clean to preserve minimal invalidation (`body_change_keeps_fan_out_dependents_clean`).
+- Status: `done`
 - Slice CS5: Remove legacy `simple_*` detector metadata channels from compiler state and host contracts.
 - Language: `.stasis + Rust`.
 - Scope: delete obsolete detector/fallback metrics and rely on real parse/resolve/emit behavior for supported slices.
@@ -965,4 +969,3 @@ Each PR must include:
 ## Backlog
 
 - Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.
-

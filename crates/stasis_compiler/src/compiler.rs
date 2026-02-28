@@ -481,6 +481,29 @@ mod tests {
     }
 
     #[test]
+    fn body_change_keeps_fan_out_dependents_clean() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 1; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+        );
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 2; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+        );
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.signature_changed_functions, 0);
+        assert_eq!(index.dirty_functions, 1);
+        assert!(function_by_name(&compiler, "helper").dirty);
+        assert!(!function_by_name(&compiler, "left").dirty);
+        assert!(!function_by_name(&compiler, "right").dirty);
+    }
+
+    #[test]
     fn signature_change_propagates_dirty_through_multi_level_chain() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
