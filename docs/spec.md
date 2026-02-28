@@ -390,17 +390,15 @@ Conceptual lowered targets:
 
 Nested struct paths are flattened deterministically during lowering, and the current iteration index is applied at the array element dimension.
 
-#### 6.5.5 `continue` (planned post-checklist feature)
+#### 6.5.5 `continue`
 
-`continue` is planned for the new compiler, but intentionally deferred until after all Rewrite V1 checklist slices (S0-S12) are complete.
+`continue` is supported in Rewrite V1.
 
-Planned behavior:
+Rules:
 - Valid only inside `for` and `foreach` loops.
 - Skips the remainder of the current iteration body.
-- Proceeds to the next iteration according to the loop's normal step/iteration rule.
-
-Status:
-- Documented target behavior only; not required in current S0-S12 implementation.
+- In `for`, control jumps to the loop `step` segment, then re-evaluates `condition`.
+- In `foreach`, control jumps to the loop's index increment, then re-evaluates iteration bounds.
 
 ### 6.6 Return
 
