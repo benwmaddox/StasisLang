@@ -27,6 +27,13 @@ pub const RETURN_TYPE_CODE_I32: i32 = 1;
 pub const RETURN_TYPE_CODE_VOID: i32 = 2;
 pub const RETURN_TYPE_CODE_F32: i32 = 3;
 pub const RETURN_TYPE_CODE_BOOL: i32 = 4;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE: i32 = 0;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH: i32 = 1;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH: i32 = 2;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH: i32 = 3;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH: i32 = 4;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST: i32 = 5;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT: i32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionMetric {
@@ -51,6 +58,7 @@ pub struct FunctionMetric {
     pub simple_i32_three_arg_uses_first_second_third_param_passthrough: bool,
     pub simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: bool,
     pub simple_i32_two_arg_uses_literal_first_second_param_passthrough: bool,
+    pub simple_i32_one_arg_call_shape_code: i32,
     pub simple_i32_return_two_call_left_target_id_hash: Option<i32>,
     pub simple_i32_return_two_call_right_target_id_hash: Option<i32>,
     pub simple_i32_return_two_call_op_code: Option<i32>,
@@ -130,6 +138,7 @@ struct ParsedFunction {
     simple_i32_three_arg_uses_first_second_third_param_passthrough: bool,
     simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: bool,
     simple_i32_two_arg_uses_literal_first_second_param_passthrough: bool,
+    simple_i32_one_arg_call_shape_code: i32,
     simple_i32_return_two_call_left_target_id_hash: Option<i32>,
     simple_i32_return_two_call_right_target_id_hash: Option<i32>,
     simple_i32_return_two_call_op_code: Option<i32>,
@@ -405,6 +414,7 @@ impl IncrementalCompilerHost {
                         .simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough,
                     simple_i32_two_arg_uses_literal_first_second_param_passthrough: parsed
                         .simple_i32_two_arg_uses_literal_first_second_param_passthrough,
+                    simple_i32_one_arg_call_shape_code: parsed.simple_i32_one_arg_call_shape_code,
                     simple_i32_return_two_call_left_target_id_hash: parsed
                         .simple_i32_return_two_call_left_target_id_hash,
                     simple_i32_return_two_call_right_target_id_hash: parsed
@@ -552,6 +562,14 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
                 && simple_i32_one_arg_has_literal
                 && !simple_i32_one_arg_has_arg_call
                 && function.params.len() == 1;
+        let simple_i32_one_arg_call_shape_code = simple_i32_one_arg_call_shape_code(
+            simple_i32_return_call_one_arg_target_id_hash.is_some(),
+            simple_i32_one_arg_uses_first_param_passthrough,
+            simple_i32_two_arg_uses_first_second_param_passthrough,
+            simple_i32_three_arg_uses_first_second_third_param_passthrough,
+            simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough,
+            simple_i32_two_arg_uses_literal_first_second_param_passthrough,
+        );
 
         let (
             simple_void_print_i32_literal,
@@ -596,6 +614,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_i32_three_arg_uses_first_second_third_param_passthrough,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough,
+            simple_i32_one_arg_call_shape_code,
             simple_i32_return_two_call_left_target_id_hash,
             simple_i32_return_two_call_right_target_id_hash,
             simple_i32_return_two_call_op_code,
@@ -937,6 +956,31 @@ fn return_type_code_from_name(type_name: &str) -> i32 {
         "f32" => RETURN_TYPE_CODE_F32,
         "bool" => RETURN_TYPE_CODE_BOOL,
         _ => RETURN_TYPE_CODE_UNKNOWN,
+    }
+}
+
+fn simple_i32_one_arg_call_shape_code(
+    has_one_arg_target: bool,
+    one_param_passthrough: bool,
+    two_param_passthrough: bool,
+    three_param_passthrough: bool,
+    four_param_passthrough: bool,
+    two_param_literal_first: bool,
+) -> i32 {
+    if four_param_passthrough {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH
+    } else if two_param_literal_first {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST
+    } else if three_param_passthrough {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH
+    } else if two_param_passthrough {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH
+    } else if one_param_passthrough {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH
+    } else if has_one_arg_target {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT
+    } else {
+        SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE
     }
 }
 
@@ -2109,6 +2153,7 @@ mod tests {
             simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
+            simple_i32_one_arg_call_shape_code: SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -2429,6 +2474,10 @@ mod tests {
         assert!(!wrapper.simple_i32_three_arg_uses_first_second_third_param_passthrough);
         assert!(!wrapper.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough);
         assert!(wrapper.simple_i32_two_arg_uses_literal_first_second_param_passthrough);
+        assert_eq!(
+            wrapper.simple_i32_one_arg_call_shape_code,
+            SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2462,6 +2511,10 @@ mod tests {
         assert!(!wrapper.simple_i32_three_arg_uses_first_second_third_param_passthrough);
         assert!(!wrapper.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough);
         assert!(!wrapper.simple_i32_two_arg_uses_literal_first_second_param_passthrough);
+        assert_eq!(
+            wrapper.simple_i32_one_arg_call_shape_code,
+            SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 

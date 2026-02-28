@@ -1055,110 +1055,76 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_i32_one_arg_uses_first_param_passthrough =
-                metric.simple_i32_one_arg_uses_first_param_passthrough;
-            let simple_i32_two_arg_uses_first_second_param_passthrough =
-                metric.simple_i32_two_arg_uses_first_second_param_passthrough;
-            let simple_i32_three_arg_uses_first_second_third_param_passthrough =
-                metric.simple_i32_three_arg_uses_first_second_third_param_passthrough;
-            let simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough =
-                metric.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough;
-            let simple_i32_two_arg_uses_literal_first_second_param_passthrough =
-                metric.simple_i32_two_arg_uses_literal_first_second_param_passthrough;
-            let resolved_simple_two_arg_passthrough_call_target =
-                if simple_i32_two_arg_uses_first_second_param_passthrough {
+            let simple_i32_one_arg_call_shape_code = metric.simple_i32_one_arg_call_shape_code;
+            let resolved_simple_one_arg_call_target = match simple_i32_one_arg_call_shape_code {
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH => {
                     resolve_known_host_two_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_three_arg_passthrough_call_target =
-                if simple_i32_three_arg_uses_first_second_third_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH => {
                     resolve_known_host_three_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_four_arg_passthrough_call_target =
-                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH => {
                     resolve_known_host_four_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_two_arg_literal_first_second_passthrough_call_target =
-                if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST => {
                     resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_one_arg_call_target =
-                if simple_i32_two_arg_uses_first_second_param_passthrough
-                    || simple_i32_three_arg_uses_first_second_third_param_passthrough
-                    || simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough
-                    || simple_i32_two_arg_uses_literal_first_second_param_passthrough
-                {
-                    None
-                } else {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH => {
                     resolve_unique_i32_single_arg_call_target_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metrics,
-                        if simple_i32_one_arg_uses_first_param_passthrough {
-                            metric.first_param_type_code
-                        } else {
-                            1
-                        },
+                        metric.first_param_type_code,
                     )
-                };
+                }
+                _ => resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metrics,
+                    1,
+                ),
+            };
             if metric
                 .simple_i32_return_call_one_arg_target_id_hash
                 .is_some()
+                && resolved_simple_one_arg_call_target.is_none()
             {
-                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
-                    if resolved_simple_four_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved four-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                let detail = match simple_i32_one_arg_call_shape_code {
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH => {
+                        "unresolved four-arg passthrough direct call target"
                     }
-                } else if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
-                    if resolved_simple_two_arg_literal_first_second_passthrough_call_target
-                        .is_none()
-                    {
-                        return Err(format!(
-                            "unresolved two-arg literal+param passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST => {
+                        "unresolved two-arg literal+param passthrough direct call target"
                     }
-                } else if simple_i32_three_arg_uses_first_second_third_param_passthrough {
-                    if resolved_simple_three_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved three-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH => {
+                        "unresolved three-arg passthrough direct call target"
                     }
-                } else if simple_i32_two_arg_uses_first_second_param_passthrough {
-                    if resolved_simple_two_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved two-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH => {
+                        "unresolved two-arg passthrough direct call target"
                     }
-                } else if resolved_simple_one_arg_call_target.is_none() {
-                    return Err(format!(
-                        "unresolved one-arg direct call target for emitted function {} (id_hash={})",
-                        function_name, metric.id_hash
-                    ));
-                }
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH => {
+                        "unresolved one-arg passthrough direct call target"
+                    }
+                    _ => "unresolved one-arg direct call target",
+                };
+                return Err(format!(
+                    "{detail} for emitted function {} (id_hash={})",
+                    function_name, metric.id_hash
+                ));
             }
             let resolved_simple_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
@@ -3176,6 +3142,7 @@ mod tests {
             simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3208,6 +3175,7 @@ mod tests {
             simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3251,6 +3219,7 @@ mod tests {
             simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3283,6 +3252,7 @@ mod tests {
             simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
             simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
             simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
