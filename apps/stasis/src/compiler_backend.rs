@@ -1055,46 +1055,16 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_i32_one_arg_uses_first_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 1;
-            let simple_i32_two_arg_uses_first_second_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 2;
-            let simple_i32_three_arg_uses_first_second_third_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 3;
-            let simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 4;
-            let simple_i32_two_arg_uses_literal_first_second_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_some()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 1;
+            let simple_i32_one_arg_uses_first_param_passthrough =
+                metric.simple_i32_one_arg_uses_first_param_passthrough;
+            let simple_i32_two_arg_uses_first_second_param_passthrough =
+                metric.simple_i32_two_arg_uses_first_second_param_passthrough;
+            let simple_i32_three_arg_uses_first_second_third_param_passthrough =
+                metric.simple_i32_three_arg_uses_first_second_third_param_passthrough;
+            let simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough =
+                metric.simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough;
+            let simple_i32_two_arg_uses_literal_first_second_param_passthrough =
+                metric.simple_i32_two_arg_uses_literal_first_second_param_passthrough;
             let resolved_simple_two_arg_passthrough_call_target =
                 if simple_i32_two_arg_uses_first_second_param_passthrough {
                     resolve_known_host_two_arg_i32_extern_symbol_by_hash(
@@ -3203,6 +3173,11 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_uses_first_param_passthrough: false,
+            simple_i32_two_arg_uses_first_second_param_passthrough: false,
+            simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
+            simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
+            simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3229,6 +3204,11 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_uses_first_param_passthrough: false,
+            simple_i32_two_arg_uses_first_second_param_passthrough: false,
+            simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
+            simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
+            simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3266,6 +3246,11 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_uses_first_param_passthrough: false,
+            simple_i32_two_arg_uses_first_second_param_passthrough: false,
+            simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
+            simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
+            simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3292,6 +3277,11 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_uses_first_param_passthrough: false,
+            simple_i32_two_arg_uses_first_second_param_passthrough: false,
+            simple_i32_three_arg_uses_first_second_third_param_passthrough: false,
+            simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough: false,
+            simple_i32_two_arg_uses_literal_first_second_param_passthrough: false,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
