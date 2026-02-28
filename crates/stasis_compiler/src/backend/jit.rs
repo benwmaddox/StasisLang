@@ -1283,12 +1283,16 @@ fn resolve_global_path_type_id(
     type_table.resolve_or_intern(trimmed)
 }
 
-fn primitive_global_type_id(type_name: &str) -> Option<TypeId> {
-    match type_name {
-        "i32" => Some(TYPE_ID_I32),
-        "f32" => Some(TYPE_ID_F32),
-        "bool" => Some(TYPE_ID_BOOL),
-        _ => None,
+fn is_primitive_scalar_type_id(type_id: TypeId) -> bool {
+    matches!(type_id, TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_BOOL)
+}
+
+fn resolve_primitive_scalar_type_id(type_name: &str, type_table: &TypeTable) -> Option<TypeId> {
+    let type_id = type_table.resolve(type_name.trim())?;
+    if is_primitive_scalar_type_id(type_id) {
+        Some(type_id)
+    } else {
+        None
     }
 }
 
@@ -1369,44 +1373,47 @@ fn parse_top_level_constant_literal(
         return Err(format!("constant '{}' initializer cannot be empty", name));
     }
     let type_name = type_name.trim();
-    match type_name {
-        "i32" => {
-            let value = initializer.parse::<i32>().map_err(|error| {
-                format!("invalid i32 initializer for constant '{}': {error}", name)
-            })?;
-            Ok(Some(ConstantValue::I32 {
-                value,
-                type_id: TYPE_ID_I32,
-            }))
-        }
-        "f32" => {
-            let value = initializer.parse::<f32>().map_err(|error| {
-                format!("invalid f32 initializer for constant '{}': {error}", name)
-            })?;
-            Ok(Some(ConstantValue::F32(value)))
-        }
-        "bool" => match initializer {
+    let type_id = type_table.resolve_or_intern(type_name).map_err(|error| {
+        format!(
+            "invalid type '{}' for constant '{}': {error}",
+            type_name, name
+        )
+    })?;
+    if type_id == TYPE_ID_I32 {
+        let value = initializer
+            .parse::<i32>()
+            .map_err(|error| format!("invalid i32 initializer for constant '{}': {error}", name))?;
+        return Ok(Some(ConstantValue::I32 { value, type_id }));
+    }
+    if type_id == TYPE_ID_F32 {
+        let value = initializer
+            .parse::<f32>()
+            .map_err(|error| format!("invalid f32 initializer for constant '{}': {error}", name))?;
+        return Ok(Some(ConstantValue::F32(value)));
+    }
+    if type_id == TYPE_ID_BOOL {
+        return match initializer {
             "true" => Ok(Some(ConstantValue::Bool(true))),
             "false" => Ok(Some(ConstantValue::Bool(false))),
             other => Err(format!(
                 "invalid bool initializer '{}' for constant '{}'",
                 other, name
             )),
-        },
-        "string" | "utf8[]" | "ascii[]" => {
-            let value = parse_constant_string_initializer(name, initializer)?;
-            let type_id = type_table.resolve_or_intern(type_name).map_err(|error| {
-                format!(
-                    "invalid type '{}' for constant '{}': {error}",
-                    type_name, name
-                )
-            })?;
-            let literal_id = hash_string_literal(&value);
-            stasis_dynload::upsert_jit_string_literal(literal_id, &value);
-            Ok(Some(ConstantValue::String { value, type_id }))
-        }
-        _ => Ok(None),
+        };
     }
+    let Some(type_info) = type_table.type_info(type_id) else {
+        return Ok(None);
+    };
+    if matches!(
+        type_info.category,
+        TypeCategory::AsciiView | TypeCategory::Utf8View
+    ) {
+        let value = parse_constant_string_initializer(name, initializer)?;
+        let literal_id = hash_string_literal(&value);
+        stasis_dynload::upsert_jit_string_literal(literal_id, &value);
+        return Ok(Some(ConstantValue::String { value, type_id }));
+    }
+    Ok(None)
 }
 
 fn parse_constant_string_initializer(name: &str, initializer: &str) -> Result<String, String> {
@@ -1618,7 +1625,7 @@ fn collect_foreach_collections_from_type(
         }
         return Ok(());
     }
-    if primitive_global_type_id(trimmed).is_some() {
+    if resolve_primitive_scalar_type_id(trimmed, type_table).is_some() {
         return Ok(());
     }
     let Some(fields) = struct_fields_by_name.get(trimmed) else {
@@ -1653,7 +1660,7 @@ fn build_collection_info_for_element_type(
     type_table: &mut TypeTable,
     visiting_structs: &mut Vec<String>,
 ) -> Result<ForeachCollectionInfo, String> {
-    if let Some(type_id) = primitive_global_type_id(element_type_name) {
+    if let Some(type_id) = resolve_primitive_scalar_type_id(element_type_name, type_table) {
         return Ok(ForeachCollectionInfo {
             len: 0,
             element_type: Some(type_id),
@@ -1711,7 +1718,8 @@ fn collect_struct_primitive_leaf_fields(
         } else {
             format!("{prefix}.{}", field.name)
         };
-        if let Some(type_id) = primitive_global_type_id(field.type_name.trim()) {
+        if let Some(type_id) = resolve_primitive_scalar_type_id(field.type_name.trim(), type_table)
+        {
             out.insert(field_path, type_id);
             continue;
         }
@@ -1719,7 +1727,7 @@ fn collect_struct_primitive_leaf_fields(
             if !extent_text.is_empty() {
                 continue;
             }
-            if primitive_global_type_id(element_type_name).is_some() {
+            if resolve_primitive_scalar_type_id(element_type_name, type_table).is_some() {
                 continue;
             }
             continue;
@@ -8630,6 +8638,21 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_ascii_constant_identifier_argument() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const TITLE: ascii[] = \"play\";\nfunction consume(path: ascii[]): i32 { return 6; }\nfunction main(): i32 { return consume(TITLE); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 6);
     }
 
     #[cfg(windows)]

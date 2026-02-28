@@ -774,6 +774,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Rust-native JIT call overload matching now uses interned type-compatibility checks instead of raw `TypeId` equality only.
 - Rust-native expression tokenization now accepts UTF-8 string literal codepoints (not ASCII-only), so non-ASCII literals compile in direct JIT parse/emit paths.
 - Added targeted coverage for this shape in both paths: `crates/stasis_compiler::backend::jit::tests::jit_process_accepts_non_ascii_utf8_string_literal_argument` and `apps/stasis::compiler_backend::tests::aot_compile_accepts_utf8_literal_call_contract`.
+- JIT top-level constant/global primitive typing now routes through interned `TypeId`/`TypeCategory` checks instead of raw `"i32"/"f32"/"bool"` and `"string"/"utf8[]"/"ascii[]"` string matching in hot-path analysis helpers (`crates/stasis_compiler/src/backend/jit.rs`).
+- Added regression coverage for ASCII constant-identifier call flow on the interned path: `crates/stasis_compiler::backend::jit::tests::jit_process_executes_ascii_constant_identifier_argument`.
 - Added deterministic unit coverage in `crates/stasis_compiler/src/frontend/types.rs` for array/string interning and layout metadata.
 - Status: `in_progress`
 - Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
@@ -965,4 +967,3 @@ Each PR must include:
 ## Backlog
 
 - Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.
-
