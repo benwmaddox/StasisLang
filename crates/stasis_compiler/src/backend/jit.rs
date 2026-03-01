@@ -224,7 +224,7 @@ impl JitProcess {
                     hir,
                     &symbol,
                     &analysis.call_signatures,
-                    &type_table,
+                    &mut type_table,
                     &analysis.global_path_types,
                     &analysis.constant_values,
                     &analysis.collection_infos,
@@ -1780,7 +1780,7 @@ fn compile_function_to_jit_module(
     hir: &FunctionHIR,
     symbol: &str,
     call_signatures: &CallSignatureMap,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
@@ -2178,25 +2178,31 @@ fn compile_function_to_jit_module(
             );
         }
 
-        let mut parse_type_table = type_table.clone();
-        let statements = parse_simple_statements(hir, &mut parse_type_table)?;
         let empty_foreach_bindings = ForeachBindingMap::new();
-        let terminated = emit_simple_statements(
-            &mut builder,
-            &statements,
-            &mut values_by_name,
-            &runtime_call_refs,
-            call_signatures,
-            &parse_type_table,
-            global_path_types,
-            constant_values,
-            collection_infos,
-            named_struct_field_types,
-            &empty_foreach_bindings,
-            None,
-            meta.return_type,
-            &mut next_variable,
-        )?;
+        let body = extract_function_body(hir)?;
+        let mut terminated = false;
+        parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
+            if terminated {
+                return Ok(());
+            }
+            terminated = emit_simple_statements(
+                &mut builder,
+                std::slice::from_ref(&statement),
+                &mut values_by_name,
+                &runtime_call_refs,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                &empty_foreach_bindings,
+                None,
+                meta.return_type,
+                &mut next_variable,
+            )?;
+            Ok(())
+        })?;
         if !terminated {
             if meta.return_type == TYPE_ID_VOID {
                 builder.ins().return_(&[]);
@@ -2692,14 +2698,6 @@ enum ComparisonOp {
     Ge,
 }
 
-fn parse_simple_statements(
-    hir: &FunctionHIR,
-    type_table: &mut TypeTable,
-) -> Result<Vec<SimpleStmt>, String> {
-    let body = extract_function_body(hir)?;
-    parse_simple_statements_from_block(body, type_table)
-}
-
 fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
     let Some(block) = hir.blocks.first() else {
         return Err("function body missing block text".to_string());
@@ -2707,16 +2705,19 @@ fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
     Ok(block.source.as_str())
 }
 
-fn parse_simple_statements_from_block(
+fn parse_simple_statements_from_block_with<F>(
     block_text: &str,
     type_table: &mut TypeTable,
-) -> Result<Vec<SimpleStmt>, String> {
+    mut visitor: F,
+) -> Result<(), String>
+where
+    F: FnMut(&TypeTable, SimpleStmt) -> Result<(), String>,
+{
     let trimmed = block_text.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return Err("expected function body block enclosed in '{...}'".to_string());
     }
     let inner = &trimmed[1..trimmed.len() - 1];
-    let mut statements = Vec::new();
     let mut cursor = 0usize;
     while cursor < inner.len() {
         cursor = skip_ascii_whitespace_and_comments(inner, cursor);
@@ -2727,7 +2728,8 @@ fn parse_simple_statements_from_block(
             let let_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[let_start..semicolon].trim();
-            statements.push(parse_let_statement(statement_text, type_table)?);
+            let statement = parse_let_statement(statement_text, type_table)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2735,7 +2737,8 @@ fn parse_simple_statements_from_block(
             let return_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[return_start..semicolon].trim();
-            statements.push(parse_return_statement(statement_text)?);
+            let statement = parse_return_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2743,25 +2746,26 @@ fn parse_simple_statements_from_block(
             let continue_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[continue_start..semicolon].trim();
-            statements.push(parse_continue_statement(statement_text)?);
+            let statement = parse_continue_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
         if starts_with_keyword(inner, cursor, "for") {
             let (statement, next_cursor) = parse_for_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "foreach") {
             let (statement, next_cursor) = parse_foreach_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "if") {
             let (statement, next_cursor) = parse_if_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
@@ -2775,7 +2779,8 @@ fn parse_simple_statements_from_block(
             let start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[start..semicolon].trim();
-            statements.push(parse_from_conversion_statement(statement_text)?);
+            let statement = parse_from_conversion_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2783,7 +2788,8 @@ fn parse_simple_statements_from_block(
             let assignment_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[assignment_start..semicolon].trim();
-            statements.push(parse_assignment_statement(statement_text)?);
+            let statement = parse_assignment_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2791,7 +2797,8 @@ fn parse_simple_statements_from_block(
             let call_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[call_start..semicolon].trim();
-            statements.push(parse_call_statement(statement_text)?);
+            let statement = parse_call_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2800,6 +2807,18 @@ fn parse_simple_statements_from_block(
             snippet_from(inner, cursor)
         ));
     }
+    Ok(())
+}
+
+fn parse_simple_statements_from_block(
+    block_text: &str,
+    type_table: &mut TypeTable,
+) -> Result<Vec<SimpleStmt>, String> {
+    let mut statements = Vec::new();
+    parse_simple_statements_from_block_with(block_text, type_table, |_type_table, statement| {
+        statements.push(statement);
+        Ok(())
+    })?;
     Ok(statements)
 }
 
