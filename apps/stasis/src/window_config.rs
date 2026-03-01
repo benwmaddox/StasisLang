@@ -9,4 +9,3 @@ impl WindowConfig {
         self.height > self.width
     }
 }
-

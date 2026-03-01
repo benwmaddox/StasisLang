@@ -10,7 +10,6 @@ mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
 pub use events::RunnerEvent;
-pub use window_config::WindowConfig;
 pub use self_host_runtime_bridge::{
     publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
@@ -20,6 +19,7 @@ pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
 };
+pub use window_config::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
@@ -36,8 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
@@ -158,6 +158,24 @@ fn hash_global_path(path: &str) -> i32 {
     hash as i32
 }
 
+fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
+    if let Some(dir) = watch_dir {
+        if !dir.as_os_str().is_empty() {
+            return dir.to_path_buf();
+        }
+    }
+
+    if let Some(parent) = watch_file.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
+    }
+
+    // `Path::parent()` can yield an empty path for basename-only inputs (e.g. "game.stasis").
+    // Treat that case as "current directory" so we never attempt set_current_dir("").
+    PathBuf::from(".")
+}
+
 pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
@@ -168,18 +186,20 @@ pub fn run_play_in_process(
         return Err("in-process play runner currently supports Windows only".to_string());
     }
 
-    let watch_dir = watch_dir
-        .or_else(|| watch_file.parent())
-        .ok_or_else(|| "play runner requires a watch directory".to_string())?;
+    let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
     let watch_dir_abs = watch_dir
         .canonicalize()
-        .unwrap_or_else(|_| watch_dir.to_path_buf());
+        .unwrap_or_else(|_| watch_dir.clone());
 
-    let mut watcher = WatchService::start(watch_dir)
-        .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
+    let mut watcher = WatchService::start(&watch_dir).map_err(|error| {
+        format!(
+            "failed to start watch service for {}: {error}",
+            watch_dir.display()
+        )
+    })?;
 
     let root_path = watch_file
         .canonicalize()
@@ -193,8 +213,7 @@ pub fn run_play_in_process(
         )
     })?;
 
-    let mut watch_dependency_paths =
-        collect_watch_dependency_paths(&root_path).ok();
+    let mut watch_dependency_paths = collect_watch_dependency_paths(&root_path).ok();
 
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
@@ -316,9 +335,7 @@ pub fn run_play_in_process(
             }
         }
         if ignored_changes > 0 && !needs_recompile {
-            println!(
-                "[watch] ignored {ignored_changes} change(s) (not in dependency graph)"
-            );
+            println!("[watch] ignored {ignored_changes} change(s) (not in dependency graph)");
         }
         if needs_recompile {
             let changed = triggered_paths
@@ -347,7 +364,8 @@ pub fn run_play_in_process(
                             // Candidate pointers: do not commit them until after the swap hook succeeds.
                             let candidate_tick_code_ptr = next_package.tick_code_ptr;
                             let candidate_render_code_ptr = next_package.render_code_ptr;
-                            let candidate_on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+                            let candidate_on_code_swap_code_ptr =
+                                next_package.on_code_swap_code_ptr;
 
                             let mut hook_ms: u128 = 0;
                             let mut hook_failed: Option<String> = None;
@@ -355,7 +373,8 @@ pub fn run_play_in_process(
                                 let t_hook = Instant::now();
                                 // Run the hook against the newly compiled code. If it fails, abort the swap attempt
                                 // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize) {
+                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
+                                {
                                     hook_ms = t_hook.elapsed().as_millis();
                                     hook_failed = Some(error);
                                 } else {
@@ -391,7 +410,6 @@ pub fn run_play_in_process(
                             );
                         }
                     }
-
                 }
                 Err(error) => {
                     // Keep running the last known-good code/data if compilation fails.
@@ -474,7 +492,9 @@ fn collect_stasis_sources_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
     paths.sort();
     for path in paths {
         if path.is_dir() {
@@ -597,11 +617,7 @@ fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf>
         return None;
     }
 
-    for preferred in [
-        "main.stasis",
-        "game.stasis",
-        "app.stasis",
-    ] {
+    for preferred in ["main.stasis", "game.stasis", "app.stasis"] {
         let candidate = watch_directory.join(preferred);
         if candidate.is_file() {
             return Some(candidate);
@@ -1228,6 +1244,33 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn resolve_play_watch_dir_defaults_to_dot_for_basename_entry() {
+        let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), None);
+        assert_eq!(resolved, PathBuf::from("."));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_ignores_empty_explicit_watch_dir() {
+        let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), Some(Path::new("")));
+        assert_eq!(resolved, PathBuf::from("."));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_uses_parent_when_present() {
+        let resolved = resolve_play_watch_dir(Path::new("samples/game.stasis"), None);
+        assert_eq!(resolved, PathBuf::from("samples"));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_prefers_explicit_watch_dir() {
+        let resolved = resolve_play_watch_dir(
+            Path::new("samples/game.stasis"),
+            Some(Path::new("override")),
+        );
+        assert_eq!(resolved, PathBuf::from("override"));
+    }
+
+    #[test]
     fn apply_commit_request_uses_jit_code_ptr_overrides_when_present() {
         let request_id = RequestId(44);
         let request = stasis_runner::swap::contracts::SwapCommitRequest::new(
@@ -1786,8 +1829,11 @@ mod tests {
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_watch_entry_infer_{}", stamp));
         fs::create_dir_all(&temp_root).expect("create temp dir");
-        fs::write(temp_root.join("helper.stasis"), "function util(): i32 { return 1; }\n")
-            .expect("write helper");
+        fs::write(
+            temp_root.join("helper.stasis"),
+            "function util(): i32 { return 1; }\n",
+        )
+        .expect("write helper");
         fs::write(
             temp_root.join("main.stasis"),
             "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
@@ -1862,7 +1908,8 @@ mod tests {
         fs::write(&dep, "function dep(): i32 { return 0; }\n").expect("write dep");
         fs::write(&other, "function other(): i32 { return 0; }\n").expect("write other");
 
-        let mut dependency_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut dependency_paths: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         dependency_paths.insert(normalize_watch_path_for_log(&root));
         dependency_paths.insert(normalize_watch_path_for_log(&dep));
 
