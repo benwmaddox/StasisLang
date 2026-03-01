@@ -1458,6 +1458,20 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    fn with_env_var_set(key: &str, value: &str, f: impl FnOnce()) {
+        let _lock = stasis_process_env_lock()
+            .lock()
+            .expect("process env lock should succeed");
+        let old = std::env::var_os(key);
+        std::env::set_var(key, value);
+        f();
+        if let Some(old) = old {
+            std::env::set_var(key, old);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
     #[test]
     fn apply_commit_request_uses_jit_code_ptr_overrides_when_present() {
         let request_id = RequestId(44);
@@ -1513,6 +1527,358 @@ mod tests {
             pointer_table.code_ptr(FnId(9)),
             Some(stasis_jit::CodePtr(0x9988))
         );
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_jit_hook_missing_hook_fn_id_when_overrides_present() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = None;
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing hook_fn_id")),
+            "expected missing hook_fn_id error, got {:?}",
+            result.error
+        );
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(pointer_table.code_ptr(FnId(9)).is_none());
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_jit_hook_missing_code_ptr_override_entry() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(FnId(7));
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        // Override exists, but not for hook fn id 7, so hook dispatch is unresolved.
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing JIT hook code pointer override")),
+            "expected missing hook code ptr override error, got {:?}",
+            result.error
+        );
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(pointer_table.code_ptr(FnId(9)).is_none());
+    }
+
+    #[test]
+    fn jit_hook_failure_preserves_previous_generation() {
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        let first_request_id = RequestId(44);
+        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            first_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+        let first = apply_commit_request(
+            first_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(first.status, SwapCommitStatus::Success);
+        assert_eq!(pointer_table.generation().0, 1);
+        let ptr_after_first = pointer_table.code_ptr(FnId(9));
+        assert!(ptr_after_first.is_some());
+
+        let second_request_id = RequestId(45);
+        let mut second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            second_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        second_request.hook_fn_id = Some(FnId(7));
+        let mut second_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> = BTreeMap::new();
+        // Note: override list doesn't include hook fn id 7, so commit must abort before swap.
+        second_overrides.insert(
+            second_request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let second = apply_commit_request(
+            second_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &second_overrides,
+        );
+        assert_eq!(second.status, SwapCommitStatus::Failed);
+        assert_eq!(pointer_table.generation().0, 1);
+        assert_eq!(pointer_table.code_ptr(FnId(9)), ptr_after_first);
+    }
+
+    #[test]
+    fn aot_native_hook_skips_when_disabled() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(FnId(7));
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        assert_eq!(hook_runs, 0);
+        assert_eq!(hook_failures, 0);
+        assert_eq!(swap_commit_successes, 1);
+        assert_eq!(swap_commit_failures, 0);
+        assert_eq!(pointer_table.generation().0, 1);
+    }
+
+    #[test]
+    fn aot_native_hook_rejects_missing_metadata_when_enabled() {
+        with_env_var_set("STASIS_AOT_EXECUTE_NATIVE_HOOK", "1", || {
+            let request_id = RequestId(44);
+            let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+                request_id,
+                LayoutHash([7; 32]),
+                FunctionPatchSet {
+                    functions: vec![FunctionPatch { fn_id: FnId(9) }],
+                },
+                Some("on_code_swap".to_string()),
+            );
+            request.hook_fn_id = Some(FnId(7));
+
+            let mut pointer_table = FunctionPointerTable::new();
+            let config = RunnerConfig {
+                target_mode: TargetMode::AotProd,
+                runtime_launch: false,
+                ..RunnerConfig::default()
+            };
+            let mut hook_runs = 0u32;
+            let mut hook_failures = 0u32;
+            let mut hook_failure_reasons = Vec::new();
+            let mut swap_commit_successes = 0u32;
+            let mut swap_commit_failures = 0u32;
+            let mut swap_failure_reasons = Vec::new();
+            let mut events = Vec::new();
+            let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
+                BTreeMap::new();
+            let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+                BTreeMap::new();
+
+            let result = apply_commit_request(
+                request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                None,
+                None,
+                &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
+            );
+
+            assert_eq!(result.status, SwapCommitStatus::Failed);
+            assert_eq!(hook_runs, 1);
+            assert_eq!(hook_failures, 1);
+            assert_eq!(swap_commit_successes, 0);
+            assert_eq!(swap_commit_failures, 1);
+            assert!(
+                result.error.as_deref().is_some_and(|error| {
+                    error.contains("missing AOT compile metadata")
+                        || error.contains("missing AOT compile")
+                }),
+                "expected missing AOT metadata error, got {:?}",
+                result.error
+            );
+            assert_eq!(pointer_table.generation().0, 0);
+        });
     }
 
     #[test]
