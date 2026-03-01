@@ -4,7 +4,6 @@ use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::parse_top_level_functions;
-use stasis_compiler::IncrementalCompilerHost;
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -21,7 +20,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub struct IncrementalCompilerBackend {
-    host: IncrementalCompilerHost,
     source_by_path: BTreeMap<String, String>,
     jit_process: JitProcess,
     jit_process_seeded: bool,
@@ -46,25 +44,12 @@ pub struct SelfHostedAotCliSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AotFallbackStubDetail {
-    symbol: String,
-    id_hash: i32,
-    sig_hash: i32,
-    body_hash: i32,
-    ordinal: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AotPatchManifest {
     request_id: u64,
     artifact_paths: Vec<String>,
     linked_image_path: Option<String>,
     linked_image_size_bytes: Option<u64>,
     linked_image_sha256: Option<String>,
-    #[serde(default)]
-    fallback_stub_symbols: Vec<String>,
-    #[serde(default)]
-    fallback_stub_details: Vec<AotFallbackStubDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +124,6 @@ impl IncrementalCompilerBackend {
                     .join(".stasis_cache")
             });
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -169,7 +153,6 @@ impl IncrementalCompilerBackend {
         aot_artifact_root: std::path::PathBuf,
     ) -> Self {
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -192,7 +175,6 @@ impl IncrementalCompilerBackend {
         enable_aot_link_step: bool,
     ) -> Self {
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -273,172 +255,19 @@ impl CompilerBackend for IncrementalCompilerBackend {
                 ),
             };
         }
-
-        let parsed = match self.host.compile_changed_files(&request.changed_files) {
+        match self.compile_aot_non_engine_contract_request(&request) {
             Ok(result) => result,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message,
-                        path: request.changed_files.first().cloned(),
-                        line: None,
-                        column: None,
-                    }],
-                );
-            }
-        };
-
-        if parsed.status != 0 {
-            let mut diagnostics = Vec::new();
-            if parsed.errors.is_empty() {
-                diagnostics.push(Diagnostic {
+            Err(message) => CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
-                    message: format!("incremental compiler failed with status {}", parsed.status),
+                    message,
                     path: request.changed_files.first().cloned(),
                     line: None,
                     column: None,
-                });
-            } else {
-                for error in parsed.errors {
-                    diagnostics.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format_error_message(error.code, error.detail_a, error.detail_b),
-                        path: None,
-                        line: None,
-                        column: Some(error.pos.max(0) as u32),
-                    });
-                }
-            }
-            return CompileResult::failed(request.request_id, diagnostics);
+                }],
+            ),
         }
-
-        let mut aot_linked_image_path: Option<String> = None;
-        let mut aot_linked_image_size_bytes: Option<u64> = None;
-        let mut aot_linked_image_sha256: Option<String> = None;
-        let mut aot_function_symbols: Option<Vec<AotFunctionSymbol>> = None;
-        if request.target_mode == TargetMode::AotProd {
-            match self.emit_aot_artifacts(request.request_id.0, &parsed.functions) {
-                Ok(path) => {
-                    aot_linked_image_path = path;
-                    if let Some(path) = aot_linked_image_path.as_ref() {
-                        let metadata = std::fs::metadata(path).map_err(|error| {
-                            CompileResult::failed(
-                                request.request_id,
-                                vec![Diagnostic {
-                                    severity: DiagnosticSeverity::Error,
-                                    message: format!(
-                                        "failed to stat linked AOT image {}: {error}",
-                                        path
-                                    ),
-                                    path: request.changed_files.first().cloned(),
-                                    line: None,
-                                    column: None,
-                                }],
-                            )
-                        });
-                        match metadata {
-                            Ok(meta) => aot_linked_image_size_bytes = Some(meta.len()),
-                            Err(result) => return result,
-                        }
-                        let digest = compute_file_sha256_hex(Path::new(path)).map_err(|error| {
-                            CompileResult::failed(
-                                request.request_id,
-                                vec![Diagnostic {
-                                    severity: DiagnosticSeverity::Error,
-                                    message: format!(
-                                        "failed to hash linked AOT image {}: {error}",
-                                        path
-                                    ),
-                                    path: request.changed_files.first().cloned(),
-                                    line: None,
-                                    column: None,
-                                }],
-                            )
-                        });
-                        match digest {
-                            Ok(hash) => aot_linked_image_sha256 = Some(hash),
-                            Err(result) => return result,
-                        }
-                    }
-                }
-                Err(message) => {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            path: request.changed_files.first().cloned(),
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
-            }
-        }
-
-        let mut functions = Vec::new();
-        let mut hook_fn_id: Option<FnId> = None;
-        let mut collected_aot_symbols: Vec<AotFunctionSymbol> = Vec::new();
-        for metric in parsed.functions {
-            let path = parsed
-                .file_paths
-                .get(metric.file_index)
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let key = format!(
-                "{path}::{}::{}::{}",
-                metric.id_hash, metric.sig_hash, metric.body_hash
-            );
-            let fn_id = match self.fn_id_for_key(&key) {
-                Ok(id) => id,
-                Err(message) => {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            path: None,
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
-            };
-            if metric.id_hash == hash_identifier("on_code_swap") {
-                hook_fn_id = Some(fn_id);
-            }
-            if request.target_mode == TargetMode::AotProd {
-                collected_aot_symbols.push(AotFunctionSymbol {
-                    fn_id,
-                    symbol: aot_symbol_name(&metric),
-                });
-            }
-            functions.push(FunctionPatch { fn_id });
-        }
-        if request.target_mode == TargetMode::AotProd {
-            aot_function_symbols = Some(collected_aot_symbols);
-        }
-
-        if hook_fn_id.is_none() {
-            hook_fn_id = self.existing_fn_id_for_identifier_hash(hash_identifier("on_code_swap"));
-        }
-
-        let layout_hash = expand_layout_hash(parsed.layout_hash);
-        CompileResult::success_with_host_set_metadata(
-            request.request_id,
-            layout_hash,
-            FunctionPatchSet { functions },
-            request.host_set_id.clone(),
-            request.host_set_hash,
-            parsed.hook_symbol,
-            hook_fn_id,
-            aot_linked_image_path.map(std::path::PathBuf::from),
-            aot_linked_image_size_bytes,
-            aot_linked_image_sha256,
-            aot_function_symbols,
-        )
     }
 }
 
@@ -707,7 +536,7 @@ impl IncrementalCompilerBackend {
             None
         };
 
-        let mut result = CompileResult::success_with_host_set_metadata(
+        Ok(CompileResult::success_with_host_set_metadata(
             request.request_id,
             self.layout_hash_from_source_cache(),
             FunctionPatchSet { functions },
@@ -793,6 +622,157 @@ impl IncrementalCompilerBackend {
         );
         result.jit_code_ptr_overrides = Some(jit_code_ptr_overrides);
         Ok(result)
+    }
+
+    fn compile_aot_non_engine_contract_request(
+        &mut self,
+        request: &CompileRequest,
+    ) -> Result<CompileResult, String> {
+        let function_entries = self.collect_cached_function_entries()?;
+        if function_entries.is_empty() {
+            return Err(
+                "non-engine AOT compile requires at least one parsed top-level function".to_string(),
+            );
+        }
+
+        let mut process = AotProcess::with_optimization_profile(
+            Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
+        );
+        for (path, source) in &self.source_by_path {
+            process.upsert_file(path.clone(), source.clone());
+        }
+        process
+            .compile()
+            .map_err(|error| format!("rust-native AOT compile failed: {error:?}"))?;
+
+        let request_id = request.request_id.0;
+        let object_output_dir = self
+            .aot_artifact_root
+            .join("non_engine_objects")
+            .join(format!("request_{}", request_id));
+        if object_output_dir.exists() {
+            std::fs::remove_dir_all(&object_output_dir).map_err(|error| {
+                format!(
+                    "failed to clear existing non-engine AOT object directory {}: {error}",
+                    object_output_dir.display()
+                )
+            })?;
+        }
+
+        let objects_by_function = process.write_object_files(&object_output_dir)?;
+        if objects_by_function.is_empty() {
+            return Err("non-engine AOT compile produced no object files".to_string());
+        }
+
+        let mut artifact_paths: Vec<String> = objects_by_function
+            .values()
+            .map(|(_, path)| path.display().to_string())
+            .collect();
+        artifact_paths.sort();
+
+        let mut functions = Vec::new();
+        let mut hook_fn_id: Option<FnId> = None;
+        let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
+        for entry in &function_entries {
+            let key = format!("rust_native::{}::{}", entry.path, entry.name);
+            let fn_id = self.fn_id_for_key(&key)?;
+            if let Some(previous) = fn_id_by_name.insert(entry.name.clone(), fn_id) {
+                if previous != fn_id {
+                    return Err(format!(
+                        "duplicate function name '{}' across files is not supported in non-engine AOT mode",
+                        entry.name
+                    ));
+                }
+            }
+            if entry.name == "on_code_swap" {
+                hook_fn_id = Some(fn_id);
+            }
+            functions.push(FunctionPatch { fn_id });
+        }
+        if functions.is_empty() {
+            return Err("non-engine AOT compile produced empty patch set".to_string());
+        }
+
+        let mut aot_function_symbols = Vec::new();
+        let mut export_symbols = Vec::new();
+        for (name, fn_id) in &fn_id_by_name {
+            let Some((symbol, _)) = objects_by_function.get(name) else {
+                return Err(format!(
+                    "non-engine AOT compile missing object for function '{}'",
+                    name
+                ));
+            };
+            export_symbols.push(symbol.clone());
+            aot_function_symbols.push(AotFunctionSymbol {
+                fn_id: *fn_id,
+                symbol: symbol.clone(),
+            });
+        }
+
+        std::fs::create_dir_all(&self.aot_artifact_root).map_err(|error| {
+            format!(
+                "failed to create AOT artifact directory {}: {error}",
+                self.aot_artifact_root.display()
+            )
+        })?;
+
+        let mut linked_image_path: Option<PathBuf> = None;
+        let mut linked_image_size_bytes: Option<u64> = None;
+        let mut linked_image_sha256: Option<String> = None;
+        if self.enable_aot_link_step {
+            let linked_output = if cfg!(windows) {
+                self.aot_artifact_root.join(format!("req{request_id}_bundle.dll"))
+            } else if cfg!(target_os = "macos") {
+                self.aot_artifact_root
+                    .join(format!("req{request_id}_bundle.dylib"))
+            } else {
+                self.aot_artifact_root.join(format!("req{request_id}_bundle.so"))
+            };
+            let object_paths: Vec<PathBuf> = objects_by_function
+                .values()
+                .map(|(_, path)| path.clone())
+                .collect();
+            link_objects_to_dynamic_library(
+                &object_paths,
+                &linked_output,
+                &export_symbols,
+                &self.aot_link_config,
+            )?;
+            linked_image_size_bytes = Some(
+                std::fs::metadata(&linked_output)
+                    .map_err(|error| {
+                        format!(
+                            "failed to stat linked AOT image {}: {error}",
+                            linked_output.display()
+                        )
+                    })?
+                    .len(),
+            );
+            linked_image_sha256 = Some(compute_file_sha256_hex(&linked_output)?);
+            linked_image_path = Some(linked_output);
+        }
+
+        self.write_aot_manifest(
+            request_id,
+            &artifact_paths,
+            linked_image_path.as_ref().map(|p| p.display().to_string()),
+            linked_image_size_bytes,
+            linked_image_sha256.clone(),
+        )?;
+
+        let mut result = CompileResult::success_with_host_set_metadata(
+            request.request_id,
+            self.layout_hash_from_source_cache(),
+            FunctionPatchSet { functions },
+            request.host_set_id.clone(),
+            request.host_set_hash,
+            hook_fn_id.map(|_| "on_code_swap".to_string()),
+            hook_fn_id,
+            linked_image_path,
+            linked_image_size_bytes,
+            linked_image_sha256,
+            Some(aot_function_symbols),
+        ))
     }
 
     fn refresh_cached_sources(
@@ -1004,8 +984,6 @@ impl IncrementalCompilerBackend {
     ) -> Result<Option<String>, String> {
         let mut artifact_paths = Vec::new();
         let mut export_symbols = Vec::new();
-        let mut fallback_stub_symbols = Vec::new();
-        let mut fallback_stub_details = Vec::new();
         let mut linked_image_path: Option<String> = None;
         let mut linked_image_size_bytes: Option<u64> = None;
         let mut linked_image_sha256: Option<String> = None;
@@ -1013,11 +991,9 @@ impl IncrementalCompilerBackend {
             self.write_aot_manifest(
                 request_id,
                 &artifact_paths,
-                linked_image_path.as_deref(),
+                linked_image_path.clone(),
                 linked_image_size_bytes,
-                linked_image_sha256.as_deref(),
-                &fallback_stub_symbols,
-                &fallback_stub_details,
+                linked_image_sha256.clone(),
             )?;
             return Ok(linked_image_path);
         }
@@ -1032,17 +1008,6 @@ impl IncrementalCompilerBackend {
         for metric in metrics {
             let function_name = aot_symbol_name(metric);
             export_symbols.push(function_name.clone());
-            let uses_stub_fallback = metric_uses_stub_fallback(metric);
-            if uses_stub_fallback {
-                fallback_stub_symbols.push(function_name.clone());
-                fallback_stub_details.push(AotFallbackStubDetail {
-                    symbol: function_name.clone(),
-                    id_hash: metric.id_hash,
-                    sig_hash: metric.sig_hash,
-                    body_hash: metric.body_hash,
-                    ordinal: metric.ordinal,
-                });
-            }
             let resolved_simple_call_target = resolve_unique_i32_call_target_symbol_by_hash(
                 metric.simple_i32_return_call_target_id_hash,
                 metrics,
@@ -1271,11 +1236,9 @@ impl IncrementalCompilerBackend {
         self.write_aot_manifest(
             request_id,
             &artifact_paths,
-            linked_image_path.as_deref(),
+            linked_image_path.clone(),
             linked_image_size_bytes,
-            linked_image_sha256.as_deref(),
-            &fallback_stub_symbols,
-            &fallback_stub_details,
+            linked_image_sha256.clone(),
         )?;
 
         Ok(linked_image_path)
@@ -1285,21 +1248,17 @@ impl IncrementalCompilerBackend {
         &self,
         request_id: u64,
         artifact_paths: &[String],
-        linked_image_path: Option<&str>,
+        linked_image_path: Option<String>,
         linked_image_size_bytes: Option<u64>,
-        linked_image_sha256: Option<&str>,
-        fallback_stub_symbols: &[String],
-        fallback_stub_details: &[AotFallbackStubDetail],
+        linked_image_sha256: Option<String>,
     ) -> Result<(), String> {
         let manifest_path = self.aot_artifact_root.join("last_patch_manifest.json");
         let manifest = AotPatchManifest {
             request_id,
             artifact_paths: artifact_paths.to_vec(),
-            linked_image_path: linked_image_path.map(str::to_string),
+            linked_image_path,
             linked_image_size_bytes,
-            linked_image_sha256: linked_image_sha256.map(str::to_string),
-            fallback_stub_symbols: fallback_stub_symbols.to_vec(),
-            fallback_stub_details: fallback_stub_details.to_vec(),
+            linked_image_sha256,
         };
         let payload = serde_json::to_string_pretty(&manifest)
             .map_err(|error| format!("failed to serialize AOT manifest: {error}"))?;
@@ -3125,7 +3084,6 @@ mod tests {
             id_hash: hash_identifier("main"),
             sig_hash: 11,
             body_hash: 12,
-            return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             uses_stub_fallback: false,
             param_count: 0,
@@ -3154,7 +3112,6 @@ mod tests {
             id_hash: hash_identifier("callee"),
             sig_hash: 21,
             body_hash: 22,
-            return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             uses_stub_fallback: false,
             param_count: 0,
@@ -3194,7 +3151,6 @@ mod tests {
             id_hash: hash_identifier("main"),
             sig_hash: 11,
             body_hash: 12,
-            return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             uses_stub_fallback: false,
             param_count: 0,
@@ -3223,7 +3179,6 @@ mod tests {
             id_hash: hash_identifier("callee"),
             sig_hash: 21,
             body_hash: 22,
-            return_type: "i32".to_string(),
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
             uses_stub_fallback: false,
             param_count: 1,

@@ -46,7 +46,6 @@ pub struct FunctionMetric {
     pub id_hash: i32,
     pub sig_hash: i32,
     pub body_hash: i32,
-    pub return_type: String,
     pub return_type_code: i32,
     pub uses_stub_fallback: bool,
     pub param_count: i32,
@@ -121,7 +120,6 @@ struct ParsedFunction {
     is_export: bool,
     sig_hash: i32,
     body_hash: i32,
-    return_type: String,
     return_type_code: i32,
     uses_stub_fallback: bool,
     param_count: i32,
@@ -383,7 +381,6 @@ impl IncrementalCompilerHost {
                     id_hash: parsed.id_hash,
                     sig_hash: parsed.sig_hash,
                     body_hash: parsed.body_hash,
-                    return_type: parsed.return_type.clone(),
                     return_type_code: parsed.return_type_code,
                     uses_stub_fallback: parsed.uses_stub_fallback,
                     param_count: parsed.param_count,
@@ -569,7 +566,6 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             is_export: function.is_export,
             sig_hash,
             body_hash,
-            return_type: function.return_type_name.clone(),
             return_type_code,
             uses_stub_fallback,
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
@@ -2118,7 +2114,6 @@ mod tests {
             is_export: false,
             sig_hash,
             body_hash: sig_hash.wrapping_mul(31),
-            return_type: "i32".to_string(),
             return_type_code: RETURN_TYPE_CODE_I32,
             uses_stub_fallback: true,
             param_count: 0,
@@ -2325,8 +2320,14 @@ mod tests {
         assert_eq!(compile.status, 0);
         assert_eq!(compile.hook_symbol.as_deref(), Some("on_code_swap"));
         assert_eq!(compile.functions.len(), 2);
-        assert!(compile.functions.iter().any(|f| f.return_type == "i32"));
-        assert!(compile.functions.iter().any(|f| f.return_type == "void"));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_I32));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_VOID));
         assert!(compile
             .functions
             .iter()
