@@ -168,3 +168,68 @@ jobs:
                   )
                   sys.exit(1)
           PY
+
+  engine-hot-update-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run engine hot-update benchmark (dev JIT)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis --example engine_hot_update_bench -- \
+            --samples 3 \
+            --tick-sleep-us 16666 \
+            --warmup-ticks 8 \
+            --timeout-ms 5000 \
+            | tee engine_hot_update_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("engine_hot_update_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          line = None
+          for candidate in text:
+              if candidate.startswith("result "):
+                  line = candidate
+          if line is None:
+              print(f"missing benchmark result line in {path}", file=sys.stderr)
+              sys.exit(1)
+
+          kv: Dict[str, str] = {}
+          for part in line.split():
+              if "=" in part:
+                  key, value = part.split("=", 1)
+                  kv[key] = value
+
+          def f64(key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          warm_p95_ms = f64("warm_update_total_ms_p95")
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_warm_p95_ms = 2000.0
+
+          print(f"warm_update_total_ms_p95={warm_p95_ms:.3f}ms (max {max_warm_p95_ms:.3f}ms)")
+
+          if warm_p95_ms > max_warm_p95_ms:
+              print("engine hot-update regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          PY
