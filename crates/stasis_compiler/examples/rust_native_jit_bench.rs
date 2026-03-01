@@ -48,6 +48,14 @@ fn render_function_line(function_index: usize, value: i32) -> String {
     format!("function fn_{function_index}(): i32 {{ return {value}; }}\n")
 }
 
+fn render_function_line_with_call(
+    function_index: usize,
+    callee_index: usize,
+    value: i32,
+) -> String {
+    format!("function fn_{function_index}(): i32 {{ return fn_{callee_index}() + {value}; }}\n")
+}
+
 fn render_source(function_count: usize, seed: u64, target_edit: Option<(usize, i32)>) -> String {
     let mut out = String::new();
     for function_index in 0..function_count {
@@ -60,10 +68,22 @@ fn render_source(function_count: usize, seed: u64, target_edit: Option<(usize, i
         } else {
             default_value(seed, function_index)
         };
-        out.push_str(&render_function_line(function_index, value));
+
+        // Keep all functions reachable under reachability-gated emission (S10b+) by threading a
+        // simple call chain through fn_0 -> fn_1 -> ... -> fn_{N-1}. Only the last function is a
+        // literal return.
+        if function_index + 1 < function_count {
+            out.push_str(&render_function_line_with_call(
+                function_index,
+                function_index + 1,
+                value,
+            ));
+        } else {
+            out.push_str(&render_function_line(function_index, value));
+        }
     }
     // Keep a `main` function so this fixture can be reused for broader runtime checks.
-    out.push_str("function main(): i32 { return 0; }\n");
+    out.push_str("function main(): i32 { return fn_0(); }\n");
     out
 }
 

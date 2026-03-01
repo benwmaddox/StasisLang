@@ -1,0 +1,95 @@
+name: Perf CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - ".github/workflows/perf-ci.yml"
+      - "crates/stasis_compiler/**"
+      - "apps/stasis/examples/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-native-jit-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run rust-native JIT benchmark (1k functions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis_compiler --example rust_native_jit_bench -- \
+            --functions 1000 \
+            --cold-samples 3 \
+            --incremental-samples 5 \
+            | tee rust_native_jit_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("rust_native_jit_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          line = None
+          for candidate in text:
+              if candidate.startswith("result ") and "functions=1000" in candidate:
+                  line = candidate
+          if line is None:
+              print(f"missing benchmark result line in {path}", file=sys.stderr)
+              sys.exit(1)
+
+          kv: Dict[str, str] = {}
+          for part in line.split():
+              if "=" in part:
+                  key, value = part.split("=", 1)
+                  kv[key] = value
+
+          def f64(key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          cold_p95_ms = f64("cold_ms_p95")
+          incremental_p95_ms = f64("incremental_one_fn_ms_p95")
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_cold_p95_ms = 2000.0
+          max_incremental_p95_ms = 50.0
+
+          print(f"cold_ms_p95={cold_p95_ms:.3f}ms (max {max_cold_p95_ms:.3f}ms)")
+          print(
+              f"incremental_one_fn_ms_p95={incremental_p95_ms:.3f}ms (max {max_incremental_p95_ms:.3f}ms)"
+          )
+
+          if cold_p95_ms > max_cold_p95_ms:
+              print("cold compile regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          if incremental_p95_ms > max_incremental_p95_ms:
+              print("incremental compile regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          PY
+
