@@ -734,21 +734,31 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: unchanged files/functions skip body parse and skip CLIF emission.
 - Tests: signature-only change, body-only change, unchanged-file no-op, and mixed-file edit cases.
 - Done gate: dirty-function set is deterministic and minimal for covered scenarios.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler flow runs explicit index then emit stages (`Compiler::index_pass`, `Compiler::emit_pass_with`) and emit work is restricted to dirty function ids only.
+- Regression coverage now includes signature-only changes, body-only changes, unchanged-source no-op, and mixed-file body edit gating in `crates/stasis_compiler::compiler::tests::*`.
+- Status: `done`
 - Slice CS3: Implement O(1) function symbol lookup via open-addressed hash table in `.stasis`.
 - Language: `.stasis`.
 - Scope: replace linear function-name scans for call resolution and file-function lookup with open-addressed table operations.
 - Deliverable: symbol table API with deterministic probing and collision handling.
 - Tests: collision-heavy fixture, duplicate-name/across-file behavior, and lookup determinism.
 - Done gate: no hot-path linear scans remain for function symbol resolution.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler index path now uses a deterministic open-addressed symbol table (linear probing) for `name_hash -> FunctionId` resolution (`SymbolTable` in `crates/stasis_compiler/src/compiler.rs`) instead of generic map lookups in the hot path.
+- Added regression coverage for collision-heavy probe behavior, duplicate-hash replacement semantics, duplicate-name across-file resolution, and repeated lookup determinism.
+- Status: `done`
 - Slice CS4: Implement first-class dependency invalidation graph (dependencies + dependents) with ripple propagation.
 - Language: `.stasis`.
 - Scope: store forward + reverse adjacency in flat arrays and propagate dirty state from signature/body changes to dependents.
 - Deliverable: deterministic ripple invalidation without full-project rebuild for local edits.
 - Tests: single-edge, fan-out, multi-level chain, and no-op signature-equal edits.
 - Done gate: invalidation matches expected closure and touches only impacted functions.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler index stage builds forward/dependent adjacency from dependency hashes each pass and stores edges in compact per-function vectors (`dependencies`, `dependents`).
+- Signature-change ripple propagation is enforced via queue walk (`propagate_dirty_from_signature_changes`) with regression coverage for single-edge, fan-out, and multi-level chain closures.
+- No-op signature-equivalent edits remain clean (`signature_equivalent_formatting_edit_does_not_dirty_or_emit`), and body-only fan-out edits keep dependents clean to preserve minimal invalidation (`body_change_keeps_fan_out_dependents_clean`).
+- Status: `done`
 - Slice CS5: Remove legacy `simple_*` detector metadata channels from compiler state and host contracts.
 - Language: `.stasis + Rust`.
 - Scope: delete obsolete detector/fallback metrics and rely on real parse/resolve/emit behavior for supported slices.
