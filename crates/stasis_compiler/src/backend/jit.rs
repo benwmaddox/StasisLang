@@ -8238,7 +8238,7 @@ fn seed_fixed_collection_max_length_headers(
                 seed_collection_max_length(path, max_length);
             }
             TypeCategory::ArrayFixed => {
-                let Some(max_length) = fixed_array_extent_from_type_name(&type_info.name) else {
+                let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
                     continue;
                 };
                 seed_collection_max_length(path, max_length);
@@ -8247,14 +8247,6 @@ fn seed_fixed_collection_max_length_headers(
         }
     }
     Ok(())
-}
-
-fn fixed_array_extent_from_type_name(type_name: &str) -> Option<i32> {
-    let (_, extent_text) = parse_array_type_parts(type_name)?;
-    if extent_text.is_empty() {
-        return None;
-    }
-    extent_text.parse::<i32>().ok()
 }
 
 fn seed_collection_max_length(path: &str, max_length: i32) {

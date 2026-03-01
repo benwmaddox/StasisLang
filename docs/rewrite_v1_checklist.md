@@ -785,6 +785,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Legacy `simple_void_print_is_one_arg` has been removed from the active compiler metric contract; void-print lowering/validation now uses only canonical shape-code metadata in active paths (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
 - Incremental compile metrics now also expose canonical void-print call-target shape codes (`SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_*` via `simple_void_print_call_target_shape_code`), and active AOT void-print target resolution/validation consumes this single numeric contract instead of ad-hoc branch conditions over raw fields (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
 - Added deterministic unit coverage in `crates/stasis_compiler/src/frontend/types.rs` for array/string interning and layout metadata.
+- JIT fixed-array `max_length` header seeding now consumes interned type metadata (`TypeTable::fixed_collection_len`) instead of parsing type-name strings, removing string parsing from this hot path (`crates/stasis_compiler/src/backend/jit.rs`).
 - Status: `in_progress`
 - Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
 - Language: `.stasis`.
