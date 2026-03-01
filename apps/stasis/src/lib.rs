@@ -10,7 +10,6 @@ mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
 pub use events::RunnerEvent;
-pub use window_config::WindowConfig;
 pub use self_host_runtime_bridge::{
     publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
     restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
@@ -20,6 +19,7 @@ pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
 };
+pub use window_config::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
@@ -36,8 +36,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
@@ -178,8 +178,12 @@ pub fn run_play_in_process(
         .canonicalize()
         .unwrap_or_else(|_| watch_dir.to_path_buf());
 
-    let mut watcher = WatchService::start(watch_dir)
-        .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
+    let mut watcher = WatchService::start(watch_dir).map_err(|error| {
+        format!(
+            "failed to start watch service for {}: {error}",
+            watch_dir.display()
+        )
+    })?;
 
     let root_path = watch_file
         .canonicalize()
@@ -193,8 +197,7 @@ pub fn run_play_in_process(
         )
     })?;
 
-    let mut watch_dependency_paths =
-        collect_watch_dependency_paths(&root_path).ok();
+    let mut watch_dependency_paths = collect_watch_dependency_paths(&root_path).ok();
 
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
@@ -316,9 +319,7 @@ pub fn run_play_in_process(
             }
         }
         if ignored_changes > 0 && !needs_recompile {
-            println!(
-                "[watch] ignored {ignored_changes} change(s) (not in dependency graph)"
-            );
+            println!("[watch] ignored {ignored_changes} change(s) (not in dependency graph)");
         }
         if needs_recompile {
             let changed = triggered_paths
@@ -347,7 +348,8 @@ pub fn run_play_in_process(
                             // Candidate pointers: do not commit them until after the swap hook succeeds.
                             let candidate_tick_code_ptr = next_package.tick_code_ptr;
                             let candidate_render_code_ptr = next_package.render_code_ptr;
-                            let candidate_on_code_swap_code_ptr = next_package.on_code_swap_code_ptr;
+                            let candidate_on_code_swap_code_ptr =
+                                next_package.on_code_swap_code_ptr;
 
                             let mut hook_ms: u128 = 0;
                             let mut hook_failed: Option<String> = None;
@@ -355,7 +357,8 @@ pub fn run_play_in_process(
                                 let t_hook = Instant::now();
                                 // Run the hook against the newly compiled code. If it fails, abort the swap attempt
                                 // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize) {
+                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
+                                {
                                     hook_ms = t_hook.elapsed().as_millis();
                                     hook_failed = Some(error);
                                 } else {
@@ -391,7 +394,6 @@ pub fn run_play_in_process(
                             );
                         }
                     }
-
                 }
                 Err(error) => {
                     // Keep running the last known-good code/data if compilation fails.
@@ -474,7 +476,9 @@ fn collect_stasis_sources_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|entry| entry.ok().map(|e| e.path())).collect();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
     paths.sort();
     for path in paths {
         if path.is_dir() {
@@ -597,11 +601,7 @@ fn infer_watch_directory_entry_source(watch_directory: &Path) -> Option<PathBuf>
         return None;
     }
 
-    for preferred in [
-        "main.stasis",
-        "game.stasis",
-        "app.stasis",
-    ] {
+    for preferred in ["main.stasis", "game.stasis", "app.stasis"] {
         let candidate = watch_directory.join(preferred);
         if candidate.is_file() {
             return Some(candidate);
@@ -1006,7 +1006,7 @@ fn apply_commit_request(
     pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
     pending_jit_code_ptr_overrides: &BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
 ) -> SwapCommitResult {
-    if !config.disable_on_code_swap_hook {
+    if config.target_mode == TargetMode::JitDev && !config.disable_on_code_swap_hook {
         if let Some(hook_symbol) = request.hook_symbol.as_deref() {
             *hook_runs += 1;
             if let Some(reason) = hook_failure_reason {
@@ -1022,6 +1022,63 @@ fn apply_commit_request(
                 *swap_commit_failures += 1;
                 swap_failure_reasons.push(hook_error.clone());
                 return SwapCommitResult::failed(request.request_id, hook_error);
+            }
+
+            if pending_jit_code_ptr_overrides.contains_key(&request.request_id) {
+                let Some(hook_fn_id) = request.hook_fn_id else {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: missing hook_fn_id metadata");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                };
+
+                let overrides = pending_jit_code_ptr_overrides
+                    .get(&request.request_id)
+                    .expect("request id should exist after contains_key");
+                let code_ptr = overrides
+                    .iter()
+                    .find(|entry| entry.fn_id == hook_fn_id)
+                    .map(|entry| entry.code_ptr)
+                    .unwrap_or(0);
+                if code_ptr == 0 {
+                    *hook_failures += 1;
+                    let hook_error = format!(
+                        "{hook_symbol} failed: missing JIT hook code pointer override for fn_id={}",
+                        hook_fn_id.0
+                    );
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+                if let Err(error) = stasis_dynload::invoke_noarg_void(code_ptr as usize) {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: {error}");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
             }
 
             events.push(RunnerEvent::HookResult {
@@ -1786,8 +1843,11 @@ mod tests {
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_watch_entry_infer_{}", stamp));
         fs::create_dir_all(&temp_root).expect("create temp dir");
-        fs::write(temp_root.join("helper.stasis"), "function util(): i32 { return 1; }\n")
-            .expect("write helper");
+        fs::write(
+            temp_root.join("helper.stasis"),
+            "function util(): i32 { return 1; }\n",
+        )
+        .expect("write helper");
         fs::write(
             temp_root.join("main.stasis"),
             "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
@@ -1862,7 +1922,8 @@ mod tests {
         fs::write(&dep, "function dep(): i32 { return 0; }\n").expect("write dep");
         fs::write(&other, "function other(): i32 { return 0; }\n").expect("write other");
 
-        let mut dependency_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut dependency_paths: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         dependency_paths.insert(normalize_watch_path_for_log(&root));
         dependency_paths.insert(normalize_watch_path_for_log(&dep));
 
@@ -2109,6 +2170,48 @@ mod tests {
         assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_executes_hook_and_mutates_global_state() {
+        stasis_dynload::clear_jit_i32_global_table();
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("rust_native_jit_smoke_hook_mutates_global.stasis");
+        let config = RunnerConfig {
+            // Real backend compile can take multiple seconds on busy CI/dev hosts.
+            max_ticks: 7000,
+            tick_sleep_micros: 1000,
+            window: None,
+            inject_file_change: Some(fixture),
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_real_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
+        assert_eq!(summary.hook_runs, 1);
+        assert_eq!(summary.hook_failures, 0);
+
+        let hook_runs =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("State.hook_runs"));
+        assert_eq!(hook_runs, 1);
+
+        stasis_dynload::clear_jit_i32_global_table();
     }
 
     #[cfg(windows)]
