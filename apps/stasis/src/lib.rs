@@ -158,6 +158,24 @@ fn hash_global_path(path: &str) -> i32 {
     hash as i32
 }
 
+fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
+    if let Some(dir) = watch_dir {
+        if !dir.as_os_str().is_empty() {
+            return dir.to_path_buf();
+        }
+    }
+
+    if let Some(parent) = watch_file.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
+    }
+
+    // `Path::parent()` can yield an empty path for basename-only inputs (e.g. "game.stasis").
+    // Treat that case as "current directory" so we never attempt set_current_dir("").
+    PathBuf::from(".")
+}
+
 pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
@@ -168,18 +186,20 @@ pub fn run_play_in_process(
         return Err("in-process play runner currently supports Windows only".to_string());
     }
 
-    let watch_dir = watch_dir
-        .or_else(|| watch_file.parent())
-        .ok_or_else(|| "play runner requires a watch directory".to_string())?;
+    let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
     let watch_dir_abs = watch_dir
         .canonicalize()
-        .unwrap_or_else(|_| watch_dir.to_path_buf());
+        .unwrap_or_else(|_| watch_dir.clone());
 
-    let mut watcher = WatchService::start(watch_dir)
-        .map_err(|error| format!("failed to start watch service for {}: {error}", watch_dir.display()))?;
+    let mut watcher = WatchService::start(&watch_dir).map_err(|error| {
+        format!(
+            "failed to start watch service for {}: {error}",
+            watch_dir.display()
+        )
+    })?;
 
     let root_path = watch_file
         .canonicalize()
@@ -1226,6 +1246,31 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resolve_play_watch_dir_defaults_to_dot_for_basename_entry() {
+        let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), None);
+        assert_eq!(resolved, PathBuf::from("."));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_ignores_empty_explicit_watch_dir() {
+        let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), Some(Path::new("")));
+        assert_eq!(resolved, PathBuf::from("."));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_uses_parent_when_present() {
+        let resolved = resolve_play_watch_dir(Path::new("samples/game.stasis"), None);
+        assert_eq!(resolved, PathBuf::from("samples"));
+    }
+
+    #[test]
+    fn resolve_play_watch_dir_prefers_explicit_watch_dir() {
+        let resolved =
+            resolve_play_watch_dir(Path::new("samples/game.stasis"), Some(Path::new("override")));
+        assert_eq!(resolved, PathBuf::from("override"));
+    }
 
     #[test]
     fn apply_commit_request_uses_jit_code_ptr_overrides_when_present() {
