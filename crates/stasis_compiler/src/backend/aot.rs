@@ -30,6 +30,7 @@ pub struct AotProcess {
     next_symbol_seq: u64,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
+    required_emit_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,7 @@ impl AotProcess {
             next_symbol_seq: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
+            required_emit_roots: Vec::new(),
         }
     }
 
@@ -60,7 +62,35 @@ impl AotProcess {
         self.compiler.upsert_file(path, content);
     }
 
+    pub fn set_required_emit_roots(&mut self, roots: &[String]) {
+        self.required_emit_roots.clear();
+        self.required_emit_roots.extend_from_slice(roots);
+    }
+
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        let index = self.compiler.index_pass()?;
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        );
+        let compiled_body_hashes: BTreeMap<FunctionId, u64> = self
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.function_id, artifact.body_hash))
+            .collect();
+        let emit_function_ids: Vec<FunctionId> = self
+            .compiler
+            .functions()
+            .iter()
+            .filter(|function| reachable.contains(&function.id))
+            .filter(|function| {
+                let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
+                let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
+                function.dirty || !artifact_matches_body_hash
+            })
+            .map(|function| function.id)
+            .collect();
+
         let (
             compiler,
             next_object_index,
@@ -76,7 +106,7 @@ impl AotProcess {
             &mut self.object_bytes,
             self.optimization_profile,
         );
-        compiler.compile_with(|meta, hir| {
+        let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
             let symbol = format!("aot_fn_{}_{}", meta.id, *next_symbol_seq);
             *next_symbol_seq = next_symbol_seq.saturating_add(1);
             let bytes = compile_function_to_object_bytes(meta, hir, &symbol, optimization_profile)?;
@@ -93,7 +123,10 @@ impl AotProcess {
                 object_bytes_len,
             });
             Ok(())
-        })
+        })?;
+
+        artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
+        Ok(CompileReport { index, emit })
     }
 
     pub fn artifacts(&self) -> &[AotArtifact] {
@@ -503,16 +536,29 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return 2; }\n",
         );
         let first = process.compile().expect("first compile");
-        assert_eq!(first.emit.emitted_functions, 2);
-        assert_eq!(process.artifacts().len(), 2);
+        assert_eq!(first.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
 
         process.upsert_file(
             "sample.stasis",
             "function helper(): i32 { return 3; }\nfunction main(): i32 { return 2; }\n",
         );
         let second = process.compile().expect("second compile");
-        assert_eq!(second.emit.emitted_functions, 1);
-        assert_eq!(process.artifacts().len(), 2);
+        assert_eq!(second.emit.emitted_functions, 0);
+        assert_eq!(process.artifacts().len(), 1);
+    }
+
+    #[test]
+    fn aot_process_skips_unreachable_invalid_function_body() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
+        );
+        let report = process.compile().expect("compile");
+        assert_eq!(report.index.parsed_functions, 2);
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
     }
 
     #[test]

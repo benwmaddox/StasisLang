@@ -1,5 +1,6 @@
 pub mod aot;
 pub mod jit;
+mod reachability;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {

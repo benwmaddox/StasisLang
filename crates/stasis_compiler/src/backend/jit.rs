@@ -247,6 +247,12 @@ impl JitProcess {
         self.next_symbol_seq = next_symbol_seq;
         self.artifacts = staged_artifacts;
         self.modules.extend(staged_modules);
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        );
+        self.artifacts
+            .retain(|artifact| reachable.contains(&artifact.function_id));
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
         self.refresh_runtime_dispatch_table();
@@ -349,7 +355,14 @@ impl JitProcess {
 
     pub fn symbol_code_ptrs(&self) -> BTreeMap<String, u64> {
         let mut symbol_code_ptrs = BTreeMap::new();
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        );
         for function in self.compiler.functions() {
+            if !reachable.contains(&function.id) {
+                continue;
+            }
             if let Some(artifact) = self.artifact_for_function_id(function.id) {
                 symbol_code_ptrs.insert(function.name.clone(), artifact.code_ptr);
             }
@@ -395,7 +408,14 @@ impl JitProcess {
         let mut f32_entries = Vec::new();
         let mut code_ptr_entries = Vec::new();
         let type_table = self.compiler.types();
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        );
         for function in self.compiler.functions() {
+            if !reachable.contains(&function.id) {
+                continue;
+            }
             let Ok(arity) = u8::try_from(function.params.len()) else {
                 continue;
             };
@@ -765,17 +785,10 @@ fn select_emit_function_ids(
     required_emit_roots: &[String],
     force_reemit_reachable: bool,
 ) -> Vec<FunctionId> {
-    let mut reachable = collect_reachable_function_ids(functions, required_emit_roots);
-    let reachable_names: BTreeSet<String> = functions
-        .iter()
-        .filter(|function| reachable.contains(&function.id))
-        .map(|function| function.name.clone())
-        .collect();
-    for function in functions {
-        if reachable_names.contains(&function.name) {
-            reachable.insert(function.id);
-        }
-    }
+    let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        functions,
+        required_emit_roots,
+    );
     let compiled_body_hashes: BTreeMap<FunctionId, u64> = artifacts
         .iter()
         .map(|artifact| (artifact.function_id, artifact.body_hash))
@@ -792,47 +805,6 @@ fn select_emit_function_ids(
         })
         .map(|function| function.id)
         .collect()
-}
-
-fn collect_reachable_function_ids(
-    functions: &[FunctionMeta],
-    required_emit_roots: &[String],
-) -> BTreeSet<FunctionId> {
-    let mut roots: Vec<FunctionId> = Vec::new();
-    for root_name in ["tick", "main", "render", "on_code_swap"] {
-        roots.extend(
-            functions
-                .iter()
-                .filter(|function| function.name == root_name)
-                .map(|function| function.id),
-        );
-    }
-    for root_name in required_emit_roots {
-        roots.extend(
-            functions
-                .iter()
-                .filter(|function| function.name == *root_name)
-                .map(|function| function.id),
-        );
-    }
-    if roots.is_empty() {
-        return functions.iter().map(|function| function.id).collect();
-    }
-
-    let mut reachable: BTreeSet<FunctionId> = BTreeSet::new();
-    let mut stack = roots;
-    while let Some(function_id) = stack.pop() {
-        if !reachable.insert(function_id) {
-            continue;
-        }
-        let Some(function) = functions.get(function_id as usize) else {
-            continue;
-        };
-        for dependency in &function.dependencies {
-            stack.push(*dependency);
-        }
-    }
-    reachable
 }
 
 fn collect_supported_extern_call_signatures(
