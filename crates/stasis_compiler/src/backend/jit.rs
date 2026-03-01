@@ -143,10 +143,10 @@ impl JitProcess {
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
         type_table
-            .resolve_or_intern("string")
+            .ensure_utf8_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
         type_table
-            .resolve_or_intern("ascii[]")
+            .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
         let cache_miss = self
@@ -224,7 +224,7 @@ impl JitProcess {
                     hir,
                     &symbol,
                     &analysis.call_signatures,
-                    &type_table,
+                    &mut type_table,
                     &analysis.global_path_types,
                     &analysis.constant_values,
                     &analysis.collection_infos,
@@ -1255,12 +1255,16 @@ fn resolve_global_path_type_id(
     type_table.resolve_or_intern(trimmed)
 }
 
-fn primitive_global_type_id(type_name: &str) -> Option<TypeId> {
-    match type_name {
-        "i32" => Some(TYPE_ID_I32),
-        "f32" => Some(TYPE_ID_F32),
-        "bool" => Some(TYPE_ID_BOOL),
-        _ => None,
+fn is_primitive_scalar_type_id(type_id: TypeId) -> bool {
+    matches!(type_id, TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_BOOL)
+}
+
+fn resolve_primitive_scalar_type_id(type_name: &str, type_table: &TypeTable) -> Option<TypeId> {
+    let type_id = type_table.resolve(type_name.trim())?;
+    if is_primitive_scalar_type_id(type_id) {
+        Some(type_id)
+    } else {
+        None
     }
 }
 
@@ -1341,44 +1345,47 @@ fn parse_top_level_constant_literal(
         return Err(format!("constant '{}' initializer cannot be empty", name));
     }
     let type_name = type_name.trim();
-    match type_name {
-        "i32" => {
-            let value = initializer.parse::<i32>().map_err(|error| {
-                format!("invalid i32 initializer for constant '{}': {error}", name)
-            })?;
-            Ok(Some(ConstantValue::I32 {
-                value,
-                type_id: TYPE_ID_I32,
-            }))
-        }
-        "f32" => {
-            let value = initializer.parse::<f32>().map_err(|error| {
-                format!("invalid f32 initializer for constant '{}': {error}", name)
-            })?;
-            Ok(Some(ConstantValue::F32(value)))
-        }
-        "bool" => match initializer {
+    let type_id = type_table.resolve_or_intern(type_name).map_err(|error| {
+        format!(
+            "invalid type '{}' for constant '{}': {error}",
+            type_name, name
+        )
+    })?;
+    if type_id == TYPE_ID_I32 {
+        let value = initializer
+            .parse::<i32>()
+            .map_err(|error| format!("invalid i32 initializer for constant '{}': {error}", name))?;
+        return Ok(Some(ConstantValue::I32 { value, type_id }));
+    }
+    if type_id == TYPE_ID_F32 {
+        let value = initializer
+            .parse::<f32>()
+            .map_err(|error| format!("invalid f32 initializer for constant '{}': {error}", name))?;
+        return Ok(Some(ConstantValue::F32(value)));
+    }
+    if type_id == TYPE_ID_BOOL {
+        return match initializer {
             "true" => Ok(Some(ConstantValue::Bool(true))),
             "false" => Ok(Some(ConstantValue::Bool(false))),
             other => Err(format!(
                 "invalid bool initializer '{}' for constant '{}'",
                 other, name
             )),
-        },
-        "string" | "utf8[]" | "ascii[]" => {
-            let value = parse_constant_string_initializer(name, initializer)?;
-            let type_id = type_table.resolve_or_intern(type_name).map_err(|error| {
-                format!(
-                    "invalid type '{}' for constant '{}': {error}",
-                    type_name, name
-                )
-            })?;
-            let literal_id = hash_string_literal(&value);
-            stasis_dynload::upsert_jit_string_literal(literal_id, &value);
-            Ok(Some(ConstantValue::String { value, type_id }))
-        }
-        _ => Ok(None),
+        };
     }
+    let Some(type_info) = type_table.type_info(type_id) else {
+        return Ok(None);
+    };
+    if matches!(
+        type_info.category,
+        TypeCategory::AsciiView | TypeCategory::Utf8View
+    ) {
+        let value = parse_constant_string_initializer(name, initializer)?;
+        let literal_id = hash_string_literal(&value);
+        stasis_dynload::upsert_jit_string_literal(literal_id, &value);
+        return Ok(Some(ConstantValue::String { value, type_id }));
+    }
+    Ok(None)
 }
 
 fn parse_constant_string_initializer(name: &str, initializer: &str) -> Result<String, String> {
@@ -1590,7 +1597,7 @@ fn collect_foreach_collections_from_type(
         }
         return Ok(());
     }
-    if primitive_global_type_id(trimmed).is_some() {
+    if resolve_primitive_scalar_type_id(trimmed, type_table).is_some() {
         return Ok(());
     }
     let Some(fields) = struct_fields_by_name.get(trimmed) else {
@@ -1625,7 +1632,7 @@ fn build_collection_info_for_element_type(
     type_table: &mut TypeTable,
     visiting_structs: &mut Vec<String>,
 ) -> Result<ForeachCollectionInfo, String> {
-    if let Some(type_id) = primitive_global_type_id(element_type_name) {
+    if let Some(type_id) = resolve_primitive_scalar_type_id(element_type_name, type_table) {
         return Ok(ForeachCollectionInfo {
             len: 0,
             element_type: Some(type_id),
@@ -1683,7 +1690,8 @@ fn collect_struct_primitive_leaf_fields(
         } else {
             format!("{prefix}.{}", field.name)
         };
-        if let Some(type_id) = primitive_global_type_id(field.type_name.trim()) {
+        if let Some(type_id) = resolve_primitive_scalar_type_id(field.type_name.trim(), type_table)
+        {
             out.insert(field_path, type_id);
             continue;
         }
@@ -1691,7 +1699,7 @@ fn collect_struct_primitive_leaf_fields(
             if !extent_text.is_empty() {
                 continue;
             }
-            if primitive_global_type_id(element_type_name).is_some() {
+            if resolve_primitive_scalar_type_id(element_type_name, type_table).is_some() {
                 continue;
             }
             continue;
@@ -1752,7 +1760,7 @@ fn compile_function_to_jit_module(
     hir: &FunctionHIR,
     symbol: &str,
     call_signatures: &CallSignatureMap,
-    type_table: &TypeTable,
+    type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
@@ -2150,25 +2158,31 @@ fn compile_function_to_jit_module(
             );
         }
 
-        let mut parse_type_table = type_table.clone();
-        let statements = parse_simple_statements(hir, &mut parse_type_table)?;
         let empty_foreach_bindings = ForeachBindingMap::new();
-        let terminated = emit_simple_statements(
-            &mut builder,
-            &statements,
-            &mut values_by_name,
-            &runtime_call_refs,
-            call_signatures,
-            &parse_type_table,
-            global_path_types,
-            constant_values,
-            collection_infos,
-            named_struct_field_types,
-            &empty_foreach_bindings,
-            None,
-            meta.return_type,
-            &mut next_variable,
-        )?;
+        let body = extract_function_body(hir)?;
+        let mut terminated = false;
+        parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
+            if terminated {
+                return Ok(());
+            }
+            terminated = emit_simple_statements(
+                &mut builder,
+                std::slice::from_ref(&statement),
+                &mut values_by_name,
+                &runtime_call_refs,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                &empty_foreach_bindings,
+                None,
+                meta.return_type,
+                &mut next_variable,
+            )?;
+            Ok(())
+        })?;
         if !terminated {
             if meta.return_type == TYPE_ID_VOID {
                 builder.ins().return_(&[]);
@@ -2664,14 +2678,6 @@ enum ComparisonOp {
     Ge,
 }
 
-fn parse_simple_statements(
-    hir: &FunctionHIR,
-    type_table: &mut TypeTable,
-) -> Result<Vec<SimpleStmt>, String> {
-    let body = extract_function_body(hir)?;
-    parse_simple_statements_from_block(body, type_table)
-}
-
 fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
     let Some(block) = hir.blocks.first() else {
         return Err("function body missing block text".to_string());
@@ -2679,16 +2685,19 @@ fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
     Ok(block.source.as_str())
 }
 
-fn parse_simple_statements_from_block(
+fn parse_simple_statements_from_block_with<F>(
     block_text: &str,
     type_table: &mut TypeTable,
-) -> Result<Vec<SimpleStmt>, String> {
+    mut visitor: F,
+) -> Result<(), String>
+where
+    F: FnMut(&TypeTable, SimpleStmt) -> Result<(), String>,
+{
     let trimmed = block_text.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return Err("expected function body block enclosed in '{...}'".to_string());
     }
     let inner = &trimmed[1..trimmed.len() - 1];
-    let mut statements = Vec::new();
     let mut cursor = 0usize;
     while cursor < inner.len() {
         cursor = skip_ascii_whitespace_and_comments(inner, cursor);
@@ -2699,7 +2708,8 @@ fn parse_simple_statements_from_block(
             let let_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[let_start..semicolon].trim();
-            statements.push(parse_let_statement(statement_text, type_table)?);
+            let statement = parse_let_statement(statement_text, type_table)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2707,7 +2717,8 @@ fn parse_simple_statements_from_block(
             let return_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[return_start..semicolon].trim();
-            statements.push(parse_return_statement(statement_text)?);
+            let statement = parse_return_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2715,25 +2726,26 @@ fn parse_simple_statements_from_block(
             let continue_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[continue_start..semicolon].trim();
-            statements.push(parse_continue_statement(statement_text)?);
+            let statement = parse_continue_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
         if starts_with_keyword(inner, cursor, "for") {
             let (statement, next_cursor) = parse_for_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "foreach") {
             let (statement, next_cursor) = parse_foreach_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
         if starts_with_keyword(inner, cursor, "if") {
             let (statement, next_cursor) = parse_if_statement(inner, cursor, type_table)?;
-            statements.push(statement);
+            visitor(type_table, statement)?;
             cursor = next_cursor;
             continue;
         }
@@ -2747,7 +2759,8 @@ fn parse_simple_statements_from_block(
             let start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[start..semicolon].trim();
-            statements.push(parse_from_conversion_statement(statement_text)?);
+            let statement = parse_from_conversion_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2755,7 +2768,8 @@ fn parse_simple_statements_from_block(
             let assignment_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[assignment_start..semicolon].trim();
-            statements.push(parse_assignment_statement(statement_text)?);
+            let statement = parse_assignment_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2763,7 +2777,8 @@ fn parse_simple_statements_from_block(
             let call_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[call_start..semicolon].trim();
-            statements.push(parse_call_statement(statement_text)?);
+            let statement = parse_call_statement(statement_text)?;
+            visitor(type_table, statement)?;
             cursor = semicolon + 1;
             continue;
         }
@@ -2772,6 +2787,18 @@ fn parse_simple_statements_from_block(
             snippet_from(inner, cursor)
         ));
     }
+    Ok(())
+}
+
+fn parse_simple_statements_from_block(
+    block_text: &str,
+    type_table: &mut TypeTable,
+) -> Result<Vec<SimpleStmt>, String> {
+    let mut statements = Vec::new();
+    parse_simple_statements_from_block_with(block_text, type_table, |_type_table, statement| {
+        statements.push(statement);
+        Ok(())
+    })?;
     Ok(statements)
 }
 
@@ -6370,7 +6397,7 @@ fn emit_simple_expression(
         SimpleExpr::StringLiteral(value) => {
             let literal_id = hash_string_literal(value);
             stasis_dynload::upsert_jit_string_literal(literal_id, value);
-            let string_type_id = type_table.resolve("string").unwrap_or(TYPE_ID_I32);
+            let string_type_id = type_table.string_literal_type_id().unwrap_or(TYPE_ID_I32);
             Ok(ValueBinding {
                 value: builder.ins().iconst(types::I32, i64::from(literal_id)),
                 type_id: string_type_id,
@@ -8202,7 +8229,7 @@ fn seed_fixed_collection_max_length_headers(
                 seed_collection_max_length(path, max_length);
             }
             TypeCategory::ArrayFixed => {
-                let Some(max_length) = fixed_array_extent_from_type_name(&type_info.name) else {
+                let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
                     continue;
                 };
                 seed_collection_max_length(path, max_length);
@@ -8211,14 +8238,6 @@ fn seed_fixed_collection_max_length_headers(
         }
     }
     Ok(())
-}
-
-fn fixed_array_extent_from_type_name(type_name: &str) -> Option<i32> {
-    let (_, extent_text) = parse_array_type_parts(type_name)?;
-    if extent_text.is_empty() {
-        return None;
-    }
-    extent_text.parse::<i32>().ok()
 }
 
 fn seed_collection_max_length(path: &str, max_length: i32) {
@@ -8602,6 +8621,21 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_ascii_constant_identifier_argument() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "const TITLE: ascii[] = \"play\";\nfunction consume(path: ascii[]): i32 { return 6; }\nfunction main(): i32 { return consume(TITLE); }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 6);
     }
 
     #[cfg(windows)]

@@ -134,16 +134,9 @@ fn try_run_play_subcommand() -> Option<i32> {
         }
     };
 
-    let watch_dir = parsed.watch_dir.clone().or_else(|| {
-        parsed
-            .watch_file
-            .parent()
-            .map(|parent| parent.to_path_buf())
-    });
-
     match run_play_in_process(
         &parsed.watch_file,
-        watch_dir.as_deref(),
+        parsed.watch_dir.as_deref(),
         parsed.tick_sleep_micros,
         parsed.ticks,
     ) {
