@@ -1,0 +1,235 @@
+name: Perf CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - ".github/workflows/perf-ci.yml"
+      - "crates/stasis_compiler/**"
+      - "apps/stasis/examples/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-native-jit-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run rust-native JIT benchmark (1k functions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis_compiler --example rust_native_jit_bench -- \
+            --functions 1000 \
+            --cold-samples 3 \
+            --incremental-samples 5 \
+            | tee rust_native_jit_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("rust_native_jit_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          line = None
+          for candidate in text:
+              if candidate.startswith("result ") and "functions=1000" in candidate:
+                  line = candidate
+          if line is None:
+              print(f"missing benchmark result line in {path}", file=sys.stderr)
+              sys.exit(1)
+
+          kv: Dict[str, str] = {}
+          for part in line.split():
+              if "=" in part:
+                  key, value = part.split("=", 1)
+                  kv[key] = value
+
+          def f64(key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          cold_p95_ms = f64("cold_ms_p95")
+          incremental_p95_ms = f64("incremental_one_fn_ms_p95")
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_cold_p95_ms = 1800.0
+          max_incremental_p95_ms = 35.0
+
+          print(f"cold_ms_p95={cold_p95_ms:.3f}ms (max {max_cold_p95_ms:.3f}ms)")
+          print(
+              f"incremental_one_fn_ms_p95={incremental_p95_ms:.3f}ms (max {max_incremental_p95_ms:.3f}ms)"
+          )
+
+          if cold_p95_ms > max_cold_p95_ms:
+              print("cold compile regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          if incremental_p95_ms > max_incremental_p95_ms:
+              print("incremental compile regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  engine-overhead-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run engine overhead benchmark (jit+aot)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis --example engine_overhead_bench -- \
+            --mode both \
+            --samples 3 \
+            --ticks 240 \
+            | tee engine_overhead_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("engine_overhead_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          result_lines = {}
+          for candidate in text:
+              if candidate.startswith("result ") and "mode=" in candidate:
+                  for mode in ("jit", "aot"):
+                      if f"mode={mode}" in candidate:
+                          result_lines[mode] = candidate
+
+          missing = [mode for mode in ("jit", "aot") if mode not in result_lines]
+          if missing:
+              print(
+                  f"missing engine_overhead_bench result lines for {missing} in {path}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          def parse_kv(line: str) -> Dict[str, str]:
+              kv: Dict[str, str] = {}
+              for part in line.split():
+                  if "=" in part:
+                      key, value = part.split("=", 1)
+                      kv[key] = value
+              return kv
+
+          def f64(kv: Dict[str, str], key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_total_p95_ms = 300.0
+
+          for mode in ("jit", "aot"):
+              kv = parse_kv(result_lines[mode])
+              total_p95_ms = f64(kv, "total_ms_p95")
+              print(f"{mode} total_ms_p95={total_p95_ms:.3f}ms (max {max_total_p95_ms:.3f}ms)")
+              if total_p95_ms > max_total_p95_ms:
+                  print(
+                      f"engine overhead regression: {mode} total p95 exceeded stop condition",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+          PY
+
+  engine-hot-update-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run engine hot-update benchmark (dev JIT)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis --example engine_hot_update_bench -- \
+            --samples 3 \
+            --tick-sleep-us 16666 \
+            --warmup-ticks 8 \
+            --timeout-ms 5000 \
+            | tee engine_hot_update_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("engine_hot_update_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          line = None
+          for candidate in text:
+              if candidate.startswith("result "):
+                  line = candidate
+          if line is None:
+              print(f"missing benchmark result line in {path}", file=sys.stderr)
+              sys.exit(1)
+
+          kv: Dict[str, str] = {}
+          for part in line.split():
+              if "=" in part:
+                  key, value = part.split("=", 1)
+                  kv[key] = value
+
+          def f64(key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          warm_p95_ms = f64("warm_update_total_ms_p95")
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_warm_p95_ms = 100.0
+
+          print(f"warm_update_total_ms_p95={warm_p95_ms:.3f}ms (max {max_warm_p95_ms:.3f}ms)")
+
+          if warm_p95_ms > max_warm_p95_ms:
+              print("engine hot-update regression: p95 exceeded stop condition", file=sys.stderr)
+              sys.exit(1)
+          PY

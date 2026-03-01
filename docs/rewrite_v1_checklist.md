@@ -792,16 +792,19 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: no stub/fallback emission in supported slices; unsupported constructs fail deterministically with diagnostics.
 - Tests: per-slice CLIF assertions + JIT/AOT executable verification for representative branches.
 - Done gate: each new compiler feature slice includes compile->JIT run and compile->AOT exe run verification.
-- Status: `pending`
+- Status: `in_progress`
 - Slice CS8: Lock acceptance gates and stop conditions.
 - Language: `Rust + .stasis + docs`.
 - Scope: wire benchmark thresholds, deterministic invalidation checks, and compile-path invariants into routine verification.
 - Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
 - Tests: gated benchmark and invalidation suites.
-- Engine-overhead benchmark task (separate from compiler-only timing gates): harness command added (`cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`); remaining work is threshold/baseline gating policy integration.
-- Engine hot-update benchmark task (separate from compiler-only timing gates): add an end-to-end watch/update benchmark that records warm edit latency through compile + swap + first updated tick/render for engine scenarios.
+- Current progress:
+- Added `Perf CI` workflow (`.github/workflows/perf-ci.yml`) running `rust_native_jit_bench` for 1k functions with conservative stop conditions (cold p95 <= 1800ms, incremental p95 <= 35ms) to catch major compile-time regressions while PRD v2 targets are still being chased.
+- Engine-overhead benchmark task (separate from compiler-only timing gates): added Perf CI gate (`engine-overhead-bench`, windows) running `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240` and hard-failing if `total_ms_p95` exceeds a conservative stop condition (300ms).
+- Engine hot-update benchmark task (separate from compiler-only timing gates): added end-to-end watch/update benchmark (`apps/stasis/examples/engine_hot_update_bench.rs`) measuring `watch change -> jit.compile -> build_engine_package -> swap pointers -> first tick+render with new code`, plus Perf CI gate (`engine-hot-update-bench`, windows) hard-failing if `warm_update_total_ms_p95` exceeds a conservative stop condition (100ms).
+- Outstanding: confirm CI environment baseline and set exact p50/p95 thresholds for PRD v2 hard-fail gating (stop conditions above are tripwires, not targets).
 - Done gate: project can reject regressions automatically against PRD v2 targets.
-- Status: `pending`
+- Status: `in_progress`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
 - Slice SH2a: Replace monolithic `.stasis` host bridge declaration with staged AOT extern contract (`emit_ir`, `run_cranelift_aot`, `link_executable`) while preserving `.stasis` orchestration ownership. (completed 2026-02-13)
 - Slice SH2b: Wire host bridge implementations for staged AOT extern calls and route CLI execution through them end-to-end. (completed 2026-02-13; current host `aot-cli` path executes staged bridge sequence)
