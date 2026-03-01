@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::collections::HashMap;
 
 #[cfg(windows)]
 use std::ffi::{c_char, c_void, CString, OsStr};
@@ -169,7 +169,8 @@ impl StasisGraphicsApi {
         let lib = Library::load(path)?;
         let stasis_init_window = lib.symbol_address("stasis_init_window")?;
         let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
-        let stasis_host_bulk_apply_requests = lib.symbol_address("stasis_host_bulk_apply_requests")?;
+        let stasis_host_bulk_apply_requests =
+            lib.symbol_address("stasis_host_bulk_apply_requests")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
@@ -197,7 +198,10 @@ impl StasisGraphicsApi {
             let _ = width;
             let _ = height;
             let _ = title;
-            Err("stasis_graphics init_window is only supported on windows in stasis_dynload".to_string())
+            Err(
+                "stasis_graphics init_window is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
         }
     }
 
@@ -213,7 +217,10 @@ impl StasisGraphicsApi {
         {
             let _ = out_i32;
             let _ = out_f32;
-            Err("stasis_graphics host_get_frame is only supported on windows in stasis_dynload".to_string())
+            Err(
+                "stasis_graphics host_get_frame is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
         }
     }
 
@@ -246,7 +253,12 @@ impl StasisGraphicsApi {
         }
     }
 
-    pub fn gfx_submit_u8(&self, cmd_i32: &[i32], cmd_f32: &[f32], cmd_u8: &[u8]) -> Result<(), String> {
+    pub fn gfx_submit_u8(
+        &self,
+        cmd_i32: &[i32],
+        cmd_f32: &[f32],
+        cmd_u8: &[u8],
+    ) -> Result<(), String> {
         #[cfg(windows)]
         {
             let callback: extern "system" fn(*const i32, *const f32, *const u8) =
@@ -259,7 +271,10 @@ impl StasisGraphicsApi {
             let _ = cmd_i32;
             let _ = cmd_f32;
             let _ = cmd_u8;
-            Err("stasis_graphics gfx_submit_u8 is only supported on windows in stasis_dynload".to_string())
+            Err(
+                "stasis_graphics gfx_submit_u8 is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
         }
     }
 
@@ -274,7 +289,10 @@ impl StasisGraphicsApi {
         #[cfg(not(windows))]
         {
             let _ = ms;
-            Err("stasis_graphics sleep_ms is only supported on windows in stasis_dynload".to_string())
+            Err(
+                "stasis_graphics sleep_ms is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
         }
     }
 }
@@ -463,31 +481,41 @@ fn registered_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
 
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
     let table = registered_i32_ptrs();
-    let mut guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("registered i32 ptr table mutex poisoned");
     guard.insert(path_hash, ptr as usize);
 }
 
 pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
     let table = registered_f32_ptrs();
-    let mut guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("registered f32 ptr table mutex poisoned");
     guard.insert(path_hash, ptr as usize);
 }
 
 pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
     let table = registered_i32_arrays();
-    let mut guard = table.lock().expect("registered i32 array table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("registered i32 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
     let table = registered_f32_arrays();
-    let mut guard = table.lock().expect("registered f32 array table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("registered f32 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
 pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
     let table = registered_u8_arrays();
-    let mut guard = table.lock().expect("registered u8 array table mutex poisoned");
+    let mut guard = table
+        .lock()
+        .expect("registered u8 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
@@ -888,7 +916,9 @@ pub extern "C" fn stasis_jit_call_f32_i32_1(fn_id_raw: i32, arg0: i32) -> f32 {
 pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
     {
         let table = registered_i32_ptrs();
-        let guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+        let guard = table
+            .lock()
+            .expect("registered i32 ptr table mutex poisoned");
         if let Some(ptr) = guard.get(&path_hash).copied() {
             // Safety: caller owns lifetime; this is a process-global registration.
             return unsafe { *(ptr as *mut i32) };
@@ -902,7 +932,9 @@ pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
 pub extern "C" fn stasis_jit_global_i32_store(path_hash: i32, value: i32) {
     {
         let table = registered_i32_ptrs();
-        let guard = table.lock().expect("registered i32 ptr table mutex poisoned");
+        let guard = table
+            .lock()
+            .expect("registered i32 ptr table mutex poisoned");
         if let Some(ptr) = guard.get(&path_hash).copied() {
             // Safety: caller owns lifetime; this is a process-global registration.
             unsafe { *(ptr as *mut i32) = value };
@@ -944,7 +976,11 @@ pub extern "C" fn stasis_jit_collection_i32_load(collection_hash: i32, meta_kind
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_jit_collection_i32_store(collection_hash: i32, meta_kind: i32, value: i32) {
+pub extern "C" fn stasis_jit_collection_i32_store(
+    collection_hash: i32,
+    meta_kind: i32,
+    value: i32,
+) {
     let Some(suffix) = stasis_meta_suffix_bytes(meta_kind) else {
         return;
     };
@@ -955,7 +991,9 @@ pub extern "C" fn stasis_jit_collection_i32_store(collection_hash: i32, meta_kin
 pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
     {
         let table = registered_f32_ptrs();
-        let guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+        let guard = table
+            .lock()
+            .expect("registered f32 ptr table mutex poisoned");
         if let Some(ptr) = guard.get(&path_hash).copied() {
             // Safety: caller owns lifetime; this is a process-global registration.
             return unsafe { *(ptr as *mut f32) };
@@ -969,7 +1007,9 @@ pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
 pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
     {
         let table = registered_f32_ptrs();
-        let guard = table.lock().expect("registered f32 ptr table mutex poisoned");
+        let guard = table
+            .lock()
+            .expect("registered f32 ptr table mutex poisoned");
         if let Some(ptr) = guard.get(&path_hash).copied() {
             // Safety: caller owns lifetime; this is a process-global registration.
             unsafe { *(ptr as *mut f32) = value };
@@ -1295,7 +1335,8 @@ fn dispatch_i32_call3(fn_id_raw: i32, arg0: i32, arg1: i32, arg2: i32) -> Result
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    let callback: extern "system" fn(i32, i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2))
 }
 
@@ -1311,7 +1352,8 @@ fn dispatch_i32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    let callback: extern "system" fn(i32, i32, i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(i32, i32, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2, arg3))
 }
 
@@ -1419,7 +1461,8 @@ fn dispatch_i32_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Re
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    let callback: extern "system" fn(f32, f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2))
 }
 
@@ -1435,7 +1478,8 @@ fn dispatch_i32_f32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    let callback: extern "system" fn(f32, f32, f32, f32) -> i32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(f32, f32, f32, f32) -> i32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2, arg3))
 }
 
@@ -1553,7 +1597,8 @@ fn dispatch_f32_call3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> Result
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=3"));
     }
-    let callback: extern "system" fn(f32, f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2))
 }
 
@@ -1569,7 +1614,8 @@ fn dispatch_f32_call4(
     if address == 0 {
         return Err(format!("missing code pointer for fn_id={fn_id}, arity=4"));
     }
-    let callback: extern "system" fn(f32, f32, f32, f32) -> f32 = unsafe { std::mem::transmute(address) };
+    let callback: extern "system" fn(f32, f32, f32, f32) -> f32 =
+        unsafe { std::mem::transmute(address) };
     Ok(callback(arg0, arg1, arg2, arg3))
 }
 
