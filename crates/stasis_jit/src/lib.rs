@@ -82,6 +82,27 @@ impl FunctionPointerTable {
         self.entries.get(&fn_id).copied()
     }
 
+    pub fn preview_code_ptr_after_commit(
+        &self,
+        patch_set: &FunctionPatchSet,
+        overrides: Option<&[JitCodePtrOverride]>,
+        fn_id: FnId,
+    ) -> Option<CodePtr> {
+        // If a function is not part of the patch set, its code pointer will not change.
+        if !patch_set.functions.iter().any(|patch| patch.fn_id == fn_id) {
+            return self.code_ptr(fn_id);
+        }
+
+        if let Some(overrides) = overrides {
+            if let Some(entry) = overrides.iter().find(|entry| entry.fn_id == fn_id) {
+                return Some(CodePtr(entry.code_ptr));
+            }
+        }
+
+        let next_generation = CodeGeneration(self.generation + 1);
+        Some(make_code_ptr(next_generation, fn_id))
+    }
+
     pub fn commit_patch_set(&mut self, patch_set: &FunctionPatchSet) -> CommitOutcome {
         self.generation += 1;
         let new_generation = CodeGeneration(self.generation);
@@ -622,6 +643,48 @@ mod tests {
         assert_eq!(outcome.swapped_fn_ids, vec![FnId(9), FnId(11)]);
         assert_eq!(table.code_ptr(FnId(9)), Some(CodePtr(0x1234)));
         assert_ne!(table.code_ptr(FnId(11)), Some(CodePtr(0x1234)));
+    }
+
+    #[test]
+    fn preview_code_ptr_after_commit_prefers_override_for_patched_entry() {
+        let table = FunctionPointerTable::new();
+        let patch = patch_set(&[9]);
+        let overrides = vec![JitCodePtrOverride {
+            fn_id: FnId(9),
+            code_ptr: 0x9988,
+        }];
+        assert_eq!(
+            table.preview_code_ptr_after_commit(&patch, Some(&overrides), FnId(9)),
+            Some(CodePtr(0x9988))
+        );
+    }
+
+    #[test]
+    fn preview_code_ptr_after_commit_returns_existing_entry_when_not_patched() {
+        let mut table = FunctionPointerTable::new();
+        table.commit_patch_set(&patch_set(&[3]));
+        assert_eq!(
+            table.preview_code_ptr_after_commit(&patch_set(&[7]), None, FnId(3)),
+            Some(CodePtr((1_u64 << 32) | 3))
+        );
+    }
+
+    #[test]
+    fn preview_code_ptr_after_commit_returns_none_when_not_patched_and_missing() {
+        let table = FunctionPointerTable::new();
+        assert_eq!(
+            table.preview_code_ptr_after_commit(&patch_set(&[1]), None, FnId(99)),
+            None
+        );
+    }
+
+    #[test]
+    fn preview_code_ptr_after_commit_returns_synthetic_ptr_when_patched_without_override() {
+        let table = FunctionPointerTable::new();
+        assert_eq!(
+            table.preview_code_ptr_after_commit(&patch_set(&[5]), None, FnId(5)),
+            Some(CodePtr((1_u64 << 32) | 5))
+        );
     }
 
     #[test]

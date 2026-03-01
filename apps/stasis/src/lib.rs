@@ -27,9 +27,10 @@ use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
-    CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
-    FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash,
-    RequestId, SwapCommitResult, SwapCommitStatus, TargetMode, TextSource,
+    AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
+    DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
+    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
+    TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,6 +47,7 @@ const SWAP_FLASH_TICKS_MAX: u32 = 180;
 struct PendingAotCompileMetadata {
     linked_image_path: Option<PathBuf>,
     linked_image_size_bytes: Option<u64>,
+    function_symbols: Option<Vec<AotFunctionSymbol>>,
 }
 
 #[derive(Debug, Clone)]
@@ -984,6 +986,7 @@ fn capture_pending_aot_compile_metadata(
         .or_insert_with(|| PendingAotCompileMetadata {
             linked_image_path: result.aot_linked_image_path.clone(),
             linked_image_size_bytes: result.aot_linked_image_size_bytes,
+            function_symbols: result.aot_function_symbols.clone(),
         });
 }
 
@@ -1022,13 +1025,237 @@ fn apply_commit_request(
     pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
     pending_jit_code_ptr_overrides: &BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
 ) -> SwapCommitResult {
-    if !config.disable_on_code_swap_hook {
+    if config.target_mode == TargetMode::JitDev && !config.disable_on_code_swap_hook {
         if let Some(hook_symbol) = request.hook_symbol.as_deref() {
             *hook_runs += 1;
             if let Some(reason) = hook_failure_reason {
                 *hook_failures += 1;
                 hook_failure_reasons.push(reason.clone());
                 let hook_error = format!("{hook_symbol} failed: {reason}");
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            }
+
+            if pending_jit_code_ptr_overrides.contains_key(&request.request_id) {
+                let Some(hook_fn_id) = request.hook_fn_id else {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: missing hook_fn_id metadata");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                };
+
+                let overrides = pending_jit_code_ptr_overrides
+                    .get(&request.request_id)
+                    .expect("request id should exist after contains_key");
+                let code_ptr = overrides
+                    .iter()
+                    .find(|entry| entry.fn_id == hook_fn_id)
+                    .map(|entry| entry.code_ptr)
+                    .unwrap_or(0);
+                if code_ptr == 0 {
+                    *hook_failures += 1;
+                    let hook_error = format!(
+                        "{hook_symbol} failed: missing JIT hook code pointer override for fn_id={}",
+                        hook_fn_id.0
+                    );
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+                if let Err(error) = stasis_dynload::invoke_noarg_void(code_ptr as usize) {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: {error}");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+            }
+
+            events.push(RunnerEvent::HookResult {
+                request_id: request.request_id.0,
+                symbol: hook_symbol.to_string(),
+                status: "success".to_string(),
+                error: None,
+            });
+        }
+    }
+
+    if config.target_mode == TargetMode::AotProd
+        && !config.disable_on_code_swap_hook
+        && std::env::var("STASIS_AOT_EXECUTE_NATIVE_HOOK")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    {
+        if let Some(hook_symbol) = request.hook_symbol.as_deref() {
+            *hook_runs += 1;
+            if let Some(reason) = hook_failure_reason {
+                *hook_failures += 1;
+                hook_failure_reasons.push(reason.clone());
+                let hook_error = format!("{hook_symbol} failed: {reason}");
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            }
+
+            let Some(hook_fn_id) = request.hook_fn_id else {
+                *hook_failures += 1;
+                let hook_error = format!("{hook_symbol} failed: missing hook_fn_id metadata");
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            };
+
+            let Some(metadata) = pending_aot_metadata.get(&request.request_id) else {
+                *hook_failures += 1;
+                let hook_error =
+                    format!("{hook_symbol} failed: missing AOT compile metadata for request");
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            };
+
+            let Some(linked_image) = metadata.linked_image_path.as_ref() else {
+                *hook_failures += 1;
+                let hook_error = format!("{hook_symbol} failed: missing linked AOT image path");
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            };
+
+            let Some(symbols) = metadata.function_symbols.as_ref() else {
+                *hook_failures += 1;
+                let hook_error =
+                    format!("{hook_symbol} failed: missing AOT function symbol mapping metadata");
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            };
+
+            let export = symbols
+                .iter()
+                .find(|entry| entry.fn_id == hook_fn_id)
+                .map(|entry| entry.symbol.as_str());
+            let Some(export) = export else {
+                *hook_failures += 1;
+                let hook_error = format!(
+                    "{hook_symbol} failed: missing AOT hook symbol for fn_id={}",
+                    hook_fn_id.0
+                );
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            };
+
+            let lib = match stasis_dynload::Library::load(linked_image) {
+                Ok(lib) => lib,
+                Err(error) => {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: {error}");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+            };
+
+            let address = match lib.symbol_address(export) {
+                Ok(address) => address,
+                Err(error) => {
+                    *hook_failures += 1;
+                    let hook_error = format!("{hook_symbol} failed: {error}");
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+            };
+
+            if let Err(error) = stasis_dynload::invoke_noarg_void(address) {
+                *hook_failures += 1;
+                let hook_error = format!("{hook_symbol} failed: {error}");
+                hook_failure_reasons.push(hook_error.clone());
                 events.push(RunnerEvent::HookResult {
                     request_id: request.request_id.0,
                     symbol: hook_symbol.to_string(),
@@ -1243,6 +1470,25 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn with_env_var_set(key: &str, value: &str, f: impl FnOnce()) {
+        let _lock = stasis_process_env_lock()
+            .lock()
+            .expect("process env lock should succeed");
+        let old = std::env::var_os(key);
+        std::env::set_var(key, value);
+        f();
+        if let Some(old) = old {
+            std::env::set_var(key, old);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
     #[test]
     fn resolve_play_watch_dir_defaults_to_dot_for_basename_entry() {
         let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), None);
@@ -1325,6 +1571,603 @@ mod tests {
             pointer_table.code_ptr(FnId(9)),
             Some(stasis_jit::CodePtr(0x9988))
         );
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_jit_hook_missing_hook_fn_id_when_overrides_present() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = None;
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing hook_fn_id")),
+            "expected missing hook_fn_id error, got {:?}",
+            result.error
+        );
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(pointer_table.code_ptr(FnId(9)).is_none());
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_jit_hook_missing_code_ptr_override_entry() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(FnId(7));
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        // Override exists, but not for hook fn id 7, so hook dispatch is unresolved.
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing JIT hook code pointer override")),
+            "expected missing hook code ptr override error, got {:?}",
+            result.error
+        );
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(pointer_table.code_ptr(FnId(9)).is_none());
+    }
+
+    #[test]
+    fn jit_hook_failure_preserves_previous_generation() {
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        let first_request_id = RequestId(44);
+        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            first_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+        let first = apply_commit_request(
+            first_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(first.status, SwapCommitStatus::Success);
+        assert_eq!(pointer_table.generation().0, 1);
+        let ptr_after_first = pointer_table.code_ptr(FnId(9));
+        assert!(ptr_after_first.is_some());
+
+        let second_request_id = RequestId(45);
+        let mut second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            second_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        second_request.hook_fn_id = Some(FnId(7));
+        let mut second_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> = BTreeMap::new();
+        // Note: override list doesn't include hook fn id 7, so commit must abort before swap.
+        second_overrides.insert(
+            second_request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(9),
+                code_ptr: 0x9988,
+            }],
+        );
+
+        let second = apply_commit_request(
+            second_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &second_overrides,
+        );
+        assert_eq!(second.status, SwapCommitStatus::Failed);
+        assert_eq!(pointer_table.generation().0, 1);
+        assert_eq!(pointer_table.code_ptr(FnId(9)), ptr_after_first);
+    }
+
+    #[test]
+    fn aot_native_hook_skips_when_disabled() {
+        let request_id = RequestId(44);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(FnId(7));
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        assert_eq!(hook_runs, 0);
+        assert_eq!(hook_failures, 0);
+        assert_eq!(swap_commit_successes, 1);
+        assert_eq!(swap_commit_failures, 0);
+        assert_eq!(pointer_table.generation().0, 1);
+    }
+
+    #[test]
+    fn aot_native_hook_rejects_missing_metadata_when_enabled() {
+        with_env_var_set("STASIS_AOT_EXECUTE_NATIVE_HOOK", "1", || {
+            let request_id = RequestId(44);
+            let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+                request_id,
+                LayoutHash([7; 32]),
+                FunctionPatchSet {
+                    functions: vec![FunctionPatch { fn_id: FnId(9) }],
+                },
+                Some("on_code_swap".to_string()),
+            );
+            request.hook_fn_id = Some(FnId(7));
+
+            let mut pointer_table = FunctionPointerTable::new();
+            let config = RunnerConfig {
+                target_mode: TargetMode::AotProd,
+                runtime_launch: false,
+                ..RunnerConfig::default()
+            };
+            let mut hook_runs = 0u32;
+            let mut hook_failures = 0u32;
+            let mut hook_failure_reasons = Vec::new();
+            let mut swap_commit_successes = 0u32;
+            let mut swap_commit_failures = 0u32;
+            let mut swap_failure_reasons = Vec::new();
+            let mut events = Vec::new();
+            let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
+                BTreeMap::new();
+            let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+                BTreeMap::new();
+
+            let result = apply_commit_request(
+                request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                None,
+                None,
+                &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
+            );
+
+            assert_eq!(result.status, SwapCommitStatus::Failed);
+            assert_eq!(hook_runs, 1);
+            assert_eq!(hook_failures, 1);
+            assert_eq!(swap_commit_successes, 0);
+            assert_eq!(swap_commit_failures, 1);
+            assert!(
+                result.error.as_deref().is_some_and(|error| {
+                    error.contains("missing AOT compile metadata")
+                        || error.contains("missing AOT compile")
+                }),
+                "expected missing AOT metadata error, got {:?}",
+                result.error
+            );
+            assert_eq!(pointer_table.generation().0, 0);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_native_hook_executes_hook_export_and_mutates_state_when_enabled() {
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_hook_exec_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game.stasis");
+        fs::write(
+            &source,
+            "global State { hook_runs: i32; }\nfunction on_code_swap(): void { State.hook_runs += 1; return; }\nfunction main(): i32 { return State.hook_runs; }\n",
+        )
+        .expect("write source");
+
+        let compile_config = stasis_jit::AotCompileConfig {
+            helper_path: Some(helper_path),
+            ..stasis_jit::AotCompileConfig::default()
+        };
+        let link_config = stasis_jit::AotLinkConfig {
+            linker_path: Some(linker_path),
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            compile_config,
+            link_config,
+            artifact_root,
+            true,
+        );
+
+        let request_id = RequestId(18_700);
+        let compiled = backend.compile(CompileRequest::new(
+            request_id,
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        if compiled.status != CompileStatus::Success {
+            fs::remove_dir_all(&temp_root).ok();
+            return;
+        }
+
+        let linked_image = compiled
+            .aot_linked_image_path
+            .as_ref()
+            .expect("linked image path should exist");
+        let hook_fn_id = compiled
+            .hook_fn_id
+            .expect("hook_fn_id should be populated for on_code_swap");
+        let symbols = compiled
+            .aot_function_symbols
+            .clone()
+            .expect("AotProd compile should emit function symbols");
+        if symbols.len() != 2 {
+            fs::remove_dir_all(&temp_root).ok();
+            return;
+        }
+        let main_export = symbols
+            .iter()
+            .find(|entry| entry.fn_id != hook_fn_id)
+            .map(|entry| entry.symbol.clone())
+            .expect("main export should exist");
+
+        // Keep the image loaded so the hook call inside apply_commit_request mutates the same module instance.
+        let library = stasis_dynload::Library::load(linked_image).expect("load linked image");
+        let main_ptr = library
+            .symbol_address(&main_export)
+            .expect("resolve main export");
+        let before = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main");
+        assert_eq!(before, 0);
+
+        let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
+            BTreeMap::new();
+        pending_aot_metadata.insert(
+            request_id,
+            PendingAotCompileMetadata {
+                linked_image_path: Some(linked_image.clone()),
+                linked_image_size_bytes: compiled.aot_linked_image_size_bytes,
+                function_symbols: Some(symbols),
+            },
+        );
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut commit_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            compiled.layout_hash.expect("layout hash should exist"),
+            compiled
+                .fn_patch_set
+                .expect("patch set should exist for successful compile"),
+            compiled.hook_symbol.clone(),
+        );
+        commit_request.hook_fn_id = Some(hook_fn_id);
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        with_env_var_set("STASIS_AOT_EXECUTE_NATIVE_HOOK", "1", || {
+            let result = apply_commit_request(
+                commit_request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                None,
+                None,
+                &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
+            );
+            assert_eq!(result.status, SwapCommitStatus::Success);
+        });
+
+        let after = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main after hook");
+        assert_eq!(after, 1);
+
+        drop(library);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn hook_failure_reason_preserves_previous_generation() {
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        let first_request_id = RequestId(44);
+        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            first_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+        let first = apply_commit_request(
+            first_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(first.status, SwapCommitStatus::Success);
+        assert_eq!(pointer_table.generation().0, 1);
+        let ptr_after_first = pointer_table.code_ptr(FnId(9));
+        assert!(ptr_after_first.is_some());
+
+        let reason = "state invariant mismatch".to_string();
+        let second_request_id = RequestId(45);
+        let second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            second_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        let second = apply_commit_request(
+            second_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            Some(&reason),
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(second.status, SwapCommitStatus::Failed);
+        assert_eq!(pointer_table.generation().0, 1);
+        assert_eq!(pointer_table.code_ptr(FnId(9)), ptr_after_first);
+        assert_eq!(swap_commit_successes, 1);
+        assert_eq!(swap_commit_failures, 1);
+        assert_eq!(hook_failures, 1);
     }
 
     #[test]
@@ -2156,6 +2999,233 @@ mod tests {
         assert_eq!(summary.swap_commit_failures, 0);
         assert_eq!(summary.last_swap_status, Some(SwapCommitStatus::Success));
         assert!(!summary.has_in_flight_work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_executes_hook_and_mutates_global_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global table lock should succeed");
+        stasis_dynload::clear_jit_i32_global_table();
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("rust_native_jit_smoke_hook_mutates_global.stasis");
+        let config = RunnerConfig {
+            // Real backend compile can take multiple seconds on busy CI/dev hosts.
+            max_ticks: 7000,
+            tick_sleep_micros: 1000,
+            window: None,
+            inject_file_change: Some(fixture),
+            watch_directory: None,
+            target_mode: TargetMode::JitDev,
+            fail_compile: false,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+        };
+
+        let summary = run_with_real_backend(config);
+        assert_eq!(summary.compile_successes, 1);
+        assert_eq!(summary.compile_failures, 0);
+        assert_eq!(summary.swap_commit_successes, 1);
+        assert_eq!(summary.swap_commit_failures, 0);
+        assert_eq!(summary.hook_runs, 1);
+        assert_eq!(summary.hook_failures, 0);
+
+        let hook_runs =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("State.hook_runs"));
+        assert_eq!(hook_runs, 1);
+
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_backend_runs_hook_on_subsequent_commits_when_hook_body_unchanged() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global table lock should succeed");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("stasis")
+            .join("rust_native_jit_smoke_hook_parity_combo.stasis");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_hook_unchanged_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let game = temp_root.join("game.stasis");
+        fs::copy(&fixture, &game).expect("copy hook fixture");
+
+        let backend = IncrementalCompilerBackend::new();
+        let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, TargetMode::JitDev);
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::JitDev,
+            disable_on_code_swap_hook: false,
+            hook_failure_reason: None,
+            swap_failure_reason: None,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+            ..RunnerConfig::default()
+        };
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        pipeline.submit_file_change(FileChangeEvent::new(
+            game.clone(),
+            1,
+            TextSource::FileWatcher,
+            FileChangeKind::Modified,
+        ));
+
+        let timeout = Duration::from_secs(90);
+        let start = Instant::now();
+        let mut last_commit_seen: Option<RequestId> = None;
+        while start.elapsed() < timeout {
+            pipeline.pump_coordinator();
+            capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            pipeline.process_commits_at_safe_point(|request| {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    None,
+                    None,
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            });
+            pipeline.pump_coordinator();
+
+            if let Some(result) = pipeline.last_commit_result() {
+                if last_commit_seen != Some(result.request_id) {
+                    last_commit_seen = Some(result.request_id);
+                    if result.status == SwapCommitStatus::Success {
+                        break;
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let first_commit_id = pipeline
+            .last_commit_result()
+            .map(|result| {
+                assert_eq!(result.status, SwapCommitStatus::Success);
+                result.request_id
+            })
+            .expect("first commit should exist");
+
+        let contents = fs::read_to_string(&game).expect("read game fixture");
+        let updated = contents.replace("return 0;", "return 1;");
+        fs::write(&game, updated).expect("write updated game fixture");
+
+        pipeline.submit_file_change(FileChangeEvent::new(
+            game,
+            2,
+            TextSource::FileWatcher,
+            FileChangeKind::Modified,
+        ));
+
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            pipeline.pump_coordinator();
+            capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            pipeline.process_commits_at_safe_point(|request| {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    None,
+                    None,
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            });
+            pipeline.pump_coordinator();
+
+            if let Some(result) = pipeline.last_commit_result() {
+                if last_commit_seen != Some(result.request_id) {
+                    last_commit_seen = Some(result.request_id);
+                    if result.status == SwapCommitStatus::Success {
+                        break;
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let second_commit_id = pipeline
+            .last_commit_result()
+            .map(|result| {
+                assert_eq!(result.status, SwapCommitStatus::Success);
+                result.request_id
+            })
+            .expect("second commit should exist");
+        assert_ne!(
+            second_commit_id, first_commit_id,
+            "second commit request id should differ from first"
+        );
+
+        assert_eq!(swap_commit_failures, 0);
+        assert_eq!(hook_runs, 2);
+        assert_eq!(hook_failures, 0);
+
+        let hook_runs =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("State.hook_runs"));
+        assert_eq!(hook_runs, 11);
+        let hook_branch =
+            stasis_dynload::stasis_jit_global_i32_load(hash_global_path("State.hook_branch"));
+        assert_eq!(hook_branch, 2);
+        let hook_sin =
+            stasis_dynload::stasis_jit_global_f32_load(hash_global_path("State.hook_sin"));
+        assert!(
+            hook_sin.abs() < 0.0001,
+            "expected sin_fast(0.0) to be near 0.0, got {hook_sin}"
+        );
+
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
     }
 
     #[cfg(windows)]
