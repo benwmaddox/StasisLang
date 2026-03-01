@@ -52,8 +52,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Partially complete/in progress: `S8b`, `S10`.
 - New self-host track started: `S10b` (minimal `.stasis` AOT CLI core orchestration).
 - Decision update (2026-02-23): host-set sandbox architecture is now locked (`deny-by-default` host access via explicit extern symbols in selected host set).
-- Host-set contract selection has been cut over to profile-only (`--host-set-profile` + optional registry mapping); legacy direct contract flags (`--host-set-id`, `--host-set-hash`) are rejected.
-- Compile-success helper paths in `stasis_runner` now leave host-set metadata unset by default so pipeline-selected host-set contracts remain authoritative unless explicitly overridden.
+- Host-set contract selection is planned to be profile-only (`--host-set-profile` + optional registry mapping). Implementation is pending; do not reintroduce legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
+- Compile contracts include optional host-set metadata (`host_set_id`, `host_set_hash`), but the current pipeline leaves it unset (selection + validation is tracked in `S13`/`S14`).
 - Planned host-set hardening slices (`S13`-`S16`) are scheduled after current self-host priority work unless they directly unblock `S10b`.
 - Strategy pivot (2026-02-23): active compiler-slice direction is now symbol-level reachability pruning (function + struct metadata) with simple one-pass lowering to Cranelift; additional parser-shape fallback expansion is deprecated and should be removed when touched.
 - Cleanup pivot progress (2026-02-23): detector-heavy simple-shape metadata extraction functions were removed from `compiler/simple_pass_compiler.stasis`; single-pass parser/fingerprint/layout coverage is now the active path.
@@ -78,7 +78,7 @@ It is not part of the steady-state incremental JIT update loop.
 - mixed-ABI call lowering fallback through exact-signature indirect call emission
 - local indexed collection load/store for fixed/view array bindings
 - local `foreach` over fixed-size local array bindings
-- `for` headers with empty init/step segments (`for (; cond; step)` and `for (; cond; )`)
+- `for` headers require `init`, `condition`, and `step` segments (no missing-segment forms such as `for (; cond; step)`).
 - Reachability-gated emission now compiles roots (`main`, `tick`, `render`, `on_code_swap`) plus reachable callees; same-name overload siblings are included to preserve receiver overload behavior.
 - Non-engine JIT contract assembly now consumes only emitted symbol code pointers (unemitted, unreachable functions are excluded from override patch emission).
 - Host memory intrinsics used by stdlib/gfx paths are now real externs with Rust-native bindings:
@@ -552,7 +552,7 @@ It is not part of the steady-state incremental JIT update loop.
 - `stasis aot-cli` now supports writing a machine-readable summary artifact (`--summary-file <path>`) containing staged bundle paths, entry symbol, and object layout contract for stage parity checks.
 - `stasis aot-cli` now supports optional `--entry-file <file.stasis>` host contract routing (`STASIS_AOT_ENTRY_FILE`) so self-host AOT can compile a selected program when a project directory contains multiple `main()` declarations; backend source discovery now resolves project-local import closure from that entry file instead of compiling every `.stasis` file under the directory.
 - `stasis aot-cli` now supports optional `--quality-gate` (`STASIS_AOT_QUALITY_GATE=1`) which rejects outputs when the selected entry symbol is still fallback-stub lowered, preventing shipping non-playable placeholder executables as "quality" game builds.
-- `.stasis` incremental parser compatibility was extended for Brickout `_v1` source forms used by self-host AOT CLI input: top-level `import`, `const`, `enum`, `struct`, and `global name: Type;` declarations, `function @inline ...` signatures, float literal tokenization compatibility (`123.45` treated as a contiguous numeric primary token), and optional `for` clauses (`for (; cond; )`).
+- `.stasis` incremental parser compatibility was extended for Brickout `_v1` source forms used by self-host AOT CLI input: top-level `import`, `const`, `enum`, `struct`, and `global name: Type;` declarations, `function @inline ...` signatures, float literal tokenization compatibility (`123.45` treated as a contiguous numeric primary token), and comment-aware `for` header parsing (all `for` header segments are required; missing-segment forms are rejected).
 - Verified self-host `.stasis` compile path advances through Brickout `_v1` parsing/incremental analysis and now fails at host linker invocation stage when linker tooling is unavailable (`link.exe`/`STASIS_AOT_LINKER`), indicating parser-side `_v1` compatibility blockers are removed for this slice.
 - With `STASIS_AOT_LINKER` set to `lld-link.exe`, Brickout `_v1` self-host compile advances past linker discovery and currently fails on runtime-bridge object unresolved runtime symbols (`core::panicking::*`, `memset`) during final executable link, making runtime-bridge/object-link contract the active blocker.
 - Runtime bridge executable-link fallback now retries with CLIF bridge object when rustc-emitted bridge object fails to link on Windows toolchains (e.g., `lld-link` unresolved runtime symbols), unblocking self-host AOT executable emission for Brickout `_v1`.
@@ -908,9 +908,12 @@ It is not part of the steady-state incremental JIT update loop.
 - Done gate:
 - No swap can commit without host-set contract validation.
 - Current progress:
-- Compile/commit contracts now carry `host_set_id` and `host_set_hash`.
-- Runtime commit path rejects host-set contract mismatch before hook/pointer swap.
-- Status: `in_progress (post-S10b: .stasis required-host extraction/diagnostics still pending)`
+- Compile contracts include optional host-set metadata fields (`host_set_id`, `host_set_hash`) on `CompileRequest`/`CompileResult`, but the pipeline does not set them yet.
+- `SwapCommitRequest` does not currently carry host-set metadata and the runtime does not yet validate host-set contracts during commit.
+- Outstanding questions / TODO:
+- Define `.stasis` required-host declaration syntax and deterministic diagnostics (source of truth: explicit directive vs inference from `@extern`/`@link` usage).
+- Define where host-set metadata is stored/validated across compile + commit (which fields must be transported on `SwapCommitRequest` vs stored as pending state).
+- Status: `in_progress (transport fields exist; extraction/selection/validation still pending)`
 
 ### S14 - Host-Set Registry and Profile Selection
 - Language:
@@ -928,13 +931,12 @@ It is not part of the steady-state incremental JIT update loop.
 - Done gate:
 - Host access is deny-by-default across runtime dispatch paths and requires selected host set.
 - Current progress:
-- Development runtime now uses profile-only host-set selection (`--host-set-profile` with optional `--host-set-registry-file`) and rejects legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
-- Host-set profile resolution is strict: unknown profiles and invalid/missing registry entries fail fast instead of silently falling back.
-- Development runtime still infers host-set profile from target mode when no explicit host-set profile is configured (`JitDev -> dev`, `AotProd -> prod`).
-- Host-set profile-to-contract mapping now lives in dedicated runtime registry module (`apps/stasis/src/host_set_registry.rs`) shared by runner resolution and CLI profile normalization.
-- Development runtime supports optional profile->contract manifest overrides (`STASIS_HOST_SET_REGISTRY_FILE` / `--host-set-registry-file`) for deterministic host-set table configuration in different environments.
-- Runner diagnostics/events include host-set metadata for compile/swap outcomes.
-- Status: `in_progress (post-S10b: full registry/profile mapping still pending)`
+- None yet: no runtime host-set registry module and no CLI/env surface for selecting a host-set profile.
+- Outstanding questions / TODO:
+- Define registry file format and precedence rules (CLI flag vs env var vs inferred target mode).
+- Define default profile inference mapping (expected: `JitDev -> dev`, `AotProd -> prod`) and whether `test` is a first-class mode.
+- Decide which runtime dispatch paths must become deny-by-default as part of S14 vs later S15/S16 enforcement.
+- Status: `planned (post-S10b)`
 
 ### S15 - Phase-Gated Effects and Tick Determinism
 - Language:
