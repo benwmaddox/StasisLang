@@ -744,7 +744,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: symbol table API with deterministic probing and collision handling.
 - Tests: collision-heavy fixture, duplicate-name/across-file behavior, and lookup determinism.
 - Done gate: no hot-path linear scans remain for function symbol resolution.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler index path now uses a deterministic open-addressed symbol table (linear probing) for `name_hash -> FunctionId` resolution (`SymbolTable` in `crates/stasis_compiler/src/compiler.rs`) instead of generic map lookups in the hot path.
+- Added regression coverage for collision-heavy probe behavior, duplicate-hash replacement semantics, duplicate-name across-file resolution, and repeated lookup determinism.
+- Status: `done`
 - Slice CS4: Implement first-class dependency invalidation graph (dependencies + dependents) with ripple propagation.
 - Language: `.stasis`.
 - Scope: store forward + reverse adjacency in flat arrays and propagate dirty state from signature/body changes to dependents.
