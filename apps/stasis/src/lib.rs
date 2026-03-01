@@ -1881,6 +1881,168 @@ mod tests {
         });
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn aot_native_hook_executes_hook_export_and_mutates_state_when_enabled() {
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            candidates
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        }
+
+        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            return;
+        }
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_hook_exec_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game.stasis");
+        fs::write(
+            &source,
+            "global State { hook_runs: i32; }\nfunction on_code_swap(): void { State.hook_runs += 1; return; }\nfunction main(): i32 { return State.hook_runs; }\n",
+        )
+        .expect("write source");
+
+        let compile_config = stasis_jit::AotCompileConfig {
+            helper_path: Some(helper_path),
+            ..stasis_jit::AotCompileConfig::default()
+        };
+        let link_config = stasis_jit::AotLinkConfig {
+            linker_path: Some(linker_path),
+        };
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            compile_config,
+            link_config,
+            artifact_root,
+            true,
+        );
+
+        let request_id = RequestId(18_700);
+        let compiled = backend.compile(CompileRequest::new(
+            request_id,
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        if compiled.status != CompileStatus::Success {
+            fs::remove_dir_all(&temp_root).ok();
+            return;
+        }
+
+        let linked_image = compiled
+            .aot_linked_image_path
+            .as_ref()
+            .expect("linked image path should exist");
+        let hook_fn_id = compiled
+            .hook_fn_id
+            .expect("hook_fn_id should be populated for on_code_swap");
+        let symbols = compiled
+            .aot_function_symbols
+            .clone()
+            .expect("AotProd compile should emit function symbols");
+        if symbols.len() != 2 {
+            fs::remove_dir_all(&temp_root).ok();
+            return;
+        }
+        let main_export = symbols
+            .iter()
+            .find(|entry| entry.fn_id != hook_fn_id)
+            .map(|entry| entry.symbol.clone())
+            .expect("main export should exist");
+
+        // Keep the image loaded so the hook call inside apply_commit_request mutates the same module instance.
+        let library = stasis_dynload::Library::load(linked_image).expect("load linked image");
+        let main_ptr = library
+            .symbol_address(&main_export)
+            .expect("resolve main export");
+        let before = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main");
+        assert_eq!(before, 0);
+
+        let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> =
+            BTreeMap::new();
+        pending_aot_metadata.insert(
+            request_id,
+            PendingAotCompileMetadata {
+                linked_image_path: Some(linked_image.clone()),
+                linked_image_size_bytes: compiled.aot_linked_image_size_bytes,
+                function_symbols: Some(symbols),
+            },
+        );
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut commit_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            compiled.layout_hash.expect("layout hash should exist"),
+            compiled
+                .fn_patch_set
+                .expect("patch set should exist for successful compile"),
+            compiled.hook_symbol.clone(),
+        );
+        commit_request.hook_fn_id = Some(hook_fn_id);
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            runtime_launch: false,
+            aot_probe_loadability: false,
+            ..RunnerConfig::default()
+        };
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        with_env_var_set("STASIS_AOT_EXECUTE_NATIVE_HOOK", "1", || {
+            let result = apply_commit_request(
+                commit_request,
+                &mut pointer_table,
+                &config,
+                &mut hook_runs,
+                &mut hook_failures,
+                &mut hook_failure_reasons,
+                &mut swap_commit_successes,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+                &mut events,
+                None,
+                None,
+                &pending_aot_metadata,
+                &pending_jit_code_ptr_overrides,
+            );
+            assert_eq!(result.status, SwapCommitStatus::Success);
+        });
+
+        let after = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main after hook");
+        assert_eq!(after, 1);
+
+        drop(library);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
     #[test]
     fn hook_failure_reason_preserves_previous_generation() {
         let mut pointer_table = FunctionPointerTable::new();
