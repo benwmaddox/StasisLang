@@ -81,6 +81,19 @@ impl TypeTable {
         self.resolve_or_intern_inner(type_name.trim())
     }
 
+    pub fn ensure_ascii_view_id(&mut self) -> Result<TypeId, String> {
+        self.resolve_or_intern_array("ascii", ArrayExtent::View)
+    }
+
+    pub fn ensure_utf8_view_id(&mut self) -> Result<TypeId, String> {
+        self.resolve_or_intern_array("utf8", ArrayExtent::View)
+    }
+
+    pub fn string_literal_type_id(&self) -> Option<TypeId> {
+        self.find_first_type_id_by_category(TypeCategory::Utf8View)
+            .or_else(|| self.find_first_type_id_by_category(TypeCategory::AsciiView))
+    }
+
     pub fn type_info(&self, id: TypeId) -> Option<&TypeInfo> {
         self.types.get(id as usize)
     }
@@ -385,6 +398,13 @@ impl TypeTable {
     fn type_key(&self, id: TypeId) -> Option<&TypeKey> {
         self.type_keys.get(id as usize)
     }
+
+    fn find_first_type_id_by_category(&self, category: TypeCategory) -> Option<TypeId> {
+        self.types
+            .iter()
+            .position(|type_info| type_info.category == category)
+            .and_then(|index| TypeId::try_from(index).ok())
+    }
 }
 
 fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> bool {
@@ -554,6 +574,18 @@ mod tests {
 
         assert_eq!(string_view, utf8_view);
         assert_eq!(string_fixed, utf8_fixed);
+    }
+
+    #[test]
+    fn ensure_text_view_ids_seed_string_literal_type_without_name_lookup() {
+        let mut table = TypeTable::new();
+        assert_eq!(table.string_literal_type_id(), None);
+
+        let utf8_view = table.ensure_utf8_view_id().expect("ensure utf8[]");
+        let ascii_view = table.ensure_ascii_view_id().expect("ensure ascii[]");
+
+        assert_eq!(table.string_literal_type_id(), Some(utf8_view));
+        assert_ne!(utf8_view, ascii_view);
     }
 
     #[test]
