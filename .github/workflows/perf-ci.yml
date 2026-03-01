@@ -93,3 +93,78 @@ jobs:
               sys.exit(1)
           PY
 
+  engine-overhead-bench:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run engine overhead benchmark (jit+aot)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p stasis --example engine_overhead_bench -- \
+            --mode both \
+            --samples 3 \
+            --ticks 240 \
+            | tee engine_overhead_bench.txt
+
+      - name: Enforce stop conditions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          from typing import Dict
+
+          path = Path("engine_overhead_bench.txt")
+          text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+          result_lines = {}
+          for candidate in text:
+              if candidate.startswith("result ") and "mode=" in candidate:
+                  for mode in ("jit", "aot"):
+                      if f"mode={mode}" in candidate:
+                          result_lines[mode] = candidate
+
+          missing = [mode for mode in ("jit", "aot") if mode not in result_lines]
+          if missing:
+              print(
+                  f"missing engine_overhead_bench result lines for {missing} in {path}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          def parse_kv(line: str) -> Dict[str, str]:
+              kv: Dict[str, str] = {}
+              for part in line.split():
+                  if "=" in part:
+                      key, value = part.split("=", 1)
+                      kv[key] = value
+              return kv
+
+          def f64(kv: Dict[str, str], key: str) -> float:
+              value = kv.get(key)
+              if value is None:
+                  raise KeyError(key)
+              return float(value)
+
+          # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
+          max_total_p95_ms = 2000.0
+
+          for mode in ("jit", "aot"):
+              kv = parse_kv(result_lines[mode])
+              total_p95_ms = f64(kv, "total_ms_p95")
+              print(f"{mode} total_ms_p95={total_p95_ms:.3f}ms (max {max_total_p95_ms:.3f}ms)")
+              if total_p95_ms > max_total_p95_ms:
+                  print(
+                      f"engine overhead regression: {mode} total p95 exceeded stop condition",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+          PY
