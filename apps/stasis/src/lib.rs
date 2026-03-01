@@ -27,9 +27,10 @@ use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
-    AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity,
-    FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet, JitCodePtrOverride,
-    LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode, TextSource,
+    AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
+    DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
+    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
+    TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};

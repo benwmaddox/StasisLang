@@ -3482,9 +3482,10 @@ mod tests {
         ));
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
-            result.diagnostics.iter().any(|diag| diag
-                .message
-                .contains("invalid on_code_swap signature")),
+            result
+                .diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("invalid on_code_swap signature")),
             "expected hook signature diagnostic, got {:?}",
             result.diagnostics
         );
@@ -3515,9 +3516,10 @@ mod tests {
         ));
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
-            result.diagnostics.iter().any(|diag| diag
-                .message
-                .contains("invalid on_code_swap signature")),
+            result
+                .diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("invalid on_code_swap signature")),
             "expected hook signature diagnostic, got {:?}",
             result.diagnostics
         );
