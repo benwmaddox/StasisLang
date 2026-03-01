@@ -407,6 +407,18 @@ impl CompilerBackend for IncrementalCompilerBackend {
                 }
             };
             if metric.id_hash == hash_identifier("on_code_swap") {
+                if metric.param_count != 0 || metric.return_type != "void" {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: "invalid on_code_swap signature; expected function on_code_swap(): void".to_string(),
+                            path: request.changed_files.first().cloned(),
+                            line: None,
+                            column: None,
+                        }],
+                    );
+                }
                 hook_fn_id = Some(fn_id);
             }
             if request.target_mode == TargetMode::AotProd {
@@ -908,6 +920,7 @@ impl IncrementalCompilerBackend {
         self.jit_process
             .compile()
             .map_err(|error| format!("rust-native JIT engine compile failed: {error:?}"))?;
+        self.jit_process.validate_on_code_swap_signature()?;
         let package = self
             .jit_process
             .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
@@ -924,6 +937,7 @@ impl IncrementalCompilerBackend {
         self.jit_process
             .compile()
             .map_err(|error| format!("rust-native JIT compile failed: {error:?}"))?;
+        self.jit_process.validate_on_code_swap_signature()?;
         Ok(self.jit_process.symbol_code_ptrs())
     }
 
@@ -3442,6 +3456,72 @@ mod tests {
         assert!(package.render_code_ptr != 0);
         assert!(package.on_code_swap_code_ptr.is_some());
         assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_rejects_on_code_swap_with_non_void_return_type() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_hook_sig_ret_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_101),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert!(
+            result.diagnostics.iter().any(|diag| diag
+                .message
+                .contains("invalid on_code_swap signature")),
+            "expected hook signature diagnostic, got {:?}",
+            result.diagnostics
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_rejects_on_code_swap_with_parameters() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_hook_sig_params_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(extra: i32): void { return; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_103),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert!(
+            result.diagnostics.iter().any(|diag| diag
+                .message
+                .contains("invalid on_code_swap signature")),
+            "expected hook signature diagnostic, got {:?}",
+            result.diagnostics
+        );
+
         fs::remove_dir_all(&temp_root).ok();
     }
 

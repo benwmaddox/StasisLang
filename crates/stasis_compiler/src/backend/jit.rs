@@ -357,6 +357,24 @@ impl JitProcess {
         symbol_code_ptrs
     }
 
+    pub fn validate_on_code_swap_signature(&self) -> Result<(), String> {
+        let Some(function) = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "on_code_swap")
+        else {
+            return Ok(());
+        };
+        if function.return_type != TYPE_ID_VOID || !function.params.is_empty() {
+            return Err(
+                "invalid on_code_swap signature; expected function on_code_swap(): void"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn build_engine_package(
         &self,
         entrypoints: &EngineEntrypoints,

@@ -1882,6 +1882,89 @@ mod tests {
     }
 
     #[test]
+    fn hook_failure_reason_preserves_previous_generation() {
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+
+        let first_request_id = RequestId(44);
+        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            first_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+        let first = apply_commit_request(
+            first_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(first.status, SwapCommitStatus::Success);
+        assert_eq!(pointer_table.generation().0, 1);
+        let ptr_after_first = pointer_table.code_ptr(FnId(9));
+        assert!(ptr_after_first.is_some());
+
+        let reason = "state invariant mismatch".to_string();
+        let second_request_id = RequestId(45);
+        let second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            second_request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        let second = apply_commit_request(
+            second_request,
+            &mut pointer_table,
+            &config,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            Some(&reason),
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+        assert_eq!(second.status, SwapCommitStatus::Failed);
+        assert_eq!(pointer_table.generation().0, 1);
+        assert_eq!(pointer_table.code_ptr(FnId(9)), ptr_after_first);
+        assert_eq!(swap_commit_successes, 1);
+        assert_eq!(swap_commit_failures, 1);
+        assert_eq!(hook_failures, 1);
+    }
+
+    #[test]
     fn runner_loop_compiles_and_commits_one_change() {
         let config = RunnerConfig {
             max_ticks: 200,
