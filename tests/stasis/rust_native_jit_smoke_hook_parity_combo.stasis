@@ -1,0 +1,24 @@
+global State { hook_runs: i32; hook_branch: i32; hook_sin: f32; }
+
+function helper_add(delta: i32): void {
+    State.hook_runs += delta;
+    return;
+}
+
+function on_code_swap(): void {
+    if (State.hook_runs == 0) {
+        helper_add(1);
+        State.hook_branch = 1;
+    } else {
+        helper_add(10);
+        State.hook_branch = 2;
+    }
+
+    State.hook_sin = sin_fast(0.0);
+    return;
+}
+
+function main(): i32 {
+    return 0;
+}
+

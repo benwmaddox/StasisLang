@@ -77,6 +77,9 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     #[cfg(windows)]
     {
         let callback: extern "system" fn() -> u64 = unsafe { std::mem::transmute(address) };
@@ -93,6 +96,9 @@ pub fn invoke_noarg_i32(address: usize) -> Result<i32, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     #[cfg(windows)]
     {
         let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
@@ -109,6 +115,9 @@ pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     #[cfg(windows)]
     {
         let callback: extern "system" fn() = unsafe { std::mem::transmute(address) };
@@ -127,6 +136,9 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     #[cfg(windows)]
     {
         let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
@@ -406,6 +418,9 @@ pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
 }
 
 pub fn replace_jit_i32_dispatch_table(entries: &[(u32, u8, usize)]) {
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     let table = jit_i32_dispatch_table();
     let mut guard = table.lock().expect("jit dispatch table mutex poisoned");
     guard.clear();
@@ -415,6 +430,9 @@ pub fn replace_jit_i32_dispatch_table(entries: &[(u32, u8, usize)]) {
 }
 
 pub fn replace_jit_f32_dispatch_table(entries: &[(u32, u8, usize)]) {
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     let table = jit_f32_dispatch_table();
     let mut guard = table.lock().expect("jit dispatch table mutex poisoned");
     guard.clear();
@@ -424,6 +442,9 @@ pub fn replace_jit_f32_dispatch_table(entries: &[(u32, u8, usize)]) {
 }
 
 pub fn replace_jit_code_ptr_table(entries: &[(u32, usize)]) {
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
     let table = jit_code_ptr_table();
     let mut guard = table.lock().expect("jit code ptr table mutex poisoned");
     guard.clear();
@@ -675,6 +696,11 @@ pub extern "C" fn stasis_jit_sin_fast(value: f32) -> f32 {
 
 pub extern "C" fn stasis_jit_cos_fast(value: f32) -> f32 {
     value.cos()
+}
+
+fn jit_dispatch_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub extern "C" fn stasis_jit_call_i32_0(fn_id_raw: i32) -> i32 {
