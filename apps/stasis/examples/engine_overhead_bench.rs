@@ -194,6 +194,8 @@ fn run_sample(mode: BenchMode, ticks: u32, tick_sleep_us: u64) -> Result<SampleM
         swap_failure_reason: None,
         runtime_launch: false,
         aot_probe_loadability: false,
+        host_set_profile: None,
+        host_set_registry_file: None,
     };
 
     let start = Instant::now();

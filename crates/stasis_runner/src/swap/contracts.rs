@@ -252,6 +252,10 @@ pub struct SwapCommitRequest {
     pub fn_patch_set: FunctionPatchSet,
     pub hook_symbol: Option<String>,
     #[serde(default)]
+    pub host_set_id: Option<String>,
+    #[serde(default)]
+    pub host_set_hash: Option<[u8; 32]>,
+    #[serde(default)]
     pub hook_fn_id: Option<FnId>,
 }
 
@@ -268,6 +272,8 @@ impl SwapCommitRequest {
             layout_hash,
             fn_patch_set,
             hook_symbol,
+            host_set_id: None,
+            host_set_hash: None,
             hook_fn_id: None,
         }
     }
