@@ -734,7 +734,10 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: unchanged files/functions skip body parse and skip CLIF emission.
 - Tests: signature-only change, body-only change, unchanged-file no-op, and mixed-file edit cases.
 - Done gate: dirty-function set is deterministic and minimal for covered scenarios.
-- Status: `pending`
+- Current progress:
+- Rust-native compiler flow runs explicit index then emit stages (`Compiler::index_pass`, `Compiler::emit_pass_with`) and emit work is restricted to dirty function ids only.
+- Regression coverage now includes signature-only changes, body-only changes, unchanged-source no-op, and mixed-file body edit gating in `crates/stasis_compiler::compiler::tests::*`.
+- Status: `done`
 - Slice CS3: Implement O(1) function symbol lookup via open-addressed hash table in `.stasis`.
 - Language: `.stasis`.
 - Scope: replace linear function-name scans for call resolution and file-function lookup with open-addressed table operations.
@@ -965,4 +968,3 @@ Each PR must include:
 ## Backlog
 
 - Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.
-
