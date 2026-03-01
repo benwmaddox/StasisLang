@@ -25,7 +25,7 @@ Stasis is built around a few pragmatic ideas that work well for games and simula
 Direct influences:
 
 - **Age of Empires II**: deterministic, tick-style simulation mindset (good for replay/debug/lockstep-style thinking).
-- **Handmade Hero**: “simple and debuggable” game code, data-oriented structures, and skepticism of hidden complexity.
+- **Handmade Hero**: "simple and debuggable" game code, data-oriented structures, and skepticism of hidden complexity.
 
 ## Start Here
 
