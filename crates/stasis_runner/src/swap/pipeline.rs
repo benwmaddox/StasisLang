@@ -1,6 +1,6 @@
 use crate::swap::contracts::{
     CompileRequest, CompileResult, CompileStatus, Diagnostic, DiagnosticSeverity, FileChangeEvent,
-    FunctionPatchSet, LayoutHash, RequestId, SwapCommitRequest, SwapCommitResult, TargetMode,
+    FnId, FunctionPatchSet, LayoutHash, RequestId, SwapCommitRequest, SwapCommitResult, TargetMode,
     CONTRACT_VERSION,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
@@ -233,6 +233,7 @@ impl DevHotSwapPipeline {
                                 result.layout_hash,
                                 result.fn_patch_set,
                                 result.hook_symbol.clone(),
+                                result.hook_fn_id,
                             );
                         }
                     }
@@ -248,6 +249,7 @@ impl DevHotSwapPipeline {
         layout_hash: Option<LayoutHash>,
         fn_patch_set: Option<FunctionPatchSet>,
         hook_symbol: Option<String>,
+        hook_fn_id: Option<FnId>,
     ) {
         let Some(layout_hash) = layout_hash else {
             return;
@@ -265,6 +267,7 @@ impl DevHotSwapPipeline {
             layout_hash,
             fn_patch_set,
             hook_symbol,
+            hook_fn_id,
         };
         let _ = self.commit_request_tx.send(request);
         self.in_flight_commit = Some(request_id);
@@ -494,6 +497,38 @@ mod tests {
 
         let processed = pipeline.process_commits_at_safe_point(|request| {
             assert_eq!(request.hook_symbol.as_deref(), Some("on_code_swap"));
+            SwapCommitResult::success(request.request_id, vec![FnId(7)], CodeGeneration(1))
+        });
+        assert_eq!(processed, 1);
+    }
+
+    #[test]
+    fn compile_hook_fn_id_propagates_to_commit_request() {
+        let mut pipeline = DevHotSwapPipeline::new(|request: CompileRequest| {
+            CompileResult::success_with_host_set_metadata(
+                request.request_id,
+                LayoutHash([6; 32]),
+                sample_patch_set(),
+                None,
+                None,
+                Some("on_code_swap".to_string()),
+                Some(FnId(55)),
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+
+        pipeline.submit_file_change(sample_change("samples/hook_fn_id.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            assert_eq!(request.hook_symbol.as_deref(), Some("on_code_swap"));
+            assert_eq!(request.hook_fn_id, Some(FnId(55)));
             SwapCommitResult::success(request.request_id, vec![FnId(7)], CodeGeneration(1))
         });
         assert_eq!(processed, 1);
