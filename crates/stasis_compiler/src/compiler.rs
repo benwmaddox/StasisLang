@@ -501,10 +501,7 @@ mod tests {
             .compile_with(|_, _| Ok(()))
             .expect("initial compile");
 
-        compiler.upsert_file(
-            "extra.stasis",
-            "function utility(): i32 { return 4; }\n",
-        );
+        compiler.upsert_file("extra.stasis", "function utility(): i32 { return 4; }\n");
         let index = compiler.index_pass().expect("index pass");
         assert_eq!(index.signature_changed_functions, 0);
         assert_eq!(index.dirty_functions, 1);

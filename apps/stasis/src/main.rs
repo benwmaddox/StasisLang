@@ -4,14 +4,14 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::time::{Duration, Instant};
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
     publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory_with_session,
     run_play_in_process, run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
-    StasisTestRunSession, RunnerConfig,
+    RunnerConfig, StasisTestRunSession,
 };
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -106,7 +106,10 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         i += 1;
     }
     let Some(watch_file) = watch_file else {
-        return Err("missing entry file. Use `stasis.exe play <path.stasis>` (or --watch-file <path>)".to_string());
+        return Err(
+            "missing entry file. Use `stasis.exe play <path.stasis>` (or --watch-file <path>)"
+                .to_string(),
+        );
     };
     Ok(PlayCliArgs {
         watch_file,
@@ -366,9 +369,7 @@ fn cleanup_stale_stasis_cache(
         return Ok(CacheCleanupSummary::default());
     }
     let now = SystemTime::now();
-    let cutoff = now
-        .checked_sub(max_age)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let cutoff = now.checked_sub(max_age).unwrap_or(SystemTime::UNIX_EPOCH);
     let mut summary = CacheCleanupSummary::default();
     cleanup_stale_stasis_cache_dir(cache_root, cutoff, true, &mut summary)?;
     Ok(summary)
@@ -396,8 +397,12 @@ fn cleanup_stale_stasis_cache_dir(
             continue;
         }
         if cache_entry_is_stale(&metadata, cutoff) {
-            fs::remove_file(&path)
-                .map_err(|error| format!("failed removing stale cache file '{}': {error}", path.display()))?;
+            fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "failed removing stale cache file '{}': {error}",
+                    path.display()
+                )
+            })?;
             summary.removed_files = summary.removed_files.saturating_add(1);
         }
     }
@@ -409,8 +414,12 @@ fn cleanup_stale_stasis_cache_dir(
         .next()
         .is_none();
     if is_empty {
-        fs::remove_dir(dir)
-            .map_err(|error| format!("failed removing stale cache directory '{}': {error}", dir.display()))?;
+        fs::remove_dir(dir).map_err(|error| {
+            format!(
+                "failed removing stale cache directory '{}': {error}",
+                dir.display()
+            )
+        })?;
         summary.removed_dirs = summary.removed_dirs.saturating_add(1);
     }
     Ok(())
@@ -831,10 +840,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "stasis_cache_cleanup_zero_{}",
-            stamp
-        ));
+        let root = std::env::temp_dir().join(format!("stasis_cache_cleanup_zero_{}", stamp));
         let cache_root = root.join(".stasis_cache");
         let nested = cache_root.join("nested");
         std::fs::create_dir_all(&nested).expect("mkdir");
@@ -855,20 +861,15 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "stasis_cache_cleanup_keep_{}",
-            stamp
-        ));
+        let root = std::env::temp_dir().join(format!("stasis_cache_cleanup_keep_{}", stamp));
         let cache_root = root.join(".stasis_cache");
         std::fs::create_dir_all(&cache_root).expect("mkdir");
         let file = cache_root.join("fresh.bin");
         std::fs::write(&file, "x").expect("write");
 
-        let summary = cleanup_stale_stasis_cache(
-            &cache_root,
-            Duration::from_secs(365 * 24 * 60 * 60),
-        )
-        .expect("cleanup");
+        let summary =
+            cleanup_stale_stasis_cache(&cache_root, Duration::from_secs(365 * 24 * 60 * 60))
+                .expect("cleanup");
         assert_eq!(summary.removed_files, 0, "{summary:?}");
         assert!(file.exists());
 
@@ -916,10 +917,7 @@ mod tests {
             "entry.stasis".to_string(),
         ];
         let parsed = parse_aot_cli_contract_args(&args).expect("parse should succeed");
-        assert_eq!(
-            parsed.entry_file,
-            Some(PathBuf::from("entry.stasis"))
-        );
+        assert_eq!(parsed.entry_file, Some(PathBuf::from("entry.stasis")));
         assert!(!parsed.quality_gate);
     }
 
