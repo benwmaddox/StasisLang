@@ -101,7 +101,10 @@ impl RuntimeLauncher {
 
         let mut command = Command::new(stasis_exe);
         // Always launch the generic play runner (no sample-specific scenarios).
-        command.arg("play").arg("--watch-file").arg(&self.source_file);
+        command
+            .arg("play")
+            .arg("--watch-file")
+            .arg(&self.source_file);
         command
             .arg("--tick-sleep-us")
             .arg("16000")
