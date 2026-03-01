@@ -362,6 +362,40 @@ mod tests {
     }
 
     #[test]
+    fn mixed_file_body_edit_only_emits_changed_file_function() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "core.stasis",
+            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        compiler.upsert_file("extra.stasis", "function utility(): i32 { return 3; }\n");
+        compiler
+            .compile_with(|_, _| Ok(()))
+            .expect("initial compile");
+
+        compiler.upsert_file(
+            "extra.stasis",
+            "function utility(): i32 { return 4; }\n",
+        );
+        let index = compiler.index_pass().expect("index pass");
+        assert_eq!(index.signature_changed_functions, 0);
+        assert_eq!(index.dirty_functions, 1);
+        assert!(!function_by_name(&compiler, "helper").dirty);
+        assert!(!function_by_name(&compiler, "main").dirty);
+        assert!(function_by_name(&compiler, "utility").dirty);
+
+        let mut emitted_names = Vec::new();
+        let emit = compiler
+            .emit_pass_with(&mut |meta, _| {
+                emitted_names.push(meta.name.clone());
+                Ok(())
+            })
+            .expect("emit pass");
+        assert_eq!(emit.emitted_functions, 1);
+        assert_eq!(emitted_names, vec!["utility".to_string()]);
+    }
+
+    #[test]
     fn signature_change_propagates_dirty_to_dependents() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
