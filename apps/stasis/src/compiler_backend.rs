@@ -45,9 +45,11 @@ pub struct SelfHostedAotCliSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AotFallbackStubDetail {
-    id_hash: i32,
     symbol: String,
+    id_hash: i32,
+    sig_hash: i32,
     body_hash: i32,
+    ordinal: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -933,9 +935,11 @@ impl IncrementalCompilerBackend {
             .iter()
             .filter(|metric| metric_uses_stub_fallback(metric))
             .map(|metric| AotFallbackStubDetail {
-                id_hash: metric.id_hash,
                 symbol: aot_symbol_name(metric),
+                id_hash: metric.id_hash,
+                sig_hash: metric.sig_hash,
                 body_hash: metric.body_hash,
+                ordinal: u32::try_from(metric.ordinal).unwrap_or_default(),
             })
             .collect();
         fallback_stub_details.sort_by(|a, b| a.symbol.cmp(&b.symbol));
