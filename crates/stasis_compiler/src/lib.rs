@@ -22,6 +22,23 @@ pub struct IncrementalCompileOutput {
     pub errors: Vec<ErrorMetric>,
 }
 
+pub const RETURN_TYPE_CODE_UNKNOWN: i32 = 0;
+pub const RETURN_TYPE_CODE_I32: i32 = 1;
+pub const RETURN_TYPE_CODE_VOID: i32 = 2;
+pub const RETURN_TYPE_CODE_F32: i32 = 3;
+pub const RETURN_TYPE_CODE_BOOL: i32 = 4;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE: i32 = 0;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH: i32 = 1;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH: i32 = 2;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH: i32 = 3;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH: i32 = 4;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST: i32 = 5;
+pub const SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT: i32 = 6;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE: i32 = 0;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG: i32 = 1;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL: i32 = 2;
+pub const SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL: i32 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionMetric {
     pub file_index: usize,
@@ -29,7 +46,8 @@ pub struct FunctionMetric {
     pub id_hash: i32,
     pub sig_hash: i32,
     pub body_hash: i32,
-    pub return_type: String,
+    pub return_type_code: i32,
+    pub uses_stub_fallback: bool,
     pub param_count: i32,
     pub first_param_type_code: i32,
     pub simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -38,6 +56,7 @@ pub struct FunctionMetric {
     pub simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
     pub simple_i32_return_call_one_arg_i32_literal: Option<i32>,
     pub simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    pub simple_i32_one_arg_call_shape_code: i32,
     pub simple_i32_return_two_call_left_target_id_hash: Option<i32>,
     pub simple_i32_return_two_call_right_target_id_hash: Option<i32>,
     pub simple_i32_return_two_call_op_code: Option<i32>,
@@ -45,6 +64,7 @@ pub struct FunctionMetric {
     pub simple_void_print_i32_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     pub simple_void_print_i32_call_add_delta: Option<i32>,
+    pub simple_void_print_call_target_shape_code: i32,
     pub clif_text: String,
 }
 
@@ -100,7 +120,8 @@ struct ParsedFunction {
     is_export: bool,
     sig_hash: i32,
     body_hash: i32,
-    return_type: String,
+    return_type_code: i32,
+    uses_stub_fallback: bool,
     param_count: i32,
     first_param_type_code: i32,
     simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
@@ -109,6 +130,7 @@ struct ParsedFunction {
     simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
     simple_i32_return_call_one_arg_i32_literal: Option<i32>,
     simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    simple_i32_one_arg_call_shape_code: i32,
     simple_i32_return_two_call_left_target_id_hash: Option<i32>,
     simple_i32_return_two_call_right_target_id_hash: Option<i32>,
     simple_i32_return_two_call_op_code: Option<i32>,
@@ -116,6 +138,7 @@ struct ParsedFunction {
     simple_void_print_i32_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
     simple_void_print_i32_call_add_delta: Option<i32>,
+    simple_void_print_call_target_shape_code: i32,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
 }
@@ -358,7 +381,8 @@ impl IncrementalCompilerHost {
                     id_hash: parsed.id_hash,
                     sig_hash: parsed.sig_hash,
                     body_hash: parsed.body_hash,
-                    return_type: parsed.return_type.clone(),
+                    return_type_code: parsed.return_type_code,
+                    uses_stub_fallback: parsed.uses_stub_fallback,
                     param_count: parsed.param_count,
                     first_param_type_code: parsed.first_param_type_code,
                     simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
@@ -371,6 +395,7 @@ impl IncrementalCompilerHost {
                         .simple_i32_return_call_one_arg_i32_literal,
                     simple_i32_return_call_one_arg_arg_call_target_id_hash: parsed
                         .simple_i32_return_call_one_arg_arg_call_target_id_hash,
+                    simple_i32_one_arg_call_shape_code: parsed.simple_i32_one_arg_call_shape_code,
                     simple_i32_return_two_call_left_target_id_hash: parsed
                         .simple_i32_return_two_call_left_target_id_hash,
                     simple_i32_return_two_call_right_target_id_hash: parsed
@@ -383,6 +408,8 @@ impl IncrementalCompilerHost {
                         .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
                     simple_void_print_i32_call_add_delta: parsed
                         .simple_void_print_i32_call_add_delta,
+                    simple_void_print_call_target_shape_code: parsed
+                        .simple_void_print_call_target_shape_code,
                     clif_text: parsed.clif_text.clone(),
                 });
             }
@@ -462,6 +489,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             &function.return_type_name,
         );
         let body_hash = hash_i32(body_text);
+        let return_type_code = return_type_code_from_name(&function.return_type_name);
         let first_param_type_code = function
             .params
             .first()
@@ -469,14 +497,14 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             .unwrap_or_default();
         if function.name == "main" {
             main_decl_count += 1;
-            if function.params.is_empty() && function.return_type_name == "i32" {
+            if function.params.is_empty() && return_type_code == RETURN_TYPE_CODE_I32 {
                 main_valid_count += 1;
             } else {
                 main_invalid_count += 1;
             }
         }
 
-        let expression = if function.return_type_name == "i32" {
+        let expression = if return_type_code == RETURN_TYPE_CODE_I32 {
             parse_return_expression(body_text)
         } else {
             None
@@ -496,17 +524,40 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
         } else {
             (None, None, None, None, None, None, None, None)
         };
+        let simple_i32_one_arg_has_literal = simple_i32_return_call_one_arg_i32_literal.is_some();
+        let simple_i32_one_arg_has_arg_call =
+            simple_i32_return_call_one_arg_arg_call_target_id_hash.is_some();
+        let simple_i32_one_arg_call_shape_code = simple_i32_one_arg_call_shape_code(
+            function.params.len(),
+            simple_i32_return_call_one_arg_target_id_hash.is_some(),
+            simple_i32_one_arg_has_literal,
+            simple_i32_one_arg_has_arg_call,
+        );
 
         let (
             simple_void_print_i32_literal,
             simple_void_print_i32_call_target_id_hash,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
-        ) = if function.return_type_name == "void" {
+        ) = if return_type_code == RETURN_TYPE_CODE_VOID {
             analyze_simple_void_print_i32_metadata(body_text)
         } else {
             (None, None, None, None)
         };
+        let simple_void_print_is_one_arg = simple_void_print_i32_call_target_id_hash.is_some()
+            && simple_void_print_i32_literal.is_some();
+        let simple_void_print_call_target_shape_code = simple_void_print_call_target_shape_code(
+            simple_void_print_i32_call_target_id_hash.is_some(),
+            simple_void_print_is_one_arg,
+            simple_void_print_i32_call_one_arg_arg_call_target_id_hash.is_some(),
+        );
+        let uses_stub_fallback = return_type_code == RETURN_TYPE_CODE_I32
+            && simple_i32_return_expr.is_none()
+            && simple_i32_return_call_target_id_hash.is_none()
+            && simple_i32_return_call_one_arg_target_id_hash.is_none()
+            && simple_i32_return_call_one_arg_arg_call_target_id_hash.is_none()
+            && simple_i32_return_two_call_left_target_id_hash.is_none()
+            && simple_i32_return_two_call_right_target_id_hash.is_none();
 
         let parsed_index = parsed_functions.len();
         parsed_functions.push(ParsedFunction {
@@ -515,7 +566,8 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             is_export: function.is_export,
             sig_hash,
             body_hash,
-            return_type: function.return_type_name.clone(),
+            return_type_code,
+            uses_stub_fallback,
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
             first_param_type_code,
             simple_i32_return_expr,
@@ -524,6 +576,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_i32_return_call_one_arg_target_id_hash,
             simple_i32_return_call_one_arg_i32_literal,
             simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            simple_i32_one_arg_call_shape_code,
             simple_i32_return_two_call_left_target_id_hash,
             simple_i32_return_two_call_right_target_id_hash,
             simple_i32_return_two_call_op_code,
@@ -531,6 +584,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             simple_void_print_i32_call_target_id_hash,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
             simple_void_print_i32_call_add_delta,
+            simple_void_print_call_target_shape_code,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
         });
@@ -585,6 +639,7 @@ struct ParsedParamDecl {
 #[derive(Debug, Clone)]
 enum EvalExpr {
     Literal(i32),
+    Identifier,
     Add(Box<EvalExpr>, Box<EvalExpr>),
     Sub(Box<EvalExpr>, Box<EvalExpr>),
     Mul(Box<EvalExpr>, Box<EvalExpr>),
@@ -853,6 +908,56 @@ fn type_code_from_name(type_name: &str) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn return_type_code_from_name(type_name: &str) -> i32 {
+    match type_name.trim() {
+        "i32" => RETURN_TYPE_CODE_I32,
+        "void" => RETURN_TYPE_CODE_VOID,
+        "f32" => RETURN_TYPE_CODE_F32,
+        "bool" => RETURN_TYPE_CODE_BOOL,
+        _ => RETURN_TYPE_CODE_UNKNOWN,
+    }
+}
+
+fn simple_i32_one_arg_call_shape_code(
+    param_count: usize,
+    has_one_arg_target: bool,
+    has_literal_arg: bool,
+    has_arg_call_arg: bool,
+) -> i32 {
+    if !has_one_arg_target {
+        return SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE;
+    }
+    if has_literal_arg && !has_arg_call_arg && param_count == 1 {
+        return SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST;
+    }
+    if !has_literal_arg && !has_arg_call_arg {
+        return match param_count {
+            1 => SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH,
+            2 => SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH,
+            3 => SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH,
+            4 => SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH,
+            _ => SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT,
+        };
+    }
+    SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT
+}
+
+fn simple_void_print_call_target_shape_code(
+    has_call_target: bool,
+    one_arg_literal: bool,
+    one_arg_arg_call: bool,
+) -> i32 {
+    if !has_call_target {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE
+    } else if one_arg_literal {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+    } else if one_arg_arg_call {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL
+    } else {
+        SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG
     }
 }
 
@@ -1219,10 +1324,10 @@ impl<'a> EvalExpressionParser<'a> {
         match self.peek_byte()? {
             b'0'..=b'9' => self.parse_integer().map(EvalExpr::Literal),
             byte if is_identifier_start(byte) => {
-                let identifier = self.parse_identifier()?.to_string();
+                let identifier = self.parse_identifier()?;
                 self.skip_ws();
                 if self.peek_byte() != Some(b'(') {
-                    return None;
+                    return Some(EvalExpr::Identifier);
                 }
                 self.cursor += 1;
                 let mut args = Vec::new();
@@ -1247,7 +1352,7 @@ impl<'a> EvalExpressionParser<'a> {
                         _ => return None,
                     }
                 }
-                Some(EvalExpr::Call(identifier, args))
+                Some(EvalExpr::Call(identifier.to_string(), args))
             }
             b'(' => {
                 self.cursor += 1;
@@ -1301,6 +1406,7 @@ impl<'a> EvalExpressionParser<'a> {
 fn convert_eval_expr_to_simple(expression: &EvalExpr) -> Option<SimpleI32ReturnExpr> {
     match expression {
         EvalExpr::Literal(value) => Some(SimpleI32ReturnExpr::Literal(*value)),
+        EvalExpr::Identifier => None,
         EvalExpr::Add(lhs, rhs) => Some(SimpleI32ReturnExpr::Add(
             Box::new(convert_eval_expr_to_simple(lhs)?),
             Box::new(convert_eval_expr_to_simple(rhs)?),
@@ -1340,7 +1446,7 @@ fn evaluate_function_i32(
         return None;
     }
     let function = functions.get(index)?;
-    if function.return_type != "i32" || function.param_count != 0 {
+    if function.return_type_code != RETURN_TYPE_CODE_I32 || function.param_count != 0 {
         return None;
     }
     let expression = return_exprs.get(index)?.as_ref()?;
@@ -1363,6 +1469,7 @@ fn evaluate_expr_i32(
 ) -> Option<i32> {
     match expression {
         EvalExpr::Literal(value) => Some(*value),
+        EvalExpr::Identifier => None,
         EvalExpr::Add(lhs, rhs) => Some(
             evaluate_expr_i32(lhs, functions, return_exprs, by_name, memo, visiting)?.wrapping_add(
                 evaluate_expr_i32(rhs, functions, return_exprs, by_name, memo, visiting)?,
@@ -1406,7 +1513,7 @@ fn evaluate_expr_i32(
             let mut selected = None;
             for candidate in candidates {
                 let function = functions.get(*candidate)?;
-                if function.return_type == "i32" && function.param_count == 0 {
+                if function.return_type_code == RETURN_TYPE_CODE_I32 && function.param_count == 0 {
                     if selected.is_some() {
                         return None;
                     }
@@ -1430,7 +1537,7 @@ fn build_stub_clif_text(function: &ParsedFunction, i32_return_value: i32) -> Str
     } else {
         "system_v"
     };
-    if function.return_type == "void" {
+    if function.return_type_code == RETURN_TYPE_CODE_VOID {
         format!("function %{symbol}() {call_conv} {{\nblock0:\nreturn\n}}")
     } else {
         format!(
@@ -2007,7 +2114,8 @@ mod tests {
             is_export: false,
             sig_hash,
             body_hash: sig_hash.wrapping_mul(31),
-            return_type: "i32".to_string(),
+            return_type_code: RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: true,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -2016,6 +2124,7 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_call_shape_code: SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -2023,6 +2132,7 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_call_target_shape_code: SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             call_target_id_hashes: callees
                 .iter()
                 .map(|callee| hash_identifier(callee))
@@ -2210,8 +2320,22 @@ mod tests {
         assert_eq!(compile.status, 0);
         assert_eq!(compile.hook_symbol.as_deref(), Some("on_code_swap"));
         assert_eq!(compile.functions.len(), 2);
-        assert!(compile.functions.iter().any(|f| f.return_type == "i32"));
-        assert!(compile.functions.iter().any(|f| f.return_type == "void"));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_I32));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_VOID));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_I32));
+        assert!(compile
+            .functions
+            .iter()
+            .any(|f| f.return_type_code == RETURN_TYPE_CODE_VOID));
         let main = compile
             .functions
             .iter()
@@ -2222,6 +2346,12 @@ mod tests {
             .iter()
             .find(|function| function.id_hash == hash_identifier("on_code_swap"))
             .expect("hook metric");
+        assert_eq!(main.return_type_code, RETURN_TYPE_CODE_I32);
+        assert_eq!(hook.return_type_code, RETURN_TYPE_CODE_VOID);
+        assert_eq!(
+            main.simple_i32_one_arg_call_shape_code,
+            SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE
+        );
         assert_eq!(
             main.simple_i32_return_expr,
             Some(SimpleI32ReturnExpr::Literal(0))
@@ -2258,6 +2388,11 @@ mod tests {
             .functions
             .iter()
             .all(|f| f.simple_void_print_i32_call_add_delta.is_none()));
+        assert!(compile
+            .functions
+            .iter()
+            .all(|f| f.simple_void_print_call_target_shape_code
+                == SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE));
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -2283,6 +2418,102 @@ mod tests {
         assert_eq!(compile.status, 0);
         assert_eq!(compile.functions.len(), 1);
         assert_eq!(compile.functions[0].id_hash, hash_identifier("main"));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_sets_literal_plus_first_param_passthrough_shape_code_for_derived_shape() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_passthrough_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction wrapper(value: i32): i32 { return callee(4); }\nfunction main(): i32 { return wrapper(3); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let wrapper = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("wrapper"))
+            .expect("wrapper metric");
+        assert_eq!(
+            wrapper.simple_i32_one_arg_call_shape_code,
+            SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_sets_one_arg_passthrough_shape_code_for_identifier_wrapper_shape() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_passthrough_ident_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(value: i32): i32 { return value; }\nfunction wrapper(value: i32): i32 { return callee(value); }\nfunction main(): i32 { return wrapper(3); }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let wrapper = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("wrapper"))
+            .expect("wrapper metric");
+        assert_eq!(
+            wrapper.simple_i32_one_arg_call_shape_code,
+            SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_sets_simple_void_print_call_target_shape_noarg_for_current_rust_fallback_shapes() {
+        let mut host = IncrementalCompilerHost::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_inc_void_print_one_arg_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp dir");
+        let file = temp_root.join("sample.stasis");
+        fs::write(
+            &file,
+            "function callee(): i32 { return 4; }\nfunction sink(): void { print_i32(callee()); return; }\nfunction main(): i32 { sink(); return 0; }\n",
+        )
+        .expect("write sample");
+
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&file))
+            .expect("compile result");
+        assert_eq!(compile.status, 0);
+        let sink = compile
+            .functions
+            .iter()
+            .find(|function| function.id_hash == hash_identifier("sink"))
+            .expect("sink metric");
+        assert_eq!(
+            sink.simple_void_print_call_target_shape_code,
+            SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NOARG
+        );
         fs::remove_dir_all(&temp_root).ok();
     }
 

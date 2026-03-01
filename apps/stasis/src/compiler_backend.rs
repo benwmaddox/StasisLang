@@ -4,7 +4,6 @@ use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::parse_top_level_functions;
-use stasis_compiler::IncrementalCompilerHost;
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -21,7 +20,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub struct IncrementalCompilerBackend {
-    host: IncrementalCompilerHost,
     source_by_path: BTreeMap<String, String>,
     jit_process: JitProcess,
     jit_process_seeded: bool,
@@ -51,7 +49,7 @@ struct AotFallbackStubDetail {
     id_hash: i32,
     sig_hash: i32,
     body_hash: i32,
-    ordinal: usize,
+    ordinal: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,9 +59,7 @@ struct AotPatchManifest {
     linked_image_path: Option<String>,
     linked_image_size_bytes: Option<u64>,
     linked_image_sha256: Option<String>,
-    #[serde(default)]
     fallback_stub_symbols: Vec<String>,
-    #[serde(default)]
     fallback_stub_details: Vec<AotFallbackStubDetail>,
 }
 
@@ -139,7 +135,6 @@ impl IncrementalCompilerBackend {
                     .join(".stasis_cache")
             });
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -169,7 +164,6 @@ impl IncrementalCompilerBackend {
         aot_artifact_root: std::path::PathBuf,
     ) -> Self {
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -192,7 +186,6 @@ impl IncrementalCompilerBackend {
         enable_aot_link_step: bool,
     ) -> Self {
         Self {
-            host: IncrementalCompilerHost::new(),
             source_by_path: BTreeMap::new(),
             jit_process: JitProcess::new(),
             jit_process_seeded: false,
@@ -273,184 +266,19 @@ impl CompilerBackend for IncrementalCompilerBackend {
                 ),
             };
         }
-
-        let parsed = match self.host.compile_changed_files(&request.changed_files) {
+        match self.compile_aot_non_engine_contract_request(&request) {
             Ok(result) => result,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message,
-                        path: request.changed_files.first().cloned(),
-                        line: None,
-                        column: None,
-                    }],
-                );
-            }
-        };
-
-        if parsed.status != 0 {
-            let mut diagnostics = Vec::new();
-            if parsed.errors.is_empty() {
-                diagnostics.push(Diagnostic {
+            Err(message) => CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
-                    message: format!("incremental compiler failed with status {}", parsed.status),
+                    message,
                     path: request.changed_files.first().cloned(),
                     line: None,
                     column: None,
-                });
-            } else {
-                for error in parsed.errors {
-                    diagnostics.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message: format_error_message(error.code, error.detail_a, error.detail_b),
-                        path: None,
-                        line: None,
-                        column: Some(error.pos.max(0) as u32),
-                    });
-                }
-            }
-            return CompileResult::failed(request.request_id, diagnostics);
+                }],
+            ),
         }
-
-        let mut aot_linked_image_path: Option<String> = None;
-        let mut aot_linked_image_size_bytes: Option<u64> = None;
-        let mut aot_linked_image_sha256: Option<String> = None;
-        let mut aot_function_symbols: Option<Vec<AotFunctionSymbol>> = None;
-        if request.target_mode == TargetMode::AotProd {
-            match self.emit_aot_artifacts(request.request_id.0, &parsed.functions) {
-                Ok(path) => {
-                    aot_linked_image_path = path;
-                    if let Some(path) = aot_linked_image_path.as_ref() {
-                        let metadata = std::fs::metadata(path).map_err(|error| {
-                            CompileResult::failed(
-                                request.request_id,
-                                vec![Diagnostic {
-                                    severity: DiagnosticSeverity::Error,
-                                    message: format!(
-                                        "failed to stat linked AOT image {}: {error}",
-                                        path
-                                    ),
-                                    path: request.changed_files.first().cloned(),
-                                    line: None,
-                                    column: None,
-                                }],
-                            )
-                        });
-                        match metadata {
-                            Ok(meta) => aot_linked_image_size_bytes = Some(meta.len()),
-                            Err(result) => return result,
-                        }
-                        let digest = compute_file_sha256_hex(Path::new(path)).map_err(|error| {
-                            CompileResult::failed(
-                                request.request_id,
-                                vec![Diagnostic {
-                                    severity: DiagnosticSeverity::Error,
-                                    message: format!(
-                                        "failed to hash linked AOT image {}: {error}",
-                                        path
-                                    ),
-                                    path: request.changed_files.first().cloned(),
-                                    line: None,
-                                    column: None,
-                                }],
-                            )
-                        });
-                        match digest {
-                            Ok(hash) => aot_linked_image_sha256 = Some(hash),
-                            Err(result) => return result,
-                        }
-                    }
-                }
-                Err(message) => {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            path: request.changed_files.first().cloned(),
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
-            }
-        }
-
-        let mut functions = Vec::new();
-        let mut hook_fn_id: Option<FnId> = None;
-        let mut collected_aot_symbols: Vec<AotFunctionSymbol> = Vec::new();
-        for metric in parsed.functions {
-            let path = parsed
-                .file_paths
-                .get(metric.file_index)
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let key = format!(
-                "{path}::{}::{}::{}",
-                metric.id_hash, metric.sig_hash, metric.body_hash
-            );
-            let fn_id = match self.fn_id_for_key(&key) {
-                Ok(id) => id,
-                Err(message) => {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            path: None,
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
-            };
-            if metric.id_hash == hash_identifier("on_code_swap") {
-                if metric.param_count != 0 || metric.return_type != "void" {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message: "invalid on_code_swap signature; expected function on_code_swap(): void".to_string(),
-                            path: request.changed_files.first().cloned(),
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
-                hook_fn_id = Some(fn_id);
-            }
-            if request.target_mode == TargetMode::AotProd {
-                collected_aot_symbols.push(AotFunctionSymbol {
-                    fn_id,
-                    symbol: aot_symbol_name(&metric),
-                });
-            }
-            functions.push(FunctionPatch { fn_id });
-        }
-        if request.target_mode == TargetMode::AotProd {
-            aot_function_symbols = Some(collected_aot_symbols);
-        }
-
-        if hook_fn_id.is_none() {
-            hook_fn_id = self.existing_fn_id_for_identifier_hash(hash_identifier("on_code_swap"));
-        }
-
-        let layout_hash = expand_layout_hash(parsed.layout_hash);
-        CompileResult::success_with_host_set_metadata(
-            request.request_id,
-            layout_hash,
-            FunctionPatchSet { functions },
-            request.host_set_id.clone(),
-            request.host_set_hash,
-            parsed.hook_symbol,
-            hook_fn_id,
-            aot_linked_image_path.map(std::path::PathBuf::from),
-            aot_linked_image_size_bytes,
-            aot_linked_image_sha256,
-            aot_function_symbols,
-        )
     }
 }
 
@@ -807,6 +635,90 @@ impl IncrementalCompilerBackend {
         Ok(result)
     }
 
+    fn compile_aot_non_engine_contract_request(
+        &mut self,
+        request: &CompileRequest,
+    ) -> Result<CompileResult, String> {
+        let mut host = stasis_compiler::IncrementalCompilerHost::new();
+        let parsed = host.compile_changed_files(&request.changed_files)?;
+
+        if parsed.status != 0 || !parsed.errors.is_empty() {
+            let diagnostics = parsed
+                .errors
+                .iter()
+                .map(|error| Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: format_error_message(error.code, error.detail_a, error.detail_b),
+                    path: request.changed_files.first().cloned(),
+                    line: None,
+                    column: None,
+                })
+                .collect();
+            return Ok(CompileResult::failed(request.request_id, diagnostics));
+        }
+
+        let request_id = request.request_id.0;
+        let linked_image_path = self.emit_aot_artifacts(request_id, &parsed.functions)?;
+        let aot_linked_image_path = linked_image_path.map(PathBuf::from);
+        let (aot_linked_image_size_bytes, aot_linked_image_sha256) =
+            if let Some(path) = aot_linked_image_path.as_ref() {
+                let size = std::fs::metadata(path)
+                    .map_err(|error| {
+                        format!(
+                            "failed to stat linked AOT image {}: {error}",
+                            path.display()
+                        )
+                    })?
+                    .len();
+                (Some(size), Some(compute_file_sha256_hex(path)?))
+            } else {
+                (None, None)
+            };
+
+        let mut functions = Vec::new();
+        let mut aot_function_symbols = Vec::new();
+        let mut hook_fn_id: Option<FnId> = None;
+        let hook_id_hash = hash_identifier("on_code_swap");
+        for metric in &parsed.functions {
+            let file_path = parsed
+                .file_paths
+                .get(metric.file_index)
+                .cloned()
+                .unwrap_or_default();
+            let key = format!(
+                "stasis::{}::{}::{}::{}",
+                file_path, metric.id_hash, metric.sig_hash, metric.ordinal
+            );
+            let fn_id = self.fn_id_for_key(&key)?;
+            if metric.id_hash == hook_id_hash {
+                hook_fn_id = Some(fn_id);
+            }
+            functions.push(FunctionPatch { fn_id });
+            aot_function_symbols.push(AotFunctionSymbol {
+                fn_id,
+                symbol: aot_symbol_name(metric),
+            });
+        }
+        if functions.is_empty() {
+            return Err("non-engine AOT compile produced empty patch set".to_string());
+        }
+
+        let result = CompileResult::success_with_host_set_metadata(
+            request.request_id,
+            self.layout_hash_from_source_cache(),
+            FunctionPatchSet { functions },
+            request.host_set_id.clone(),
+            request.host_set_hash,
+            hook_fn_id.map(|_| "on_code_swap".to_string()),
+            hook_fn_id,
+            aot_linked_image_path,
+            aot_linked_image_size_bytes,
+            aot_linked_image_sha256,
+            Some(aot_function_symbols),
+        );
+        Ok(result)
+    }
+
     fn refresh_cached_sources(
         &mut self,
         changed_files: &[PathBuf],
@@ -1018,18 +930,32 @@ impl IncrementalCompilerBackend {
     ) -> Result<Option<String>, String> {
         let mut artifact_paths = Vec::new();
         let mut export_symbols = Vec::new();
-        let mut fallback_stub_symbols = Vec::new();
-        let mut fallback_stub_details = Vec::new();
         let mut linked_image_path: Option<String> = None;
         let mut linked_image_size_bytes: Option<u64> = None;
         let mut linked_image_sha256: Option<String> = None;
+        let mut fallback_stub_details: Vec<AotFallbackStubDetail> = metrics
+            .iter()
+            .filter(|metric| metric_uses_stub_fallback(metric))
+            .map(|metric| AotFallbackStubDetail {
+                symbol: aot_symbol_name(metric),
+                id_hash: metric.id_hash,
+                sig_hash: metric.sig_hash,
+                body_hash: metric.body_hash,
+                ordinal: u32::try_from(metric.ordinal).unwrap_or_default(),
+            })
+            .collect();
+        fallback_stub_details.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        let fallback_stub_symbols: Vec<String> = fallback_stub_details
+            .iter()
+            .map(|detail| detail.symbol.clone())
+            .collect();
         if metrics.is_empty() {
             self.write_aot_manifest(
                 request_id,
                 &artifact_paths,
-                linked_image_path.as_deref(),
+                linked_image_path.clone(),
                 linked_image_size_bytes,
-                linked_image_sha256.as_deref(),
+                linked_image_sha256.clone(),
                 &fallback_stub_symbols,
                 &fallback_stub_details,
             )?;
@@ -1046,17 +972,6 @@ impl IncrementalCompilerBackend {
         for metric in metrics {
             let function_name = aot_symbol_name(metric);
             export_symbols.push(function_name.clone());
-            let uses_stub_fallback = metric_uses_stub_fallback(metric);
-            if uses_stub_fallback {
-                fallback_stub_symbols.push(function_name.clone());
-                fallback_stub_details.push(AotFallbackStubDetail {
-                    symbol: function_name.clone(),
-                    id_hash: metric.id_hash,
-                    sig_hash: metric.sig_hash,
-                    body_hash: metric.body_hash,
-                    ordinal: metric.ordinal,
-                });
-            }
             let resolved_simple_call_target = resolve_unique_i32_call_target_symbol_by_hash(
                 metric.simple_i32_return_call_target_id_hash,
                 metrics,
@@ -1069,140 +984,76 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_i32_one_arg_uses_first_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 1;
-            let simple_i32_two_arg_uses_first_second_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 2;
-            let simple_i32_three_arg_uses_first_second_third_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 3;
-            let simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_none()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 4;
-            let simple_i32_two_arg_uses_literal_first_second_param_passthrough = metric
-                .simple_i32_return_call_one_arg_target_id_hash
-                .is_some()
-                && metric.simple_i32_return_call_one_arg_i32_literal.is_some()
-                && metric
-                    .simple_i32_return_call_one_arg_arg_call_target_id_hash
-                    .is_none()
-                && metric.param_count == 1;
-            let resolved_simple_two_arg_passthrough_call_target =
-                if simple_i32_two_arg_uses_first_second_param_passthrough {
+            let simple_i32_one_arg_call_shape_code = metric.simple_i32_one_arg_call_shape_code;
+            let resolved_simple_one_arg_call_target = match simple_i32_one_arg_call_shape_code {
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH => {
                     resolve_known_host_two_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_three_arg_passthrough_call_target =
-                if simple_i32_three_arg_uses_first_second_third_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH => {
                     resolve_known_host_three_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_four_arg_passthrough_call_target =
-                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH => {
                     resolve_known_host_four_arg_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_two_arg_literal_first_second_passthrough_call_target =
-                if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST => {
                     resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metric.first_param_type_code,
                     )
-                } else {
-                    None
-                };
-            let resolved_simple_one_arg_call_target =
-                if simple_i32_two_arg_uses_first_second_param_passthrough
-                    || simple_i32_three_arg_uses_first_second_third_param_passthrough
-                    || simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough
-                    || simple_i32_two_arg_uses_literal_first_second_param_passthrough
-                {
-                    None
-                } else {
+                    .map(str::to_string)
+                }
+                stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH => {
                     resolve_unique_i32_single_arg_call_target_symbol_by_hash(
                         metric.simple_i32_return_call_one_arg_target_id_hash,
                         metrics,
-                        if simple_i32_one_arg_uses_first_param_passthrough {
-                            metric.first_param_type_code
-                        } else {
-                            1
-                        },
+                        metric.first_param_type_code,
                     )
-                };
+                }
+                _ => resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+                    metric.simple_i32_return_call_one_arg_target_id_hash,
+                    metrics,
+                    1,
+                ),
+            };
             if metric
                 .simple_i32_return_call_one_arg_target_id_hash
                 .is_some()
+                && resolved_simple_one_arg_call_target.is_none()
             {
-                if simple_i32_four_arg_uses_first_second_third_fourth_param_passthrough {
-                    if resolved_simple_four_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved four-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                let detail = match simple_i32_one_arg_call_shape_code {
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_FOUR_PARAM_PASSTHROUGH => {
+                        "unresolved four-arg passthrough direct call target"
                     }
-                } else if simple_i32_two_arg_uses_literal_first_second_param_passthrough {
-                    if resolved_simple_two_arg_literal_first_second_passthrough_call_target
-                        .is_none()
-                    {
-                        return Err(format!(
-                            "unresolved two-arg literal+param passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_LITERAL_FIRST => {
+                        "unresolved two-arg literal+param passthrough direct call target"
                     }
-                } else if simple_i32_three_arg_uses_first_second_third_param_passthrough {
-                    if resolved_simple_three_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved three-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_THREE_PARAM_PASSTHROUGH => {
+                        "unresolved three-arg passthrough direct call target"
                     }
-                } else if simple_i32_two_arg_uses_first_second_param_passthrough {
-                    if resolved_simple_two_arg_passthrough_call_target.is_none() {
-                        return Err(format!(
-                            "unresolved two-arg passthrough direct call target for emitted function {} (id_hash={})",
-                            function_name, metric.id_hash
-                        ));
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_TWO_PARAM_PASSTHROUGH => {
+                        "unresolved two-arg passthrough direct call target"
                     }
-                } else if resolved_simple_one_arg_call_target.is_none() {
-                    return Err(format!(
-                        "unresolved one-arg direct call target for emitted function {} (id_hash={})",
-                        function_name, metric.id_hash
-                    ));
-                }
+                    stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_ONE_PARAM_PASSTHROUGH => {
+                        "unresolved one-arg passthrough direct call target"
+                    }
+                    _ => "unresolved one-arg direct call target",
+                };
+                return Err(format!(
+                    "{detail} for emitted function {} (id_hash={})",
+                    function_name, metric.id_hash
+                ));
             }
             let resolved_simple_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
@@ -1219,9 +1070,8 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let simple_void_print_is_one_arg =
-                metric.simple_void_print_i32_call_target_id_hash.is_some()
-                    && metric.simple_void_print_i32_literal.is_some();
+            let simple_void_print_call_target_shape_code =
+                metric.simple_void_print_call_target_shape_code;
             let resolved_simple_void_print_one_arg_arg_call_target =
                 resolve_unique_i32_call_target_symbol_by_hash(
                     metric.simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
@@ -1237,31 +1087,29 @@ impl IncrementalCompilerBackend {
                     function_name, metric.id_hash
                 ));
             }
-            let resolved_simple_void_print_call_target = if simple_void_print_is_one_arg {
-                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                    1,
-                )
-            } else if metric
-                .simple_void_print_i32_call_one_arg_arg_call_target_id_hash
-                .is_some()
-            {
-                resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                    1,
-                )
-            } else {
-                resolve_unique_i32_call_target_symbol_by_hash(
-                    metric.simple_void_print_i32_call_target_id_hash,
-                    metrics,
-                )
-            };
+            let resolved_simple_void_print_call_target =
+                match simple_void_print_call_target_shape_code {
+                    stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+                    | stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL => {
+                        resolve_unique_i32_single_arg_call_target_symbol_by_hash(
+                            metric.simple_void_print_i32_call_target_id_hash,
+                            metrics,
+                            1,
+                        )
+                    }
+                    _ => resolve_unique_i32_call_target_symbol_by_hash(
+                        metric.simple_void_print_i32_call_target_id_hash,
+                        metrics,
+                    ),
+                };
             if metric.simple_void_print_i32_call_target_id_hash.is_some()
                 && resolved_simple_void_print_call_target.is_none()
             {
-                if simple_void_print_is_one_arg {
+                if simple_void_print_call_target_shape_code
+                    == stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_LITERAL
+                    || simple_void_print_call_target_shape_code
+                        == stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_ONE_ARG_ARG_CALL
+                {
                     return Err(format!(
                         "unresolved void print_i32 one-arg call target for emitted function {} (id_hash={})",
                         function_name, metric.id_hash
@@ -1352,9 +1200,9 @@ impl IncrementalCompilerBackend {
         self.write_aot_manifest(
             request_id,
             &artifact_paths,
-            linked_image_path.as_deref(),
+            linked_image_path.clone(),
             linked_image_size_bytes,
-            linked_image_sha256.as_deref(),
+            linked_image_sha256.clone(),
             &fallback_stub_symbols,
             &fallback_stub_details,
         )?;
@@ -1366,9 +1214,9 @@ impl IncrementalCompilerBackend {
         &self,
         request_id: u64,
         artifact_paths: &[String],
-        linked_image_path: Option<&str>,
+        linked_image_path: Option<String>,
         linked_image_size_bytes: Option<u64>,
-        linked_image_sha256: Option<&str>,
+        linked_image_sha256: Option<String>,
         fallback_stub_symbols: &[String],
         fallback_stub_details: &[AotFallbackStubDetail],
     ) -> Result<(), String> {
@@ -1376,9 +1224,9 @@ impl IncrementalCompilerBackend {
         let manifest = AotPatchManifest {
             request_id,
             artifact_paths: artifact_paths.to_vec(),
-            linked_image_path: linked_image_path.map(str::to_string),
+            linked_image_path,
             linked_image_size_bytes,
-            linked_image_sha256: linked_image_sha256.map(str::to_string),
+            linked_image_sha256,
             fallback_stub_symbols: fallback_stub_symbols.to_vec(),
             fallback_stub_details: fallback_stub_details.to_vec(),
         };
@@ -1429,6 +1277,7 @@ fn format_error_message(code: i32, detail_a: i32, detail_b: i32) -> String {
     format!("{head} (code={code}, detail_a={detail_a}, detail_b={detail_b})")
 }
 
+#[allow(dead_code)]
 fn expand_layout_hash(layout_hash: i32) -> LayoutHash {
     let as_u32 = layout_hash as u32;
     let mut out = [0u8; 32];
@@ -1865,7 +1714,7 @@ fn resolve_unique_i32_call_target_symbol_by_hash(
     let target_id_hash = maybe_target_id_hash?;
     let mut matches = metrics.iter().filter(|candidate| {
         candidate.id_hash == target_id_hash
-            && candidate.return_type == "i32"
+            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
             && candidate.param_count == 0
     });
     if let Some(first) = matches.next() {
@@ -1885,7 +1734,7 @@ fn resolve_unique_i32_single_arg_call_target_symbol_by_hash(
     let target_id_hash = maybe_target_id_hash?;
     let mut matches = metrics.iter().filter(|candidate| {
         candidate.id_hash == target_id_hash
-            && candidate.return_type == "i32"
+            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
             && candidate.param_count == 1
             && candidate.first_param_type_code == first_param_type_code
     });
@@ -2256,6 +2105,7 @@ mod tests {
         stasis_process_env_lock,
     };
     use object::Object;
+    use stasis_compiler::IncrementalCompilerHost;
     #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
     use stasis_runner::swap::contracts::{CompileRequest, CompileStatus, RequestId, TargetMode};
@@ -3206,7 +3056,8 @@ mod tests {
             id_hash: hash_identifier("main"),
             sig_hash: 11,
             body_hash: 12,
-            return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3215,6 +3066,7 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3222,6 +3074,8 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3230,7 +3084,8 @@ mod tests {
             id_hash: hash_identifier("callee"),
             sig_hash: 21,
             body_hash: 22,
-            return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3239,6 +3094,7 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3246,6 +3102,8 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee.clone()];
@@ -3265,7 +3123,8 @@ mod tests {
             id_hash: hash_identifier("main"),
             sig_hash: 11,
             body_hash: 12,
-            return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
             simple_i32_return_expr: None,
@@ -3274,6 +3133,7 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3281,6 +3141,8 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -3289,7 +3151,8 @@ mod tests {
             id_hash: hash_identifier("callee"),
             sig_hash: 21,
             body_hash: 22,
-            return_type: "i32".to_string(),
+            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
+            uses_stub_fallback: false,
             param_count: 1,
             first_param_type_code: 1,
             simple_i32_return_expr: None,
@@ -3298,6 +3161,7 @@ mod tests {
             simple_i32_return_call_one_arg_target_id_hash: None,
             simple_i32_return_call_one_arg_i32_literal: None,
             simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
+            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
             simple_i32_return_two_call_left_target_id_hash: None,
             simple_i32_return_two_call_right_target_id_hash: None,
             simple_i32_return_two_call_op_code: None,
@@ -3305,6 +3169,8 @@ mod tests {
             simple_void_print_i32_call_target_id_hash: None,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
             simple_void_print_i32_call_add_delta: None,
+            simple_void_print_call_target_shape_code:
+                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];
@@ -10396,23 +10262,7 @@ fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
 }
 
 fn metric_uses_stub_fallback(metric: &stasis_compiler::FunctionMetric) -> bool {
-    if metric.return_type != "i32" {
-        return false;
-    }
-    metric.simple_i32_return_expr.is_none()
-        && metric.simple_i32_return_call_target_id_hash.is_none()
-        && metric
-            .simple_i32_return_call_one_arg_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_call_one_arg_arg_call_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_two_call_left_target_id_hash
-            .is_none()
-        && metric
-            .simple_i32_return_two_call_right_target_id_hash
-            .is_none()
+    metric.uses_stub_fallback
 }
 
 fn resolve_aot_cli_summary_sidecar_path(

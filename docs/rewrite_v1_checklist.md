@@ -784,7 +784,18 @@ It is not part of the steady-state incremental JIT update loop.
 - Rust-native JIT call overload matching now uses interned type-compatibility checks instead of raw `TypeId` equality only.
 - Rust-native expression tokenization now accepts UTF-8 string literal codepoints (not ASCII-only), so non-ASCII literals compile in direct JIT parse/emit paths.
 - Added targeted coverage for this shape in both paths: `crates/stasis_compiler::backend::jit::tests::jit_process_accepts_non_ascii_utf8_string_literal_argument` and `apps/stasis::compiler_backend::tests::aot_compile_accepts_utf8_literal_call_contract`.
+- JIT top-level constant/global primitive typing now routes through interned `TypeId`/`TypeCategory` checks instead of raw `"i32"/"f32"/"bool"` and `"string"/"utf8[]"/"ascii[]"` string matching in hot-path analysis helpers (`crates/stasis_compiler/src/backend/jit.rs`).
+- Added regression coverage for ASCII constant-identifier call flow on the interned path: `crates/stasis_compiler::backend::jit::tests::jit_process_executes_ascii_constant_identifier_argument`.
+- Added explicit text-view helper APIs in `TypeTable` (`ensure_utf8_view_id`, `ensure_ascii_view_id`, `string_literal_type_id`) and switched JIT compile/string-literal lowering paths to use those interned helpers instead of direct `"string"`/`"ascii[]"` name resolution in hot-path code (`crates/stasis_compiler/src/frontend/types.rs`, `crates/stasis_compiler/src/backend/jit.rs`).
+- Legacy `return_type` string has been removed from the active compiler metric contract; active AOT resolution/fallback checks use only numeric `return_type_code` (`RETURN_TYPE_CODE_*`) instead of raw string equality checks (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
+- Incremental compile metrics now also expose explicit `uses_stub_fallback` derivation, and AOT fallback manifest classification consumes that flag directly instead of recomputing fallback status from a bundle of `simple_*` channels (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
+- Legacy one-arg passthrough booleans (`simple_i32_*_passthrough`) have been removed from the active compiler metric contract; active AOT one-arg lowering/validation now consumes only canonical shape-code metadata (`simple_i32_one_arg_call_shape_code`) in host paths (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
+- Incremental compile metrics now also expose canonical one-arg call-shape codes (`SIMPLE_I32_ONE_ARG_CALL_SHAPE_*` via `simple_i32_one_arg_call_shape_code`), and active AOT one-arg target resolution/validation consumes this single numeric contract instead of branching over multiple legacy passthrough booleans (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
+- Rust fallback expression parsing now accepts identifier arguments in call expressions (e.g., `return callee(value);`) so one-arg passthrough shapes are recognized in the Rust incremental analysis path as well (`crates/stasis_compiler/src/lib.rs`, `crates/stasis_compiler::tests::compile_sets_one_arg_passthrough_shape_code_for_identifier_wrapper_shape`).
+- Legacy `simple_void_print_is_one_arg` has been removed from the active compiler metric contract; void-print lowering/validation now uses only canonical shape-code metadata in active paths (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
+- Incremental compile metrics now also expose canonical void-print call-target shape codes (`SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_*` via `simple_void_print_call_target_shape_code`), and active AOT void-print target resolution/validation consumes this single numeric contract instead of ad-hoc branch conditions over raw fields (`crates/stasis_compiler/src/lib.rs`, `apps/stasis/src/compiler_backend.rs`).
 - Added deterministic unit coverage in `crates/stasis_compiler/src/frontend/types.rs` for array/string interning and layout metadata.
+- JIT fixed-array `max_length` header seeding now consumes interned type metadata (`TypeTable::fixed_collection_len`) instead of parsing type-name strings, removing string parsing from this hot path (`crates/stasis_compiler/src/backend/jit.rs`).
 - Status: `in_progress`
 - Slice CS7: Enforce direct CLIF emission from dirty-function body parse and remove non-conforming fallback branches.
 - Language: `.stasis`.
@@ -792,16 +803,19 @@ It is not part of the steady-state incremental JIT update loop.
 - Deliverable: no stub/fallback emission in supported slices; unsupported constructs fail deterministically with diagnostics.
 - Tests: per-slice CLIF assertions + JIT/AOT executable verification for representative branches.
 - Done gate: each new compiler feature slice includes compile->JIT run and compile->AOT exe run verification.
-- Status: `pending`
+- Status: `in_progress`
 - Slice CS8: Lock acceptance gates and stop conditions.
 - Language: `Rust + .stasis + docs`.
 - Scope: wire benchmark thresholds, deterministic invalidation checks, and compile-path invariants into routine verification.
 - Deliverable: documented pass/fail gates for cold/incremental targets and regression criteria.
 - Tests: gated benchmark and invalidation suites.
-- Engine-overhead benchmark task (separate from compiler-only timing gates): harness command added (`cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`); remaining work is threshold/baseline gating policy integration.
-- Engine hot-update benchmark task (separate from compiler-only timing gates): add an end-to-end watch/update benchmark that records warm edit latency through compile + swap + first updated tick/render for engine scenarios.
+- Current progress:
+- Added `Perf CI` workflow (`.github/workflows/perf-ci.yml`) running `rust_native_jit_bench` for 1k functions with conservative stop conditions (cold p95 <= 1800ms, incremental p95 <= 35ms) to catch major compile-time regressions while PRD v2 targets are still being chased.
+- Engine-overhead benchmark task (separate from compiler-only timing gates): added Perf CI gate (`engine-overhead-bench`, windows) running `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240` and hard-failing if `total_ms_p95` exceeds a conservative stop condition (300ms).
+- Engine hot-update benchmark task (separate from compiler-only timing gates): added end-to-end watch/update benchmark (`apps/stasis/examples/engine_hot_update_bench.rs`) measuring `watch change -> jit.compile -> build_engine_package -> swap pointers -> first tick+render with new code`, plus Perf CI gate (`engine-hot-update-bench`, windows) hard-failing if `warm_update_total_ms_p95` exceeds a conservative stop condition (100ms).
+- Outstanding: confirm CI environment baseline and set exact p50/p95 thresholds for PRD v2 hard-fail gating (stop conditions above are tripwires, not targets).
 - Done gate: project can reject regressions automatically against PRD v2 targets.
-- Status: `pending`
+- Status: `in_progress`
 - Slice SH1: Wire minimal host bridge implementations for `S10b` externs in CLI path and execute `compiler_cli_compile_project`. (completed 2026-02-13; current host command path is `stasis aot-cli`)
 - Slice SH2a: Replace monolithic `.stasis` host bridge declaration with staged AOT extern contract (`emit_ir`, `run_cranelift_aot`, `link_executable`) while preserving `.stasis` orchestration ownership. (completed 2026-02-13)
 - Slice SH2b: Wire host bridge implementations for staged AOT extern calls and route CLI execution through them end-to-end. (completed 2026-02-13; current host `aot-cli` path executes staged bridge sequence)
