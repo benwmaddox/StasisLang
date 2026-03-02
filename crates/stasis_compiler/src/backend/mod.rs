@@ -1,4 +1,5 @@
 pub mod aot;
+pub(crate) mod emit;
 pub mod jit;
 mod reachability;
 
