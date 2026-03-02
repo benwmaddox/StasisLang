@@ -51,20 +51,28 @@ It is not part of the steady-state incremental JIT update loop.
 
 ## Slice Plan
 
-### Current Snapshot (2026-02-23)
+### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
-- New self-host track started: `S10b` (experimental `.stasis` AOT CLI core orchestration; not the stable compilation pipeline).
+- Release direction (locked):
+- Production/release backend is Cranelift AOT.
+- AOT must run the same sample games as JIT (notably Brickout Revenge).
+- Next language priority: add `f64` end-to-end (pause `u16`/`u32` narrow-int work for now).
+- Explicit non-goals for current release approach:
+- Optional plugin libraries.
+- Anything that depends on a self-host `.stasis` compiler for the release pipeline.
+- Self-host note:
+- `S10b` and other self-host `.stasis` compiler work under `compiler/` is experimental and must not block the Rust compiler release pipeline.
 - Decision update (2026-02-23): host-set sandbox architecture is now locked (`deny-by-default` host access via explicit extern symbols in selected host set).
 - Host-set contract selection is profile-only (`--host-set-profile` + optional `--host-set-registry-file` mapping; env fallback: `STASIS_HOST_SET_PROFILE` / `STASIS_HOST_SET_REGISTRY_FILE`). Do not introduce legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
 - Compile and commit contracts include host-set metadata (`host_set_id`, `host_set_hash`), and the runtime validates it at commit time (missing/mismatch fails before hook/pointer swap).
-- Planned host-set hardening slices (`S13`-`S16`) are scheduled after current self-host priority work unless they directly unblock `S10b`.
+- Planned host-set hardening slices (`S13`-`S16`) are scheduled after current AOT parity + `f64` work unless they directly unblock the release pipeline.
 - Strategy pivot (2026-02-23): active compiler-slice direction is now symbol-level reachability pruning (function + struct metadata) with simple one-pass lowering to Cranelift; additional parser-shape fallback expansion is deprecated and should be removed when touched.
 - Cleanup pivot progress (2026-02-23): detector-heavy simple-shape metadata extraction functions were removed from `compiler/simple_pass_compiler.stasis`; single-pass parser/fingerprint/layout coverage is now the active path.
 - Reset update (2026-02-23): compiler implementation has been restarted as a straightforward single-pass pipeline in `compiler/simple_pass_compiler.stasis`; prior detector-metadata expansion work is superseded and should not be resumed.
-- Priority override (2026-02-13):
-- Single top priority is `S10b` (`SH1 -> SH2 -> SH3`) until `.stasis` self-host AOT CLI core is running end-to-end.
-- All other in-progress tracks (`S8b`, `S10`, and remaining `R*`/`H*` slices) are lower priority and should only be touched if they directly unblock `S10b`.
+Archived priority override (2026-02-13, historical):
+- At that time, `S10b` self-host AOT CLI core was treated as the top priority.
+- That is no longer the release priority; the stable release pipeline is Rust + AOT parity.
 - Main integration gap: real backend compile path is now default, but emitted function patches are metadata-only (`FnId` mapping from hashes) and are not yet executing newly generated machine code through the pointer table.
 - Shared global-layout arena lowering now emits one owning `global` declaration per compile unit and uses `global_import` for other lowered functions, enabling multi-object AOT linking without duplicate data symbol definitions.
 - Simple-pass compiler now builds a root-based function reachability set in `.stasis` (`main`, `tick`, `on_code_swap`) and emits reachable functions only through host analysis harness output (current call-edge discovery uses direct identifier-call tokens; files with no roots keep all functions reachable to avoid helper-file drops in current per-file host analysis flow).
