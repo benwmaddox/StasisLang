@@ -1,9 +1,9 @@
-# Stasis Language Specification (Rewrite V1)
+# Stasis Language Specification
 
-This document is the language-level specification for Rewrite V1.
+This document is the language-level specification for Stasis.
 It is aligned with:
 - `docs/live-compilation-prd.md`
-- `docs/rewrite_v1_checklist.md`
+- `docs/build_checklist.md`
 
 The focus is deterministic simulation/game logic with static memory, in-process incremental compilation, and safe hot swap.
 
@@ -11,7 +11,7 @@ The focus is deterministic simulation/game logic with static memory, in-process 
 
 Stasis is a statically allocated language with explicit behavior.
 
-Core direction for Rewrite V1:
+Core direction:
 - Single process runtime.
 - In-process Cranelift JIT for development.
 - Cranelift AOT for production builds.
@@ -71,7 +71,7 @@ u8 u16 u32 i32 f32 f64 bool void
 - Strings:
 - `utf8[N]`
 - `ascii[N]`
-- `string` (alias for UTF-8 string type in Rewrite V1 runtime conventions)
+- `string` (alias for UTF-8 string type in current runtime conventions)
 - `string[N]` (alias form for compatibility)
 
 ### 4.2.1 String Layout and Invariants
@@ -179,7 +179,7 @@ Arithmetic and comparison are infix only:
 - `+ - * / %`
 - `< <= > >= == !=`
 
-Method-style arithmetic/comparison forms are removed from Rewrite V1 language surface.
+Method-style arithmetic/comparison forms are not part of the language surface.
 
 ### 5.2 Logical Operators
 
@@ -276,7 +276,7 @@ Rules:
 
 ### 6.5 Looping
 
-Rewrite V1 includes `for` and `foreach`.
+Stasis includes `for` and `foreach`.
 
 #### 6.5.1 `for` loop
 
@@ -392,7 +392,7 @@ Nested struct paths are flattened deterministically during lowering, and the cur
 
 #### 6.5.5 `continue`
 
-`continue` is supported in Rewrite V1.
+`continue` is supported.
 
 Rules:
 - Valid only inside `for` and `foreach` loops.
@@ -417,7 +417,7 @@ function name(param: Type): ReturnType {
 }
 ```
 
-For struct/element arguments, Rewrite V1 uses reference/view passing semantics (pointer-like behavior), not implicit by-value copies.
+For struct/element arguments, Stasis uses reference/view passing semantics (pointer-like behavior), not implicit by-value copies.
 
 Reference/view bindings for struct/element parameters are not rebindable inside the callee:
 - assigning to fields/elements through the parameter is allowed
@@ -465,9 +465,9 @@ If declarations share a function name, they must use the same parameter count.
 
 Struct and array returns are allowed.
 
-Rewrite V1 treats these as strongly typed references/views, not implicit by-value copies.
+Stasis treats these as strongly typed references/views, not implicit by-value copies.
 - Struct/array returns must reference global-backed storage (for example a global struct field/element path).
-- Struct-typed temporaries are not materialized as standalone local value objects in Rewrite V1.
+- Struct-typed temporaries are not materialized as standalone local value objects in Stasis.
 
 ## 8. Enums
 
@@ -493,7 +493,7 @@ Rules:
 let phase: Phase = Phase.Play;
 ```
 - Enum/integer conversion uses explicit conversion calls.
-- Current Rewrite V1 conversion surface: `enum_to_i32(value: EnumType): i32`.
+- Current conversion surface: `enum_to_i32(value: EnumType): i32`.
 - `enum_to_i32` is a compiler intrinsic with a stable call shape.
 
 ## 9. Modules and Imports
@@ -513,7 +513,7 @@ Rules:
 - Import cycles are hard errors.
 - Ambiguous references across modules must produce diagnostics.
 - Disambiguation is explicit `module.symbol` only.
-- For Rewrite V1, `module` is the imported file basename (without extension).
+- `module` is the imported file basename (without extension).
 - If multiple imports map to the same basename `module` name, compilation fails with a hard error.
 - When a symbol name collides across imports, unqualified use is invalid and must be rewritten as `module.symbol`.
 
@@ -556,7 +556,7 @@ Illustrative lowering:
 
 ## 12. Runtime Boundary and Extern
 
-### 12.1 Current Rewrite V1 Boundary
+### 12.1 Current Runtime Boundary
 
 Compiled Stasis code calls a stable host API using ABI-stable primitive shapes.
 
@@ -574,14 +574,14 @@ extern function print_i32(value: i32): void;
 extern function print_string(value: string): void;
 ```
 
-Console output contract (Rewrite V1):
+Console output contract:
 - `print_i32(i32)` prints integer text in deterministic decimal form.
 - `print_string(string)` prints string data without implicit formatting.
-- `print_string` accepts `string`, `ascii[]`, and `utf8[]` call sites in Rewrite V1 runtime conventions.
+- `print_string` accepts `string`, `ascii[]`, and `utf8[]` call sites in current runtime conventions.
 - For `ascii[]`/`utf8[]` call sites, argument passing is by string-view/reference semantics (no implicit full-buffer copy).
 
 Bootstrap compatibility note:
-- Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Rewrite V1 naming.
+- Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Stasis naming.
 
 ### 12.2 Future Direction: Optional Plugin Libraries
 
@@ -705,7 +705,7 @@ Diagnostics should:
 
 Diagnostics should not silently skip invalid semantics.
 
-## 17. Development Target for Rewrite V1
+## 17. Development Target
 
 - Development backend: in-process Cranelift JIT.
 - Production backend: Cranelift AOT.
@@ -726,5 +726,5 @@ Rules:
 
 ## 18. Status Note
 
-This document defines Rewrite V1 direction.
+This document defines the current direction.
 Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.

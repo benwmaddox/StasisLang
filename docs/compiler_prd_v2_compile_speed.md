@@ -11,7 +11,7 @@ Primary intent:
 - Compile-speed prioritized over memory footprint
 
 Scope note:
-- This document is the active scope anchor for the compiler speed lock-in slices in `docs/rewrite_v1_checklist.md` (`CS0` - `CS8`).
+- This document is the active scope anchor for the compiler speed lock-in slices in `docs/build_checklist.md` (`CS0` - `CS8`).
 
 ## 1. Goals
 

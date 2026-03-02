@@ -101,7 +101,7 @@ Raw Text
  -> Per-function codegen (gated)
 ```
 
-Reachability roots for Rewrite V1:
+Reachability roots:
 - `main`
 - `tick` (when present)
 - `on_code_swap` (when present)
@@ -401,7 +401,7 @@ Interfaces are message-based and versioned. No cross-thread shared mutable compi
 
 Failure at any sequence step aborts commit and preserves old code/data.
 
-### 12.4 Language and Implementation Ownership (Rewrite V1)
+### 12.4 Language and Implementation Ownership
 
 - `.stasis` owns user program source, language feature usage, and gameplay/runtime logic.
 - Rust owns compiler implementation end-to-end: lexer/tokenization, parser, semantic diagnostics, incremental compile policy, lowering, and Cranelift JIT/AOT backend integration.
