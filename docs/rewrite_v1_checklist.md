@@ -52,8 +52,8 @@ It is not part of the steady-state incremental JIT update loop.
 - Partially complete/in progress: `S8b`, `S10`.
 - New self-host track started: `S10b` (minimal `.stasis` AOT CLI core orchestration).
 - Decision update (2026-02-23): host-set sandbox architecture is now locked (`deny-by-default` host access via explicit extern symbols in selected host set).
-- Host-set contract selection is planned to be profile-only (`--host-set-profile` + optional registry mapping). Implementation is pending; do not reintroduce legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
-- Compile contracts include optional host-set metadata (`host_set_id`, `host_set_hash`), but the current pipeline leaves it unset (selection + validation is tracked in `S13`/`S14`).
+- Host-set contract selection is profile-only (`--host-set-profile` + optional `--host-set-registry-file` mapping; env fallback: `STASIS_HOST_SET_PROFILE` / `STASIS_HOST_SET_REGISTRY_FILE`). Do not introduce legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
+- Compile and commit contracts include host-set metadata (`host_set_id`, `host_set_hash`), and the runtime validates it at commit time (missing/mismatch fails before hook/pointer swap).
 - Planned host-set hardening slices (`S13`-`S16`) are scheduled after current self-host priority work unless they directly unblock `S10b`.
 - Strategy pivot (2026-02-23): active compiler-slice direction is now symbol-level reachability pruning (function + struct metadata) with simple one-pass lowering to Cranelift; additional parser-shape fallback expansion is deprecated and should be removed when touched.
 - Cleanup pivot progress (2026-02-23): detector-heavy simple-shape metadata extraction functions were removed from `compiler/simple_pass_compiler.stasis`; single-pass parser/fingerprint/layout coverage is now the active path.
@@ -908,12 +908,11 @@ It is not part of the steady-state incremental JIT update loop.
 - Done gate:
 - No swap can commit without host-set contract validation.
 - Current progress:
-- Compile contracts include optional host-set metadata fields (`host_set_id`, `host_set_hash`) on `CompileRequest`/`CompileResult`, but the pipeline does not set them yet.
-- `SwapCommitRequest` does not currently carry host-set metadata and the runtime does not yet validate host-set contracts during commit.
+- Compile contracts include optional host-set metadata fields (`host_set_id`, `host_set_hash`) on `CompileRequest`/`CompileResult`, and commit contracts include host-set metadata on `SwapCommitRequest`.
+- `apps/stasis` resolves a host-set contract by profile and sets it on the swap pipeline; commit-time validation rejects missing/mismatched host-set metadata before hook/pointer swap.
 - Outstanding questions / TODO:
 - Define `.stasis` required-host declaration syntax and deterministic diagnostics (source of truth: explicit directive vs inference from `@extern`/`@link` usage).
-- Define where host-set metadata is stored/validated across compile + commit (which fields must be transported on `SwapCommitRequest` vs stored as pending state).
-- Status: `in_progress (transport fields exist; extraction/selection/validation still pending)`
+- Status: `in_progress (contract transport + commit validation implemented; required-host extraction pending)`
 
 ### S14 - Host-Set Registry and Profile Selection
 - Language:
@@ -931,12 +930,12 @@ It is not part of the steady-state incremental JIT update loop.
 - Done gate:
 - Host access is deny-by-default across runtime dispatch paths and requires selected host set.
 - Current progress:
-- None yet: no runtime host-set registry module and no CLI/env surface for selecting a host-set profile.
+- `apps/stasis/src/host_set_registry.rs` implements deterministic profile-to-contract resolution with optional JSON registry file mapping.
+- CLI/env surface exists: `--host-set-profile`, `--host-set-registry-file`, `STASIS_HOST_SET_PROFILE`, `STASIS_HOST_SET_REGISTRY_FILE` (precedence: CLI > env > inferred target mode).
 - Outstanding questions / TODO:
-- Define registry file format and precedence rules (CLI flag vs env var vs inferred target mode).
-- Define default profile inference mapping (expected: `JitDev -> dev`, `AotProd -> prod`) and whether `test` is a first-class mode.
+- Profile inference mapping is implemented (`JitDev -> dev`, `AotProd -> prod`); decide whether `test` is a first-class mode and where it applies.
 - Decide which runtime dispatch paths must become deny-by-default as part of S14 vs later S15/S16 enforcement.
-- Status: `planned (post-S10b)`
+- Status: `in_progress (registry + profile selection implemented; deny-by-default dispatch pending)`
 
 ### S15 - Phase-Gated Effects and Tick Determinism
 - Language:

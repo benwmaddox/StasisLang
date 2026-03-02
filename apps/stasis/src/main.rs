@@ -230,6 +230,16 @@ fn parse_args() -> CliOptions {
                     }
                 }
             }
+            "--host-set-profile" => {
+                if let Some(value) = args.next() {
+                    config.host_set_profile = Some(value);
+                }
+            }
+            "--host-set-registry-file" => {
+                if let Some(value) = args.next() {
+                    config.host_set_registry_file = Some(PathBuf::from(value));
+                }
+            }
             "--aot-prod" => {
                 config.target_mode = TargetMode::AotProd;
             }

@@ -2,6 +2,7 @@
 
 mod compiler_backend;
 mod events;
+mod host_set_registry;
 mod runtime_exec;
 mod self_host_runtime_bridge;
 mod stasis_test_runner;
@@ -64,6 +65,8 @@ pub struct RunnerConfig {
     pub swap_failure_reason: Option<String>,
     pub runtime_launch: bool,
     pub aot_probe_loadability: bool,
+    pub host_set_profile: Option<String>,
+    pub host_set_registry_file: Option<PathBuf>,
 }
 
 impl Default for RunnerConfig {
@@ -81,6 +84,8 @@ impl Default for RunnerConfig {
             swap_failure_reason: None,
             runtime_launch: true,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         }
     }
 }
@@ -116,6 +121,46 @@ pub struct RunnerSummary {
     pub retired_aot_linked_images: u32,
 }
 
+const STASIS_HOST_SET_PROFILE_ENV: &str = "STASIS_HOST_SET_PROFILE";
+const STASIS_HOST_SET_REGISTRY_FILE_ENV: &str = "STASIS_HOST_SET_REGISTRY_FILE";
+
+fn infer_host_set_profile_from_target_mode(
+    target_mode: TargetMode,
+) -> host_set_registry::HostSetProfile {
+    match target_mode {
+        TargetMode::JitDev => host_set_registry::HostSetProfile::Dev,
+        TargetMode::AotProd => host_set_registry::HostSetProfile::Prod,
+    }
+}
+
+fn resolve_host_set_contract(
+    config: &RunnerConfig,
+) -> Result<host_set_registry::HostSetContract, String> {
+    let profile = if let Some(profile) = config.host_set_profile.as_deref() {
+        host_set_registry::HostSetProfile::parse(profile).ok_or_else(|| {
+            format!("invalid --host-set-profile '{profile}' (expected dev|test|prod)")
+        })?
+    } else if let Ok(profile) = std::env::var(STASIS_HOST_SET_PROFILE_ENV) {
+        host_set_registry::HostSetProfile::parse(&profile).ok_or_else(|| {
+            format!("invalid {STASIS_HOST_SET_PROFILE_ENV}='{profile}' (expected dev|test|prod)")
+        })?
+    } else {
+        infer_host_set_profile_from_target_mode(config.target_mode)
+    };
+
+    let registry_file = config
+        .host_set_registry_file
+        .as_deref()
+        .map(|path| path.to_path_buf())
+        .or_else(|| {
+            std::env::var_os(STASIS_HOST_SET_REGISTRY_FILE_ENV)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        });
+
+    host_set_registry::resolve_profile_contract(profile, registry_file.as_deref())
+}
+
 pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
     let backend = move |request: CompileRequest| -> CompileResult {
         if config.fail_compile {
@@ -138,11 +183,18 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
             } else {
                 None
             };
-            CompileResult::success_with_hook_symbol(
+            CompileResult::success_with_host_set_metadata(
                 request.request_id,
                 LayoutHash([1; 32]),
                 patch_set,
+                request.host_set_id.clone(),
+                request.host_set_hash,
                 hook_symbol,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
         }
     };
@@ -666,7 +718,46 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         .and_then(|source| collect_watch_dependency_paths(source).ok());
     let window = config.window;
 
+    let host_set_contract = match resolve_host_set_contract(&config) {
+        Ok(contract) => contract,
+        Err(message) => {
+            return RunnerSummary {
+                ticks_executed: 0,
+                compile_successes: 0,
+                compile_failures: 1,
+                compile_diagnostics: vec![message],
+                hook_runs: 0,
+                hook_failures: 0,
+                hook_failure_reasons: Vec::new(),
+                swap_commit_successes: 0,
+                swap_commit_failures: 0,
+                swap_failure_reasons: Vec::new(),
+                swap_indicator_armed_count: 0,
+                swap_flash_peak_ticks: 0,
+                swap_flash_ticks_remaining: 0,
+                last_compile_duration_ms: None,
+                last_commit_duration_ms: None,
+                window,
+                last_swap_status: None,
+                has_in_flight_work: false,
+                events: Vec::new(),
+                runtime_launches: 0,
+                runtime_launch_failures: 0,
+                runtime_launch_failure_reasons: Vec::new(),
+                aot_linked_image_activations: 0,
+                active_aot_linked_image_path: None,
+                active_aot_linked_image_size_bytes: None,
+                active_aot_linked_image_generation: None,
+                retired_aot_linked_images: 0,
+            };
+        }
+    };
+
     let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, config.target_mode);
+    pipeline.set_host_set_contract(
+        Some(host_set_contract.host_set_id.clone()),
+        Some(host_set_contract.host_set_hash),
+    );
     let mut pointer_table = FunctionPointerTable::new();
     let mut hook_runs: u32 = 0;
     let mut hook_failures: u32 = 0;
@@ -754,6 +845,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 request,
                 &mut pointer_table,
                 &config,
+                &host_set_contract,
                 &mut hook_runs,
                 &mut hook_failures,
                 &mut hook_failure_reasons,
@@ -843,6 +935,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 request,
                 &mut pointer_table,
                 &config,
+                &host_set_contract,
                 &mut hook_runs,
                 &mut hook_failures,
                 &mut hook_failure_reasons,
@@ -1013,6 +1106,7 @@ fn apply_commit_request(
     request: stasis_runner::swap::contracts::SwapCommitRequest,
     pointer_table: &mut FunctionPointerTable,
     config: &RunnerConfig,
+    expected_host_set: &host_set_registry::HostSetContract,
     hook_runs: &mut u32,
     hook_failures: &mut u32,
     hook_failure_reasons: &mut Vec<String>,
@@ -1025,6 +1119,18 @@ fn apply_commit_request(
     pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
     pending_jit_code_ptr_overrides: &BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
 ) -> SwapCommitResult {
+    if request.host_set_id.as_deref() != Some(expected_host_set.host_set_id.as_str())
+        || request.host_set_hash != Some(expected_host_set.host_set_hash)
+    {
+        let message = format!(
+            "host-set contract mismatch: expected id='{}' hash={:02x?}",
+            expected_host_set.host_set_id, expected_host_set.host_set_hash
+        );
+        *swap_commit_failures += 1;
+        swap_failure_reasons.push(message.clone());
+        return SwapCommitResult::failed(request.request_id, message);
+    }
+
     if config.target_mode == TargetMode::JitDev && !config.disable_on_code_swap_hook {
         if let Some(hook_symbol) = request.hook_symbol.as_deref() {
             *hook_runs += 1;
@@ -1489,6 +1595,146 @@ mod tests {
         }
     }
 
+    fn expected_host_set(config: &RunnerConfig) -> host_set_registry::HostSetContract {
+        resolve_host_set_contract(config).expect("host-set contract should resolve in tests")
+    }
+
+    fn attach_host_set(
+        request: &mut stasis_runner::swap::contracts::SwapCommitRequest,
+        contract: &host_set_registry::HostSetContract,
+    ) {
+        request.host_set_id = Some(contract.host_set_id.clone());
+        request.host_set_hash = Some(contract.host_set_hash);
+    }
+
+    #[test]
+    fn resolve_host_set_contract_prefers_explicit_config_profile_over_env() {
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            host_set_profile: Some("dev".to_string()),
+            host_set_registry_file: None,
+            ..RunnerConfig::default()
+        };
+        with_env_var_set(STASIS_HOST_SET_PROFILE_ENV, "prod", || {
+            let contract =
+                resolve_host_set_contract(&config).expect("host-set contract should resolve");
+            assert_eq!(contract.host_set_id, "stasis-dev");
+        });
+    }
+
+    #[test]
+    fn resolve_host_set_contract_prefers_env_profile_over_target_mode_inference() {
+        let config = RunnerConfig {
+            target_mode: TargetMode::AotProd,
+            host_set_profile: None,
+            host_set_registry_file: None,
+            ..RunnerConfig::default()
+        };
+        with_env_var_set(STASIS_HOST_SET_PROFILE_ENV, "dev", || {
+            let contract =
+                resolve_host_set_contract(&config).expect("host-set contract should resolve");
+            assert_eq!(contract.host_set_id, "stasis-dev");
+        });
+    }
+
+    #[test]
+    fn resolve_host_set_contract_uses_registry_file_from_env_when_set() {
+        let config = RunnerConfig {
+            target_mode: TargetMode::JitDev,
+            host_set_profile: Some("dev".to_string()),
+            host_set_registry_file: None,
+            ..RunnerConfig::default()
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let tmp: PathBuf = std::env::temp_dir().join(format!(
+            "stasis_host_set_registry_env_resolution_{}.json",
+            stamp
+        ));
+        fs::write(
+            &tmp,
+            "{\"profiles\":{\"dev\":{\"id\":\"editor-host\",\"hash\":\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\"}}}",
+        )
+        .expect("write registry");
+
+        let tmp_str = tmp.to_string_lossy().to_string();
+        with_env_var_set(STASIS_HOST_SET_REGISTRY_FILE_ENV, &tmp_str, || {
+            let contract =
+                resolve_host_set_contract(&config).expect("host-set contract should resolve");
+            assert_eq!(contract.host_set_id, "editor-host");
+            assert_eq!(contract.host_set_hash[0], 0);
+            assert_eq!(contract.host_set_hash[31], 31);
+        });
+
+        fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_missing_host_set_contract_metadata() {
+        let request_id = RequestId(44);
+        let request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            None,
+        );
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig::default();
+        let host_set_contract = expected_host_set(&config);
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &host_set_contract,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 0);
+        assert_eq!(hook_failures, 0);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("host-set contract mismatch")),
+            "expected host-set contract mismatch error, got {:?}",
+            result.error
+        );
+        assert_eq!(swap_failure_reasons.len(), 1);
+        assert!(swap_failure_reasons[0].contains("host-set contract mismatch"));
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(pointer_table.code_ptr(FnId(9)).is_none());
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn resolve_play_watch_dir_defaults_to_dot_for_basename_entry() {
         let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), None);
@@ -1519,7 +1765,7 @@ mod tests {
     #[test]
     fn apply_commit_request_uses_jit_code_ptr_overrides_when_present() {
         let request_id = RequestId(44);
-        let request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
             request_id,
             LayoutHash([7; 32]),
             FunctionPatchSet {
@@ -1530,6 +1776,8 @@ mod tests {
 
         let mut pointer_table = FunctionPointerTable::new();
         let config = RunnerConfig::default();
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
         let mut hook_failure_reasons = Vec::new();
@@ -1552,6 +1800,7 @@ mod tests {
             request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1591,6 +1840,8 @@ mod tests {
             runtime_launch: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
         let mut hook_failure_reasons = Vec::new();
@@ -1613,6 +1864,7 @@ mod tests {
             request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1661,6 +1913,8 @@ mod tests {
             runtime_launch: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
         let mut hook_failure_reasons = Vec::new();
@@ -1684,6 +1938,7 @@ mod tests {
             request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1721,6 +1976,7 @@ mod tests {
             runtime_launch: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
         let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
         let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
             BTreeMap::new();
@@ -1734,7 +1990,7 @@ mod tests {
         let mut events = Vec::new();
 
         let first_request_id = RequestId(44);
-        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+        let mut first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
             first_request_id,
             LayoutHash([7; 32]),
             FunctionPatchSet {
@@ -1742,10 +1998,12 @@ mod tests {
             },
             None,
         );
+        attach_host_set(&mut first_request, &host_set_contract);
         let first = apply_commit_request(
             first_request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1772,6 +2030,7 @@ mod tests {
             },
             Some("on_code_swap".to_string()),
         );
+        attach_host_set(&mut second_request, &host_set_contract);
         second_request.hook_fn_id = Some(FnId(7));
         let mut second_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> = BTreeMap::new();
         // Note: override list doesn't include hook fn id 7, so commit must abort before swap.
@@ -1787,6 +2046,7 @@ mod tests {
             second_request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1823,6 +2083,8 @@ mod tests {
             runtime_launch: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
         let mut hook_failure_reasons = Vec::new();
@@ -1838,6 +2100,7 @@ mod tests {
             request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -1879,6 +2142,8 @@ mod tests {
                 runtime_launch: false,
                 ..RunnerConfig::default()
             };
+            let host_set_contract = expected_host_set(&config);
+            attach_host_set(&mut request, &host_set_contract);
             let mut hook_runs = 0u32;
             let mut hook_failures = 0u32;
             let mut hook_failure_reasons = Vec::new();
@@ -1895,6 +2160,7 @@ mod tests {
                 request,
                 &mut pointer_table,
                 &config,
+                &host_set_contract,
                 &mut hook_runs,
                 &mut hook_failures,
                 &mut hook_failure_reasons,
@@ -2052,6 +2318,8 @@ mod tests {
             aot_probe_loadability: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut commit_request, &host_set_contract);
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
         let mut hook_failure_reasons = Vec::new();
@@ -2065,6 +2333,7 @@ mod tests {
                 commit_request,
                 &mut pointer_table,
                 &config,
+                &host_set_contract,
                 &mut hook_runs,
                 &mut hook_failures,
                 &mut hook_failure_reasons,
@@ -2094,6 +2363,7 @@ mod tests {
             runtime_launch: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
         let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
         let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
             BTreeMap::new();
@@ -2107,7 +2377,7 @@ mod tests {
         let mut events = Vec::new();
 
         let first_request_id = RequestId(44);
-        let first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+        let mut first_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
             first_request_id,
             LayoutHash([7; 32]),
             FunctionPatchSet {
@@ -2115,10 +2385,12 @@ mod tests {
             },
             None,
         );
+        attach_host_set(&mut first_request, &host_set_contract);
         let first = apply_commit_request(
             first_request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -2138,7 +2410,7 @@ mod tests {
 
         let reason = "state invariant mismatch".to_string();
         let second_request_id = RequestId(45);
-        let second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+        let mut second_request = stasis_runner::swap::contracts::SwapCommitRequest::new(
             second_request_id,
             LayoutHash([7; 32]),
             FunctionPatchSet {
@@ -2146,10 +2418,12 @@ mod tests {
             },
             Some("on_code_swap".to_string()),
         );
+        attach_host_set(&mut second_request, &host_set_contract);
         let second = apply_commit_request(
             second_request,
             &mut pointer_table,
             &config,
+            &host_set_contract,
             &mut hook_runs,
             &mut hook_failures,
             &mut hook_failure_reasons,
@@ -2187,6 +2461,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2276,6 +2552,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2339,6 +2617,8 @@ mod tests {
             swap_failure_reason: Some("simulated swap rejection: layout mismatch".to_string()),
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2386,6 +2666,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2451,6 +2733,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2509,6 +2793,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2564,6 +2850,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2589,7 +2877,19 @@ mod tests {
             let patch_set = FunctionPatchSet {
                 functions: vec![FunctionPatch { fn_id: FnId(1) }],
             };
-            CompileResult::success(request.request_id, LayoutHash([2; 32]), patch_set)
+            CompileResult::success_with_host_set_metadata(
+                request.request_id,
+                LayoutHash([2; 32]),
+                patch_set,
+                request.host_set_id.clone(),
+                request.host_set_hash,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         };
 
         let config = RunnerConfig {
@@ -2605,6 +2905,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_backend(config, backend);
@@ -2632,6 +2934,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: true,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_default_backend(config);
@@ -2658,6 +2962,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: true,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
@@ -2696,6 +3002,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: true,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
@@ -2803,8 +3111,8 @@ mod tests {
                 FunctionPatchSet {
                     functions: vec![FunctionPatch { fn_id: FnId(1) }],
                 },
-                None,
-                None,
+                request.host_set_id.clone(),
+                request.host_set_hash,
                 None,
                 None,
                 Some(linked_image_for_backend.clone()),
@@ -2827,6 +3135,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: true,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_backend(config, backend);
@@ -2859,8 +3169,8 @@ mod tests {
                 FunctionPatchSet {
                     functions: vec![FunctionPatch { fn_id: FnId(1) }],
                 },
-                None,
-                None,
+                request.host_set_id.clone(),
+                request.host_set_hash,
                 None,
                 None,
                 Some(linked_image_for_backend.clone()),
@@ -2883,6 +3193,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_backend(config, backend);
@@ -2922,6 +3234,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_real_backend(config);
@@ -2956,6 +3270,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_real_backend(config);
@@ -2990,6 +3306,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_real_backend(config);
@@ -3029,6 +3347,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_real_backend(config);
@@ -3083,6 +3403,11 @@ mod tests {
             aot_probe_loadability: false,
             ..RunnerConfig::default()
         };
+        let host_set_contract = expected_host_set(&config);
+        pipeline.set_host_set_contract(
+            Some(host_set_contract.host_set_id.clone()),
+            Some(host_set_contract.host_set_hash),
+        );
 
         let mut hook_runs = 0u32;
         let mut hook_failures = 0u32;
@@ -3113,6 +3438,7 @@ mod tests {
                     request,
                     &mut pointer_table,
                     &config,
+                    &host_set_contract,
                     &mut hook_runs,
                     &mut hook_failures,
                     &mut hook_failure_reasons,
@@ -3168,6 +3494,7 @@ mod tests {
                     request,
                     &mut pointer_table,
                     &config,
+                    &host_set_contract,
                     &mut hook_runs,
                     &mut hook_failures,
                     &mut hook_failure_reasons,
@@ -3250,6 +3577,8 @@ mod tests {
             swap_failure_reason: None,
             runtime_launch: false,
             aot_probe_loadability: false,
+            host_set_profile: None,
+            host_set_registry_file: None,
         };
 
         let summary = run_with_real_backend(config);
