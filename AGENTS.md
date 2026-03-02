@@ -1,14 +1,14 @@
 ﻿# Repository Guidelines
 
 ## Project Structure & Module Organization
-- `docs/spec.md` is the canonical language spec for Rewrite V1.
+- `docs/spec.md` is the canonical language spec.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
-- `docs/rewrite_v1_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
+- `docs/build_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
 - `compiler/` holds compiler source written in Stasis.
-- Planned primary orchestration file is `compiler/simple_pass_compiler.stasis`.
+- Note: `compiler/` is experimental and is not the active compilation pipeline today.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
 - `Stasis.Compiler/` and `Stasis.Cli/` are bootstrap compiler sources imported from `main` for branch compatibility.
-- Treat `Stasis.Compiler/` + `Stasis.Cli/` as bootstrap-only (not the long-term Rewrite V1 self-hosted compiler target).
+- Treat `Stasis.Compiler/` + `Stasis.Cli/` as bootstrap-only (not the long-term self-hosted compiler target).
 - `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
 - `apps/stasis` is the single in-process graphical runner app.
@@ -42,8 +42,8 @@
 - `to_*` are pure conversions (expression-safe).
 
 ## Testing Guidelines
-- Ship work in feature slices from `docs/rewrite_v1_checklist.md` and include tests in the same PR.
-- Only implement changes that map to active items in `docs/rewrite_v1_checklist.md`; if a proposed change is outside the checklist, pause and ask before changing requirements or code.
+- Ship work in feature slices from `docs/build_checklist.md` and include tests in the same PR.
+- Only implement changes that map to active items in `docs/build_checklist.md`; if a proposed change is outside the checklist, pause and ask before changing requirements or code.
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
@@ -61,14 +61,14 @@
 ## Commit & Pull Request Guidelines
 - Use short imperative subjects; Conventional Commits are preferred (`feat:`, `fix:`, `docs:`, `test:`).
 - Reference affected spec/PRD/checklist sections when relevant.
-- Keep PRs scoped to one slice group where possible (exact grouping/sequencing lives in `docs/rewrite_v1_checklist.md`).
+- Keep PRs scoped to one slice group where possible (exact grouping/sequencing lives in `docs/build_checklist.md`).
 - Each PR should include:
 - behavioral summary
 - tests added/updated
 - docs updates
 - explicit removal of obsolete paths introduced during the slice
 
-## Architecture & Design Notes (Rewrite V1)
+## Architecture & Design Notes
 - Single OS process runtime with in-process compiler and Cranelift JIT for development.
 - Production build target uses Cranelift AOT output.
 - File-level correctness is primary; semantic analysis runs for full changed file.
@@ -132,4 +132,3 @@
 - Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
 - Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.
 - Adjustment: introduce a small explicit compile-config object in Rust host next, so required roots and future compile flags are passed through one typed path.
-

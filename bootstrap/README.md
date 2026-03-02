@@ -1,13 +1,13 @@
 # Bootstrap Compiler (Windows)
 
-This folder contains the bootstrap compiler runtime used while Rewrite V1 self-hosting is in progress.
+This folder contains the bootstrap compiler runtime retained for compatibility/testing.
 
 Bootstrap source in this branch:
 
 - `Stasis.Compiler/`
 - `Stasis.Cli/`
 
-These are retained specifically as bootstrap compiler sources for compatibility/testing while self-hosted compiler logic continues to move into `.stasis`.
+The stable compilation pipeline is Rust (`cargo build` / `cargo test`). Self-hosting work in `compiler/` is experimental and is not required for day-to-day builds.
 
 ## Location
 
