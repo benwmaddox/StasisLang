@@ -41,6 +41,8 @@ pub struct DevHotSwapPipeline {
     commit_result_rx: Receiver<SwapCommitResult>,
     pending_files: BTreeSet<PathBuf>,
     target_mode: TargetMode,
+    host_set_id: Option<String>,
+    host_set_hash: Option<[u8; 32]>,
     in_flight_compile: Option<RequestId>,
     in_flight_compile_started_at: Option<Instant>,
     in_flight_commit: Option<RequestId>,
@@ -90,6 +92,8 @@ impl DevHotSwapPipeline {
             commit_result_rx,
             pending_files: BTreeSet::new(),
             target_mode,
+            host_set_id: None,
+            host_set_hash: None,
             in_flight_compile: None,
             in_flight_compile_started_at: None,
             in_flight_commit: None,
@@ -105,6 +109,15 @@ impl DevHotSwapPipeline {
 
     pub fn watcher_sender(&self) -> Sender<FileChangeEvent> {
         self.file_change_tx.clone()
+    }
+
+    pub fn set_host_set_contract(
+        &mut self,
+        host_set_id: Option<String>,
+        host_set_hash: Option<[u8; 32]>,
+    ) {
+        self.host_set_id = host_set_id;
+        self.host_set_hash = host_set_hash;
     }
 
     pub fn submit_file_change(&self, event: FileChangeEvent) {
@@ -191,7 +204,9 @@ impl DevHotSwapPipeline {
         let changed_files: Vec<PathBuf> = self.pending_files.iter().cloned().collect();
         self.pending_files.clear();
 
-        let request = CompileRequest::new(request_id, changed_files, self.target_mode);
+        let mut request = CompileRequest::new(request_id, changed_files, self.target_mode);
+        request.host_set_id = self.host_set_id.clone();
+        request.host_set_hash = self.host_set_hash;
         let _ = self
             .compiler_tx
             .send(CompilerThreadMessage::Compile(request));
@@ -233,6 +248,8 @@ impl DevHotSwapPipeline {
                                 result.layout_hash,
                                 result.fn_patch_set,
                                 result.hook_symbol.clone(),
+                                result.host_set_id.clone(),
+                                result.host_set_hash,
                                 result.hook_fn_id,
                             );
                         }
@@ -249,6 +266,8 @@ impl DevHotSwapPipeline {
         layout_hash: Option<LayoutHash>,
         fn_patch_set: Option<FunctionPatchSet>,
         hook_symbol: Option<String>,
+        host_set_id: Option<String>,
+        host_set_hash: Option<[u8; 32]>,
         hook_fn_id: Option<FnId>,
     ) {
         let Some(layout_hash) = layout_hash else {
@@ -267,6 +286,8 @@ impl DevHotSwapPipeline {
             layout_hash,
             fn_patch_set,
             hook_symbol,
+            host_set_id,
+            host_set_hash,
             hook_fn_id,
         };
         let _ = self.commit_request_tx.send(request);
@@ -476,6 +497,43 @@ mod tests {
         let captured_requests = requests.lock().expect("poisoned");
         let request = captured_requests.first().expect("request should exist");
         assert_eq!(request.target_mode, TargetMode::AotProd);
+    }
+
+    #[test]
+    fn host_set_contract_flows_from_pipeline_to_compile_and_commit_requests() {
+        let host_set_id = "editor-host".to_string();
+        let host_set_hash = [7u8; 32];
+        let mut pipeline = DevHotSwapPipeline::new(move |request: CompileRequest| {
+            assert_eq!(request.host_set_id.as_deref(), Some("editor-host"));
+            assert_eq!(request.host_set_hash, Some(host_set_hash));
+            CompileResult::success_with_host_set_metadata(
+                request.request_id,
+                LayoutHash([6; 32]),
+                sample_patch_set(),
+                request.host_set_id.clone(),
+                request.host_set_hash,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+        pipeline.set_host_set_contract(Some(host_set_id), Some(host_set_hash));
+
+        pipeline.submit_file_change(sample_change("samples/host_set.stasis", 1));
+        eventually(|| {
+            pipeline.pump_coordinator();
+            pipeline.pending_commit_requests() == 1
+        });
+
+        let processed = pipeline.process_commits_at_safe_point(|request| {
+            assert_eq!(request.host_set_id.as_deref(), Some("editor-host"));
+            assert_eq!(request.host_set_hash, Some(host_set_hash));
+            SwapCommitResult::success(request.request_id, vec![FnId(7)], CodeGeneration(1))
+        });
+        assert_eq!(processed, 1);
     }
 
     #[test]
