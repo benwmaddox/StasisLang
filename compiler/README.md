@@ -8,10 +8,10 @@ Planned primary entrypoint:
 - `compiler/compiler_state.stasis`
 - `compiler/incremental_compiler.stasis` is retired; all compiler work lands in `compiler/simple_pass_compiler.stasis`.
 
-Ownership boundary (Rewrite V1):
-- `.stasis` owns lexer, parser, semantic checks, diagnostics, and incremental compile policy.
-- Rust owns host runtime, file watching, message plumbing, Cranelift integration, and swap commit/runtime ABI.
-- Rust `stasis_compiler` crate provides bootstrap/test harness and boundary integration only; compiler language logic stays in `.stasis`.
+Ownership boundary:
+- Rust owns the compiler implementation end-to-end (frontend + lowering + Cranelift JIT/AOT).
+- `.stasis` owns user code, stdlib, and samples.
+- `compiler/` is experimental self-hosting work and is not the active compilation pipeline today.
 
 Smoke compile path:
 - Local Windows: `bootstrap\\windows\\stasisc.bat run compiler\\simple_pass_compiler.stasis --emit-ir`
@@ -42,8 +42,7 @@ Current single-source execution mode:
 - Struct/global layout reachability flags are exposed via `Compiler.layout_struct_reachable_flags` and `Compiler.layout_global_reachable_flags`; semantic validation prunes unreachable struct/global layout metadata before flattened-offset lowering.
 - File-db incremental layout updates are exposed via `Compiler.incremental_layout_changed_files`.
 
-Console extern naming (Rewrite V1):
+Console extern naming:
 - Source-level preferred name: `print_i32`.
 - Bootstrap runtime currently exposes `print_int`; stdlib provides `print_i32(value: i32)` wrapper over `print_int(value)`.
 - `print_string` is available directly in bootstrap runtime.
-
