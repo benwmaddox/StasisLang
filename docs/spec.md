@@ -4,6 +4,7 @@ This document is the language-level specification for Stasis.
 It is aligned with:
 - `docs/live-compilation-prd.md`
 - `docs/build_checklist.md`
+- `docs/spec_implementation_status.md` (spec section -> Rust implementation status table)
 
 The focus is deterministic simulation/game logic with static memory, in-process incremental compilation, and safe hot swap.
 
@@ -585,7 +586,16 @@ Bootstrap compatibility note:
 
 ### 12.2 Future Direction: Optional Plugin Libraries
 
-Long-term direction is opt-in runtime libraries/plugins rather than one monolithic host surface.
+This section is intentionally **out of scope** for the current release approach.
+
+Current release approach:
+- Development: in-process Cranelift JIT
+- Production/release: Cranelift AOT
+
+Optional plugin libraries may be revisited later, but they must not be a dependency for shipping AOT builds or for running the sample games.
+
+Historical note:
+Long-term direction could be opt-in runtime libraries/plugins rather than one monolithic host surface.
 
 Intent:
 - pull only required host libraries into a build/runtime
