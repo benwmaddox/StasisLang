@@ -159,13 +159,13 @@ Watch mode:
 .\target\debug\stasis.exe test --dir tests/stasis --watch --watch-settle-ms 50
 ```
 
-## Current Constraints (Rewrite V1)
+## Current Constraints
 
 Current intentional language/runtime constraints:
 
 | Constraint | Notes |
 |------------|-------|
-| `for` header requires all 3 clauses (`init; condition; step`) | `for (; cond; step)` is intentionally rejected as a compile-time error in Rewrite V1. |
+| `for` header requires all 3 clauses (`init; condition; step`) | `for (; cond; step)` is intentionally rejected as a compile-time error. |
 
 ## Build From Source
 
@@ -174,7 +174,7 @@ cargo build
 cargo test
 ```
 
-## Where Things Live (Rewrite V1)
+## Where Things Live
 
 - `apps/stasis`: main app/CLI (includes `play`, `test`, `aot-cli`).
 - `crates/stasis_compiler`: Rust-native frontend + Cranelift lowering (JIT/AOT).
@@ -186,6 +186,6 @@ cargo test
 
 ## Specs / PRD
 
-- `docs/spec.md`: canonical language spec (Rewrite V1)
+- `docs/spec.md`: canonical language spec
 - `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
-- `docs/rewrite_v1_checklist.md`: execution plan and slice ordering
+- `docs/build_checklist.md`: execution plan and slice ordering

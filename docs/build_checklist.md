@@ -1,15 +1,18 @@
-﻿# Rewrite V1 Build Checklist
+# Build Checklist
 
-This checklist is the implementation plan for Rewrite V1 and is aligned with:
+This checklist is the implementation plan and is aligned with:
 - `docs/spec.md`
 - `docs/live-compilation-prd.md`
+
+Status note:
+- This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
+- The `compiler/` directory contains experimental self-hosting work and is not the active compilation pipeline today.
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
 - Reachability-DCE roots are `main`, `tick`, and `on_code_swap` (when present), plus host-exported required entry symbols.
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
-- Planned compiler orchestration file path is `compiler/simple_pass_compiler.stasis`.
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
 - Call dispatch policy: debug/hot-swap mode keeps indirect dispatch (`FnId -> code_ptr`); release/AOT mode can lower direct call edges where compatibility gates allow.
 - Backend modes are:
@@ -18,12 +21,13 @@ Locked decisions:
 
 ## Language Ownership Legend
 
-- `Rust`: Host app/runtime boundary, platform integration, Cranelift integration, process/watch plumbing, and host-set/phase enforcement.
-- `.stasis`: Compiler pipeline orchestration and language-level compile logic (lexer/parser/semantics/incremental policy source of truth).
-- `Rust + .stasis`: Rust provides execution/binding substrate; `.stasis` defines compiler behavior/policies.
+`Rust` is the compiler and runtime implementation.
+
+- `Rust`: compiler implementation (frontend + lowering + Cranelift), host app/runtime boundary, platform integration, process/watch plumbing, and host-set/phase enforcement.
+- `.stasis`: user code, stdlib, and samples. (`compiler/` is experimental; not the current compiler.)
 
 Boundary rule:
-- Rust must not become a second source of truth for lexer/parser semantics; frontend behavior lands in `compiler/simple_pass_compiler.stasis`.
+- Keep the compiler single-source-of-truth: do not reintroduce parallel compiler implementations that diverge in semantics.
 
 ## Execution Rules
 
@@ -50,7 +54,7 @@ It is not part of the steady-state incremental JIT update loop.
 ### Current Snapshot (2026-02-23)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
-- New self-host track started: `S10b` (minimal `.stasis` AOT CLI core orchestration).
+- New self-host track started: `S10b` (experimental `.stasis` AOT CLI core orchestration; not the stable compilation pipeline).
 - Decision update (2026-02-23): host-set sandbox architecture is now locked (`deny-by-default` host access via explicit extern symbols in selected host set).
 - Host-set contract selection is profile-only (`--host-set-profile` + optional `--host-set-registry-file` mapping; env fallback: `STASIS_HOST_SET_PROFILE` / `STASIS_HOST_SET_REGISTRY_FILE`). Do not introduce legacy direct contract flags (`--host-set-id`, `--host-set-hash`).
 - Compile and commit contracts include host-set metadata (`host_set_id`, `host_set_hash`), and the runtime validates it at commit time (missing/mismatch fails before hook/pointer swap).
@@ -64,7 +68,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Main integration gap: real backend compile path is now default, but emitted function patches are metadata-only (`FnId` mapping from hashes) and are not yet executing newly generated machine code through the pointer table.
 - Shared global-layout arena lowering now emits one owning `global` declaration per compile unit and uses `global_import` for other lowered functions, enabling multi-object AOT linking without duplicate data symbol definitions.
 - Simple-pass compiler now builds a root-based function reachability set in `.stasis` (`main`, `tick`, `on_code_swap`) and emits reachable functions only through host analysis harness output (current call-edge discovery uses direct identifier-call tokens; files with no roots keep all functions reachable to avoid helper-file drops in current per-file host analysis flow).
-- Ownership enforcement: compiler frontend semantics are routed through `.stasis` (`compiler/simple_pass_compiler.stasis`), and Rust is constrained to host/runtime glue.
+- Ownership enforcement: compiler semantics live in Rust; `.stasis` compiler work under `compiler/` is experimental and must not be treated as the stable pipeline.
 - Rust semantic analyzer paths were removed from `crates/stasis_compiler`; ownership guard test now enforces zero reintroduction (`tests/compiler_logic_ownership_guard.rs`).
 - Rust-native JIT now resolves typed global paths from top-level declarations (`struct`, `global name: Type`, and `global Name { ... }`) and emits typed runtime global loads/stores (`i32` and `f32`) without implicit `i32` fallback.
 - Rust-native JIT now resolves top-level `const` identifiers (`i32`/`f32`/`bool`) and enum variant identifiers (`Enum.Variant`, including explicit enum discriminants) as immediate values during expression lowering.
@@ -124,7 +128,7 @@ It is not part of the steady-state incremental JIT update loop.
 - Language:
 - `Rust + .stasis`
 - Rust: host invocation/test harness and in-process compiler host bindings.
-- `.stasis`: lexer, parser, diagnostics emission, and incremental parse orchestration in `compiler/simple_pass_compiler.stasis`.
+- `.stasis` (experimental): self-hosting compiler prototypes under `compiler/`.
 - Scope:
 - Implement lexer/parser for minimum executable subset:
 - `function`, `return`, integer/string literals, call expression, extern declaration.
