@@ -637,7 +637,7 @@ Archived priority override (2026-02-13, historical):
 - Strengthen Windows executable/runtime parity smokes (JIT + AOT) on Brickout-oriented scenarios.
 - Lane B progress note:
 - Runtime commit path now supports JIT `FnId -> code_ptr` override application sourced from compile results when available (dev path can consume real JIT pointers instead of synthetic placeholder pointer generation).
-- Added engine-overhead benchmark harness for package/load/swap/render-loop timing slices: `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`.
+- Added engine-overhead benchmark harness for package/load/swap/render-loop timing slices: `cargo run -p stasis --release --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`.
 - Initial smoke snapshot recorded (single-sample run) in `docs/rust_native_compiler_prd.md` for both JIT and AOT runtime-overhead timing breakdown.
 - Runtime real-backend JIT smoke fixtures are now rust-native-compatible (`literal`, `binary literal`, `on_code_swap + literal`) so no-fallback dev mode stays deterministic while richer syntax slices are implemented.
 - Compile-speed lock-in checklist (PRD v2, current top compiler priority):
@@ -659,7 +659,7 @@ Archived priority override (2026-02-13, historical):
 - Tests: benchmark smoke runs in CI-optional mode and validates output format/consistency.
 - Done gate: baseline numbers are recorded in docs and used as acceptance checks for subsequent slices.
 - Current progress:
-- Added deterministic benchmark executable: `cargo run -p stasis_compiler --example compile_bench`.
+- Added deterministic benchmark executable: `cargo run -p stasis_compiler --release --example compile_bench`.
 - Benchmark executable now supports explicit mode selection: `--mode analysis` (in-process analysis only) and `--mode jit` (Cranelift machine-code generation via rust-native `JitProcess`).
 - Added benchmark smoke/unit checks: `cargo test -p stasis_compiler --example compile_bench`.
 - Baseline snapshot (2026-02-24, local machine, seed=1337, chunk_size=500, 1 sample each):
@@ -823,7 +823,7 @@ Archived priority override (2026-02-13, historical):
 - Tests: gated benchmark and invalidation suites.
 - Current progress:
 - Added `Perf CI` workflow (`.github/workflows/perf-ci.yml`) running `rust_native_jit_bench` for 1k functions with conservative stop conditions (cold p95 <= 1800ms, incremental p95 <= 35ms) to catch major compile-time regressions while PRD v2 targets are still being chased.
-- Engine-overhead benchmark task (separate from compiler-only timing gates): added Perf CI gate (`engine-overhead-bench`, windows) running `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240` and hard-failing if `total_ms_p95` exceeds a conservative stop condition (300ms).
+- Engine-overhead benchmark task (separate from compiler-only timing gates): added Perf CI gate (`engine-overhead-bench`, windows) running `cargo run -p stasis --release --example engine_overhead_bench -- --mode both --samples 3 --ticks 240` and hard-failing if `total_ms_p95` exceeds a conservative stop condition (300ms).
 - Engine hot-update benchmark task (separate from compiler-only timing gates): added end-to-end watch/update benchmark (`apps/stasis/examples/engine_hot_update_bench.rs`) measuring `watch change -> jit.compile -> build_engine_package -> swap pointers -> first tick+render with new code`, plus Perf CI gate (`engine-hot-update-bench`, windows) hard-failing if `warm_update_total_ms_p95` exceeds a conservative stop condition (100ms).
 - Outstanding: confirm CI environment baseline and set exact p50/p95 thresholds for PRD v2 hard-fail gating (stop conditions above are tripwires, not targets).
 - Done gate: project can reject regressions automatically against PRD v2 targets.
