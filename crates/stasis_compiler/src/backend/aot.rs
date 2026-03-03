@@ -84,10 +84,13 @@ impl AotProcess {
         let extern_signatures =
             collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        // AOT objects must be linked against a concrete runtime. For externs we prefer the most
+        // "runtime-friendly" symbol candidate (typically `stasis_jit_*` shims) instead of the
+        // raw source-level name.
         let resolved_extern_signatures: Vec<ResolvedExternCallSignature> = extern_signatures
             .iter()
             .filter_map(|sig| {
-                sig.symbol_candidates.first().map(|symbol| {
+                sig.symbol_candidates.last().map(|symbol| {
                     ResolvedExternCallSignature {
                         name: sig.name.clone(),
                         symbol: symbol.clone(),

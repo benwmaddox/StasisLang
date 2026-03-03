@@ -31,7 +31,7 @@ impl Default for AotCompileConfig {
             helper_path: None,
             target: default_target_triple(),
             module_name: "stasis_module".to_string(),
-            opt_level: "none".to_string(),
+            opt_level: "speed".to_string(),
         }
     }
 }
@@ -219,6 +219,34 @@ pub fn link_objects_to_dynamic_library(
         for symbol in export_symbols {
             command.arg(format!("/EXPORT:{symbol}"));
         }
+        let windows_lib_paths = resolve_windows_link_lib_paths();
+        for lib_path in &windows_lib_paths {
+            command.arg(format!("/LIBPATH:{}", lib_path.display()));
+        }
+        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
+            command.arg(kernel32);
+        } else {
+            command.arg("kernel32.lib");
+        }
+        // When linking against Rust `staticlib` runtime shims (e.g. `stasis_dynload.lib`),
+        // lld-link does not automatically pull in the CRT/system libraries that those objects
+        // depend on. Add the common MSVC + Windows SDK libraries so AOT bundles link cleanly.
+        command.arg("ucrt.lib");
+        command.arg("vcruntime.lib");
+        command.arg("msvcrt.lib");
+        command.arg("legacy_stdio_definitions.lib");
+        command.arg("advapi32.lib");
+        command.arg("bcrypt.lib");
+        command.arg("dbghelp.lib");
+        command.arg("ntdll.lib");
+        command.arg("ole32.lib");
+        command.arg("oleaut32.lib");
+        command.arg("psapi.lib");
+        command.arg("secur32.lib");
+        command.arg("shell32.lib");
+        command.arg("user32.lib");
+        command.arg("userenv.lib");
+        command.arg("ws2_32.lib");
     } else {
         command.arg("-shared");
         command.arg("-o");
@@ -226,6 +254,9 @@ pub fn link_objects_to_dynamic_library(
     }
     for object_path in object_paths {
         command.arg(object_path);
+    }
+    for runtime_lib in &config.runtime_lib_paths {
+        command.arg(runtime_lib);
     }
 
     run_link_command(&mut command, "dynamic library link", &linker)?;
