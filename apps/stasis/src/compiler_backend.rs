@@ -95,10 +95,18 @@ struct EngineBundleManifestStringLiteralRow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestCollectionMaxLengthRow {
+    path: String,
+    max_length: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     functions: Vec<EngineBundleManifestFunctionRow>,
     #[serde(default)]
     string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
+    #[serde(default)]
+    collection_max_lengths: Option<Vec<EngineBundleManifestCollectionMaxLengthRow>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -427,6 +435,18 @@ impl IncrementalCompilerBackend {
                     stasis_dynload::clear_jit_string_literal_table();
                     for literal in literals {
                         stasis_dynload::upsert_jit_string_literal(literal.id, &literal.value);
+                    }
+                }
+                if let Some(entries) = manifest.collection_max_lengths.as_ref() {
+                    // Fixed-size arrays/strings rely on .max_length headers stored in the global i32
+                    // table. The JIT path seeds these during compilation; AOT must seed them when
+                    // the bundle is loaded.
+                    for entry in entries {
+                        let max_length_path = format!("{}.max_length", entry.path);
+                        stasis_dynload::stasis_jit_global_i32_store(
+                            crate::hash_global_path(&max_length_path),
+                            entry.max_length,
+                        );
                     }
                 }
                 manifest_rows = manifest.functions;
@@ -5024,6 +5044,49 @@ mod tests {
             stasis_dynload::jit_string_literal_value(row.id),
             Some(literal_value.to_string()),
             "expected dynload string literal table to contain registered literal"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_seeds_collection_max_length_headers_from_bundle_manifest() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_collection_headers_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+
+        let global_name = format!("values_{stamp}");
+        let max_length_path = format!("{global_name}.max_length");
+        let max_length_hash = crate::hash_global_path(&max_length_path);
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            0,
+            "expected empty global table entry before seeding"
+        );
+
+        fs::write(
+            &source,
+            format!(
+                "global {global_name}: i32[12];\nfunction tick(): void {{ return; }}\nfunction render(): void {{ return; }}\nfunction on_code_swap(): void {{ return; }}\n"
+            ),
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(158),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            12,
+            "expected max_length header to be seeded after AOT compile"
         );
 
         fs::remove_dir_all(&temp_root).ok();
