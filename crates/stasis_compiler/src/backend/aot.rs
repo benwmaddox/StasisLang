@@ -9,7 +9,7 @@ use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -70,6 +70,8 @@ impl AotProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        self.load_import_graph_sources()
+            .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
         type_table
@@ -196,6 +198,52 @@ impl AotProcess {
 
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
         Ok(CompileReport { index, emit })
+    }
+
+    fn load_import_graph_sources(&mut self) -> Result<(), String> {
+        let mut known_paths: BTreeSet<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        let mut queue: Vec<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+
+        while let Some(path) = queue.pop() {
+            let Some(source) = self
+                .compiler
+                .files()
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.content.clone())
+            else {
+                continue;
+            };
+            let imports = parse_import_paths(&source);
+            for import_path in imports {
+                let resolved = resolve_import_path(&path, &import_path);
+                let normalized = normalize_path_for_compiler_key(&resolved);
+                if known_paths.contains(&normalized) {
+                    continue;
+                }
+                let content = std::fs::read_to_string(&resolved).map_err(|error| {
+                    format!(
+                        "failed to load import '{}' referenced by '{}': {}",
+                        import_path, path, error
+                    )
+                })?;
+                self.compiler.upsert_file(normalized.clone(), content);
+                known_paths.insert(normalized.clone());
+                queue.push(normalized);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn artifacts(&self) -> &[AotArtifact] {

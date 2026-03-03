@@ -450,6 +450,8 @@ impl IncrementalCompilerBackend {
                     }
                 }
                 manifest_rows = manifest.functions;
+                jit_emitted_function_names =
+                    Some(manifest_rows.iter().map(|row| row.name.clone()).collect());
             }
         }
 
@@ -516,16 +518,20 @@ impl IncrementalCompilerBackend {
         }
 
         let aot_function_symbols = if request.target_mode == TargetMode::AotProd {
-            let mut symbols = Vec::new();
+            let mut symbol_by_name: BTreeMap<String, String> = BTreeMap::new();
             for row in manifest_rows {
-                let Some(fn_id) = fn_id_by_name.get(&row.name).copied() else {
+                symbol_by_name.insert(row.name, row.symbol);
+            }
+            let mut symbols = Vec::new();
+            for (name, fn_id) in &fn_id_by_name {
+                let Some(symbol) = symbol_by_name.get(name).cloned() else {
                     return CompileResult::failed(
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
                             message: format!(
-                                "AOT engine bundle manifest symbol row '{}' has no matching function mapping",
-                                row.name
+                                "AOT engine bundle manifest missing function row for '{}'",
+                                name
                             ),
                             path: request.changed_files.first().cloned(),
                             line: None,
@@ -534,8 +540,8 @@ impl IncrementalCompilerBackend {
                     );
                 };
                 symbols.push(AotFunctionSymbol {
-                    fn_id,
-                    symbol: row.symbol,
+                    fn_id: *fn_id,
+                    symbol,
                 });
             }
             Some(symbols)
@@ -3456,6 +3462,100 @@ mod tests {
             package.symbol_code_ptrs.contains_key("render"),
             "expected render symbol in JIT engine package"
         );
+    }
+
+    #[test]
+    fn aot_brickout_revenge_v1_compiles_full_engine_bundle() {
+        if !std::env::var("STASIS_AOT_QUALITY_GATE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        {
+            return;
+        }
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+        assert!(
+            source.exists(),
+            "expected Brickout sample at {}",
+            source.display()
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_brickout_bundle_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let artifact_root = temp_root.join("aot_artifacts");
+
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(AotCompileConfig::default(), artifact_root);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_201),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "expected Brickout AOT compile success, got diagnostics: {:?}",
+            result.diagnostics
+        );
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("AOT engine bundle should be present after successful compile");
+        assert!(
+            bundle.manifest_path.exists(),
+            "engine bundle manifest should exist at {}",
+            bundle.manifest_path.display()
+        );
+
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read engine bundle manifest");
+
+        for required in ["tick", "render", "on_code_swap"] {
+            assert!(
+                bundle.object_paths_by_function.contains_key(required),
+                "missing required entrypoint '{required}' in AOT bundle object map"
+            );
+            let object_path = bundle
+                .object_paths_by_function
+                .get(required)
+                .expect("checked contains_key");
+            assert!(
+                object_path.exists(),
+                "AOT bundle object for '{required}' should exist at {}",
+                object_path.display()
+            );
+            assert!(
+                manifest.functions.iter().any(|row| row.name == required),
+                "engine bundle manifest missing function row for '{required}'"
+            );
+        }
+
+        assert!(
+            manifest
+                .string_literals
+                .as_ref()
+                .is_some_and(|values| !values.is_empty()),
+            "expected Brickout engine bundle manifest to include string_literals"
+        );
+        assert!(
+            manifest
+                .collection_max_lengths
+                .as_ref()
+                .is_some_and(|values| !values.is_empty()),
+            "expected Brickout engine bundle manifest to include collection_max_lengths"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
     }
 
     #[test]
