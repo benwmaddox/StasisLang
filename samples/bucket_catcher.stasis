@@ -86,7 +86,8 @@ function seed_rng(seed: i32): void {
     // Park-Miller "minimal standard" RNG (31-bit, no overflow with i32 math).
     // State is in [1, 2147483646].
     let s: i32 = seed;
-    if (s == -2147483648) {
+    // Avoid `-2147483648` because it tokenizes as unary-minus + `2147483648` (out of i32 range).
+    if (s == (-2147483647 - 1)) {
         state.rng_state = 2147483646;
         return;
     }
@@ -212,7 +213,6 @@ function update_input(): void {
     if (count > 0 && input_pointer_is_down(0)) {
         state.bucket_target_x = f32_to_i32(input_pointer_x_px(0));
     }
-    state.
 
     // Keyboard input: steer left/right with arrow keys.
     let move: i32 = 0;
@@ -305,10 +305,10 @@ function draw_ui(): void {
     if (state.ui_font == 0) { return; }
     ascii_clear(state.ui_ascii);
     ascii_append(state.ui_ascii, "Catches: ");
-    ascii_append_i32(state.ui_ascii, state.catches);
+    ascii_push_i32(state.ui_ascii, state.catches);
     ascii_append(state.ui_ascii, "  Misses: ");
-    ascii_append_i32(state.ui_ascii, state.misses);
-    from_ascii(state.ui_text, state.ui_ascii, 64);
+    ascii_push_i32(state.ui_ascii, state.misses);
+    utf8_from_ascii(state.ui_text, state.ui_ascii, 64);
 
     draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
 }
@@ -346,4 +346,14 @@ function main(): i32 {
         return 1;
     }
     return 0;
+}
+
+// The play runner expects a render() hook even if a sample renders inside tick().
+function render(): i32 {
+    return 0;
+}
+
+// Hot-reload hook. This sample does not need any special swap behavior.
+function on_code_swap(): void {
+    return;
 }

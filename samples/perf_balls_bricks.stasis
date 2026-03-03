@@ -182,3 +182,8 @@ function tick(): i32 {
 function render(): i32 {
     return 0;
 }
+
+// Hot-reload hook. This perf sample does not need any special swap behavior.
+function on_code_swap(): void {
+    return;
+}
