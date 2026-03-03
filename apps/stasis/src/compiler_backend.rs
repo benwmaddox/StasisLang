@@ -430,6 +430,8 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
+                // Parsed for manifest forward-compatibility, but not used for behavior today.
+                let _ = manifest.optimization_profile.as_deref();
                 if let Some(literals) = manifest.string_literals.as_ref() {
                     // AOT code references string literals by hashed ID at runtime. Unlike the JIT path,
                     // AOT compilation happens out of band from execution, so the runtime table must be
