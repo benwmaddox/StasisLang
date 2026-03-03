@@ -1115,6 +1115,9 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) lookup_code_ptr: FuncId,
     pub(crate) sin_fast: FuncId,
     pub(crate) cos_fast: FuncId,
+    pub(crate) global_i32_ptr: FuncId,
+    pub(crate) global_f32_ptr: FuncId,
+    pub(crate) global_f64_ptr: FuncId,
     pub(crate) global_i32_load: FuncId,
     pub(crate) global_i32_store: FuncId,
     pub(crate) global_f32_load: FuncId,
@@ -1168,6 +1171,9 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) lookup_code_ptr: FuncRef,
     pub(crate) sin_fast: FuncRef,
     pub(crate) cos_fast: FuncRef,
+    pub(crate) global_i32_ptr: FuncRef,
+    pub(crate) global_f32_ptr: FuncRef,
+    pub(crate) global_f64_ptr: FuncRef,
     pub(crate) global_i32_load: FuncRef,
     pub(crate) global_i32_store: FuncRef,
     pub(crate) global_f32_load: FuncRef,
@@ -1458,6 +1464,42 @@ pub(crate) fn declare_f64_global_store_import(
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_i32_global_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f32_global_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_global_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
     module
         .declare_function(symbol, Linkage::Import, &signature)
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
@@ -7582,6 +7624,7 @@ pub(crate) fn emit_struct_view_field_load(
         ));
     }
     let index_value = builder.use_var(binding.index_var);
+    let len_value = builder.use_var(binding.len_var);
     let aos_condition = builder
         .ins()
         .icmp_imm(IntCC::SignedLessThan, index_value, 0);
@@ -7598,20 +7641,23 @@ pub(crate) fn emit_struct_view_field_load(
     builder.switch_to_block(aos_block);
     let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
     let aos_value = if is_i32_abi_compatible_type(field_type, type_table) {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_load, &[path_hash]);
-        builder.inst_results(call)[0]
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().load(types::I32, MemFlags::new(), ptr, 0)
     } else if field_type == TYPE_ID_F32 {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f32_load, &[path_hash]);
-        builder.inst_results(call)[0]
+            .call(runtime_call_refs.global_f32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().load(types::F32, MemFlags::new(), ptr, 0)
     } else if field_type == TYPE_ID_F64 {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f64_load, &[path_hash]);
-        builder.inst_results(call)[0]
+            .call(runtime_call_refs.global_f64_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().load(types::F64, MemFlags::new(), ptr, 0)
     } else {
         return Err(format!(
             "unsupported struct view field type {} for suffix '{}'",
@@ -7625,23 +7671,35 @@ pub(crate) fn emit_struct_view_field_load(
     let field_hash = hash_foreach_field_suffix(suffix);
     let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
     let soa_value = if is_i32_abi_compatible_type(field_type, type_table) {
-        let call = builder.ins().call(
-            runtime_call_refs.global_i32_array_load,
-            &[base_hash, field_hash_value, index_value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
-        builder.inst_results(call)[0]
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().load(types::I32, MemFlags::new(), addr, 0)
     } else if field_type == TYPE_ID_F32 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f32_array_load,
-            &[base_hash, field_hash_value, index_value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f32_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
-        builder.inst_results(call)[0]
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().load(types::F32, MemFlags::new(), addr, 0)
     } else if field_type == TYPE_ID_F64 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f64_array_load,
-            &[base_hash, field_hash_value, index_value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f64_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
-        builder.inst_results(call)[0]
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().load(types::F64, MemFlags::new(), addr, 0)
     } else {
         return Err(format!(
             "unsupported struct view field type {} for suffix '{}'",
@@ -7689,6 +7747,7 @@ pub(crate) fn emit_struct_view_field_assignment(
     }
 
     let index_value = builder.use_var(binding.index_var);
+    let len_value = builder.use_var(binding.len_var);
     let aos_condition = builder
         .ins()
         .icmp_imm(IntCC::SignedLessThan, index_value, 0);
@@ -7705,10 +7764,11 @@ pub(crate) fn emit_struct_view_field_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
-                let call = builder
+                let ptr_call = builder
                     .ins()
-                    .call(runtime_call_refs.global_i32_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
+                    .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+                let ptr = builder.inst_results(ptr_call)[0];
+                let lhs = builder.ins().load(types::I32, MemFlags::new(), ptr, 0);
                 match op {
                     AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
@@ -7719,9 +7779,11 @@ pub(crate) fn emit_struct_view_field_assignment(
                 }
             }
         };
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
     } else if field_type == TYPE_ID_BOOL {
         if op != AssignOp::Set {
             return Err(format!(
@@ -7729,17 +7791,20 @@ pub(crate) fn emit_struct_view_field_assignment(
                 suffix
             ));
         }
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, rhs.value]);
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), rhs.value, ptr, 0);
     } else if field_type == TYPE_ID_F32 {
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder
+                let ptr_call = builder
                     .ins()
-                    .call(runtime_call_refs.global_f32_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
+                    .call(runtime_call_refs.global_f32_ptr, &[path_hash]);
+                let ptr = builder.inst_results(ptr_call)[0];
+                let lhs = builder.ins().load(types::F32, MemFlags::new(), ptr, 0);
                 match op {
                     AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
@@ -7756,17 +7821,20 @@ pub(crate) fn emit_struct_view_field_assignment(
                 ));
             }
         };
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_f32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
     } else if field_type == TYPE_ID_F64 {
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder
+                let ptr_call = builder
                     .ins()
-                    .call(runtime_call_refs.global_f64_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
+                    .call(runtime_call_refs.global_f64_ptr, &[path_hash]);
+                let ptr = builder.inst_results(ptr_call)[0];
+                let lhs = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
                 match op {
                     AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
@@ -7783,9 +7851,11 @@ pub(crate) fn emit_struct_view_field_assignment(
                 ));
             }
         };
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_f64_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
     } else {
         return Err(format!(
             "unsupported struct view field type {} for suffix '{}'",
@@ -7802,11 +7872,15 @@ pub(crate) fn emit_struct_view_field_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_i32_array_load,
-                    &[base_hash, field_hash_value, index_value],
+                let ptr_call = builder.ins().call(
+                    runtime_call_refs.global_i32_array_ptr,
+                    &[base_hash, field_hash_value, len_value],
                 );
-                let lhs = builder.inst_results(call)[0];
+                let base_ptr = builder.inst_results(ptr_call)[0];
+                let index_i64 = builder.ins().uextend(types::I64, index_value);
+                let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+                let addr = builder.ins().iadd(base_ptr, byte_offset);
+                let lhs = builder.ins().load(types::I32, MemFlags::new(), addr, 0);
                 match op {
                     AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
@@ -7817,10 +7891,15 @@ pub(crate) fn emit_struct_view_field_assignment(
                 }
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[base_hash, field_hash_value, index_value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
     } else if field_type == TYPE_ID_BOOL {
         if op != AssignOp::Set {
             return Err(format!(
@@ -7828,19 +7907,28 @@ pub(crate) fn emit_struct_view_field_assignment(
                 suffix
             ));
         }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[base_hash, field_hash_value, index_value, rhs.value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), rhs.value, addr, 0);
     } else if field_type == TYPE_ID_F32 {
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_f32_array_load,
-                    &[base_hash, field_hash_value, index_value],
+                let ptr_call = builder.ins().call(
+                    runtime_call_refs.global_f32_array_ptr,
+                    &[base_hash, field_hash_value, len_value],
                 );
-                let lhs = builder.inst_results(call)[0];
+                let base_ptr = builder.inst_results(ptr_call)[0];
+                let index_i64 = builder.ins().uextend(types::I64, index_value);
+                let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+                let addr = builder.ins().iadd(base_ptr, byte_offset);
+                let lhs = builder.ins().load(types::F32, MemFlags::new(), addr, 0);
                 match op {
                     AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
@@ -7857,19 +7945,28 @@ pub(crate) fn emit_struct_view_field_assignment(
                 ));
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[base_hash, field_hash_value, index_value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f32_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
     } else if field_type == TYPE_ID_F64 {
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_f64_array_load,
-                    &[base_hash, field_hash_value, index_value],
+                let ptr_call = builder.ins().call(
+                    runtime_call_refs.global_f64_array_ptr,
+                    &[base_hash, field_hash_value, len_value],
                 );
-                let lhs = builder.inst_results(call)[0];
+                let base_ptr = builder.inst_results(ptr_call)[0];
+                let index_i64 = builder.ins().uextend(types::I64, index_value);
+                let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+                let addr = builder.ins().iadd(base_ptr, byte_offset);
+                let lhs = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
                 match op {
                     AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
                     AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
@@ -7886,10 +7983,15 @@ pub(crate) fn emit_struct_view_field_assignment(
                 ));
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[base_hash, field_hash_value, index_value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f64_array_ptr,
+            &[base_hash, field_hash_value, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
     } else {
         return Err(format!(
             "unsupported struct view field type {} for suffix '{}'",
@@ -8001,37 +8103,80 @@ pub(crate) fn emit_local_indexed_collection_load(
         named_struct_field_types,
     )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
+    let collection_len = type_table.fixed_collection_len(collection_binding.type_id);
     let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
     if is_i32_abi_compatible_type(resolved, type_table) {
-        let call = builder.ins().call(
-            runtime_call_refs.global_i32_array_load,
-            &[collection_handle, field_hash, index_binding.value],
-        );
+        let value = if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_i32_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().load(types::I32, MemFlags::new(), addr, 0)
+        } else {
+            let call = builder.ins().call(
+                runtime_call_refs.global_i32_array_load,
+                &[collection_handle, field_hash, index_binding.value],
+            );
+            builder.inst_results(call)[0]
+        };
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: resolved,
         });
     }
     if resolved == TYPE_ID_F32 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f32_array_load,
-            &[collection_handle, field_hash, index_binding.value],
-        );
+        let value = if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_f32_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().load(types::F32, MemFlags::new(), addr, 0)
+        } else {
+            let call = builder.ins().call(
+                runtime_call_refs.global_f32_array_load,
+                &[collection_handle, field_hash, index_binding.value],
+            );
+            builder.inst_results(call)[0]
+        };
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: TYPE_ID_F32,
         });
     }
     if resolved == TYPE_ID_F64 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f64_array_load,
-            &[collection_handle, field_hash, index_binding.value],
-        );
+        let value = if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_f64_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().load(types::F64, MemFlags::new(), addr, 0)
+        } else {
+            let call = builder.ins().call(
+                runtime_call_refs.global_f64_array_load,
+                &[collection_handle, field_hash, index_binding.value],
+            );
+            builder.inst_results(call)[0]
+        };
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: TYPE_ID_F64,
         });
     }
@@ -8066,6 +8211,7 @@ pub(crate) fn emit_local_indexed_collection_assignment(
             collection_name, suffix, path_type, rhs.type_id
         ));
     }
+    let collection_len = type_table.fixed_collection_len(collection_binding.type_id);
     let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
         .ins()
@@ -8145,10 +8291,23 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_handle, field_hash, index_binding.value, value],
-        );
+        if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_i32_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[collection_handle, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -8158,15 +8317,28 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 collection_name, suffix
             ));
         }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[
-                collection_handle,
-                field_hash,
-                index_binding.value,
-                rhs.value,
-            ],
-        );
+        if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_i32_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), rhs.value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[
+                    collection_handle,
+                    field_hash,
+                    index_binding.value,
+                    rhs.value,
+                ],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -8235,10 +8407,23 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 ));
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[collection_handle, field_hash, index_binding.value, value],
-        );
+        if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_f32_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f32_array_store,
+                &[collection_handle, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -8307,10 +8492,23 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 ));
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[collection_handle, field_hash, index_binding.value, value],
-        );
+        if let Some(collection_len) = collection_len {
+            let len_value = builder.ins().iconst(types::I32, i64::from(collection_len));
+            let ptr_call = builder.ins().call(
+                runtime_call_refs.global_f64_array_ptr,
+                &[collection_handle, field_hash, len_value],
+            );
+            let base_ptr = builder.inst_results(ptr_call)[0];
+            let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f64_array_store,
+                &[collection_handle, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     Err(format!(
@@ -8336,33 +8534,51 @@ pub(crate) fn emit_indexed_collection_load(
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
+    let len_value = builder
+        .ins()
+        .iconst(types::I32, i64::from(collection_info.len));
     if is_i32_abi_compatible_type(resolved, type_table) {
-        let call = builder.ins().call(
-            runtime_call_refs.global_i32_array_load,
-            &[collection_hash, field_hash, index_binding.value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        let value = builder.ins().load(types::I32, MemFlags::new(), addr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: resolved,
         });
     }
     if resolved == TYPE_ID_F32 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f32_array_load,
-            &[collection_hash, field_hash, index_binding.value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f32_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        let value = builder.ins().load(types::F32, MemFlags::new(), addr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: TYPE_ID_F32,
         });
     }
     if resolved == TYPE_ID_F64 {
-        let call = builder.ins().call(
-            runtime_call_refs.global_f64_array_load,
-            &[collection_hash, field_hash, index_binding.value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f64_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        let value = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value,
             type_id: TYPE_ID_F64,
         });
     }
@@ -8397,6 +8613,9 @@ pub(crate) fn emit_indexed_collection_assignment(
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
+    let len_value = builder
+        .ins()
+        .iconst(types::I32, i64::from(collection_info.len));
 
     if is_i32_scalar_lane_type(path_type, type_table) {
         let value = match op {
@@ -8467,10 +8686,15 @@ pub(crate) fn emit_indexed_collection_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -8480,10 +8704,15 @@ pub(crate) fn emit_indexed_collection_assignment(
                 collection_path, suffix
             ));
         }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash, index_binding.value, rhs.value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_i32_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), rhs.value, addr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -8548,10 +8777,15 @@ pub(crate) fn emit_indexed_collection_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f32_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -8616,10 +8850,15 @@ pub(crate) fn emit_indexed_collection_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
+        let ptr_call = builder.ins().call(
+            runtime_call_refs.global_f64_array_ptr,
+            &[collection_hash, field_hash, len_value],
         );
+        let base_ptr = builder.inst_results(ptr_call)[0];
+        let index_i64 = builder.ins().uextend(types::I64, index_binding.value);
+        let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+        let addr = builder.ins().iadd(base_ptr, byte_offset);
+        builder.ins().store(MemFlags::new(), value, addr, 0);
         return Ok(());
     }
     Err(format!(
@@ -8645,29 +8884,35 @@ pub(crate) fn emit_global_load(
         });
     }
     if is_i32_abi_compatible_type(path_type, type_table) {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_load, &[path_hash]);
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        let call = builder.ins().load(types::I32, MemFlags::new(), ptr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value: call,
             type_id: path_type,
         });
     }
     if path_type == TYPE_ID_F32 {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f32_load, &[path_hash]);
+            .call(runtime_call_refs.global_f32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        let call = builder.ins().load(types::F32, MemFlags::new(), ptr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value: call,
             type_id: TYPE_ID_F32,
         });
     }
     if path_type == TYPE_ID_F64 {
-        let call = builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f64_load, &[path_hash]);
+            .call(runtime_call_refs.global_f64_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        let call = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
         return Ok(ValueBinding {
-            value: builder.inst_results(call)[0],
+            value: call,
             type_id: TYPE_ID_F64,
         });
     }
@@ -8735,9 +8980,11 @@ pub(crate) fn emit_global_assignment(
         let path_hash = builder
             .ins()
             .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -8750,9 +8997,11 @@ pub(crate) fn emit_global_assignment(
         let path_hash = builder
             .ins()
             .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, rhs.value]);
+            .call(runtime_call_refs.global_i32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), rhs.value, ptr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -8792,9 +9041,11 @@ pub(crate) fn emit_global_assignment(
         let path_hash = builder
             .ins()
             .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_f32_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -8834,9 +9085,11 @@ pub(crate) fn emit_global_assignment(
         let path_hash = builder
             .ins()
             .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
+        let ptr_call = builder
             .ins()
-            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
+            .call(runtime_call_refs.global_f64_ptr, &[path_hash]);
+        let ptr = builder.inst_results(ptr_call)[0];
+        builder.ins().store(MemFlags::new(), value, ptr, 0);
         return Ok(());
     }
     Err(format!(
@@ -9147,6 +9400,9 @@ pub(crate) fn build_runtime_call_import_ids(
         lookup_code_ptr: declare_lookup_code_ptr_import(module, "stasis_jit_lookup_code_ptr")?,
         sin_fast: declare_direct_f32_unary_import(module, "stasis_jit_sin_fast")?,
         cos_fast: declare_direct_f32_unary_import(module, "stasis_jit_cos_fast")?,
+        global_i32_ptr: declare_i32_global_ptr_import(module, "stasis_jit_global_i32_ptr")?,
+        global_f32_ptr: declare_f32_global_ptr_import(module, "stasis_jit_global_f32_ptr")?,
+        global_f64_ptr: declare_f64_global_ptr_import(module, "stasis_jit_global_f64_ptr")?,
         global_i32_load: declare_i32_call_import(module, "stasis_jit_global_i32_load", 1)?,
         global_i32_store: declare_void_call_import(module, "stasis_jit_global_i32_store", 2)?,
         global_f32_load: declare_f32_global_load_import(module, "stasis_jit_global_f32_load")?,
@@ -9242,6 +9498,9 @@ pub(crate) fn build_runtime_call_refs(
         lookup_code_ptr: module.declare_func_in_func(imports.lookup_code_ptr, func),
         sin_fast: module.declare_func_in_func(imports.sin_fast, func),
         cos_fast: module.declare_func_in_func(imports.cos_fast, func),
+        global_i32_ptr: module.declare_func_in_func(imports.global_i32_ptr, func),
+        global_f32_ptr: module.declare_func_in_func(imports.global_f32_ptr, func),
+        global_f64_ptr: module.declare_func_in_func(imports.global_f64_ptr, func),
         global_i32_load: module.declare_func_in_func(imports.global_i32_load, func),
         global_i32_store: module.declare_func_in_func(imports.global_i32_store, func),
         global_f32_load: module.declare_func_in_func(imports.global_f32_load, func),

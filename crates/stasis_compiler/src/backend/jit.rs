@@ -711,10 +711,13 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         }
         "sin_fast" | "stasis_jit_sin_fast" => stasis_dynload::stasis_jit_sin_fast as usize,
         "cos_fast" | "stasis_jit_cos_fast" => stasis_dynload::stasis_jit_cos_fast as usize,
+        "stasis_jit_global_i32_ptr" => stasis_dynload::stasis_jit_global_i32_ptr as usize,
         "stasis_jit_global_i32_load" => stasis_dynload::stasis_jit_global_i32_load as usize,
         "stasis_jit_global_i32_store" => stasis_dynload::stasis_jit_global_i32_store as usize,
+        "stasis_jit_global_f32_ptr" => stasis_dynload::stasis_jit_global_f32_ptr as usize,
         "stasis_jit_global_f32_load" => stasis_dynload::stasis_jit_global_f32_load as usize,
         "stasis_jit_global_f32_store" => stasis_dynload::stasis_jit_global_f32_store as usize,
+        "stasis_jit_global_f64_ptr" => stasis_dynload::stasis_jit_global_f64_ptr as usize,
         "stasis_jit_global_f64_load" => stasis_dynload::stasis_jit_global_f64_load as usize,
         "stasis_jit_global_f64_store" => stasis_dynload::stasis_jit_global_f64_store as usize,
         "stasis_jit_collection_i32_load" => stasis_dynload::stasis_jit_collection_i32_load as usize,
@@ -937,6 +940,10 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_cos_fast as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_global_i32_ptr",
+        stasis_dynload::stasis_jit_global_i32_ptr as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_global_i32_load",
         stasis_dynload::stasis_jit_global_i32_load as *const u8,
     );
@@ -945,12 +952,20 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_global_i32_store as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_global_f32_ptr",
+        stasis_dynload::stasis_jit_global_f32_ptr as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_global_f32_load",
         stasis_dynload::stasis_jit_global_f32_load as *const u8,
     );
     jit_builder.symbol(
         "stasis_jit_global_f32_store",
         stasis_dynload::stasis_jit_global_f32_store as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_ptr",
+        stasis_dynload::stasis_jit_global_f64_ptr as *const u8,
     );
     jit_builder.symbol(
         "stasis_jit_global_f64_load",
