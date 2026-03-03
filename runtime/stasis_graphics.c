@@ -2364,16 +2364,9 @@ static const char* kFallbackPostfxFrag =
 
 static void init_postfx_shader(void) {
     const char* fragSource = kFallbackPostfxFrag;
-    char* fileSource = read_text_file("docs/assets/underwater/caustics.glsl");
-    if (fileSource) {
-        fragSource = fileSource;
-    }
 
     GLuint vs = compile_shader(GL_VERTEX_SHADER, kFallbackPostfxVert);
     GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragSource);
-    if (fileSource) {
-        free(fileSource);
-    }
     if (vs == 0 || fs == 0) {
         if (vs) glDeleteShader(vs);
         if (fs) glDeleteShader(fs);

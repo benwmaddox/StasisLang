@@ -3,7 +3,7 @@ use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Value};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -92,7 +92,9 @@ impl AotProcess {
         let resolved_extern_signatures: Vec<ResolvedExternCallSignature> = extern_signatures
             .iter()
             .filter_map(|sig| {
-                sig.symbol_candidates.last().map(|symbol| ResolvedExternCallSignature {
+                sig.symbol_candidates
+                    .last()
+                    .map(|symbol| ResolvedExternCallSignature {
                         name: sig.name.clone(),
                         symbol: symbol.clone(),
                         params: sig.params.clone(),
@@ -425,14 +427,13 @@ impl AotProcess {
         }
 
         let manifest_path = output_dir.join("engine_bundle_manifest.json");
-        let manifest =
-            build_engine_bundle_manifest(
-                self.optimization_profile,
-                entrypoints,
-                &manifest_rows,
-                &self.string_literals,
-                &self.collection_max_lengths,
-            );
+        let manifest = build_engine_bundle_manifest(
+            self.optimization_profile,
+            entrypoints,
+            &manifest_rows,
+            &self.string_literals,
+            &self.collection_max_lengths,
+        );
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
                 "failed to write engine bundle manifest {}: {error}",
@@ -539,12 +540,12 @@ fn compile_function_to_object_bytes(
     let mut context = module.make_context();
     context.func.signature = module.make_signature();
     for param_type in &meta.params {
-        let clif_param_type = clif_type_for_type_id(*param_type, type_table)?;
-        context
-            .func
-            .signature
-            .params
-            .push(AbiParam::new(clif_param_type));
+        append_abi_params_for_type_id(
+            &mut context.func.signature.params,
+            *param_type,
+            type_table,
+            named_struct_field_types,
+        )?;
     }
     if meta.return_type != TYPE_ID_VOID {
         let clif_return_type =
@@ -564,8 +565,12 @@ fn compile_function_to_object_bytes(
     let function_id = module
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare AOT function {symbol}: {error}"))?;
-    let runtime_call_imports =
-        build_runtime_call_import_ids(&mut module, call_signatures, type_table)?;
+    let runtime_call_imports = build_runtime_call_import_ids(
+        &mut module,
+        call_signatures,
+        type_table,
+        named_struct_field_types,
+    )?;
 
     let mut function_builder_context = FunctionBuilderContext::new();
     {
@@ -574,7 +579,13 @@ fn compile_function_to_object_bytes(
             build_runtime_call_refs(&mut module, &runtime_call_imports, builder.func);
         let entry = builder.create_block();
         for param_type in &meta.params {
-            builder.append_block_param(entry, clif_type_for_type_id(*param_type, type_table)?);
+            if is_struct_view_type(*param_type, named_struct_field_types) {
+                for _ in 0..STRUCT_VIEW_ABI_WORDS {
+                    builder.append_block_param(entry, types::I32);
+                }
+            } else {
+                builder.append_block_param(entry, clif_type_for_type_id(*param_type, type_table)?);
+            }
         }
         builder.switch_to_block(entry);
         builder.seal_block(entry);
@@ -590,20 +601,87 @@ fn compile_function_to_object_bytes(
         let mut values_by_name: BTreeMap<String, LocalBinding> = BTreeMap::new();
         let mut next_variable = 0u32;
         let block_params: Vec<Value> = builder.block_params(entry).to_vec();
+        let mut block_param_cursor = 0usize;
         for (index, name) in meta.param_names.iter().enumerate() {
-            let Some(value) = block_params.get(index).copied() else {
-                return Err(format!(
-                    "missing block parameter {} for function '{}'",
-                    index, meta.name
-                ));
-            };
-            let variable = declare_new_variable(
-                &mut builder,
-                &mut next_variable,
-                value,
-                meta.params[index],
-                type_table,
-            )?;
+            let param_type = meta.params[index];
+            let (variable, struct_view) =
+                if is_struct_view_type(param_type, named_struct_field_types) {
+                    let base_value =
+                        block_params
+                            .get(block_param_cursor)
+                            .copied()
+                            .ok_or_else(|| {
+                                format!(
+                                    "missing struct view base parameter {} for function '{}'",
+                                    block_param_cursor, meta.name
+                                )
+                            })?;
+                    let index_value = block_params
+                        .get(block_param_cursor + 1)
+                        .copied()
+                        .ok_or_else(|| {
+                            format!(
+                                "missing struct view index parameter {} for function '{}'",
+                                block_param_cursor + 1,
+                                meta.name
+                            )
+                        })?;
+                    let len_value = block_params
+                        .get(block_param_cursor + 2)
+                        .copied()
+                        .ok_or_else(|| {
+                            format!(
+                                "missing struct view len parameter {} for function '{}'",
+                                block_param_cursor + 2,
+                                meta.name
+                            )
+                        })?;
+                    block_param_cursor += STRUCT_VIEW_ABI_WORDS;
+
+                    let base_var = declare_new_variable(
+                        &mut builder,
+                        &mut next_variable,
+                        base_value,
+                        param_type,
+                        type_table,
+                    )?;
+                    let index_var = declare_new_variable(
+                        &mut builder,
+                        &mut next_variable,
+                        index_value,
+                        TYPE_ID_I32,
+                        type_table,
+                    )?;
+                    let len_var = declare_new_variable(
+                        &mut builder,
+                        &mut next_variable,
+                        len_value,
+                        TYPE_ID_I32,
+                        type_table,
+                    )?;
+                    (base_var, Some(StructViewBinding { index_var, len_var }))
+                } else {
+                    let value = block_params
+                        .get(block_param_cursor)
+                        .copied()
+                        .ok_or_else(|| {
+                            format!(
+                                "missing block parameter {} for function '{}'",
+                                block_param_cursor, meta.name
+                            )
+                        })?;
+                    block_param_cursor = block_param_cursor.saturating_add(1);
+                    (
+                        declare_new_variable(
+                            &mut builder,
+                            &mut next_variable,
+                            value,
+                            param_type,
+                            type_table,
+                        )?,
+                        None,
+                    )
+                };
             if values_by_name.contains_key(name) {
                 return Err(format!("parameter '{}' shadows existing variable", name));
             }
@@ -611,9 +689,18 @@ fn compile_function_to_object_bytes(
                 name.clone(),
                 LocalBinding {
                     var: variable,
-                    type_id: meta.params[index],
+                    type_id: param_type,
+                    struct_view,
                 },
             );
+        }
+        if block_param_cursor != block_params.len() {
+            return Err(format!(
+                "block parameter count mismatch for function '{}' (consumed {}, found {})",
+                meta.name,
+                block_param_cursor,
+                block_params.len()
+            ));
         }
 
         let empty_foreach_bindings = ForeachBindingMap::new();
@@ -854,7 +941,9 @@ fn record_string_literals_in_stmt(
             }
             Ok(())
         }
-        SimpleStmt::Foreach { body_statements, .. } => {
+        SimpleStmt::Foreach {
+            body_statements, ..
+        } => {
             for stmt in body_statements {
                 record_string_literals_in_stmt(stmt, out)?;
             }
@@ -1181,7 +1270,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_collections_{stamp}"));
+        let bundle_dir =
+            std::env::temp_dir().join(format!("stasis_aot_bundle_collections_{stamp}"));
         let bundle = process
             .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
             .expect("write bundle");
@@ -1434,7 +1524,10 @@ mod tests {
         })));
 
         let report = process.compile().expect("compile perf sample");
-        assert!(report.emit.emitted_functions > 0, "expected functions emitted");
+        assert!(
+            report.emit.emitted_functions > 0,
+            "expected functions emitted"
+        );
 
         set_clif_dump_hook(None);
         let clif = captured
@@ -1447,8 +1540,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_millis();
-        let out_path = std::env::temp_dir()
-            .join(format!("stasis_perf_balls_bricks_tick_{stamp}.clif"));
+        let out_path =
+            std::env::temp_dir().join(format!("stasis_perf_balls_bricks_tick_{stamp}.clif"));
         fs::write(&out_path, &clif).expect("write clif dump");
 
         let call_lines = clif.lines().filter(|line| line.contains("call ")).count();

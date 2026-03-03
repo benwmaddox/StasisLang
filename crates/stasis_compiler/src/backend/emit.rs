@@ -90,7 +90,9 @@ pub(crate) struct ForeachCollectionInfo {
 pub(crate) struct ForeachBinding {
     pub(crate) collection_handle: ForeachCollectionHandle,
     pub(crate) index_var: Variable,
+    pub(crate) len: i32,
     pub(crate) element_type: Option<TypeId>,
+    pub(crate) struct_type_id: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
     pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
@@ -1205,6 +1207,7 @@ fn emit_aot_direct_call_for_signature(
     signature: &CallSignature,
     arg_values: &[Value],
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Option<Value>, String> {
     if signature.extern_symbol.is_some() {
         return Err("direct call emission requested for extern signature".to_string());
@@ -1221,12 +1224,12 @@ fn emit_aot_direct_call_for_signature(
         let symbol = aot_symbol_name(function_id);
         let mut import_signature = mode.module.make_signature();
         for param_type in &signature.params {
-            import_signature
-                .params
-                .push(AbiParam::new(clif_type_for_type_id(
-                    *param_type,
-                    type_table,
-                )?));
+            append_abi_params_for_type_id(
+                &mut import_signature.params,
+                *param_type,
+                type_table,
+                named_struct_field_types,
+            )?;
         }
         if signature.return_type != TYPE_ID_VOID {
             import_signature
@@ -1267,9 +1270,24 @@ pub(crate) struct ValueBinding {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct StructViewValue {
+    pub(crate) type_id: TypeId,
+    pub(crate) base: Value,
+    pub(crate) index: Value,
+    pub(crate) len: Value,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct LocalBinding {
     pub(crate) var: Variable,
     pub(crate) type_id: TypeId,
+    pub(crate) struct_view: Option<StructViewBinding>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StructViewBinding {
+    pub(crate) index_var: Variable,
+    pub(crate) len_var: Variable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1558,6 +1576,7 @@ pub(crate) fn declare_extern_call_imports(
     module: &mut impl Module,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<BTreeMap<ExternImportKey, FuncId>, String> {
     let mut out = BTreeMap::new();
     for signatures in call_signatures.values() {
@@ -1575,9 +1594,12 @@ pub(crate) fn declare_extern_call_imports(
             }
             let mut clif_signature = module.make_signature();
             for param in &signature.params {
-                clif_signature
-                    .params
-                    .push(AbiParam::new(clif_type_for_type_id(*param, type_table)?));
+                append_abi_params_for_type_id(
+                    &mut clif_signature.params,
+                    *param,
+                    type_table,
+                    named_struct_field_types,
+                )?;
             }
             if signature.return_type != TYPE_ID_VOID {
                 clif_signature
@@ -1616,6 +1638,56 @@ pub(crate) fn declare_new_variable(
     builder.declare_var(variable, clif_type_for_type_id(type_id, type_table)?);
     builder.def_var(variable, initial_value);
     Ok(variable)
+}
+
+pub(crate) const STRUCT_VIEW_ABI_WORDS: usize = 3;
+pub(crate) const STRUCT_VIEW_AOS_INDEX_SENTINEL: i32 = -1;
+pub(crate) const STRUCT_VIEW_AOS_LEN_SENTINEL: i32 = 0;
+
+pub(crate) fn is_struct_view_type(
+    type_id: TypeId,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> bool {
+    named_struct_field_types.contains_key(&type_id)
+}
+
+pub(crate) fn abi_word_count_for_param_type(
+    type_id: TypeId,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> usize {
+    if is_struct_view_type(type_id, named_struct_field_types) {
+        STRUCT_VIEW_ABI_WORDS
+    } else {
+        1
+    }
+}
+
+pub(crate) fn abi_word_count_for_params(
+    params: &[TypeId],
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> usize {
+    params
+        .iter()
+        .copied()
+        .map(|type_id| abi_word_count_for_param_type(type_id, named_struct_field_types))
+        .sum()
+}
+
+pub(crate) fn append_abi_params_for_type_id(
+    params: &mut Vec<AbiParam>,
+    type_id: TypeId,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> Result<(), String> {
+    if is_struct_view_type(type_id, named_struct_field_types) {
+        for _ in 0..STRUCT_VIEW_ABI_WORDS {
+            params.push(AbiParam::new(types::I32));
+        }
+        Ok(())
+    } else {
+        params.push(AbiParam::new(clif_type_for_type_id(type_id, type_table)?));
+        Ok(())
+    }
 }
 
 pub(crate) fn clif_type_for_type_id(
@@ -3104,6 +3176,7 @@ pub(crate) fn emit_indirect_call_for_signature(
     signature: &CallSignature,
     arg_values: &[Value],
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Option<Value>, String> {
     let function_id = signature
         .function_id
@@ -3123,12 +3196,12 @@ pub(crate) fn emit_indirect_call_for_signature(
     let mut indirect_signature =
         cranelift_codegen::ir::Signature::new(builder.func.signature.call_conv);
     for param_type in &signature.params {
-        indirect_signature
-            .params
-            .push(AbiParam::new(clif_type_for_type_id(
-                *param_type,
-                type_table,
-            )?));
+        append_abi_params_for_type_id(
+            &mut indirect_signature.params,
+            *param_type,
+            type_table,
+            named_struct_field_types,
+        )?;
     }
     if signature.return_type != TYPE_ID_VOID {
         indirect_signature
@@ -3748,6 +3821,68 @@ pub(crate) fn emit_simple_statements(
                     foreach_bindings,
                     "let binding",
                 )?;
+
+                if let Some(struct_view) = try_emit_struct_view_value(
+                    builder,
+                    expression,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )? {
+                    let local_type_id = type_id.unwrap_or(struct_view.type_id);
+                    if local_type_id != struct_view.type_id {
+                        return Err(format!(
+                            "let binding '{}' expected type {} view expression but found {}",
+                            name, local_type_id, struct_view.type_id
+                        ));
+                    }
+                    let variable = declare_new_variable(
+                        builder,
+                        next_variable,
+                        struct_view.base,
+                        local_type_id,
+                        type_table,
+                    )?;
+                    let index_var = declare_new_variable(
+                        builder,
+                        next_variable,
+                        struct_view.index,
+                        TYPE_ID_I32,
+                        type_table,
+                    )?;
+                    let len_var = declare_new_variable(
+                        builder,
+                        next_variable,
+                        struct_view.len,
+                        TYPE_ID_I32,
+                        type_table,
+                    )?;
+                    values_by_name.insert(
+                        name.clone(),
+                        LocalBinding {
+                            var: variable,
+                            type_id: local_type_id,
+                            struct_view: Some(StructViewBinding { index_var, len_var }),
+                        },
+                    );
+                    continue;
+                } else if type_id
+                    .is_some_and(|type_id| is_struct_view_type(type_id, named_struct_field_types))
+                {
+                    return Err(format!(
+                        "let binding '{}' requires view initializer for struct type {}",
+                        name,
+                        type_id.unwrap_or(TYPE_ID_VOID)
+                    ));
+                }
+
                 let binding = emit_simple_expression(
                     builder,
                     expression,
@@ -3790,6 +3925,7 @@ pub(crate) fn emit_simple_statements(
                     LocalBinding {
                         var: variable,
                         type_id: local_type_id,
+                        struct_view: None,
                     },
                 );
             }
@@ -3872,7 +4008,7 @@ pub(crate) fn emit_simple_statements(
                         .or_else(|| global_path_types.get(name).copied()),
                     AssignTarget::GlobalPath(path) => {
                         global_path_types.get(path).copied().or_else(|| {
-                            let (base, suffix) = path.rsplit_once('.')?;
+                            let (base, suffix) = path.split_once('.')?;
                             let local = values_by_name.get(base)?;
                             let field_types = named_struct_field_types.get(&local.type_id)?;
                             field_types.get(suffix).copied()
@@ -3917,6 +4053,12 @@ pub(crate) fn emit_simple_statements(
                 match target {
                     AssignTarget::Local(name) => {
                         if let Some(local) = values_by_name.get(name).copied() {
+                            if is_struct_view_type(local.type_id, named_struct_field_types) {
+                                return Err(format!(
+                                    "assignment target '{}' is a view binding and is not rebindable in current jit path",
+                                    name
+                                ));
+                            }
                             if !are_assignment_types_compatible(
                                 local.type_id,
                                 rhs.type_id,
@@ -4073,7 +4215,7 @@ pub(crate) fn emit_simple_statements(
                             )?;
                             continue;
                         }
-                        if let Some((base, suffix)) = path.rsplit_once('.') {
+                        if let Some((base, suffix)) = path.split_once('.') {
                             if let Some(local) = values_by_name.get(base).copied() {
                                 if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
                                     if suffix == "max_length" {
@@ -4170,10 +4312,24 @@ pub(crate) fn emit_simple_statements(
                                         ));
                                     }
 
+                                    let base_hash = builder.use_var(local.var);
+                                    if let Some(struct_view) = local.struct_view {
+                                        emit_struct_view_field_assignment(
+                                            builder,
+                                            runtime_call_refs,
+                                            type_table,
+                                            struct_view,
+                                            base_hash,
+                                            suffix,
+                                            field_type,
+                                            *op,
+                                            rhs,
+                                        )?;
+                                        continue;
+                                    }
+
                                     let path_hash = emit_local_struct_field_path_hash(
-                                        builder.use_var(local.var),
-                                        suffix,
-                                        builder,
+                                        base_hash, suffix, builder,
                                     );
                                     if is_i32_scalar_lane_type(field_type, type_table) {
                                         let value = match op {
@@ -4567,6 +4723,26 @@ pub(crate) fn emit_simple_statements(
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
                     for arg in args {
+                        if let Some(struct_view) = try_emit_struct_view_value(
+                            builder,
+                            arg,
+                            values_by_name,
+                            runtime_call_refs,
+                            internal_calls,
+                            call_signatures,
+                            type_table,
+                            global_path_types,
+                            constant_values,
+                            collection_infos,
+                            named_struct_field_types,
+                            foreach_bindings,
+                        )? {
+                            arg_values.push(struct_view.base);
+                            arg_values.push(struct_view.index);
+                            arg_values.push(struct_view.len);
+                            arg_types.push(struct_view.type_id);
+                            continue;
+                        }
                         let binding = emit_simple_expression(
                             builder,
                             arg,
@@ -4585,8 +4761,13 @@ pub(crate) fn emit_simple_statements(
                         arg_values.push(binding.value);
                         arg_types.push(binding.type_id);
                     }
-                    let signature =
-                        resolve_call_signature(target, &arg_types, call_signatures, type_table)?;
+                    let signature = resolve_call_signature(
+                        target,
+                        &arg_types,
+                        call_signatures,
+                        type_table,
+                        named_struct_field_types,
+                    )?;
                     if signature.return_type == TYPE_ID_VOID {
                         if signature.extern_symbol.is_some() {
                             let _ = emit_extern_call_for_signature(
@@ -4604,6 +4785,7 @@ pub(crate) fn emit_simple_statements(
                                         signature,
                                         &arg_values,
                                         type_table,
+                                        named_struct_field_types,
                                     )?;
                                 }
                                 InternalCallMode::AotDirect(mode) => {
@@ -4613,6 +4795,7 @@ pub(crate) fn emit_simple_statements(
                                         signature,
                                         &arg_values,
                                         type_table,
+                                        named_struct_field_types,
                                     )?;
                                 }
                             }
@@ -4889,7 +5072,7 @@ pub(crate) fn emit_simple_statements(
                         "foreach index binding",
                     )?;
                 }
-                let (collection_info, collection_handle) =
+                let (collection_info, collection_handle, collection_struct_type_id) =
                     if let Some(local_collection) = values_by_name.get(collection_path).copied() {
                         let info = build_local_foreach_collection_info(
                             collection_path,
@@ -4897,9 +5080,14 @@ pub(crate) fn emit_simple_statements(
                             type_table,
                             named_struct_field_types,
                         )?;
+                        let element_type =
+                            type_table.indexed_element_type_id(local_collection.type_id);
+                        let struct_type_id = element_type
+                            .filter(|type_id| named_struct_field_types.contains_key(type_id));
                         (
                             info,
                             ForeachCollectionHandle::LocalVar(local_collection.var),
+                            struct_type_id,
                         )
                     } else {
                         let Some(collection_info) = collection_infos.get(collection_path) else {
@@ -4908,9 +5096,22 @@ pub(crate) fn emit_simple_statements(
                                 collection_path
                             ));
                         };
+                        let collection_type = global_path_types
+                            .get(collection_path)
+                            .copied()
+                            .ok_or_else(|| {
+                                format!(
+                                    "unknown foreach collection '{}' in current jit path",
+                                    collection_path
+                                )
+                            })?;
+                        let element_type = type_table.indexed_element_type_id(collection_type);
+                        let struct_type_id = element_type
+                            .filter(|type_id| named_struct_field_types.contains_key(type_id));
                         (
                             collection_info.clone(),
                             ForeachCollectionHandle::PathHash(hash_global_path(collection_path)),
+                            struct_type_id,
                         )
                     };
                 let initial_index_value = builder.ins().iconst(types::I32, 0);
@@ -4949,8 +5150,7 @@ pub(crate) fn emit_simple_statements(
                 }
                 for (suffix, type_id) in &collection_info.field_types {
                     let field_hash = hash_foreach_field_suffix(suffix);
-                    let field_hash_value =
-                        builder.ins().iconst(types::I32, i64::from(field_hash));
+                    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
                     if *type_id == TYPE_ID_F32 {
                         let call = builder.ins().call(
                             runtime_call_refs.global_f32_array_ptr,
@@ -4974,6 +5174,7 @@ pub(crate) fn emit_simple_statements(
                         LocalBinding {
                             var: index_var,
                             type_id: TYPE_ID_I32,
+                            struct_view: None,
                         },
                     );
                 }
@@ -4983,7 +5184,9 @@ pub(crate) fn emit_simple_statements(
                     ForeachBinding {
                         collection_handle,
                         index_var,
+                        len: collection_info.len,
                         element_type: collection_info.element_type,
+                        struct_type_id: collection_struct_type_id,
                         field_types: collection_info.field_types.clone(),
                         f32_array_base_ptrs,
                         f64_array_base_ptrs,
@@ -5689,6 +5892,7 @@ pub(crate) fn resolve_call_signature<'a>(
     arg_types: &[TypeId],
     call_signatures: &'a CallSignatureMap,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<&'a CallSignature, String> {
     let Some(candidates) = call_signatures.get(target) else {
         return Err(format!("unknown call target '{}'", target));
@@ -5698,7 +5902,14 @@ pub(crate) fn resolve_call_signature<'a>(
             && arg_types
                 .iter()
                 .zip(candidate.params.iter())
-                .all(|(arg, param)| type_table.is_argument_compatible_with_param(*arg, *param))
+                .all(|(arg, param)| {
+                    are_call_argument_and_param_compatible(
+                        *arg,
+                        *param,
+                        type_table,
+                        named_struct_field_types,
+                    )
+                })
     });
     let Some(first) = matches.next() else {
         return Err(format!(
@@ -5713,6 +5924,171 @@ pub(crate) fn resolve_call_signature<'a>(
         ));
     }
     Ok(first)
+}
+
+pub(crate) fn are_call_argument_and_param_compatible(
+    argument: TypeId,
+    parameter: TypeId,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> bool {
+    if is_struct_view_type(argument, named_struct_field_types)
+        || is_struct_view_type(parameter, named_struct_field_types)
+    {
+        return argument == parameter;
+    }
+    type_table.is_argument_compatible_with_param(argument, parameter)
+}
+
+pub(crate) fn try_emit_struct_view_value(
+    builder: &mut FunctionBuilder<'_>,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<StructViewValue>, String> {
+    match expression {
+        SimpleExpr::Identifier(name) => {
+            if let Some(local) = values_by_name.get(name).copied() {
+                if is_struct_view_type(local.type_id, named_struct_field_types) {
+                    let Some(struct_view) = local.struct_view else {
+                        return Err(format!(
+                            "struct local '{}' is missing struct view metadata in current jit path",
+                            name
+                        ));
+                    };
+                    return Ok(Some(StructViewValue {
+                        type_id: local.type_id,
+                        base: builder.use_var(local.var),
+                        index: builder.use_var(struct_view.index_var),
+                        len: builder.use_var(struct_view.len_var),
+                    }));
+                }
+            }
+            if let Some(binding) = foreach_bindings.get(name) {
+                if let Some(struct_type_id) = binding.struct_type_id {
+                    let base =
+                        emit_foreach_collection_handle_value(builder, binding.collection_handle);
+                    let index = builder.use_var(binding.index_var);
+                    let len = builder.ins().iconst(types::I32, i64::from(binding.len));
+                    return Ok(Some(StructViewValue {
+                        type_id: struct_type_id,
+                        base,
+                        index,
+                        len,
+                    }));
+                }
+            }
+            if let Some(path_type) = global_path_types.get(name).copied() {
+                if is_struct_view_type(path_type, named_struct_field_types) {
+                    let base = builder
+                        .ins()
+                        .iconst(types::I32, i64::from(hash_global_path(name)));
+                    let index = builder
+                        .ins()
+                        .iconst(types::I32, i64::from(STRUCT_VIEW_AOS_INDEX_SENTINEL));
+                    let len = builder
+                        .ins()
+                        .iconst(types::I32, i64::from(STRUCT_VIEW_AOS_LEN_SENTINEL));
+                    return Ok(Some(StructViewValue {
+                        type_id: path_type,
+                        base,
+                        index,
+                        len,
+                    }));
+                }
+            }
+            Ok(None)
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if !suffix.is_empty() {
+                return Ok(None);
+            }
+
+            let (collection_handle, collection_type_id, known_len) =
+                if let Some(local_collection) = values_by_name.get(collection_path).copied() {
+                    let len = type_table.fixed_collection_len(local_collection.type_id);
+                    (
+                        builder.use_var(local_collection.var),
+                        local_collection.type_id,
+                        len,
+                    )
+                } else {
+                    let Some(collection_type_id) = global_path_types.get(collection_path).copied()
+                    else {
+                        return Ok(None);
+                    };
+                    let len = collection_infos
+                        .get(collection_path)
+                        .map(|info| info.len)
+                        .or_else(|| type_table.fixed_collection_len(collection_type_id));
+                    (
+                        builder
+                            .ins()
+                            .iconst(types::I32, i64::from(hash_global_path(collection_path))),
+                        collection_type_id,
+                        len,
+                    )
+                };
+
+            let Some(element_type_id) = type_table.indexed_element_type_id(collection_type_id)
+            else {
+                return Ok(None);
+            };
+            if !is_struct_view_type(element_type_id, named_struct_field_types) {
+                return Ok(None);
+            }
+
+            let index_binding = emit_simple_expression(
+                builder,
+                index,
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            let index_binding = normalize_index_binding(index_binding, type_table)?;
+
+            let len_value = if let Some(known_len) = known_len {
+                builder.ins().iconst(types::I32, i64::from(known_len))
+            } else {
+                let kind_value = builder
+                    .ins()
+                    .iconst(types::I32, i64::from(CollectionMetaKind::Length as i32));
+                let call = builder.ins().call(
+                    runtime_call_refs.collection_i32_load,
+                    &[collection_handle, kind_value],
+                );
+                builder.inst_results(call)[0]
+            };
+
+            Ok(Some(StructViewValue {
+                type_id: element_type_id,
+                base: collection_handle,
+                index: index_binding.value,
+                len: len_value,
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 pub(crate) fn emit_simple_expression(
@@ -5792,7 +6168,7 @@ pub(crate) fn emit_simple_expression(
             })
         }
         SimpleExpr::Identifier(name) => {
-            if let Some((base, suffix)) = name.rsplit_once('.') {
+            if let Some((base, suffix)) = name.split_once('.') {
                 if let Some(local) = values_by_name.get(base).copied() {
                     if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
                         if is_collection_handle_type(local.type_id, type_table) {
@@ -5817,6 +6193,18 @@ pub(crate) fn emit_simple_expression(
                             ));
                         };
                         let base_hash = builder.use_var(local.var);
+                        if let Some(struct_view) = local.struct_view {
+                            return emit_struct_view_field_load(
+                                builder,
+                                runtime_call_refs,
+                                type_table,
+                                struct_view,
+                                base_hash,
+                                suffix,
+                                field_type,
+                            );
+                        }
+
                         let path_hash =
                             emit_local_struct_field_path_hash(base_hash, suffix, builder);
                         if is_collection_handle_type(field_type, type_table) {
@@ -5952,6 +6340,27 @@ pub(crate) fn emit_simple_expression(
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
             for arg in args {
+                if let Some(struct_view) = try_emit_struct_view_value(
+                    builder,
+                    arg,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )? {
+                    arg_values.push(struct_view.base);
+                    arg_values.push(struct_view.index);
+                    arg_values.push(struct_view.len);
+                    arg_types.push(struct_view.type_id);
+                    continue;
+                }
+
                 let binding = emit_simple_expression(
                     builder,
                     arg,
@@ -6034,8 +6443,13 @@ pub(crate) fn emit_simple_expression(
                     type_id: TYPE_ID_F32,
                 });
             }
-            let signature =
-                resolve_call_signature(target, &arg_types, call_signatures, type_table)?;
+            let signature = resolve_call_signature(
+                target,
+                &arg_types,
+                call_signatures,
+                type_table,
+                named_struct_field_types,
+            )?;
             if signature.extern_symbol.is_some() {
                 let result = emit_extern_call_for_signature(
                     builder,
@@ -6061,6 +6475,7 @@ pub(crate) fn emit_simple_expression(
                     signature,
                     &arg_values,
                     type_table,
+                    named_struct_field_types,
                 )?;
                 let value = result.ok_or_else(|| {
                     format!(
@@ -6175,11 +6590,22 @@ pub(crate) fn emit_simple_expression(
                                 arg_values[7],
                             ],
                         ),
-                        other => {
-                            return Err(format!(
-                                "unsupported call arity {} in expression for target '{}'",
-                                other, target
-                            ))
+                        _ => {
+                            let value = emit_indirect_call_for_signature(
+                                builder,
+                                runtime_call_refs,
+                                signature,
+                                &arg_values,
+                                type_table,
+                                named_struct_field_types,
+                            )?
+                            .ok_or_else(|| {
+                                format!("call target '{}' did not produce value", target)
+                            })?;
+                            return Ok(ValueBinding {
+                                value,
+                                type_id: signature.return_type,
+                            });
                         }
                     }
                 } else if all_f32_args {
@@ -6259,11 +6685,22 @@ pub(crate) fn emit_simple_expression(
                                 arg_values[7],
                             ],
                         ),
-                        other => {
-                            return Err(format!(
-                                "unsupported call arity {} in expression for target '{}'",
-                                other, target
-                            ))
+                        _ => {
+                            let value = emit_indirect_call_for_signature(
+                                builder,
+                                runtime_call_refs,
+                                signature,
+                                &arg_values,
+                                type_table,
+                                named_struct_field_types,
+                            )?
+                            .ok_or_else(|| {
+                                format!("call target '{}' did not produce value", target)
+                            })?;
+                            return Ok(ValueBinding {
+                                value,
+                                type_id: signature.return_type,
+                            });
                         }
                     }
                 } else {
@@ -6281,6 +6718,7 @@ pub(crate) fn emit_simple_expression(
                             signature,
                             &arg_values,
                             type_table,
+                            named_struct_field_types,
                         )?
                     };
                     let value = result
@@ -6319,6 +6757,7 @@ pub(crate) fn emit_simple_expression(
                                 signature,
                                 &arg_values,
                                 type_table,
+                                named_struct_field_types,
                             )?
                         };
                         let value = result.ok_or_else(|| {
@@ -6401,11 +6840,22 @@ pub(crate) fn emit_simple_expression(
                                 arg_values[7],
                             ],
                         ),
-                        other => {
-                            return Err(format!(
-                                "unsupported call arity {} in expression for target '{}'",
-                                other, target
-                            ))
+                        _ => {
+                            let value = emit_indirect_call_for_signature(
+                                builder,
+                                runtime_call_refs,
+                                signature,
+                                &arg_values,
+                                type_table,
+                                named_struct_field_types,
+                            )?
+                            .ok_or_else(|| {
+                                format!("call target '{}' did not produce value", target)
+                            })?;
+                            return Ok(ValueBinding {
+                                value,
+                                type_id: signature.return_type,
+                            });
                         }
                     }
                 }
@@ -6416,6 +6866,7 @@ pub(crate) fn emit_simple_expression(
                     signature,
                     &arg_values,
                     type_table,
+                    named_struct_field_types,
                 )?
                 .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
                 return Ok(ValueBinding {
@@ -6704,7 +7155,8 @@ pub(crate) fn emit_foreach_binding_load(
     let index_value = builder.use_var(binding.index_var);
     if is_i32_abi_compatible_type(resolved, type_table) {
         let field_hash = hash_foreach_field_suffix(suffix);
-        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let collection_hash =
+            emit_foreach_collection_handle_value(builder, binding.collection_handle);
         let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_i32_array_load,
@@ -6728,7 +7180,8 @@ pub(crate) fn emit_foreach_binding_load(
         }
 
         let field_hash = hash_foreach_field_suffix(suffix);
-        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let collection_hash =
+            emit_foreach_collection_handle_value(builder, binding.collection_handle);
         let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_f32_array_load,
@@ -6752,7 +7205,8 @@ pub(crate) fn emit_foreach_binding_load(
         }
 
         let field_hash = hash_foreach_field_suffix(suffix);
-        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let collection_hash =
+            emit_foreach_collection_handle_value(builder, binding.collection_handle);
         let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_f64_array_load,
@@ -7048,6 +7502,344 @@ pub(crate) fn emit_local_struct_field_path_hash(
         hash_value = builder.ins().imul_imm(hash_value, 16_777_619);
     }
     hash_value
+}
+
+pub(crate) fn emit_struct_view_field_load(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    binding: StructViewBinding,
+    base_hash: Value,
+    suffix: &str,
+    field_type: TypeId,
+) -> Result<ValueBinding, String> {
+    if is_collection_handle_type(field_type, type_table) {
+        return Err(format!(
+            "struct view field '{}' resolves to collection handle type {} which is unsupported in current jit path",
+            suffix, field_type
+        ));
+    }
+    let index_value = builder.use_var(binding.index_var);
+    let aos_condition = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index_value, 0);
+
+    let aos_block = builder.create_block();
+    let soa_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, clif_type_for_type_id(field_type, type_table)?);
+
+    builder
+        .ins()
+        .brif(aos_condition, aos_block, &[], soa_block, &[]);
+
+    builder.switch_to_block(aos_block);
+    let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
+    let aos_value = if is_i32_abi_compatible_type(field_type, type_table) {
+        let call = builder
+            .ins()
+            .call(runtime_call_refs.global_i32_load, &[path_hash]);
+        builder.inst_results(call)[0]
+    } else if field_type == TYPE_ID_F32 {
+        let call = builder
+            .ins()
+            .call(runtime_call_refs.global_f32_load, &[path_hash]);
+        builder.inst_results(call)[0]
+    } else if field_type == TYPE_ID_F64 {
+        let call = builder
+            .ins()
+            .call(runtime_call_refs.global_f64_load, &[path_hash]);
+        builder.inst_results(call)[0]
+    } else {
+        return Err(format!(
+            "unsupported struct view field type {} for suffix '{}'",
+            field_type, suffix
+        ));
+    };
+    builder.ins().jump(merge_block, &[aos_value]);
+    builder.seal_block(aos_block);
+
+    builder.switch_to_block(soa_block);
+    let field_hash = hash_foreach_field_suffix(suffix);
+    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
+    let soa_value = if is_i32_abi_compatible_type(field_type, type_table) {
+        let call = builder.ins().call(
+            runtime_call_refs.global_i32_array_load,
+            &[base_hash, field_hash_value, index_value],
+        );
+        builder.inst_results(call)[0]
+    } else if field_type == TYPE_ID_F32 {
+        let call = builder.ins().call(
+            runtime_call_refs.global_f32_array_load,
+            &[base_hash, field_hash_value, index_value],
+        );
+        builder.inst_results(call)[0]
+    } else if field_type == TYPE_ID_F64 {
+        let call = builder.ins().call(
+            runtime_call_refs.global_f64_array_load,
+            &[base_hash, field_hash_value, index_value],
+        );
+        builder.inst_results(call)[0]
+    } else {
+        return Err(format!(
+            "unsupported struct view field type {} for suffix '{}'",
+            field_type, suffix
+        ));
+    };
+    builder.ins().jump(merge_block, &[soa_value]);
+    builder.seal_block(soa_block);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let value = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "struct view merge block missing value param".to_string())?;
+    Ok(ValueBinding {
+        value,
+        type_id: field_type,
+    })
+}
+
+pub(crate) fn emit_struct_view_field_assignment(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    binding: StructViewBinding,
+    base_hash: Value,
+    suffix: &str,
+    field_type: TypeId,
+    op: AssignOp,
+    rhs: ValueBinding,
+) -> Result<(), String> {
+    if is_collection_handle_type(field_type, type_table) {
+        return Err(format!(
+            "struct view field '{}' resolves to collection handle type {} which is unsupported in current jit path",
+            suffix, field_type
+        ));
+    }
+    if !are_assignment_types_compatible(field_type, rhs.type_id, type_table) {
+        return Err(format!(
+            "assignment type mismatch for struct view field '{}': target type {}, expression type {}",
+            suffix, field_type, rhs.type_id
+        ));
+    }
+
+    let index_value = builder.use_var(binding.index_var);
+    let aos_condition = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index_value, 0);
+    let aos_block = builder.create_block();
+    let soa_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder
+        .ins()
+        .brif(aos_condition, aos_block, &[], soa_block, &[]);
+
+    builder.switch_to_block(aos_block);
+    let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
+    if is_i32_scalar_lane_type(field_type, type_table) {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
+                let call = builder
+                    .ins()
+                    .call(runtime_call_refs.global_i32_load, &[path_hash]);
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().imul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().sdiv(lhs, rhs.value),
+                    AssignOp::Mod => builder.ins().srem(lhs, rhs.value),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+        };
+        builder
+            .ins()
+            .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
+    } else if field_type == TYPE_ID_BOOL {
+        if op != AssignOp::Set {
+            return Err(format!(
+                "bool assignment only supports '=' in current jit path for struct view field '{}'",
+                suffix
+            ));
+        }
+        builder
+            .ins()
+            .call(runtime_call_refs.global_i32_store, &[path_hash, rhs.value]);
+    } else if field_type == TYPE_ID_F32 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                let call = builder
+                    .ins()
+                    .call(runtime_call_refs.global_f32_load, &[path_hash]);
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
+                    AssignOp::Mod => unreachable!(),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f32 struct view field '{}'",
+                    suffix
+                ));
+            }
+        };
+        builder
+            .ins()
+            .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
+    } else if field_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                let call = builder
+                    .ins()
+                    .call(runtime_call_refs.global_f64_load, &[path_hash]);
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
+                    AssignOp::Mod => unreachable!(),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 struct view field '{}'",
+                    suffix
+                ));
+            }
+        };
+        builder
+            .ins()
+            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
+    } else {
+        return Err(format!(
+            "unsupported struct view field type {} for suffix '{}'",
+            field_type, suffix
+        ));
+    }
+    builder.ins().jump(merge_block, &[]);
+    builder.seal_block(aos_block);
+
+    builder.switch_to_block(soa_block);
+    let field_hash = hash_foreach_field_suffix(suffix);
+    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
+    if is_i32_scalar_lane_type(field_type, type_table) {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
+                let call = builder.ins().call(
+                    runtime_call_refs.global_i32_array_load,
+                    &[base_hash, field_hash_value, index_value],
+                );
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().imul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().sdiv(lhs, rhs.value),
+                    AssignOp::Mod => builder.ins().srem(lhs, rhs.value),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+        };
+        builder.ins().call(
+            runtime_call_refs.global_i32_array_store,
+            &[base_hash, field_hash_value, index_value, value],
+        );
+    } else if field_type == TYPE_ID_BOOL {
+        if op != AssignOp::Set {
+            return Err(format!(
+                "bool assignment only supports '=' in current jit path for struct view field '{}'",
+                suffix
+            ));
+        }
+        builder.ins().call(
+            runtime_call_refs.global_i32_array_store,
+            &[base_hash, field_hash_value, index_value, rhs.value],
+        );
+    } else if field_type == TYPE_ID_F32 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                let call = builder.ins().call(
+                    runtime_call_refs.global_f32_array_load,
+                    &[base_hash, field_hash_value, index_value],
+                );
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
+                    AssignOp::Mod => unreachable!(),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f32 struct view field '{}'",
+                    suffix
+                ));
+            }
+        };
+        builder.ins().call(
+            runtime_call_refs.global_f32_array_store,
+            &[base_hash, field_hash_value, index_value, value],
+        );
+    } else if field_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div => {
+                let call = builder.ins().call(
+                    runtime_call_refs.global_f64_array_load,
+                    &[base_hash, field_hash_value, index_value],
+                );
+                let lhs = builder.inst_results(call)[0];
+                match op {
+                    AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
+                    AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
+                    AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
+                    AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
+                    AssignOp::Mod => unreachable!(),
+                    AssignOp::Set => unreachable!(),
+                }
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 struct view field '{}'",
+                    suffix
+                ));
+            }
+        };
+        builder.ins().call(
+            runtime_call_refs.global_f64_array_store,
+            &[base_hash, field_hash_value, index_value, value],
+        );
+    } else {
+        return Err(format!(
+            "unsupported struct view field type {} for suffix '{}'",
+            field_type, suffix
+        ));
+    }
+    builder.ins().jump(merge_block, &[]);
+    builder.seal_block(soa_block);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    Ok(())
 }
 
 pub(crate) fn emit_foreach_collection_handle_value(
@@ -8258,6 +9050,7 @@ pub(crate) fn build_runtime_call_import_ids(
     module: &mut impl Module,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<RuntimeCallImportIds, String> {
     Ok(RuntimeCallImportIds {
         call_i32_0: declare_i32_call_import(module, "stasis_jit_call_i32_0", 1)?,
@@ -8314,7 +9107,10 @@ pub(crate) fn build_runtime_call_import_ids(
             module,
             "stasis_jit_global_f32_array_store",
         )?,
-        global_f32_array_ptr: declare_f32_array_ptr_import(module, "stasis_jit_global_f32_array_ptr")?,
+        global_f32_array_ptr: declare_f32_array_ptr_import(
+            module,
+            "stasis_jit_global_f32_array_ptr",
+        )?,
         global_f64_array_load: declare_f64_array_load_import(
             module,
             "stasis_jit_global_f64_array_load",
@@ -8323,14 +9119,22 @@ pub(crate) fn build_runtime_call_import_ids(
             module,
             "stasis_jit_global_f64_array_store",
         )?,
-        global_f64_array_ptr: declare_f64_array_ptr_import(module, "stasis_jit_global_f64_array_ptr")?,
+        global_f64_array_ptr: declare_f64_array_ptr_import(
+            module,
+            "stasis_jit_global_f64_array_ptr",
+        )?,
         collection_i32_load: declare_i32_call_import(module, "stasis_jit_collection_i32_load", 2)?,
         collection_i32_store: declare_void_call_import(
             module,
             "stasis_jit_collection_i32_store",
             3,
         )?,
-        extern_calls: declare_extern_call_imports(module, call_signatures, type_table)?,
+        extern_calls: declare_extern_call_imports(
+            module,
+            call_signatures,
+            type_table,
+            named_struct_field_types,
+        )?,
     })
 }
 
