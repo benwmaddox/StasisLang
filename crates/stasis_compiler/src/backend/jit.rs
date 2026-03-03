@@ -58,9 +58,12 @@ impl JitProcess {
             // deterministic by clearing under the test guard.
             stasis_dynload::clear_jit_i32_global_table();
             stasis_dynload::clear_jit_f32_global_table();
+            stasis_dynload::clear_jit_f64_global_table();
             stasis_dynload::clear_jit_i32_array_global_table();
             stasis_dynload::clear_jit_f32_array_global_table();
+            stasis_dynload::clear_jit_f64_array_global_table();
             stasis_dynload::clear_jit_string_literal_table();
+            stasis_dynload::clear_registered_global_memory();
         }
 
         Self {
@@ -704,6 +707,8 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "stasis_jit_global_i32_store" => stasis_dynload::stasis_jit_global_i32_store as usize,
         "stasis_jit_global_f32_load" => stasis_dynload::stasis_jit_global_f32_load as usize,
         "stasis_jit_global_f32_store" => stasis_dynload::stasis_jit_global_f32_store as usize,
+        "stasis_jit_global_f64_load" => stasis_dynload::stasis_jit_global_f64_load as usize,
+        "stasis_jit_global_f64_store" => stasis_dynload::stasis_jit_global_f64_store as usize,
         "stasis_jit_collection_i32_load" => stasis_dynload::stasis_jit_collection_i32_load as usize,
         "stasis_jit_collection_i32_store" => {
             stasis_dynload::stasis_jit_collection_i32_store as usize
@@ -940,6 +945,14 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_global_f32_store as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_global_f64_load",
+        stasis_dynload::stasis_jit_global_f64_load as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_store",
+        stasis_dynload::stasis_jit_global_f64_store as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_collection_i32_load",
         stasis_dynload::stasis_jit_collection_i32_load as *const u8,
     );
@@ -962,6 +975,22 @@ fn compile_function_to_jit_module(
     jit_builder.symbol(
         "stasis_jit_global_f32_array_store",
         stasis_dynload::stasis_jit_global_f32_array_store as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f32_array_ptr",
+        stasis_dynload::stasis_jit_global_f32_array_ptr as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_array_load",
+        stasis_dynload::stasis_jit_global_f64_array_load as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_array_store",
+        stasis_dynload::stasis_jit_global_f64_array_store as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_array_ptr",
+        stasis_dynload::stasis_jit_global_f64_array_ptr as *const u8,
     );
     for (extern_symbol, address) in extern_symbol_addresses {
         if *address == 0 {
@@ -998,148 +1027,14 @@ fn compile_function_to_jit_module(
     let function_id = module
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare JIT function {symbol}: {error}"))?;
-    let runtime_call_imports = RuntimeCallImportIds {
-        call_i32_0: declare_i32_call_import(&mut module, "stasis_jit_call_i32_0", 1)?,
-        call_i32_1: declare_i32_call_import(&mut module, "stasis_jit_call_i32_1", 2)?,
-        call_i32_2: declare_i32_call_import(&mut module, "stasis_jit_call_i32_2", 3)?,
-        call_i32_3: declare_i32_call_import(&mut module, "stasis_jit_call_i32_3", 4)?,
-        call_i32_4: declare_i32_call_import(&mut module, "stasis_jit_call_i32_4", 5)?,
-        call_i32_5: declare_i32_call_import(&mut module, "stasis_jit_call_i32_5", 6)?,
-        call_i32_6: declare_i32_call_import(&mut module, "stasis_jit_call_i32_6", 7)?,
-        call_i32_7: declare_i32_call_import(&mut module, "stasis_jit_call_i32_7", 8)?,
-        call_i32_8: declare_i32_call_import(&mut module, "stasis_jit_call_i32_8", 9)?,
-        call_i32_f32_1: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_1", 1)?,
-        call_i32_f32_2: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_2", 2)?,
-        call_i32_f32_3: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_3", 3)?,
-        call_i32_f32_4: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_4", 4)?,
-        call_i32_f32_5: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_5", 5)?,
-        call_i32_f32_6: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_6", 6)?,
-        call_i32_f32_7: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_7", 7)?,
-        call_i32_f32_8: declare_i32_f32_call_import(&mut module, "stasis_jit_call_i32_f32_8", 8)?,
-        call_f32_0: declare_f32_call_import(&mut module, "stasis_jit_call_f32_0", 1)?,
-        call_f32_1: declare_f32_call_import(&mut module, "stasis_jit_call_f32_1", 2)?,
-        call_f32_2: declare_f32_call_import(&mut module, "stasis_jit_call_f32_2", 3)?,
-        call_f32_3: declare_f32_call_import(&mut module, "stasis_jit_call_f32_3", 4)?,
-        call_f32_4: declare_f32_call_import(&mut module, "stasis_jit_call_f32_4", 5)?,
-        call_f32_5: declare_f32_call_import(&mut module, "stasis_jit_call_f32_5", 6)?,
-        call_f32_6: declare_f32_call_import(&mut module, "stasis_jit_call_f32_6", 7)?,
-        call_f32_7: declare_f32_call_import(&mut module, "stasis_jit_call_f32_7", 8)?,
-        call_f32_8: declare_f32_call_import(&mut module, "stasis_jit_call_f32_8", 9)?,
-        call_f32_i32_1: declare_f32_i32_call_import(&mut module, "stasis_jit_call_f32_i32_1", 2)?,
-        print_i32: declare_void_call_import(&mut module, "stasis_jit_print_i32", 1)?,
-        print_string: declare_void_call_import(&mut module, "stasis_jit_print_string", 1)?,
-        lookup_code_ptr: declare_lookup_code_ptr_import(&mut module, "stasis_jit_lookup_code_ptr")?,
-        sin_fast: declare_direct_f32_unary_import(&mut module, "stasis_jit_sin_fast")?,
-        cos_fast: declare_direct_f32_unary_import(&mut module, "stasis_jit_cos_fast")?,
-        global_i32_load: declare_i32_call_import(&mut module, "stasis_jit_global_i32_load", 1)?,
-        global_i32_store: declare_void_call_import(&mut module, "stasis_jit_global_i32_store", 2)?,
-        global_f32_load: declare_f32_global_load_import(&mut module, "stasis_jit_global_f32_load")?,
-        global_f32_store: declare_f32_global_store_import(
-            &mut module,
-            "stasis_jit_global_f32_store",
-        )?,
-        global_i32_array_load: declare_i32_array_load_import(
-            &mut module,
-            "stasis_jit_global_i32_array_load",
-        )?,
-        global_i32_array_store: declare_i32_array_store_import(
-            &mut module,
-            "stasis_jit_global_i32_array_store",
-        )?,
-        global_f32_array_load: declare_f32_array_load_import(
-            &mut module,
-            "stasis_jit_global_f32_array_load",
-        )?,
-        global_f32_array_store: declare_f32_array_store_import(
-            &mut module,
-            "stasis_jit_global_f32_array_store",
-        )?,
-        collection_i32_load: declare_i32_call_import(
-            &mut module,
-            "stasis_jit_collection_i32_load",
-            2,
-        )?,
-        collection_i32_store: declare_void_call_import(
-            &mut module,
-            "stasis_jit_collection_i32_store",
-            3,
-        )?,
-        extern_calls: declare_extern_call_imports(&mut module, call_signatures, type_table)?,
-    };
+    let runtime_call_imports =
+        build_runtime_call_import_ids(&mut module, call_signatures, type_table)?;
 
     let mut function_builder_context = FunctionBuilderContext::new();
     {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-        let runtime_call_refs = RuntimeCallRefs {
-            call_i32_0: module.declare_func_in_func(runtime_call_imports.call_i32_0, builder.func),
-            call_i32_1: module.declare_func_in_func(runtime_call_imports.call_i32_1, builder.func),
-            call_i32_2: module.declare_func_in_func(runtime_call_imports.call_i32_2, builder.func),
-            call_i32_3: module.declare_func_in_func(runtime_call_imports.call_i32_3, builder.func),
-            call_i32_4: module.declare_func_in_func(runtime_call_imports.call_i32_4, builder.func),
-            call_i32_5: module.declare_func_in_func(runtime_call_imports.call_i32_5, builder.func),
-            call_i32_6: module.declare_func_in_func(runtime_call_imports.call_i32_6, builder.func),
-            call_i32_7: module.declare_func_in_func(runtime_call_imports.call_i32_7, builder.func),
-            call_i32_8: module.declare_func_in_func(runtime_call_imports.call_i32_8, builder.func),
-            call_i32_f32_1: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_1, builder.func),
-            call_i32_f32_2: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_2, builder.func),
-            call_i32_f32_3: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_3, builder.func),
-            call_i32_f32_4: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_4, builder.func),
-            call_i32_f32_5: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_5, builder.func),
-            call_i32_f32_6: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_6, builder.func),
-            call_i32_f32_7: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_7, builder.func),
-            call_i32_f32_8: module
-                .declare_func_in_func(runtime_call_imports.call_i32_f32_8, builder.func),
-            call_f32_0: module.declare_func_in_func(runtime_call_imports.call_f32_0, builder.func),
-            call_f32_1: module.declare_func_in_func(runtime_call_imports.call_f32_1, builder.func),
-            call_f32_2: module.declare_func_in_func(runtime_call_imports.call_f32_2, builder.func),
-            call_f32_3: module.declare_func_in_func(runtime_call_imports.call_f32_3, builder.func),
-            call_f32_4: module.declare_func_in_func(runtime_call_imports.call_f32_4, builder.func),
-            call_f32_5: module.declare_func_in_func(runtime_call_imports.call_f32_5, builder.func),
-            call_f32_6: module.declare_func_in_func(runtime_call_imports.call_f32_6, builder.func),
-            call_f32_7: module.declare_func_in_func(runtime_call_imports.call_f32_7, builder.func),
-            call_f32_8: module.declare_func_in_func(runtime_call_imports.call_f32_8, builder.func),
-            call_f32_i32_1: module
-                .declare_func_in_func(runtime_call_imports.call_f32_i32_1, builder.func),
-            print_i32: module.declare_func_in_func(runtime_call_imports.print_i32, builder.func),
-            print_string: module
-                .declare_func_in_func(runtime_call_imports.print_string, builder.func),
-            lookup_code_ptr: module
-                .declare_func_in_func(runtime_call_imports.lookup_code_ptr, builder.func),
-            sin_fast: module.declare_func_in_func(runtime_call_imports.sin_fast, builder.func),
-            cos_fast: module.declare_func_in_func(runtime_call_imports.cos_fast, builder.func),
-            global_i32_load: module
-                .declare_func_in_func(runtime_call_imports.global_i32_load, builder.func),
-            global_i32_store: module
-                .declare_func_in_func(runtime_call_imports.global_i32_store, builder.func),
-            global_f32_load: module
-                .declare_func_in_func(runtime_call_imports.global_f32_load, builder.func),
-            global_f32_store: module
-                .declare_func_in_func(runtime_call_imports.global_f32_store, builder.func),
-            global_i32_array_load: module
-                .declare_func_in_func(runtime_call_imports.global_i32_array_load, builder.func),
-            global_i32_array_store: module
-                .declare_func_in_func(runtime_call_imports.global_i32_array_store, builder.func),
-            global_f32_array_load: module
-                .declare_func_in_func(runtime_call_imports.global_f32_array_load, builder.func),
-            global_f32_array_store: module
-                .declare_func_in_func(runtime_call_imports.global_f32_array_store, builder.func),
-            collection_i32_load: module
-                .declare_func_in_func(runtime_call_imports.collection_i32_load, builder.func),
-            collection_i32_store: module
-                .declare_func_in_func(runtime_call_imports.collection_i32_store, builder.func),
-            extern_calls: runtime_call_imports
-                .extern_calls
-                .iter()
-                .map(|(key, id)| (key.clone(), module.declare_func_in_func(*id, builder.func)))
-                .collect(),
-        };
+        let runtime_call_refs =
+            build_runtime_call_refs(&mut module, &runtime_call_imports, builder.func);
         let entry = builder.create_block();
         for param_type in &meta.params {
             builder.append_block_param(entry, clif_type_for_type_id(*param_type, type_table)?);
@@ -1621,6 +1516,51 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_supports_typed_f64_global_path_set_and_read() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Layout { width: f64; }\nglobal state: Layout;\nfunction main(): i32 { state.width = 3.5; let w: f64 = state.width; if (w > 3.0) { return 1; } return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_supports_f64_array_set_and_read() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global values: f64[4];\nfunction main(): i32 { values[0] = 3.5; let w: f64 = values[0]; if (w > 3.0) { return 1; } return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_f64_return_call_and_conversions() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function helper(value: f64): f64 { return value + 1.0; }\nfunction main(): i32 {\n    let src: i32 = 8;\n    let x: f64 = 0.0;\n    x.from_i32(src);\n    let v: f64 = helper(x);\n    let out: i32 = 0;\n    out.from_f64(v);\n    return out;\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 9);
     }
 
     #[cfg(windows)]

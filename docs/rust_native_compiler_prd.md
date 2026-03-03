@@ -68,7 +68,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 
 ## Benchmark Snapshot (2026-02-24)
 - Command:
-- `cargo run -p stasis_compiler --example rust_native_jit_bench -- --functions 1000,5000 --cold-samples 3 --incremental-samples 5`
+- `cargo run -p stasis_compiler --release --example rust_native_jit_bench -- --functions 1000,5000 --cold-samples 3 --incremental-samples 5`
 - Results:
 - `1,000` functions: cold `p50=349.027ms`, cold `p95=354.803ms`; one-function JIT update `p50=2.982ms`, `p95=3.145ms`.
 - `5,000` functions: cold `p50=1738.212ms`, cold `p95=1755.483ms`; one-function JIT update `p50=13.262ms`, `p95=13.672ms`.
@@ -82,7 +82,7 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 
 ## Engine Overhead Snapshot (2026-02-24)
 - Command:
-- `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 1 --ticks 240`
+- `cargo run -p stasis --release --example engine_overhead_bench -- --mode both --samples 1 --ticks 240`
 - Results (single-sample smoke baseline):
 - `jit`: total `124.577ms`, compile `2.000ms`, commit `0.000ms`, runtime-overhead `122.577ms`.
 - `aot`: total `124.029ms`, compile `2.000ms`, commit `0.000ms`, runtime-overhead `122.029ms`, load-artifact `0.049ms`.
@@ -92,4 +92,4 @@ This branch tracks an experimental Rust-native compiler direction focused on com
 - Improve compile-time performance against target gates (`<250ms @1k cold`, `<5ms typical single-function update`).
 - Add a deferred end-to-end engine overhead benchmark/test that includes package/build artifact handoff, load, swap commit, and render-loop progression timing.
 - Added engine-overhead benchmark harness command:
-- `cargo run -p stasis --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`
+- `cargo run -p stasis --release --example engine_overhead_bench -- --mode both --samples 3 --ticks 240`
