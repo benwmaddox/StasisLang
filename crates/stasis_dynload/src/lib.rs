@@ -630,6 +630,11 @@ fn owned_f32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f32>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn owned_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<i32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<i32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -668,6 +673,10 @@ pub fn clear_registered_global_memory() {
     owned_f32_arrays()
         .lock()
         .expect("owned f32 array table mutex poisoned")
+        .clear();
+    owned_i32_arrays()
+        .lock()
+        .expect("owned i32 array table mutex poisoned")
         .clear();
     owned_f64_arrays()
         .lock()
@@ -729,6 +738,65 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
         .lock()
         .expect("registered u8 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_i32_array_ptr(
+    collection_hash: i32,
+    field_hash: i32,
+    len: i32,
+) -> *mut i32 {
+    if len <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    // Fast path: already registered (host-owned or previously allocated).
+    {
+        let table = registered_i32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered i32 array table mutex poisoned");
+        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
+            return ptr as *mut i32;
+        }
+    }
+
+    let requested_len = len as usize;
+    let key = (collection_hash, field_hash);
+
+    let ptr = {
+        let mut owned_guard = owned_i32_arrays()
+            .lock()
+            .expect("owned i32 array table mutex poisoned");
+        let array = owned_guard.entry(key).or_insert_with(|| vec![0; requested_len]);
+        if array.len() < requested_len {
+            array.resize(requested_len, 0);
+        }
+
+        // Migrate any previously-stored values from the fallback hash map.
+        {
+            let table = jit_i32_array_global_table();
+            let mut guard = table.lock().expect("jit global table mutex poisoned");
+            for idx in 0..requested_len {
+                let idx_i32 = idx as i32;
+                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
+                    array[idx] = value;
+                }
+            }
+        }
+
+        array.as_mut_ptr()
+    };
+
+    {
+        let table = registered_i32_arrays();
+        let mut guard = table
+            .lock()
+            .expect("registered i32 array table mutex poisoned");
+        guard.insert(key, (ptr as usize, requested_len));
+    }
+
+    ptr
 }
 
 #[no_mangle]
@@ -2427,5 +2495,45 @@ mod tests {
             .expect("resolve GetTickCount");
         let value = invoke_noarg_u64(address).expect("invoke GetTickCount");
         assert!(value <= u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn i32_array_ptr_migrates_fallback_values_and_supports_direct_access() {
+        clear_registered_global_memory();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x1357_2468i32;
+        let field_hash = 0x2468_1357i32;
+        stasis_jit_global_i32_array_store(collection_hash, field_hash, 0, 11);
+        stasis_jit_global_i32_array_store(collection_hash, field_hash, 1, 22);
+        stasis_jit_global_i32_array_store(collection_hash, field_hash, 2, 33);
+
+        let ptr = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
+        assert!(!ptr.is_null());
+
+        assert_eq!(
+            stasis_jit_global_i32_array_load(collection_hash, field_hash, 0),
+            11
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(collection_hash, field_hash, 1),
+            22
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(collection_hash, field_hash, 2),
+            33
+        );
+
+        // Safety: pointer comes from dynload-owned registration table for this test process.
+        unsafe {
+            *ptr.add(3) = 44;
+        }
+        assert_eq!(
+            stasis_jit_global_i32_array_load(collection_hash, field_hash, 3),
+            44
+        );
+
+        let ptr2 = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
+        assert_eq!(ptr, ptr2);
     }
 }
