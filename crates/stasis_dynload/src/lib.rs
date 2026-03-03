@@ -551,6 +551,56 @@ fn registered_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn owned_f32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn clear_registered_global_memory() {
+    registered_i32_ptrs()
+        .lock()
+        .expect("registered i32 ptr table mutex poisoned")
+        .clear();
+    registered_f32_ptrs()
+        .lock()
+        .expect("registered f32 ptr table mutex poisoned")
+        .clear();
+    registered_f64_ptrs()
+        .lock()
+        .expect("registered f64 ptr table mutex poisoned")
+        .clear();
+    registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .clear();
+    registered_f32_arrays()
+        .lock()
+        .expect("registered f32 array table mutex poisoned")
+        .clear();
+    registered_f64_arrays()
+        .lock()
+        .expect("registered f64 array table mutex poisoned")
+        .clear();
+    registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .clear();
+
+    owned_f32_arrays()
+        .lock()
+        .expect("owned f32 array table mutex poisoned")
+        .clear();
+    owned_f64_arrays()
+        .lock()
+        .expect("owned f64 array table mutex poisoned")
+        .clear();
+}
+
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
     let table = registered_i32_ptrs();
     let mut guard = table
@@ -605,6 +655,127 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
         .lock()
         .expect("registered u8 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f32_array_ptr(
+    collection_hash: i32,
+    field_hash: i32,
+    len: i32,
+) -> *mut f32 {
+    if len <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    // Fast path: already registered (host-owned or previously allocated).
+    {
+        let table = registered_f32_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f32 array table mutex poisoned");
+        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
+            return ptr as *mut f32;
+        }
+    }
+
+    let requested_len = len as usize;
+    let key = (collection_hash, field_hash);
+
+    // Allocate (or reuse) an owned backing array, then register it so subsequent helper calls
+    // can skip the fallback hash map path.
+    let ptr = {
+        let mut owned_guard = owned_f32_arrays()
+            .lock()
+            .expect("owned f32 array table mutex poisoned");
+        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        if array.len() < requested_len {
+            array.resize(requested_len, 0.0);
+        }
+
+        // Migrate any previously-stored values from the fallback hash map.
+        {
+            let table = jit_f32_array_global_table();
+            let mut guard = table.lock().expect("jit global table mutex poisoned");
+            for idx in 0..requested_len {
+                let idx_i32 = idx as i32;
+                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
+                    array[idx] = value;
+                }
+            }
+        }
+
+        array.as_mut_ptr()
+    };
+
+    {
+        let table = registered_f32_arrays();
+        let mut guard = table
+            .lock()
+            .expect("registered f32 array table mutex poisoned");
+        // Register with the requested len so helper loads/stores use the same bounds as foreach.
+        guard.insert(key, (ptr as usize, requested_len));
+    }
+
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_array_ptr(
+    collection_hash: i32,
+    field_hash: i32,
+    len: i32,
+) -> *mut f64 {
+    if len <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    // Fast path: already registered (host-owned or previously allocated).
+    {
+        let table = registered_f64_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f64 array table mutex poisoned");
+        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
+            return ptr as *mut f64;
+        }
+    }
+
+    let requested_len = len as usize;
+    let key = (collection_hash, field_hash);
+
+    let ptr = {
+        let mut owned_guard = owned_f64_arrays()
+            .lock()
+            .expect("owned f64 array table mutex poisoned");
+        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        if array.len() < requested_len {
+            array.resize(requested_len, 0.0);
+        }
+
+        // Migrate any previously-stored values from the fallback hash map.
+        {
+            let table = jit_f64_array_global_table();
+            let mut guard = table.lock().expect("jit global table mutex poisoned");
+            for idx in 0..requested_len {
+                let idx_i32 = idx as i32;
+                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
+                    array[idx] = value;
+                }
+            }
+        }
+
+        array.as_mut_ptr()
+    };
+
+    {
+        let table = registered_f64_arrays();
+        let mut guard = table
+            .lock()
+            .expect("registered f64 array table mutex poisoned");
+        guard.insert(key, (ptr as usize, requested_len));
+    }
+
+    ptr
 }
 
 #[no_mangle]
