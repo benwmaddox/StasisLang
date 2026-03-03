@@ -29,6 +29,7 @@ pub struct AotProcess {
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
+    string_literals: BTreeMap<i32, String>,
     required_emit_roots: Vec<String>,
 }
 
@@ -52,6 +53,7 @@ impl AotProcess {
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
+            string_literals: BTreeMap::new(),
             required_emit_roots: Vec::new(),
         }
     }
@@ -99,6 +101,12 @@ impl AotProcess {
         let constant_values =
             collect_top_level_constant_values(self.compiler.files(), &mut type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        for constant in constant_values.values() {
+            if let ConstantValue::String { value, .. } = constant {
+                record_string_literal(&mut self.string_literals, value)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+            }
+        }
         let global_path_types =
             collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
                 .map_err(crate::compiler::CompileError::Backend)?;
@@ -140,12 +148,14 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
+            string_literals,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
+            &mut self.string_literals,
         );
         let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
             // Stable per-function symbols are required so AOT objects can reference each other
@@ -160,6 +170,7 @@ impl AotProcess {
                 &mut type_table,
                 &global_path_types,
                 &constant_values,
+                string_literals,
                 &collection_infos,
                 &named_struct_field_types,
             )?;
@@ -184,6 +195,10 @@ impl AotProcess {
 
     pub fn artifacts(&self) -> &[AotArtifact] {
         &self.artifacts
+    }
+
+    pub fn string_literals(&self) -> &BTreeMap<i32, String> {
+        &self.string_literals
     }
 
     pub fn optimization_profile(&self) -> AotOptimizationProfile {
@@ -348,7 +363,12 @@ impl AotProcess {
 
         let manifest_path = output_dir.join("engine_bundle_manifest.json");
         let manifest =
-            build_engine_bundle_manifest(self.optimization_profile, entrypoints, &manifest_rows);
+            build_engine_bundle_manifest(
+                self.optimization_profile,
+                entrypoints,
+                &manifest_rows,
+                &self.string_literals,
+            );
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
                 "failed to write engine bundle manifest {}: {error}",
@@ -430,6 +450,7 @@ fn compile_function_to_object_bytes(
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
+    string_literals: &mut BTreeMap<i32, String>,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Vec<u8>, String> {
@@ -544,6 +565,7 @@ fn compile_function_to_object_bytes(
             if terminated {
                 return Ok(());
             }
+            record_string_literals_in_stmt(&statement, string_literals)?;
             terminated = emit_simple_statements(
                 &mut builder,
                 std::slice::from_ref(&statement),
@@ -584,6 +606,137 @@ fn compile_function_to_object_bytes(
     product
         .emit()
         .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
+}
+
+fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
+    let id = hash_string_literal(value);
+    if let Some(existing) = out.get(&id) {
+        if existing != value {
+            return Err(format!(
+                "string literal hash collision for id={id}: existing={existing:?} new={value:?}"
+            ));
+        }
+        return Ok(());
+    }
+    out.insert(id, value.to_string());
+    Ok(())
+}
+
+fn record_string_literals_in_assign_target(
+    target: &AssignTarget,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match target {
+        AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => Ok(()),
+        AssignTarget::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+    }
+}
+
+fn record_string_literals_in_condition(
+    condition: &SimpleCondition,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            record_string_literals_in_expr(lhs, out)?;
+            record_string_literals_in_expr(rhs, out)?;
+            Ok(())
+        }
+        SimpleCondition::Expr(expr) => record_string_literals_in_expr(expr, out),
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            record_string_literals_in_condition(lhs, out)?;
+            record_string_literals_in_condition(rhs, out)?;
+            Ok(())
+        }
+        SimpleCondition::Not(inner) => record_string_literals_in_condition(inner, out),
+    }
+}
+
+fn record_string_literals_in_expr(
+    expression: &SimpleExpr,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match expression {
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::Identifier(_) => Ok(()),
+        SimpleExpr::StringLiteral(value) => record_string_literal(out, value),
+        SimpleExpr::Condition(condition) => record_string_literals_in_condition(condition, out),
+        SimpleExpr::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+        SimpleExpr::Call { args, .. } => {
+            for arg in args {
+                record_string_literals_in_expr(arg, out)?;
+            }
+            Ok(())
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            record_string_literals_in_expr(lhs, out)?;
+            record_string_literals_in_expr(rhs, out)?;
+            Ok(())
+        }
+    }
+}
+
+fn record_string_literals_in_stmt(
+    statement: &SimpleStmt,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match statement {
+        SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => Ok(()),
+        SimpleStmt::Let { expression, .. } => record_string_literals_in_expr(expression, out),
+        SimpleStmt::Assign {
+            target, expression, ..
+        } => {
+            record_string_literals_in_assign_target(target, out)?;
+            record_string_literals_in_expr(expression, out)?;
+            Ok(())
+        }
+        SimpleStmt::Convert { target, source, .. } => {
+            record_string_literals_in_assign_target(target, out)?;
+            record_string_literals_in_expr(source, out)?;
+            Ok(())
+        }
+        SimpleStmt::If {
+            condition,
+            then_statements,
+            else_statements,
+        } => {
+            record_string_literals_in_condition(condition, out)?;
+            for stmt in then_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            if let Some(else_statements) = else_statements {
+                for stmt in else_statements {
+                    record_string_literals_in_stmt(stmt, out)?;
+                }
+            }
+            Ok(())
+        }
+        SimpleStmt::For {
+            init,
+            condition,
+            step,
+            body_statements,
+        } => {
+            record_string_literals_in_stmt(init, out)?;
+            record_string_literals_in_condition(condition, out)?;
+            record_string_literals_in_stmt(step, out)?;
+            for stmt in body_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            Ok(())
+        }
+        SimpleStmt::Foreach { body_statements, .. } => {
+            for stmt in body_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            Ok(())
+        }
+        SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+            record_string_literals_in_expr(expression, out)
+        }
+    }
 }
 
 fn ensure_function_in_bundle(
@@ -627,6 +780,7 @@ fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
     rows: &[(String, String, String)],
+    string_literals: &BTreeMap<i32, String>,
 ) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -660,6 +814,18 @@ fn build_engine_bundle_manifest(
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
+            comma
+        ));
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"string_literals\": [\n");
+    let literals_len = string_literals.len();
+    for (index, (id, value)) in string_literals.iter().enumerate() {
+        let comma = if index + 1 < literals_len { "," } else { "" };
+        out.push_str(&format!(
+            "    {{\"id\":{},\"value\":\"{}\"}}{}\n",
+            id,
+            json_escape(value),
             comma
         ));
     }
@@ -807,6 +973,42 @@ mod tests {
         assert!(
             manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
             "manifest should include required entrypoints"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_manifest_includes_string_literals() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(): void { print_string(\"hello\\n\"); return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_literals_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        let literal_id = crate::backend::emit::hash_string_literal("hello\n");
+        assert!(
+            manifest.contains("\"string_literals\""),
+            "manifest should include string_literals field"
+        );
+        assert!(
+            manifest.contains(&format!("\"id\":{literal_id}")),
+            "manifest should include expected literal id"
+        );
+        assert!(
+            manifest.contains("\"value\":\"hello\\n\""),
+            "manifest should include escaped literal value"
         );
 
         let _ = fs::remove_dir_all(&bundle_dir);
