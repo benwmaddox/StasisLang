@@ -4630,6 +4630,13 @@ mod tests {
         let main_rc = stasis_dynload::invoke_noarg_i32(main_ptr as usize).expect("invoke main");
         assert_eq!(main_rc, 0, "expected perf main() to succeed");
 
+        // Warm up the JIT path once so tick timing excludes any first-call effects.
+        let warmup_ticks: i32 = 1;
+        for _ in 0..warmup_ticks {
+            let rc = stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("invoke tick");
+            assert_eq!(rc, 0, "expected tick() to return 0 (keep running)");
+        }
+
         let ticks: i32 = 1000;
         let start = std::time::Instant::now();
         for _ in 0..ticks {
@@ -4640,7 +4647,8 @@ mod tests {
         let ms_per_tick = elapsed.as_secs_f64() * 1_000.0 / f64::from(ticks);
         let us_per_tick = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(ticks);
         println!(
-            "bench=jit perf_balls_bricks_v1 ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
+            "bench=jit perf_balls_bricks_v1 warmup_ticks={} ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
+            warmup_ticks,
             ticks,
             elapsed.as_millis(),
             ms_per_tick,
